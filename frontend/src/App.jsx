@@ -7,7 +7,7 @@ import Performance from './pages/Performance'
 export default function App() {
   return (
     <Router>
-      <div className="min-h-screen bg-slate-900">
+      <div className="min-h-screen bg-neutral-950">
         <Navbar />
         <Routes>
           <Route path="/" element={<Home />} />

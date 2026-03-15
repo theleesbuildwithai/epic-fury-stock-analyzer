@@ -14,6 +14,7 @@ from analysis.technical import (
     calculate_volume_analysis,
     calculate_risk_score,
     determine_trend,
+    calculate_price_forecast,
 )
 
 
@@ -51,6 +52,9 @@ def generate_full_report(ticker: str, period: str = "1y") -> dict:
     # 3. Generate the prediction signal
     signal = generate_signal(closes, rsi, macd, trend, volume_analysis)
 
+    # 4. Calculate price forecast with probabilities
+    forecast = calculate_price_forecast(closes, trend)
+
     # 4. Build the chart data (dates + prices + indicators aligned)
     chart_data = []
     for i in range(len(dates)):
@@ -76,6 +80,7 @@ def generate_full_report(ticker: str, period: str = "1y") -> dict:
     return {
         "info": info,
         "signal": signal,
+        "forecast": forecast,
         "trend": trend,
         "risk": risk,
         "support_resistance": support_resistance,

@@ -9,6 +9,7 @@ and blood pressure, we check RSI, MACD, and Bollinger Bands.
 
 import pandas as pd
 import numpy as np
+from scipy.stats import norm
 
 
 def calculate_sma(prices: list, window: int) -> list:
@@ -257,4 +258,109 @@ def determine_trend(prices: list) -> dict:
         "price_vs_sma50": round(((current_price / sma_50) - 1) * 100, 2),
         "sma20": round(sma_20, 2),
         "sma50": round(sma_50, 2),
+    }
+
+
+def calculate_price_forecast(prices: list, trend: dict) -> dict:
+    """
+    Price Forecast — uses historical volatility and statistical modeling
+    to estimate the probability of a stock moving up or down over
+    specific timeframes (7, 14, 30 days).
+
+    Based on geometric Brownian motion: the standard model used in
+    quantitative finance for projecting stock price distributions.
+    """
+    if len(prices) < 60:
+        return {"error": "Need at least 60 days of data for reliable forecasts"}
+
+    current_price = prices[-1]
+
+    # Calculate daily log returns (log returns are more statistically sound)
+    series = pd.Series(prices)
+    log_returns = np.log(series / series.shift(1)).dropna()
+
+    # Historical stats
+    daily_mean = float(log_returns.mean())
+    daily_std = float(log_returns.std())
+
+    # Adjust mean based on current trend (subtle bias, not override)
+    trend_dir = trend.get("direction", "neutral")
+    if trend_dir == "bullish":
+        trend_adjustment = daily_std * 0.15
+    elif trend_dir == "slightly_bullish":
+        trend_adjustment = daily_std * 0.08
+    elif trend_dir == "bearish":
+        trend_adjustment = -daily_std * 0.15
+    elif trend_dir == "slightly_bearish":
+        trend_adjustment = -daily_std * 0.08
+    else:
+        trend_adjustment = 0.0
+
+    adjusted_mean = daily_mean + trend_adjustment
+
+    timeframes = [
+        {"label": "7 days", "days": 7},
+        {"label": "14 days", "days": 14},
+        {"label": "30 days", "days": 30},
+    ]
+
+    forecasts = []
+    for tf in timeframes:
+        days = tf["days"]
+
+        # Scale mean and std to the timeframe
+        tf_mean = adjusted_mean * days
+        tf_std = daily_std * np.sqrt(days)
+
+        # Probability of going up (log return > 0)
+        prob_up = float(1 - norm.cdf(0, loc=tf_mean, scale=tf_std))
+        prob_down = 1 - prob_up
+
+        # Probability of specific percentage moves
+        thresholds = [5, 10, 15]
+        prob_up_by = {}
+        prob_down_by = {}
+        for pct in thresholds:
+            log_threshold = np.log(1 + pct / 100)
+            prob_up_by[f"+{pct}%"] = round(
+                float(1 - norm.cdf(log_threshold, loc=tf_mean, scale=tf_std)) * 100, 1
+            )
+            log_threshold_down = np.log(1 - pct / 100)
+            prob_down_by[f"-{pct}%"] = round(
+                float(norm.cdf(log_threshold_down, loc=tf_mean, scale=tf_std)) * 100, 1
+            )
+
+        # Price targets (percentile-based)
+        bear_return = float(norm.ppf(0.25, loc=tf_mean, scale=tf_std))
+        base_return = float(norm.ppf(0.50, loc=tf_mean, scale=tf_std))
+        bull_return = float(norm.ppf(0.75, loc=tf_mean, scale=tf_std))
+
+        bear_price = round(current_price * np.exp(bear_return), 2)
+        base_price = round(current_price * np.exp(base_return), 2)
+        bull_price = round(current_price * np.exp(bull_return), 2)
+
+        bear_pct = round((np.exp(bear_return) - 1) * 100, 2)
+        base_pct = round((np.exp(base_return) - 1) * 100, 2)
+        bull_pct = round((np.exp(bull_return) - 1) * 100, 2)
+
+        forecasts.append({
+            "timeframe": tf["label"],
+            "days": days,
+            "prob_up": round(prob_up * 100, 1),
+            "prob_down": round(prob_down * 100, 1),
+            "prob_up_by": prob_up_by,
+            "prob_down_by": prob_down_by,
+            "targets": {
+                "bull": {"price": bull_price, "pct": bull_pct},
+                "base": {"price": base_price, "pct": base_pct},
+                "bear": {"price": bear_price, "pct": bear_pct},
+            },
+        })
+
+    return {
+        "current_price": current_price,
+        "annualized_volatility": round(daily_std * np.sqrt(252) * 100, 1),
+        "daily_avg_return": round(daily_mean * 100, 4),
+        "trend_bias": trend_dir,
+        "forecasts": forecasts,
     }

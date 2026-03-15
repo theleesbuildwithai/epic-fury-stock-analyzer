@@ -15,10 +15,10 @@ export default function TickerSearch({ onAnalyze, loading }) {
   return (
     <div className="text-center py-12">
       <h1 className="text-5xl font-bold text-white mb-4">
-        🔥 Epic Fury Stock Analyzer
+        Epic Fury Stock Analyzer
       </h1>
-      <p className="text-slate-400 text-lg mb-8 max-w-2xl mx-auto">
-        Enter a stock ticker to get real-time technical analysis, trend detection,
+      <p className="text-neutral-400 text-lg mb-8 max-w-2xl mx-auto">
+        Enter a stock ticker to get real-time technical analysis, price forecasts,
         and risk assessment powered by real Yahoo Finance data.
       </p>
 
@@ -28,15 +28,15 @@ export default function TickerSearch({ onAnalyze, loading }) {
           value={ticker}
           onChange={(e) => setTicker(e.target.value.toUpperCase())}
           placeholder="Enter ticker (e.g. AAPL)"
-          className="px-6 py-3 bg-slate-800 border border-slate-600 rounded-lg text-white text-lg
-                     focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 w-72"
+          className="px-6 py-3 bg-black border border-neutral-600 rounded-lg text-white text-lg
+                     focus:outline-none focus:border-white focus:ring-1 focus:ring-white w-72"
           disabled={loading}
         />
         <button
           type="submit"
           disabled={loading || !ticker.trim()}
-          className="px-8 py-3 bg-orange-600 hover:bg-orange-700 disabled:bg-slate-700
-                     disabled:text-slate-500 text-white font-semibold rounded-lg text-lg
+          className="px-8 py-3 bg-white hover:bg-neutral-200 disabled:bg-neutral-800
+                     disabled:text-neutral-500 text-black font-semibold rounded-lg text-lg
                      transition-colors"
         >
           {loading ? 'Analyzing...' : 'Analyze'}
@@ -44,21 +44,21 @@ export default function TickerSearch({ onAnalyze, loading }) {
       </form>
 
       <div className="flex justify-center gap-2 flex-wrap">
-        <span className="text-slate-500 text-sm py-1">Popular:</span>
+        <span className="text-neutral-500 text-sm py-1">Popular:</span>
         {popularTickers.map((t) => (
           <button
             key={t}
             onClick={() => { setTicker(t); onAnalyze(t) }}
             disabled={loading}
-            className="px-3 py-1 text-sm bg-slate-800 text-slate-300 rounded-full
-                       hover:bg-slate-700 hover:text-white transition-colors border border-slate-700"
+            className="px-3 py-1 text-sm bg-black text-neutral-300 rounded-full
+                       hover:bg-neutral-800 hover:text-white transition-colors border border-neutral-700"
           >
             {t}
           </button>
         ))}
       </div>
 
-      <p className="text-slate-600 text-xs mt-8">
+      <p className="text-neutral-600 text-xs mt-8">
         Not financial advice. For educational purposes only. All data from Yahoo Finance.
       </p>
     </div>
