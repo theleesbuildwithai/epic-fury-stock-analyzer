@@ -265,10 +265,12 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
     """
     Price Forecast — uses historical volatility and statistical modeling
     to estimate the probability of a stock moving up or down over
-    specific timeframes (7, 14, 30 days).
+    specific timeframes (7, 14, 30, 60, 90, 180 days).
 
-    Based on geometric Brownian motion: the standard model used in
-    quantitative finance for projecting stock price distributions.
+    Based on geometric Brownian motion with enhancements for long-term accuracy:
+    - Trend decay: short-term trend bias fades over longer horizons
+    - Mean reversion: long-term drift blends toward historical market average
+    - Dual volatility: recent vol for short-term, full-history vol for long-term
     """
     if len(prices) < 60:
         return {"error": "Need at least 60 days of data for reliable forecasts"}
@@ -279,45 +281,72 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
     series = pd.Series(prices)
     log_returns = np.log(series / series.shift(1)).dropna()
 
-    # Historical stats
-    daily_mean = float(log_returns.mean())
-    daily_std = float(log_returns.std())
+    # Full-history stats
+    daily_mean_full = float(log_returns.mean())
+    daily_std_full = float(log_returns.std())
 
-    # Adjust mean based on current trend (subtle bias, not override)
+    # Recent 60-day stats (captures current market regime)
+    recent_returns = log_returns.iloc[-60:] if len(log_returns) >= 60 else log_returns
+    daily_std_recent = float(recent_returns.std())
+
+    # Long-term market average drift (~8% annualized = ~0.000317 daily)
+    market_avg_daily = np.log(1.08) / 252
+
+    # Trend adjustment base (before decay)
     trend_dir = trend.get("direction", "neutral")
     if trend_dir == "bullish":
-        trend_adjustment = daily_std * 0.15
+        trend_base = daily_std_recent * 0.15
     elif trend_dir == "slightly_bullish":
-        trend_adjustment = daily_std * 0.08
+        trend_base = daily_std_recent * 0.08
     elif trend_dir == "bearish":
-        trend_adjustment = -daily_std * 0.15
+        trend_base = -daily_std_recent * 0.15
     elif trend_dir == "slightly_bearish":
-        trend_adjustment = -daily_std * 0.08
+        trend_base = -daily_std_recent * 0.08
     else:
-        trend_adjustment = 0.0
-
-    adjusted_mean = daily_mean + trend_adjustment
+        trend_base = 0.0
 
     timeframes = [
         {"label": "7 days", "days": 7},
         {"label": "14 days", "days": 14},
         {"label": "30 days", "days": 30},
+        {"label": "60 days", "days": 60},
+        {"label": "90 days", "days": 90},
+        {"label": "180 days", "days": 180},
     ]
 
     forecasts = []
     for tf in timeframes:
         days = tf["days"]
 
+        # --- Trend decay: trend influence fades with time ---
+        # Full weight at 7d, half at 30d, ~15% at 90d, near-zero at 180d
+        trend_decay = np.exp(-0.025 * days)
+        trend_adjustment = trend_base * trend_decay
+
+        # --- Mean reversion: blend stock's mean toward market average ---
+        # Short-term (<=14d): 100% stock's own mean
+        # Long-term (180d): ~60% market average, 40% stock's own mean
+        reversion_weight = min(0.6, max(0.0, (days - 14) / 280))
+        blended_mean = (1 - reversion_weight) * daily_mean_full + reversion_weight * market_avg_daily
+
+        adjusted_mean = blended_mean + trend_adjustment
+
+        # --- Dual volatility: blend recent and full-history vol ---
+        # Short-term (<=14d): 80% recent, 20% full
+        # Long-term (180d): 30% recent, 70% full
+        recent_weight = max(0.3, 1.0 - (days / 250))
+        blended_std = recent_weight * daily_std_recent + (1 - recent_weight) * daily_std_full
+
         # Scale mean and std to the timeframe
         tf_mean = adjusted_mean * days
-        tf_std = daily_std * np.sqrt(days)
+        tf_std = blended_std * np.sqrt(days)
 
         # Probability of going up (log return > 0)
         prob_up = float(1 - norm.cdf(0, loc=tf_mean, scale=tf_std))
         prob_down = 1 - prob_up
 
         # Probability of specific percentage moves
-        thresholds = [5, 10, 15]
+        thresholds = [5, 10, 15, 20, 25] if days >= 60 else [5, 10, 15]
         prob_up_by = {}
         prob_down_by = {}
         for pct in thresholds:
@@ -359,8 +388,10 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
 
     return {
         "current_price": current_price,
-        "annualized_volatility": round(daily_std * np.sqrt(252) * 100, 1),
-        "daily_avg_return": round(daily_mean * 100, 4),
+        "annualized_volatility": round(daily_std_full * np.sqrt(252) * 100, 1),
+        "recent_volatility": round(daily_std_recent * np.sqrt(252) * 100, 1),
+        "daily_avg_return": round(daily_mean_full * 100, 4),
         "trend_bias": trend_dir,
+        "data_points_used": len(log_returns),
         "forecasts": forecasts,
     }

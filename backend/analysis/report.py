@@ -18,7 +18,7 @@ from analysis.technical import (
 )
 
 
-def generate_full_report(ticker: str, period: str = "1y") -> dict:
+def generate_full_report(ticker: str, period: str = "2y") -> dict:
     """
     Generates the complete analysis report for a stock.
     This is the main function that ties everything together.

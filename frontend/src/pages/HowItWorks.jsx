@@ -58,7 +58,7 @@ export default function HowItWorks() {
           <IndicatorCard name="MACD" explanation="Shows momentum shifts by comparing fast (12-day) and slow (26-day) averages. Crossing above = bullish. Crossing below = bearish." />
           <IndicatorCard name="Bollinger Bands" explanation="Creates a channel around price. Hitting top band = might be too high. Bottom = too low. Bands squeezing = big move coming." />
           <IndicatorCard name="Moving Averages (SMA/EMA)" explanation="Smooths daily swings to show the real trend. 20-day = short term, 50-day = medium term." />
-          <IndicatorCard name="Price Forecast" explanation="Uses historical volatility and log-normal distribution to calculate probability of the stock moving up or down over 7, 14, and 30 days. Based on real math, not guessing." />
+          <IndicatorCard name="Price Forecast" explanation="Uses geometric Brownian motion with trend decay, mean reversion, and dual volatility to calculate probability over 7, 14, 30, 60, 90, and 180 days. Short-term forecasts weight recent volatility; long-term blends toward historical market averages. Based on 2 years of real price data." />
           <IndicatorCard name="Support & Resistance" explanation="Price levels where the stock tends to bounce. Support = floor. Resistance = ceiling." />
         </div>
       </section>
