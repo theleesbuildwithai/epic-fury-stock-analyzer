@@ -25,7 +25,8 @@ export default function TickerBanner() {
 
   if (loading || tickers.length === 0) return null
 
-  const scrollItems = [...tickers, ...tickers]
+  // Triple the items for seamless loop with 100+ stocks
+  const scrollItems = [...tickers, ...tickers, ...tickers]
 
   return (
     <div className="bg-black/80 backdrop-blur-sm border-b border-neutral-800/50 overflow-hidden">
@@ -58,14 +59,14 @@ export default function TickerBanner() {
 
       <style>{`
         .ticker-scroll {
-          animation: scroll-left 80s linear infinite;
+          animation: scroll-left 120s linear infinite;
         }
         .ticker-scroll:hover {
           animation-play-state: paused;
         }
         @keyframes scroll-left {
           0% { transform: translateX(0); }
-          100% { transform: translateX(-50%); }
+          100% { transform: translateX(-33.333%); }
         }
       `}</style>
     </div>
