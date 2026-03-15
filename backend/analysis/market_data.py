@@ -2,20 +2,47 @@
 Fetches real stock data from Yahoo Finance.
 Think of this as the "data collector" — it goes out to Yahoo Finance
 and brings back real prices, volumes, and company info.
+
+Uses yf.download() for historical data (bulk method, less likely to trigger
+rate limits) and includes robust fallback logic for stock info.
 """
 
 import yfinance as yf
 from datetime import datetime, timedelta
-from functools import lru_cache
 import time
+import requests
 
-# Cache to avoid hitting Yahoo Finance too often (5 min cache)
+# --- Session with custom User-Agent to reduce 429 blocks ---
+_session = requests.Session()
+_session.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+})
+
+# Cache to avoid hitting Yahoo Finance too often (10 min cache)
 _cache = {}
-_cache_ttl = 300  # 5 minutes
+_cache_ttl = 600  # 10 minutes
+
+# Timestamp of last API call, used to enforce spacing between requests
+_last_api_call = 0.0
+_API_CALL_DELAY = 3.0  # seconds between different API calls (slower = safer)
+
+
+def _throttle():
+    """Ensure at least _API_CALL_DELAY seconds between Yahoo Finance calls."""
+    global _last_api_call
+    now = time.time()
+    elapsed = now - _last_api_call
+    if elapsed < _API_CALL_DELAY:
+        time.sleep(_API_CALL_DELAY - elapsed)
+    _last_api_call = time.time()
 
 
 def _get_cached(key, fetch_fn):
-    """Simple cache that expires after 5 minutes."""
+    """Simple cache that expires after _cache_ttl seconds."""
     now = time.time()
     if key in _cache and now - _cache[key]["time"] < _cache_ttl:
         return _cache[key]["data"]
@@ -24,34 +51,64 @@ def _get_cached(key, fetch_fn):
     return data
 
 
+def _download_recent(ticker: str, period: str = "5d"):
+    """
+    Use yf.download() to grab recent data for a single ticker.
+    Returns a pandas DataFrame or an empty DataFrame on failure.
+    """
+    _throttle()
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            progress=False,
+            session=_session,
+        )
+        return df
+    except Exception:
+        return None
+
+
 def get_stock_info(ticker: str) -> dict:
     """Get basic info about a stock (name, price, market cap, etc.)."""
+
     def fetch():
-        stock = yf.Ticker(ticker)
-        # Try to get info, retry once if rate-limited
+        stock = yf.Ticker(ticker, session=_session)
+        info = None
+
+        # Attempt 1: try stock.info with retry
         for attempt in range(2):
             try:
-                info = stock.info
-                if info:
+                _throttle()
+                raw = stock.info
+                if raw and raw.get("regularMarketPrice") or raw.get("currentPrice"):
+                    info = raw
                     break
             except Exception:
                 if attempt == 0:
                     time.sleep(2)
                     continue
-                # Fall back to using history data for basic info
-                hist = stock.history(period="5d")
-                if hist.empty:
-                    raise
-                last = hist.iloc[-1]
+
+        # Attempt 2: fall back to yf.download() for basic price data
+        if info is None:
+            df = _download_recent(ticker, period="5d")
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                prev_close = round(float(df.iloc[-2]["Close"]), 2) if len(df) > 1 else 0
                 info = {
                     "shortName": ticker.upper(),
-                    "regularMarketPrice": round(last["Close"], 2),
-                    "previousClose": round(hist.iloc[-2]["Close"], 2) if len(hist) > 1 else 0,
-                    "regularMarketOpen": round(last["Open"], 2),
-                    "regularMarketDayHigh": round(last["High"], 2),
-                    "regularMarketDayLow": round(last["Low"], 2),
+                    "regularMarketPrice": round(float(last["Close"]), 2),
+                    "previousClose": prev_close,
+                    "regularMarketOpen": round(float(last["Open"]), 2),
+                    "regularMarketDayHigh": round(float(last["High"]), 2),
+                    "regularMarketDayLow": round(float(last["Low"]), 2),
                     "regularMarketVolume": int(last["Volume"]),
                 }
+            else:
+                # Nothing worked — return an empty shell so the caller
+                # doesn't crash.
+                info = {"shortName": ticker.upper()}
+
         return {
             "ticker": ticker.upper(),
             "name": info.get("longName", info.get("shortName", ticker)),
@@ -72,6 +129,7 @@ def get_stock_info(ticker: str) -> dict:
             "beta": info.get("beta", 0),
             "currency": info.get("currency", "USD"),
         }
+
     return _get_cached(f"info_{ticker}", fetch)
 
 
@@ -80,23 +138,38 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
     Get historical price data for a stock.
     period options: 1mo, 3mo, 6mo, 1y, 2y, 5y
     Returns a list of dicts with date, open, high, low, close, volume.
+
+    Uses yf.download() which is the bulk-download method and is less
+    likely to trigger rate-limit (429) errors than Ticker.history().
     """
+
     def fetch():
-        stock = yf.Ticker(ticker)
-        df = stock.history(period=period)
-        if df.empty:
+        _throttle()
+        try:
+            df = yf.download(
+                ticker,
+                period=period,
+                progress=False,
+                session=_session,
+            )
+        except Exception:
             return []
+
+        if df is None or df.empty:
+            return []
+
         records = []
         for date, row in df.iterrows():
             records.append({
                 "date": date.strftime("%Y-%m-%d"),
-                "open": round(row["Open"], 2),
-                "high": round(row["High"], 2),
-                "low": round(row["Low"], 2),
-                "close": round(row["Close"], 2),
+                "open": round(float(row["Open"]), 2),
+                "high": round(float(row["High"]), 2),
+                "low": round(float(row["Low"]), 2),
+                "close": round(float(row["Close"]), 2),
                 "volume": int(row["Volume"]),
             })
         return records
+
     return _get_cached(f"history_{ticker}_{period}", fetch)
 
 

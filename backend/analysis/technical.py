@@ -37,14 +37,17 @@ def calculate_rsi(prices: list, period: int = 14) -> list:
     - Above 70 = overbought (might go down)
     - Below 30 = oversold (might go up)
     - Around 50 = neutral
+
+    Uses Wilder's smoothing method (industry standard, matches TradingView/Bloomberg).
     """
     series = pd.Series(prices)
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
 
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
+    # Wilder's smoothing: first value is SMA, then exponential with alpha=1/period
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
