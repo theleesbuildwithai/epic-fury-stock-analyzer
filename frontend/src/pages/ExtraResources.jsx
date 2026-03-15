@@ -158,9 +158,9 @@ export default function ExtraResources() {
       <div className="bg-black border border-neutral-700 rounded-xl p-6">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="text-xl font-bold text-white">Upcoming Earnings This Week</h2>
+            <h2 className="text-xl font-bold text-white">Upcoming Earnings</h2>
             <p className="text-neutral-500 text-sm mt-1">
-              Major companies reporting earnings in the next 7 days
+              Major companies reporting earnings in the next 14 days
             </p>
           </div>
           {earnings?.week_start && (
@@ -183,6 +183,7 @@ export default function ExtraResources() {
                   <span className="text-white font-mono font-bold text-lg">{e.symbol}</span>
                   <span className="text-neutral-400 text-sm">{e.day_of_week}</span>
                 </div>
+                {e.name && <p className="text-neutral-400 text-xs mb-1">{e.name}</p>}
                 <p className="text-neutral-500 text-sm mb-3">{e.date}</p>
                 <div className="space-y-1">
                   {e.eps_estimate && (

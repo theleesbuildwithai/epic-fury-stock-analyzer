@@ -270,91 +270,120 @@ def get_daily_picks():
 
 # --- Earnings Calendar ---
 
-# Major companies with known typical earnings months
-# This is a curated list — updated quarterly
-EARNINGS_SCHEDULE = {
-    # Q1 earnings (Jan-Mar report in Apr)
-    # Q2 earnings (Apr-Jun report in Jul)
-    # Q3 earnings (Jul-Sep report in Oct)
-    # Q4 earnings (Oct-Dec report in Jan)
-    # We'll generate upcoming week based on real yfinance calendar data
-}
-
 
 def get_earnings_calendar():
     """
-    Get upcoming earnings for major stocks in the next 7 days.
-    Uses yfinance's earnings_dates when available.
+    Get upcoming earnings for major stocks in the next 14 days.
+    Uses a fast batch approach: checks a small set of high-priority stocks
+    with earnings_dates instead of calendar (more reliable).
+    Also extends to 14 days for better coverage.
     Cached for 6 hours.
     """
     def fetch():
         today = datetime.now().date()
-        week_end = today + timedelta(days=7)
+        week_end = today + timedelta(days=14)
 
-        # Major stocks to check for upcoming earnings
-        major_stocks = [
-            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX",
-            "JPM", "BAC", "GS", "MS", "WFC", "C",
-            "UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY",
-            "XOM", "CVX", "COP",
-            "HD", "WMT", "COST", "TGT", "MCD", "SBUX", "NKE",
-            "BA", "CAT", "HON", "GE", "RTX", "LMT",
-            "DIS", "CMCSA", "CRM", "ADBE", "AMD", "INTC", "QCOM",
-            "V", "MA", "AXP", "PG", "KO", "PEP",
-            "NEE", "DUK", "SO",
+        # Only check ~15 stocks at a time to stay fast (15 × 3s = 45s max)
+        # These are the biggest market-moving earnings reporters
+        priority_stocks = [
+            ("AAPL", "Apple Inc"),
+            ("MSFT", "Microsoft"),
+            ("GOOGL", "Alphabet"),
+            ("AMZN", "Amazon"),
+            ("META", "Meta Platforms"),
+            ("NVDA", "NVIDIA"),
+            ("TSLA", "Tesla"),
+            ("NFLX", "Netflix"),
+            ("JPM", "JPMorgan Chase"),
+            ("BAC", "Bank of America"),
+            ("UNH", "UnitedHealth"),
+            ("JNJ", "Johnson & Johnson"),
+            ("XOM", "Exxon Mobil"),
+            ("WMT", "Walmart"),
+            ("HD", "Home Depot"),
+            ("NKE", "Nike"),
+            ("FDX", "FedEx"),
+            ("MU", "Micron Technology"),
+            ("ADBE", "Adobe"),
+            ("CRM", "Salesforce"),
+            ("COST", "Costco"),
+            ("DIS", "Walt Disney"),
+            ("BA", "Boeing"),
+            ("GS", "Goldman Sachs"),
+            ("V", "Visa"),
         ]
 
         upcoming = []
 
-        for symbol in major_stocks:
+        for symbol, name in priority_stocks:
             try:
                 _throttle()
                 stock = yf.Ticker(symbol)
-                cal = stock.calendar
-                if cal is None:
+
+                # Try earnings_dates first (more reliable than calendar)
+                try:
+                    ed_df = stock.earnings_dates
+                    if ed_df is not None and not ed_df.empty:
+                        for idx in ed_df.index:
+                            try:
+                                if hasattr(idx, 'date'):
+                                    ed = idx.date()
+                                else:
+                                    ed = pd.Timestamp(idx).date()
+
+                                if today <= ed <= week_end:
+                                    eps_est = None
+                                    rev_est = None
+                                    try:
+                                        if "EPS Estimate" in ed_df.columns:
+                                            val = ed_df.loc[idx, "EPS Estimate"]
+                                            if pd.notna(val):
+                                                eps_est = round(float(val), 2)
+                                    except Exception:
+                                        pass
+
+                                    upcoming.append({
+                                        "symbol": symbol,
+                                        "name": name,
+                                        "date": ed.isoformat(),
+                                        "day_of_week": ed.strftime("%A"),
+                                        "eps_estimate": eps_est,
+                                        "revenue_estimate": rev_est,
+                                    })
+                                    break  # Only need the next earnings date
+                            except Exception:
+                                continue
+                        continue  # Move to next stock
+                except Exception:
+                    pass
+
+                # Fallback: try calendar
+                try:
+                    cal = stock.calendar
+                    if cal and isinstance(cal, dict):
+                        ed_raw = cal.get("Earnings Date")
+                        if ed_raw:
+                            if isinstance(ed_raw, list) and len(ed_raw) > 0:
+                                ed_raw = ed_raw[0]
+                            if hasattr(ed_raw, 'date'):
+                                ed = ed_raw.date()
+                            elif isinstance(ed_raw, str):
+                                ed = datetime.strptime(ed_raw[:10], "%Y-%m-%d").date()
+                            else:
+                                continue
+
+                            if today <= ed <= week_end:
+                                upcoming.append({
+                                    "symbol": symbol,
+                                    "name": name,
+                                    "date": ed.isoformat(),
+                                    "day_of_week": ed.strftime("%A"),
+                                    "eps_estimate": round(float(cal.get("Earnings Average", 0)), 2) if cal.get("Earnings Average") else None,
+                                    "revenue_estimate": None,
+                                })
+                except Exception:
                     continue
 
-                # yfinance calendar returns a dict with 'Earnings Date' key
-                earnings_date = None
-                if isinstance(cal, dict):
-                    ed = cal.get("Earnings Date")
-                    if ed:
-                        if isinstance(ed, list) and len(ed) > 0:
-                            earnings_date = ed[0]
-                        elif hasattr(ed, 'date'):
-                            earnings_date = ed
-                elif isinstance(cal, pd.DataFrame):
-                    if "Earnings Date" in cal.columns:
-                        vals = cal["Earnings Date"].dropna()
-                        if len(vals) > 0:
-                            earnings_date = vals.iloc[0]
-
-                if earnings_date is None:
-                    continue
-
-                # Convert to date
-                if hasattr(earnings_date, 'date'):
-                    ed = earnings_date.date()
-                elif isinstance(earnings_date, str):
-                    ed = datetime.strptime(earnings_date[:10], "%Y-%m-%d").date()
-                else:
-                    continue
-
-                if today <= ed <= week_end:
-                    # Get estimate info
-                    eps_estimate = None
-                    revenue_estimate = None
-                    if isinstance(cal, dict):
-                        eps_estimate = cal.get("Earnings Average")
-                        revenue_estimate = cal.get("Revenue Average")
-
-                    upcoming.append({
-                        "symbol": symbol,
-                        "date": ed.isoformat(),
-                        "day_of_week": ed.strftime("%A"),
-                        "eps_estimate": round(float(eps_estimate), 2) if eps_estimate else None,
-                        "revenue_estimate": int(revenue_estimate) if revenue_estimate else None,
-                    })
             except Exception:
                 continue
 
@@ -365,6 +394,7 @@ def get_earnings_calendar():
             "earnings": upcoming,
             "week_start": today.isoformat(),
             "week_end": week_end.isoformat(),
+            "stocks_checked": len(priority_stocks),
             "generated_at": datetime.now().isoformat(),
         }
 
