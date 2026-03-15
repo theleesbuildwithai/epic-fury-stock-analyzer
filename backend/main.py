@@ -151,7 +151,7 @@ def get_performance():
 
 # --- Serve Frontend (in production, the built React app is here) ---
 
-frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+frontend_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 if os.path.exists(frontend_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dir, "assets")), name="assets")
 
