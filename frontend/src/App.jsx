@@ -2,7 +2,7 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import Navbar from './components/Navbar'
 import TickerBanner from './components/TickerBanner'
 import Home from './pages/Home'
-import HowItWorks from './pages/HowItWorks'
+
 import Watchlist from './pages/Watchlist'
 import ExtraResources from './pages/ExtraResources'
 import CookieConsent from './components/CookieConsent'
@@ -15,7 +15,7 @@ export default function App() {
         <Navbar />
         <Routes>
           <Route path="/" element={<Home />} />
-          <Route path="/how-it-works" element={<HowItWorks />} />
+
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/extra-resources" element={<ExtraResources />} />
         </Routes>
