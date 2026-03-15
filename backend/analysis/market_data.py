@@ -5,22 +5,14 @@ and brings back real prices, volumes, and company info.
 
 Uses yf.download() for historical data (bulk method, less likely to trigger
 rate limits) and includes robust fallback logic for stock info.
+
+NOTE: Modern yfinance (0.2.37+) manages its own curl_cffi session internally.
+Do NOT pass a custom requests.Session — it will cause errors.
 """
 
 import yfinance as yf
 from datetime import datetime, timedelta
 import time
-import requests
-
-# --- Session with custom User-Agent to reduce 429 blocks ---
-_session = requests.Session()
-_session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-})
 
 # Cache to avoid hitting Yahoo Finance too often (10 min cache)
 _cache = {}
@@ -54,7 +46,7 @@ def _get_cached(key, fetch_fn):
 def _download_recent(ticker: str, period: str = "5d"):
     """
     Use yf.download() to grab recent data for a single ticker.
-    Returns a pandas DataFrame or an empty DataFrame on failure.
+    Returns a pandas DataFrame or None on failure.
     """
     _throttle()
     try:
@@ -62,7 +54,6 @@ def _download_recent(ticker: str, period: str = "5d"):
             ticker,
             period=period,
             progress=False,
-            session=_session,
         )
         return df
     except Exception:
@@ -73,7 +64,7 @@ def get_stock_info(ticker: str) -> dict:
     """Get basic info about a stock (name, price, market cap, etc.)."""
 
     def fetch():
-        stock = yf.Ticker(ticker, session=_session)
+        stock = yf.Ticker(ticker)
         info = None
 
         # Attempt 1: try stock.info with retry
@@ -81,7 +72,7 @@ def get_stock_info(ticker: str) -> dict:
             try:
                 _throttle()
                 raw = stock.info
-                if raw and raw.get("regularMarketPrice") or raw.get("currentPrice"):
+                if raw and (raw.get("regularMarketPrice") or raw.get("currentPrice")):
                     info = raw
                     break
             except Exception:
@@ -150,7 +141,6 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
                 ticker,
                 period=period,
                 progress=False,
-                session=_session,
             )
         except Exception:
             return []
