@@ -13,43 +13,52 @@ export default function TickerBanner() {
           setTickers(data.tickers)
         }
       } catch {
-        // Silent fail — banner is non-critical
+        // Silent fail
       } finally {
         setLoading(false)
       }
     }
     fetchBanner()
-
-    // Refresh every 5 minutes
     const interval = setInterval(fetchBanner, 300000)
     return () => clearInterval(interval)
   }, [])
 
   if (loading || tickers.length === 0) return null
 
-  // Double the tickers for seamless infinite scroll
   const scrollItems = [...tickers, ...tickers]
 
   return (
-    <div className="bg-black border-b border-neutral-800 overflow-hidden">
-      <div className="ticker-scroll flex items-center whitespace-nowrap py-2">
-        {scrollItems.map((t, i) => (
-          <div key={`${t.symbol}-${i}`} className="inline-flex items-center gap-2 px-4">
-            <span className="text-neutral-400 text-xs font-medium">{t.name}</span>
-            <span className="text-white text-xs font-mono font-bold">${t.price}</span>
-            <span className={`text-xs font-mono font-bold ${
-              t.change >= 0 ? 'text-green-500' : 'text-red-500'
-            }`}>
-              {t.change >= 0 ? '+' : ''}{t.change_pct}%
-            </span>
-            <span className="text-neutral-700 text-xs mx-2">|</span>
+    <div className="bg-black/80 backdrop-blur-sm border-b border-neutral-800/50 overflow-hidden">
+      <div className="flex items-center">
+        {/* Live indicator */}
+        <div className="flex items-center gap-1.5 px-4 border-r border-neutral-800/50 py-1.5 shrink-0">
+          <div className="w-1.5 h-1.5 rounded-full bg-green-500 pulse-dot"></div>
+          <span className="text-neutral-500 text-[10px] font-medium tracking-widest uppercase">Live</span>
+        </div>
+
+        <div className="overflow-hidden flex-1">
+          <div className="ticker-scroll flex items-center whitespace-nowrap py-1.5">
+            {scrollItems.map((t, i) => (
+              <div key={`${t.symbol}-${i}`} className="inline-flex items-center gap-1.5 px-3">
+                <span className="text-neutral-500 text-[11px] font-medium tracking-wide">{t.name}</span>
+                <span className="text-white text-[11px] font-mono font-semibold">${t.price.toLocaleString()}</span>
+                <span className={`text-[11px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                  t.change >= 0
+                    ? 'text-green-400 bg-green-500/10'
+                    : 'text-red-400 bg-red-500/10'
+                }`}>
+                  {t.change >= 0 ? '+' : ''}{t.change_pct}%
+                </span>
+                <span className="text-neutral-800 text-[10px] mx-1.5">|</span>
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
       </div>
 
       <style>{`
         .ticker-scroll {
-          animation: scroll-left 60s linear infinite;
+          animation: scroll-left 80s linear infinite;
         }
         .ticker-scroll:hover {
           animation-play-state: paused;

@@ -34,7 +34,6 @@ export default function TickerSearch({ onAnalyze, loading }) {
     setRecentSearches(getRecentSearches())
   }, [])
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(event) {
       if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
@@ -66,8 +65,6 @@ export default function TickerSearch({ onAnalyze, loading }) {
   const handleInputChange = (e) => {
     const value = e.target.value.toUpperCase()
     setTicker(value)
-
-    // Debounce search — wait 200ms after user stops typing
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
       fetchSuggestions(value)
@@ -96,7 +93,6 @@ export default function TickerSearch({ onAnalyze, loading }) {
 
   const handleKeyDown = (e) => {
     if (!showSuggestions || suggestions.length === 0) return
-
     if (e.key === 'ArrowDown') {
       e.preventDefault()
       setHighlightIndex(prev => Math.min(prev + 1, suggestions.length - 1))
@@ -114,17 +110,30 @@ export default function TickerSearch({ onAnalyze, loading }) {
   const popularTickers = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META']
 
   return (
-    <div className="text-center py-12">
-      <h1 className="text-5xl font-bold text-white mb-4">
-        Epic Fury Stock Analyzer
-      </h1>
-      <p className="text-neutral-400 text-lg mb-8 max-w-2xl mx-auto">
-        Enter a stock ticker or company name to get real-time technical analysis, price forecasts,
-        and risk assessment powered by real Yahoo Finance data.
+    <div className="text-center py-16 px-4">
+      {/* Hero section */}
+      <div className="mb-12">
+        <h1 className="text-6xl sm:text-7xl font-black text-white mb-3 tracking-tight">
+          Epic Fury
+        </h1>
+        <p className="text-xl text-neutral-500 font-light tracking-wide">
+          Stock Analyzer
+        </p>
+      </div>
+
+      <p className="text-neutral-400 text-base mb-10 max-w-xl mx-auto leading-relaxed">
+        Real-time technical analysis, probability forecasts, and risk assessment.
+        Search by ticker or company name.
       </p>
 
-      <form onSubmit={handleSubmit} className="flex justify-center gap-3 mb-6">
+      {/* Search bar */}
+      <form onSubmit={handleSubmit} className="flex justify-center gap-2 mb-8">
         <div className="relative" ref={wrapperRef}>
+          <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
+            <svg className="w-5 h-5 text-neutral-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </div>
           <input
             type="text"
             value={ticker}
@@ -132,36 +141,40 @@ export default function TickerSearch({ onAnalyze, loading }) {
             onKeyDown={handleKeyDown}
             onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true) }}
             placeholder="Search ticker or company name..."
-            className="px-6 py-3 bg-black border border-neutral-600 rounded-lg text-white text-lg
-                       focus:outline-none focus:border-white focus:ring-1 focus:ring-white w-80"
+            className="pl-12 pr-6 py-3.5 bg-neutral-900 border border-neutral-700 rounded-xl text-white text-base
+                       focus:outline-none focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500 w-96
+                       placeholder-neutral-500 shadow-lg shadow-black/20"
             disabled={loading}
             autoComplete="off"
           />
 
           {/* Autocomplete dropdown */}
           {showSuggestions && suggestions.length > 0 && (
-            <div className="absolute z-50 w-full mt-1 bg-neutral-900 border border-neutral-700
-                            rounded-lg shadow-2xl overflow-hidden max-h-80 overflow-y-auto">
+            <div className="absolute z-50 w-full mt-2 bg-neutral-900 border border-neutral-700
+                            rounded-xl shadow-2xl shadow-black/50 overflow-hidden max-h-80 overflow-y-auto">
               {suggestions.map((item, index) => (
                 <button
                   key={item.ticker}
                   type="button"
                   onClick={() => handleSelect(item.ticker)}
-                  className={`w-full px-4 py-3 flex items-center gap-3 text-left transition-colors
+                  className={`w-full px-4 py-3 flex items-center gap-3 text-left transition-all
                     ${index === highlightIndex
-                      ? 'bg-neutral-700'
-                      : 'hover:bg-neutral-800'
+                      ? 'bg-neutral-800'
+                      : 'hover:bg-neutral-800/50'
                     }
-                    ${index !== suggestions.length - 1 ? 'border-b border-neutral-800' : ''}`}
+                    ${index !== suggestions.length - 1 ? 'border-b border-neutral-800/50' : ''}`}
                 >
-                  <span className="font-mono font-bold text-white text-sm bg-neutral-800
-                                   px-2 py-1 rounded min-w-[60px] text-center">
+                  <span className="font-mono font-bold text-white text-xs bg-neutral-800 border border-neutral-700
+                                   px-2.5 py-1 rounded-md min-w-[56px] text-center">
                     {item.ticker}
                   </span>
                   <div className="flex-1 min-w-0">
                     <div className="text-neutral-200 text-sm truncate">{item.name}</div>
                     <div className="text-neutral-500 text-xs">{item.sector}</div>
                   </div>
+                  <svg className="w-4 h-4 text-neutral-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
                 </button>
               ))}
             </div>
@@ -171,25 +184,35 @@ export default function TickerSearch({ onAnalyze, loading }) {
         <button
           type="submit"
           disabled={loading || !ticker.trim()}
-          className="px-8 py-3 bg-white hover:bg-neutral-200 disabled:bg-neutral-800
-                     disabled:text-neutral-500 text-black font-semibold rounded-lg text-lg
-                     transition-colors"
+          className="px-8 py-3.5 bg-white hover:bg-neutral-100 disabled:bg-neutral-800
+                     disabled:text-neutral-600 text-black font-semibold rounded-xl text-base
+                     transition-all shadow-lg shadow-white/5 hover:shadow-white/10
+                     disabled:shadow-none"
         >
-          {loading ? 'Analyzing...' : 'Analyze'}
+          {loading ? (
+            <span className="flex items-center gap-2">
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+              </svg>
+              Analyzing
+            </span>
+          ) : 'Analyze'}
         </button>
       </form>
 
       {/* Recent Searches */}
       {recentSearches.length > 0 && (
-        <div className="flex justify-center gap-2 flex-wrap mb-4">
-          <span className="text-neutral-500 text-sm py-1">Recent:</span>
+        <div className="flex justify-center items-center gap-2 flex-wrap mb-4">
+          <span className="text-neutral-600 text-xs font-medium tracking-wider uppercase">Recent</span>
+          <span className="text-neutral-700">|</span>
           {recentSearches.slice(0, 6).map((t) => (
             <button
               key={t}
               onClick={() => handleSelect(t)}
               disabled={loading}
-              className="px-3 py-1 text-sm bg-neutral-900 text-white rounded-full
-                         hover:bg-neutral-700 transition-colors border border-neutral-600"
+              className="px-3 py-1 text-xs font-mono font-semibold bg-neutral-900 text-white rounded-md
+                         hover:bg-neutral-800 transition-all border border-neutral-700 hover:border-neutral-500"
             >
               {t}
             </button>
@@ -198,23 +221,25 @@ export default function TickerSearch({ onAnalyze, loading }) {
       )}
 
       {/* Popular Tickers */}
-      <div className="flex justify-center gap-2 flex-wrap">
-        <span className="text-neutral-500 text-sm py-1">Popular:</span>
+      <div className="flex justify-center items-center gap-2 flex-wrap">
+        <span className="text-neutral-600 text-xs font-medium tracking-wider uppercase">Popular</span>
+        <span className="text-neutral-700">|</span>
         {popularTickers.map((t) => (
           <button
             key={t}
             onClick={() => handleSelect(t)}
             disabled={loading}
-            className="px-3 py-1 text-sm bg-black text-neutral-300 rounded-full
-                       hover:bg-neutral-800 hover:text-white transition-colors border border-neutral-700"
+            className="px-3 py-1 text-xs font-mono bg-transparent text-neutral-400 rounded-md
+                       hover:bg-neutral-900 hover:text-white transition-all border border-neutral-800
+                       hover:border-neutral-600"
           >
             {t}
           </button>
         ))}
       </div>
 
-      <p className="text-neutral-600 text-xs mt-8">
-        Not financial advice. For educational purposes only. All data from Yahoo Finance.
+      <p className="text-neutral-700 text-[11px] mt-10 tracking-wide">
+        Not financial advice. For educational purposes only. Data from Yahoo Finance.
       </p>
     </div>
   )
