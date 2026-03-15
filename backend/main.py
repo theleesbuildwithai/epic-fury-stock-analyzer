@@ -16,6 +16,7 @@ import os
 
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
+from analysis.ticker_search import search_tickers
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 
@@ -57,6 +58,13 @@ class PredictionRequest(BaseModel):
 def health_check():
     """Health check — App Runner pings this to make sure the app is alive."""
     return {"status": "healthy", "app": "Epic Fury Stock Analyzer"}
+
+
+@app.get("/api/search")
+def search_stocks(q: str = ""):
+    """Search for stocks by company name or ticker symbol. Instant, no API calls."""
+    results = search_tickers(q)
+    return {"results": results}
 
 
 @app.get("/api/analyze/{ticker}")
