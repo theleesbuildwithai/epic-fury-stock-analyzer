@@ -17,6 +17,7 @@ import os
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
 from analysis.ticker_search import search_tickers
+from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 
@@ -155,6 +156,33 @@ def get_performance():
         return get_performance_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating performance: {str(e)}")
+
+
+@app.get("/api/banner")
+def get_banner():
+    """Get live prices for the scrolling ticker banner."""
+    try:
+        return {"tickers": get_banner_data()}
+    except Exception as e:
+        return {"tickers": [], "error": str(e)}
+
+
+@app.get("/api/daily-picks")
+def daily_picks():
+    """Get today's top 15 stock picks based on technical analysis."""
+    try:
+        return get_daily_picks()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating picks: {str(e)}")
+
+
+@app.get("/api/earnings-calendar")
+def earnings_calendar():
+    """Get upcoming earnings for major stocks this week."""
+    try:
+        return get_earnings_calendar()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching earnings: {str(e)}")
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

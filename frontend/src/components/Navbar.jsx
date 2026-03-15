@@ -22,6 +22,14 @@ export default function Navbar() {
               Analyze
             </Link>
             <Link
+              to="/extra-resources"
+              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                isActive('/extra-resources') ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
+              }`}
+            >
+              Extra Resources
+            </Link>
+            <Link
               to="/performance"
               className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
                 isActive('/performance') ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
