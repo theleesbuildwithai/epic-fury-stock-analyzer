@@ -1,12 +1,38 @@
 import { useState, useEffect, useRef } from 'react'
 
+function getRecentSearches() {
+  try {
+    const data = localStorage.getItem('epic_fury_recent_searches')
+    return data ? JSON.parse(data) : []
+  } catch {
+    return []
+  }
+}
+
+function addRecentSearch(ticker) {
+  try {
+    let recent = getRecentSearches()
+    recent = recent.filter(t => t !== ticker)
+    recent.unshift(ticker)
+    if (recent.length > 10) recent = recent.slice(0, 10)
+    localStorage.setItem('epic_fury_recent_searches', JSON.stringify(recent))
+  } catch {
+    // Silent fail
+  }
+}
+
 export default function TickerSearch({ onAnalyze, loading }) {
   const [ticker, setTicker] = useState('')
   const [suggestions, setSuggestions] = useState([])
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [highlightIndex, setHighlightIndex] = useState(-1)
+  const [recentSearches, setRecentSearches] = useState([])
   const wrapperRef = useRef(null)
   const debounceRef = useRef(null)
+
+  useEffect(() => {
+    setRecentSearches(getRecentSearches())
+  }, [])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -52,14 +78,19 @@ export default function TickerSearch({ onAnalyze, loading }) {
     setTicker(selectedTicker)
     setShowSuggestions(false)
     setSuggestions([])
+    addRecentSearch(selectedTicker)
+    setRecentSearches(getRecentSearches())
     onAnalyze(selectedTicker)
   }
 
   const handleSubmit = (e) => {
     e.preventDefault()
     if (ticker.trim()) {
+      const t = ticker.trim().toUpperCase()
       setShowSuggestions(false)
-      onAnalyze(ticker.trim().toUpperCase())
+      addRecentSearch(t)
+      setRecentSearches(getRecentSearches())
+      onAnalyze(t)
     }
   }
 
@@ -148,12 +179,31 @@ export default function TickerSearch({ onAnalyze, loading }) {
         </button>
       </form>
 
+      {/* Recent Searches */}
+      {recentSearches.length > 0 && (
+        <div className="flex justify-center gap-2 flex-wrap mb-4">
+          <span className="text-neutral-500 text-sm py-1">Recent:</span>
+          {recentSearches.slice(0, 6).map((t) => (
+            <button
+              key={t}
+              onClick={() => handleSelect(t)}
+              disabled={loading}
+              className="px-3 py-1 text-sm bg-neutral-900 text-white rounded-full
+                         hover:bg-neutral-700 transition-colors border border-neutral-600"
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Popular Tickers */}
       <div className="flex justify-center gap-2 flex-wrap">
         <span className="text-neutral-500 text-sm py-1">Popular:</span>
         {popularTickers.map((t) => (
           <button
             key={t}
-            onClick={() => { setTicker(t); onAnalyze(t) }}
+            onClick={() => handleSelect(t)}
             disabled={loading}
             className="px-3 py-1 text-sm bg-black text-neutral-300 rounded-full
                        hover:bg-neutral-800 hover:text-white transition-colors border border-neutral-700"

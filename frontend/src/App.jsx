@@ -5,6 +5,7 @@ import Home from './pages/Home'
 import HowItWorks from './pages/HowItWorks'
 import Performance from './pages/Performance'
 import ExtraResources from './pages/ExtraResources'
+import CookieConsent from './components/CookieConsent'
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="/performance" element={<Performance />} />
           <Route path="/extra-resources" element={<ExtraResources />} />
         </Routes>
+        <CookieConsent />
       </div>
     </Router>
   )

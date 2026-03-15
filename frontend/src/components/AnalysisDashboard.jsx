@@ -1,40 +1,88 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import PriceChart from './PriceChart'
 import TechnicalIndicators from './TechnicalIndicators'
 import RiskScore from './RiskScore'
 import KeyStats from './KeyStats'
 import PriceForecast from './PriceForecast'
 
+function hasConsent() {
+  return localStorage.getItem('epic_fury_cookie_consent') === 'accepted'
+}
+
+function getSavedStocks() {
+  try {
+    const data = localStorage.getItem('epic_fury_saved_stocks')
+    return data ? JSON.parse(data) : []
+  } catch {
+    return []
+  }
+}
+
+function saveStockToLocal(prediction) {
+  if (!hasConsent()) return
+  const stocks = getSavedStocks()
+  const filtered = stocks.filter(s => s.ticker !== prediction.ticker)
+  filtered.push({ ...prediction, saved_at: new Date().toISOString() })
+  localStorage.setItem('epic_fury_saved_stocks', JSON.stringify(filtered))
+}
+
+function removeStockFromLocal(ticker) {
+  const stocks = getSavedStocks()
+  const filtered = stocks.filter(s => s.ticker !== ticker)
+  localStorage.setItem('epic_fury_saved_stocks', JSON.stringify(filtered))
+}
+
+function isStockSavedLocally(ticker) {
+  return getSavedStocks().some(s => s.ticker === ticker)
+}
+
 export default function AnalysisDashboard({ data, onSavePrediction }) {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [isTracked, setIsTracked] = useState(false)
+
+  useEffect(() => {
+    if (data?.info?.ticker) {
+      setIsTracked(isStockSavedLocally(data.info.ticker))
+      setSaved(false)
+    }
+  }, [data?.info?.ticker])
 
   if (!data) return null
 
   const handleSavePrediction = async () => {
     setSaving(true)
     try {
+      const prediction = {
+        ticker: data.info.ticker,
+        predicted_direction: data.signal.direction,
+        confidence_score: data.signal.confidence,
+        entry_price: data.latest.price,
+        target_price: null,
+        check_after_days: 30,
+        notes: `Auto-generated from analysis. RSI: ${data.latest.rsi}, Trend: ${data.trend.direction}`,
+      }
+
       const res = await fetch('/api/predictions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ticker: data.info.ticker,
-          predicted_direction: data.signal.direction,
-          confidence_score: data.signal.confidence,
-          entry_price: data.latest.price,
-          target_price: null,
-          check_after_days: 30,
-          notes: `Auto-generated from analysis. RSI: ${data.latest.rsi}, Trend: ${data.trend.direction}`,
-        }),
+        body: JSON.stringify(prediction),
       })
       if (res.ok) {
         setSaved(true)
+        setIsTracked(true)
+        saveStockToLocal(prediction)
         setTimeout(() => setSaved(false), 3000)
       }
     } catch (err) {
       console.error('Failed to save prediction:', err)
     }
     setSaving(false)
+  }
+
+  const handleRemovePrediction = () => {
+    removeStockFromLocal(data.info.ticker)
+    setIsTracked(false)
   }
 
   return (
@@ -54,18 +102,36 @@ export default function AnalysisDashboard({ data, onSavePrediction }) {
         <div className="lg:col-span-1">
           <RiskScore risk={data.risk} signal={data.signal} />
 
-          {/* Save Prediction Button */}
-          <button
-            onClick={handleSavePrediction}
-            disabled={saving || saved}
-            className="mt-4 w-full py-3 px-4 bg-neutral-800 hover:bg-neutral-700 disabled:bg-neutral-900
-                       text-white font-medium rounded-lg transition-colors border border-neutral-700"
-          >
-            {saved ? 'Prediction Saved' : saving ? 'Saving...' : 'Save This Prediction'}
-          </button>
-          <p className="text-neutral-600 text-xs mt-2 text-center">
-            Track this prediction on the Performance page
-          </p>
+          {/* Save / Remove Prediction Button */}
+          {isTracked ? (
+            <div className="mt-4 space-y-2">
+              <div className="w-full py-3 px-4 bg-neutral-900 text-green-500 font-medium rounded-lg
+                              border border-green-500/30 text-center text-sm">
+                Tracking This Stock
+              </div>
+              <button
+                onClick={handleRemovePrediction}
+                className="w-full py-2 px-4 text-neutral-500 hover:text-red-500 text-xs
+                           hover:bg-neutral-900 rounded-lg transition-colors"
+              >
+                Remove from tracker
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={handleSavePrediction}
+                disabled={saving || saved}
+                className="mt-4 w-full py-3 px-4 bg-neutral-800 hover:bg-neutral-700 disabled:bg-neutral-900
+                           text-white font-medium rounded-lg transition-colors border border-neutral-700"
+              >
+                {saved ? 'Prediction Saved' : saving ? 'Saving...' : 'Save This Prediction'}
+              </button>
+              <p className="text-neutral-600 text-xs mt-2 text-center">
+                Track this prediction on the Performance page
+              </p>
+            </>
+          )}
         </div>
 
         <div className="lg:col-span-2">
