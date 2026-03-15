@@ -59,7 +59,7 @@ export default function TickerBanner() {
 
       <style>{`
         .ticker-scroll {
-          animation: scroll-left 25s linear infinite;
+          animation: scroll-left 15s linear infinite;
         }
         .ticker-scroll:hover {
           animation-play-state: paused;
