@@ -1,5 +1,6 @@
 # Stage 1: Build the React frontend
-FROM node:20-slim AS frontend-build
+# Use ECR Public Gallery to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:20-slim AS frontend-build
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm install --legacy-peer-deps
@@ -7,7 +8,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Run the Python backend + serve the built frontend
-FROM python:3.12-slim
+FROM public.ecr.aws/docker/library/python:3.12-slim
 WORKDIR /app
 
 # Install Python dependencies
