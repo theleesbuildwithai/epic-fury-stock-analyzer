@@ -5,84 +5,64 @@ import RiskScore from './RiskScore'
 import KeyStats from './KeyStats'
 import PriceForecast from './PriceForecast'
 
-function hasConsent() {
-  return localStorage.getItem('epic_fury_cookie_consent') === 'accepted'
-}
-
-function getSavedStocks() {
+function getWatchlist() {
   try {
-    const data = localStorage.getItem('epic_fury_saved_stocks')
+    const data = localStorage.getItem('epic_fury_watchlist')
     return data ? JSON.parse(data) : []
   } catch {
     return []
   }
 }
 
-function saveStockToLocal(prediction) {
-  if (!hasConsent()) return
-  const stocks = getSavedStocks()
-  const filtered = stocks.filter(s => s.ticker !== prediction.ticker)
-  filtered.push({ ...prediction, saved_at: new Date().toISOString() })
-  localStorage.setItem('epic_fury_saved_stocks', JSON.stringify(filtered))
+function addToWatchlist(stock) {
+  const list = getWatchlist()
+  if (list.some(s => s.ticker === stock.ticker)) return
+  list.push(stock)
+  localStorage.setItem('epic_fury_watchlist', JSON.stringify(list))
 }
 
-function removeStockFromLocal(ticker) {
-  const stocks = getSavedStocks()
-  const filtered = stocks.filter(s => s.ticker !== ticker)
-  localStorage.setItem('epic_fury_saved_stocks', JSON.stringify(filtered))
+function removeFromWatchlist(ticker) {
+  const list = getWatchlist().filter(s => s.ticker !== ticker)
+  localStorage.setItem('epic_fury_watchlist', JSON.stringify(list))
 }
 
-function isStockSavedLocally(ticker) {
-  return getSavedStocks().some(s => s.ticker === ticker)
+function isInWatchlist(ticker) {
+  return getWatchlist().some(s => s.ticker === ticker)
 }
 
-export default function AnalysisDashboard({ data, onSavePrediction }) {
-  const [saving, setSaving] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [isTracked, setIsTracked] = useState(false)
+export default function AnalysisDashboard({ data }) {
+  const [added, setAdded] = useState(false)
+  const [onWatchlist, setOnWatchlist] = useState(false)
 
   useEffect(() => {
     if (data?.info?.ticker) {
-      setIsTracked(isStockSavedLocally(data.info.ticker))
-      setSaved(false)
+      setOnWatchlist(isInWatchlist(data.info.ticker))
+      setAdded(false)
     }
   }, [data?.info?.ticker])
 
   if (!data) return null
 
-  const handleSavePrediction = async () => {
-    setSaving(true)
-    try {
-      const prediction = {
-        ticker: data.info.ticker,
-        predicted_direction: data.signal.direction,
-        confidence_score: data.signal.confidence,
-        entry_price: data.latest.price,
-        target_price: null,
-        check_after_days: 30,
-        notes: `Auto-generated from analysis. RSI: ${data.latest.rsi}, Trend: ${data.trend.direction}`,
-      }
-
-      const res = await fetch('/api/predictions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(prediction),
-      })
-      if (res.ok) {
-        setSaved(true)
-        setIsTracked(true)
-        saveStockToLocal(prediction)
-        setTimeout(() => setSaved(false), 3000)
-      }
-    } catch (err) {
-      console.error('Failed to save prediction:', err)
+  const handleAddToWatchlist = () => {
+    const stock = {
+      ticker: data.info.ticker,
+      name: data.info.name || data.info.ticker,
+      entry_price: data.latest.price,
+      current_price: data.latest.price,
+      change: 0,
+      change_pct: 0,
+      added_at: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
     }
-    setSaving(false)
+    addToWatchlist(stock)
+    setOnWatchlist(true)
+    setAdded(true)
+    setTimeout(() => setAdded(false), 3000)
   }
 
-  const handleRemovePrediction = () => {
-    removeStockFromLocal(data.info.ticker)
-    setIsTracked(false)
+  const handleRemoveFromWatchlist = () => {
+    removeFromWatchlist(data.info.ticker)
+    setOnWatchlist(false)
   }
 
   return (
@@ -102,33 +82,35 @@ export default function AnalysisDashboard({ data, onSavePrediction }) {
         <div className="lg:col-span-1">
           <RiskScore risk={data.risk} signal={data.signal} />
 
-          {/* Save / Remove Prediction Button */}
-          {isTracked ? (
+          {/* Add to / Remove from Watchlist */}
+          {onWatchlist ? (
             <div className="mt-4 space-y-2">
               <div className="w-full py-3 px-4 bg-neutral-900 text-green-500 font-medium rounded-lg
-                              border border-green-500/30 text-center text-sm">
-                Tracking This Stock
+                              border border-green-500/30 text-center text-sm flex items-center justify-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                On Your Watchlist
               </div>
               <button
-                onClick={handleRemovePrediction}
+                onClick={handleRemoveFromWatchlist}
                 className="w-full py-2 px-4 text-neutral-500 hover:text-red-500 text-xs
                            hover:bg-neutral-900 rounded-lg transition-colors"
               >
-                Remove from tracker
+                Remove from watchlist
               </button>
             </div>
           ) : (
             <>
               <button
-                onClick={handleSavePrediction}
-                disabled={saving || saved}
-                className="mt-4 w-full py-3 px-4 bg-neutral-800 hover:bg-neutral-700 disabled:bg-neutral-900
-                           text-white font-medium rounded-lg transition-colors border border-neutral-700"
+                onClick={handleAddToWatchlist}
+                className="mt-4 w-full py-3 px-4 bg-white hover:bg-neutral-200
+                           text-black font-semibold rounded-lg transition-colors shadow-lg shadow-white/5"
               >
-                {saved ? 'Prediction Saved' : saving ? 'Saving...' : 'Save This Prediction'}
+                {added ? '✓ Added to Watchlist' : '+ Add to Watchlist'}
               </button>
               <p className="text-neutral-600 text-xs mt-2 text-center">
-                Track this prediction on the Performance page
+                Track this stock on the Watchlist page
               </p>
             </>
           )}

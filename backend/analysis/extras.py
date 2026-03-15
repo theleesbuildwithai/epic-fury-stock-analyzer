@@ -72,26 +72,39 @@ def get_banner_data():
         # Download all at once to minimize API calls
         _throttle()
         symbols = [s[0] for s in BANNER_SYMBOLS]
+        symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
+
         try:
-            df = yf.download(symbols, period="2d", progress=False, group_by="ticker")
+            df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
         except Exception:
             return []
 
         if df is None or df.empty:
             return []
 
-        for symbol, name in BANNER_SYMBOLS:
+        for symbol in symbols:
             try:
-                if len(BANNER_SYMBOLS) == 1:
-                    ticker_df = df
-                else:
-                    ticker_df = df[symbol] if symbol in df.columns.get_level_values(0) else None
+                name = symbol_to_name[symbol]
 
-                if ticker_df is None or ticker_df.empty or len(ticker_df) < 2:
+                # Handle both multi-level and flat column structures
+                if isinstance(df.columns, pd.MultiIndex):
+                    # Multi-ticker download: columns are (Ticker, Price)
+                    if symbol in df.columns.get_level_values(0):
+                        close_series = df[(symbol, "Close")].dropna()
+                    else:
+                        continue
+                else:
+                    # Single ticker or flat structure
+                    if "Close" in df.columns:
+                        close_series = df["Close"].dropna()
+                    else:
+                        continue
+
+                if close_series is None or len(close_series) < 2:
                     continue
 
-                current = float(ticker_df["Close"].iloc[-1])
-                prev = float(ticker_df["Close"].iloc[-2])
+                current = float(close_series.iloc[-1])
+                prev = float(close_series.iloc[-2])
                 change = current - prev
                 change_pct = (change / prev) * 100
 

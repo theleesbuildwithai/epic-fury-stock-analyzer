@@ -3,7 +3,7 @@ import Navbar from './components/Navbar'
 import TickerBanner from './components/TickerBanner'
 import Home from './pages/Home'
 import HowItWorks from './pages/HowItWorks'
-import Performance from './pages/Performance'
+import Watchlist from './pages/Watchlist'
 import ExtraResources from './pages/ExtraResources'
 import CookieConsent from './components/CookieConsent'
 
@@ -16,7 +16,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/how-it-works" element={<HowItWorks />} />
-          <Route path="/performance" element={<Performance />} />
+          <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/extra-resources" element={<ExtraResources />} />
         </Routes>
         <CookieConsent />
