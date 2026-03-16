@@ -15,7 +15,14 @@ from scipy.stats import norm
 
 # Shared cache
 _extras_cache = {}
-_extras_cache_ttl = 900  # 15 minutes for extras (less frequent updates OK)
+def _market_ttl():
+    """60s cache during market hours, 15min otherwise"""
+    from datetime import datetime
+    now = datetime.now()
+    t = now.hour * 60 + now.minute
+    return 60 if (390 <= t <= 1050) else 900
+
+_extras_cache_ttl = 60  # Default, overridden by _market_ttl()
 _last_api_call = [0.0]
 _API_DELAY = 3.0
 
@@ -30,7 +37,7 @@ def _throttle():
 
 def _get_cached(key, fetch_fn, ttl=None):
     if ttl is None:
-        ttl = _extras_cache_ttl
+        ttl = _market_ttl()
     now = time.time()
     if key in _extras_cache and now - _extras_cache[key]["time"] < ttl:
         return _extras_cache[key]["data"]

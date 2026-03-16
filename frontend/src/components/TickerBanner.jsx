@@ -18,8 +18,21 @@ export default function TickerBanner() {
         setLoading(false)
       }
     }
+
+    const isMarketHours = () => {
+      const now = new Date()
+      const hours = now.getHours()
+      const mins = now.getMinutes()
+      const t = hours * 60 + mins
+      // 6:30 AM = 390, 5:30 PM = 1050
+      return t >= 390 && t <= 1050
+    }
+
     fetchBanner()
-    const interval = setInterval(fetchBanner, 300000)
+    // During market hours refresh every 60s, otherwise every 5 min
+    const interval = setInterval(() => {
+      fetchBanner()
+    }, isMarketHours() ? 60000 : 300000)
     return () => clearInterval(interval)
   }, [])
 

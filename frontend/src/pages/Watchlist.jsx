@@ -26,6 +26,23 @@ export default function Watchlist() {
     setWatchlist(wl)
     // Refresh prices for all watchlist stocks
     wl.forEach(stock => refreshPrice(stock.ticker))
+
+    const isMarketHours = () => {
+      const now = new Date()
+      const hours = now.getHours()
+      const mins = now.getMinutes()
+      const t = hours * 60 + mins
+      return t >= 390 && t <= 1050
+    }
+
+    // Auto-refresh every 60s during market hours
+    const interval = setInterval(() => {
+      if (isMarketHours()) {
+        const current = getWatchlist()
+        current.forEach(stock => refreshPrice(stock.ticker))
+      }
+    }, 60000)
+    return () => clearInterval(interval)
   }, [])
 
   const refreshPrice = async (ticker) => {
@@ -130,7 +147,7 @@ export default function Watchlist() {
         <div>
           <h1 className="text-3xl font-bold text-white mb-2">Watchlist</h1>
           <p className="text-neutral-400">
-            Track stocks you own or are watching. Prices update when you visit.
+            Track stocks you own or are watching. Prices auto-update every 60s during market hours.
           </p>
         </div>
 
