@@ -231,8 +231,9 @@ PICK_CANDIDATES = [
 
 def get_daily_picks():
     """
-    Generate top 15 daily picks based on technical signals.
-    Uses RSI, momentum, and volatility to rank stocks.
+    Symbols to Buy — hedge fund grade stock screening.
+    Uses EMA crossovers, RSI, MACD, pivot points, and momentum.
+    Calculates recommended hold duration and entry/exit timing.
     Cached for 1 hour.
     """
     def fetch():
@@ -259,6 +260,7 @@ def get_daily_picks():
                     continue
 
                 current = closes[-1]
+                series = pd.Series(closes)
 
                 # RSI (Wilder's smoothing)
                 deltas = np.diff(closes)
@@ -269,76 +271,147 @@ def get_daily_picks():
                 rs = avg_gain / avg_loss if avg_loss > 0 else 100
                 rsi = 100 - (100 / (1 + rs))
 
+                # EMA crossovers (9, 21, 50)
+                ema_9 = float(series.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema_21 = float(series.ewm(span=21, adjust=False).mean().iloc[-1])
+                ema_50 = float(series.ewm(span=50, adjust=False).mean().iloc[-1]) if len(closes) >= 50 else ema_21
+
+                # MACD
+                ema_12 = series.ewm(span=12, adjust=False).mean()
+                ema_26 = series.ewm(span=26, adjust=False).mean()
+                macd_line = float((ema_12 - ema_26).iloc[-1])
+                signal_line = float((ema_12 - ema_26).ewm(span=9, adjust=False).mean().iloc[-1])
+                macd_bullish = macd_line > signal_line
+
                 # Momentum (20-day return)
-                if len(closes) >= 20:
-                    momentum = ((closes[-1] / closes[-20]) - 1) * 100
-                else:
-                    momentum = 0
+                momentum = ((closes[-1] / closes[-20]) - 1) * 100 if len(closes) >= 20 else 0
 
                 # Volatility
                 log_returns = np.log(closes[1:] / closes[:-1])
                 vol = float(np.std(log_returns)) * np.sqrt(252) * 100
 
-                # Trend (price vs 20 SMA)
-                sma20 = np.mean(closes[-20:])
-                above_sma = current > sma20
+                # Pivot points
+                high_20 = max(closes[-20:])
+                low_20 = min(closes[-20:])
+                pivot = (high_20 + low_20 + current) / 3
+                above_pivot = current > pivot
 
-                # Score: favor oversold (low RSI), positive momentum, reasonable vol
+                # --- Multi-factor scoring ---
                 score = 0
                 signal = "Hold"
                 reasons = []
+                action = "Hold"
 
-                if rsi < 30:
+                # RSI factor
+                if rsi < 25:
                     score += 3
-                    reasons.append(f"Oversold (RSI {rsi:.0f})")
-                elif rsi < 40:
+                    reasons.append(f"Deeply oversold (RSI {rsi:.0f})")
+                elif rsi < 35:
                     score += 2
-                    reasons.append(f"Near oversold (RSI {rsi:.0f})")
-                elif rsi > 70:
-                    score -= 2
+                    reasons.append(f"Oversold zone (RSI {rsi:.0f})")
+                elif rsi > 75:
+                    score -= 3
+                    reasons.append(f"Extremely overbought (RSI {rsi:.0f})")
+                elif rsi > 65:
+                    score -= 1
                     reasons.append(f"Overbought (RSI {rsi:.0f})")
-                elif rsi > 60:
-                    score -= 1
 
-                if momentum > 5:
+                # EMA alignment factor
+                if current > ema_9 > ema_21 > ema_50:
+                    score += 3
+                    reasons.append("Perfect bullish EMA stack")
+                elif current > ema_9 > ema_21:
                     score += 2
-                    reasons.append(f"Strong momentum (+{momentum:.1f}%)")
-                elif momentum > 0:
-                    score += 1
-                    reasons.append(f"Positive momentum (+{momentum:.1f}%)")
-                elif momentum < -5:
-                    score -= 1
-                    reasons.append(f"Weak momentum ({momentum:.1f}%)")
+                    reasons.append("Bullish EMA alignment")
+                elif current < ema_9 < ema_21 < ema_50:
+                    score -= 2
+                    reasons.append("Bearish EMA alignment")
 
-                if above_sma:
+                # MACD factor
+                if macd_bullish:
                     score += 1
-                    reasons.append("Above 20-day average")
+                    reasons.append("MACD bullish crossover")
                 else:
                     score -= 1
-                    reasons.append("Below 20-day average")
 
+                # Momentum factor
+                if momentum > 8:
+                    score += 2
+                    reasons.append(f"Strong momentum (+{momentum:.1f}%)")
+                elif momentum > 2:
+                    score += 1
+                    reasons.append(f"Positive momentum (+{momentum:.1f}%)")
+                elif momentum < -8:
+                    score -= 2
+                    reasons.append(f"Weak momentum ({momentum:.1f}%)")
+
+                # Pivot point factor
+                if above_pivot:
+                    score += 1
+                    reasons.append("Trading above pivot point")
+                else:
+                    score -= 1
+
+                # Volatility factor
                 if vol < 25:
                     score += 1
-                    reasons.append(f"Low volatility ({vol:.0f}%)")
                 elif vol > 50:
                     score -= 1
-                    reasons.append(f"High volatility ({vol:.0f}%)")
+                    reasons.append(f"High volatility risk ({vol:.0f}%)")
 
-                if score >= 3:
+                # Determine action and signal
+                if score >= 5:
                     signal = "Strong Buy"
+                    action = "Buy Now"
+                elif score >= 3:
+                    signal = "Strong Buy"
+                    action = "Buy"
                 elif score >= 1:
                     signal = "Buy"
+                    action = "Buy"
                 elif score <= -3:
                     signal = "Strong Sell"
+                    action = "Sell"
                 elif score <= -1:
                     signal = "Sell"
+                    action = "Sell"
+                else:
+                    action = "Hold"
 
-                # Probability estimate (simplified)
+                # Hold duration calculation (simplified for picks)
+                hold_days = 14  # base 2 weeks
+                if rsi < 30:
+                    hold_days += 21  # oversold: hold for recovery
+                if current > ema_9 > ema_21 > ema_50:
+                    hold_days += 14  # strong trend: ride it
+                if vol > 40:
+                    hold_days = max(7, hold_days - 7)  # high vol: shorter
+                if vol < 20:
+                    hold_days += 14  # low vol: safe to hold longer
+                hold_days = max(7, min(90, hold_days))
+
+                if hold_days <= 10:
+                    hold_label = "1-2 Weeks"
+                elif hold_days <= 21:
+                    hold_label = "2-3 Weeks"
+                elif hold_days <= 35:
+                    hold_label = "1 Month"
+                elif hold_days <= 60:
+                    hold_label = "1-2 Months"
+                else:
+                    hold_label = "2-3 Months"
+
+                # Probability estimate
                 daily_mean = float(np.mean(log_returns))
                 daily_std = float(np.std(log_returns))
                 tf_mean = daily_mean * 30
                 tf_std = daily_std * np.sqrt(30)
                 prob_up_30d = float(1 - norm.cdf(0, loc=tf_mean, scale=tf_std)) * 100
+
+                # Entry price guidance
+                entry = "At market" if score >= 3 else f"Near ${round(ema_21, 2)}" if score >= 1 else "Avoid"
+                target = round(current * (1 + (prob_up_30d / 100) * 0.1), 2) if action == "Buy" or action == "Buy Now" else round(current * 0.95, 2)
+                stop_loss = round(current * 0.95, 2) if action != "Sell" else None
 
                 picks.append({
                     "rank": 0,
@@ -348,9 +421,18 @@ def get_daily_picks():
                     "momentum_20d": round(momentum, 2),
                     "volatility": round(vol, 1),
                     "signal": signal,
+                    "action": action,
                     "score": score,
                     "prob_up_30d": round(prob_up_30d, 1),
-                    "reasons": reasons[:3],
+                    "hold_days": hold_days,
+                    "hold_label": hold_label,
+                    "entry": entry,
+                    "target": target,
+                    "stop_loss": stop_loss,
+                    "ema_9": round(ema_9, 2),
+                    "ema_21": round(ema_21, 2),
+                    "pivot": round(pivot, 2),
+                    "reasons": reasons[:4],
                 })
             except Exception:
                 continue

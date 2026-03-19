@@ -18,6 +18,7 @@ from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
 from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar
+from analysis.news_sentiment import get_market_news
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 
@@ -183,6 +184,15 @@ def earnings_calendar():
         return get_earnings_calendar()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching earnings: {str(e)}")
+
+
+@app.get("/api/market-news")
+def market_news():
+    """Get latest market news with sentiment analysis from Yahoo Finance, CNN, CNBC."""
+    try:
+        return get_market_news()
+    except Exception as e:
+        return {"headlines": [], "error": str(e)}
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

@@ -261,6 +261,186 @@ def determine_trend(prices: list) -> dict:
     }
 
 
+def calculate_pivot_points(prices: list) -> dict:
+    """
+    Classic Pivot Points — used by institutional traders to identify
+    key intraday and swing trade levels.
+
+    Standard pivot: P = (H + L + C) / 3
+    Support/Resistance levels derived from pivot.
+    """
+    if len(prices) < 2:
+        return {}
+
+    # Use last trading day's OHLC approximation from close prices
+    # For more accuracy we'd need actual OHLC, but closes work for swing levels
+    recent = prices[-20:]
+    high = max(recent)
+    low = min(recent)
+    close = prices[-1]
+
+    pivot = round((high + low + close) / 3, 2)
+    r1 = round(2 * pivot - low, 2)
+    r2 = round(pivot + (high - low), 2)
+    r3 = round(high + 2 * (pivot - low), 2)
+    s1 = round(2 * pivot - high, 2)
+    s2 = round(pivot - (high - low), 2)
+    s3 = round(low - 2 * (high - pivot), 2)
+
+    # Fibonacci pivot points
+    fib_r1 = round(pivot + 0.382 * (high - low), 2)
+    fib_r2 = round(pivot + 0.618 * (high - low), 2)
+    fib_r3 = round(pivot + 1.0 * (high - low), 2)
+    fib_s1 = round(pivot - 0.382 * (high - low), 2)
+    fib_s2 = round(pivot - 0.618 * (high - low), 2)
+    fib_s3 = round(pivot - 1.0 * (high - low), 2)
+
+    # Price position relative to pivot
+    position = "above" if close > pivot else "below" if close < pivot else "at"
+
+    return {
+        "pivot": pivot,
+        "r1": r1, "r2": r2, "r3": r3,
+        "s1": s1, "s2": s2, "s3": s3,
+        "fib_r1": fib_r1, "fib_r2": fib_r2, "fib_r3": fib_r3,
+        "fib_s1": fib_s1, "fib_s2": fib_s2, "fib_s3": fib_s3,
+        "position": position,
+        "high_20d": high,
+        "low_20d": low,
+    }
+
+
+def calculate_hold_duration(prices: list, rsi_values: list, trend: dict, forecast: dict) -> dict:
+    """
+    Recommended Hold Duration — calculates optimal holding period
+    based on technical indicators, trend strength, and forecast data.
+
+    Minimum 1 week (investing, not day trading).
+    Uses EMA crossover signals, RSI mean reversion timing,
+    and forecast probability windows.
+    """
+    if len(prices) < 60:
+        return {"days": 30, "label": "1 Month", "reasoning": "Insufficient data for precise timing"}
+
+    series = pd.Series(prices)
+    latest_rsi = next((r for r in reversed(rsi_values) if r is not None), 50)
+
+    # EMA analysis for timing
+    ema_9 = series.ewm(span=9, adjust=False).mean()
+    ema_21 = series.ewm(span=21, adjust=False).mean()
+    ema_50 = series.ewm(span=50, adjust=False).mean()
+
+    ema_9_val = float(ema_9.iloc[-1])
+    ema_21_val = float(ema_21.iloc[-1])
+    ema_50_val = float(ema_50.iloc[-1])
+    current = prices[-1]
+
+    reasons = []
+    hold_days = 14  # Start with 2-week default (minimum investing timeframe)
+
+    # Factor 1: RSI-based timing
+    if latest_rsi < 25:
+        # Deeply oversold — hold longer for recovery
+        hold_days += 30
+        reasons.append(f"RSI deeply oversold ({latest_rsi:.0f}) — hold for full recovery")
+    elif latest_rsi < 35:
+        hold_days += 14
+        reasons.append(f"RSI oversold ({latest_rsi:.0f}) — hold for bounce")
+    elif latest_rsi > 75:
+        # Overbought — shorter hold, take profits soon
+        hold_days = max(7, hold_days - 7)
+        reasons.append(f"RSI overbought ({latest_rsi:.0f}) — consider taking profits")
+    elif latest_rsi > 65:
+        hold_days = max(7, hold_days - 3)
+        reasons.append(f"RSI elevated ({latest_rsi:.0f}) — watch for pullback")
+
+    # Factor 2: EMA alignment (trend strength)
+    if current > ema_9_val > ema_21_val > ema_50_val:
+        # Perfect bullish alignment — ride the trend
+        hold_days += 21
+        reasons.append("Strong EMA alignment (9>21>50) — ride the uptrend")
+    elif current < ema_9_val < ema_21_val < ema_50_val:
+        # Perfect bearish — hold short or avoid
+        hold_days = max(7, hold_days - 7)
+        reasons.append("Bearish EMA alignment — shorter hold recommended")
+    elif current > ema_21_val:
+        hold_days += 7
+        reasons.append("Price above 21-day EMA — moderate uptrend")
+
+    # Factor 3: Trend strength from main analysis
+    direction = trend.get("direction", "neutral")
+    strength = trend.get("strength", 0)
+    if direction == "bullish" and strength > 60:
+        hold_days += 14
+        reasons.append(f"Strong bullish trend ({strength}% strength)")
+    elif direction == "bearish" and strength > 60:
+        hold_days = max(7, hold_days - 7)
+        reasons.append(f"Strong bearish trend — minimize exposure")
+
+    # Factor 4: Volatility-based adjustment
+    returns = series.pct_change().dropna()
+    vol = float(returns.std()) * np.sqrt(252) * 100
+    if vol > 50:
+        # High volatility — shorter hold to manage risk
+        hold_days = max(7, int(hold_days * 0.7))
+        reasons.append(f"High volatility ({vol:.0f}%) — shorter hold to manage risk")
+    elif vol < 20:
+        # Low volatility — can hold longer
+        hold_days += 14
+        reasons.append(f"Low volatility ({vol:.0f}%) — safe for longer hold")
+
+    # Factor 5: Best forecast window
+    if forecast and "forecasts" in forecast:
+        best_prob = 0
+        best_tf = None
+        for fc in forecast["forecasts"]:
+            if fc["prob_up"] > best_prob and fc["days"] >= 7:
+                best_prob = fc["prob_up"]
+                best_tf = fc
+        if best_tf and best_prob > 55:
+            reasons.append(f"Best probability window: {best_tf['timeframe']} ({best_prob}% up)")
+
+    # Ensure minimum 7 days
+    hold_days = max(7, min(180, hold_days))
+
+    # Generate label
+    if hold_days <= 10:
+        label = "1-2 Weeks"
+    elif hold_days <= 21:
+        label = "2-3 Weeks"
+    elif hold_days <= 35:
+        label = "1 Month"
+    elif hold_days <= 60:
+        label = "1-2 Months"
+    elif hold_days <= 95:
+        label = "2-3 Months"
+    else:
+        label = "3-6 Months"
+
+    # Entry/exit guidance
+    entry_guidance = "Buy at current levels"
+    exit_guidance = f"Target exit in ~{hold_days} days"
+
+    if latest_rsi > 70:
+        entry_guidance = "Wait for pullback before entering"
+    elif latest_rsi < 30:
+        entry_guidance = "Strong entry point — oversold"
+
+    if current < ema_21_val:
+        entry_guidance = "Wait for price to reclaim 21-day EMA"
+
+    return {
+        "days": hold_days,
+        "label": label,
+        "entry_guidance": entry_guidance,
+        "exit_guidance": exit_guidance,
+        "reasoning": reasons[:4],
+        "ema_9": round(ema_9_val, 2),
+        "ema_21": round(ema_21_val, 2),
+        "ema_50": round(ema_50_val, 2),
+    }
+
+
 def calculate_price_forecast(prices: list, trend: dict) -> dict:
     """
     Price Forecast — uses historical volatility and statistical modeling

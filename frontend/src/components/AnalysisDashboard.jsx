@@ -77,6 +77,157 @@ export default function AnalysisDashboard({ data }) {
       {/* Price Forecast — the main prediction section */}
       <PriceForecast forecast={data.forecast} />
 
+      {/* Hold Duration & Action Recommendation */}
+      {data.hold_duration && (
+        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold text-white mb-1">Investment Action</h2>
+              <div className="flex items-center gap-4">
+                <span className={`text-3xl font-black ${
+                  data.signal.direction.includes('Buy') ? 'text-green-500' :
+                  data.signal.direction.includes('Sell') ? 'text-red-500' : 'text-neutral-300'
+                }`}>
+                  {data.signal.direction}
+                </span>
+                <span className="text-neutral-500">|</span>
+                <span className="text-neutral-400 text-sm">Confidence: {data.signal.confidence}%</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              <div className="text-center">
+                <p className="text-neutral-500 text-xs uppercase tracking-wider">Hold For</p>
+                <p className="text-white font-bold text-xl">{data.hold_duration.label}</p>
+                <p className="text-neutral-500 text-xs">~{data.hold_duration.days} days</p>
+              </div>
+              <div className="text-center">
+                <p className="text-neutral-500 text-xs uppercase tracking-wider">Entry</p>
+                <p className="text-white font-medium text-sm">{data.hold_duration.entry_guidance}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Hold reasoning */}
+          {data.hold_duration.reasoning && data.hold_duration.reasoning.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-neutral-800">
+              <p className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Analysis</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {data.hold_duration.reasoning.map((r, i) => (
+                  <p key={i} className="text-neutral-400 text-sm">• {r}</p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* EMA levels */}
+          <div className="mt-4 pt-4 border-t border-neutral-800 flex flex-wrap gap-4">
+            <div>
+              <span className="text-neutral-500 text-xs">EMA 9</span>
+              <p className="text-white font-mono text-sm">${data.hold_duration.ema_9}</p>
+            </div>
+            <div>
+              <span className="text-neutral-500 text-xs">EMA 21</span>
+              <p className="text-white font-mono text-sm">${data.hold_duration.ema_21}</p>
+            </div>
+            <div>
+              <span className="text-neutral-500 text-xs">EMA 50</span>
+              <p className="text-white font-mono text-sm">${data.hold_duration.ema_50}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* News Sentiment & Current Events */}
+      {data.news_sentiment && (
+        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold text-white">News & Current Events</h2>
+            <span className={`text-sm font-bold px-3 py-1 rounded-full ${
+              data.news_sentiment.market_sentiment?.label?.includes('Bullish') ? 'bg-green-500/10 text-green-500' :
+              data.news_sentiment.market_sentiment?.label?.includes('Bearish') ? 'bg-red-500/10 text-red-500' :
+              'bg-neutral-500/10 text-neutral-400'
+            }`}>
+              Market: {data.news_sentiment.market_sentiment?.label || 'N/A'}
+            </span>
+          </div>
+
+          {/* Stock-specific headlines */}
+          {data.news_sentiment.stock_headlines && data.news_sentiment.stock_headlines.length > 0 && (
+            <div className="mb-4">
+              <p className="text-neutral-500 text-xs uppercase tracking-wider mb-2">
+                {data.info.ticker} in the News
+              </p>
+              {data.news_sentiment.stock_headlines.map((h, i) => (
+                <div key={i} className="flex items-center gap-2 py-1.5 border-b border-neutral-900">
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    h.sentiment > 0 ? 'bg-green-500' : h.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-500'
+                  }`}></span>
+                  <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  <span className="text-neutral-600 text-xs shrink-0">{h.source}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Macro events */}
+          {data.news_sentiment.macro_events && data.news_sentiment.macro_events.length > 0 && (
+            <div>
+              <p className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Macro Events Affecting Markets</p>
+              {data.news_sentiment.macro_events.slice(0, 4).map((h, i) => (
+                <div key={i} className="flex items-center gap-2 py-1.5 border-b border-neutral-900">
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    h.sentiment > 0 ? 'bg-green-500' : h.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-500'
+                  }`}></span>
+                  <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  <span className="text-neutral-600 text-xs shrink-0">{h.source}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Pivot Points */}
+      {data.pivot_points && data.pivot_points.pivot && (
+        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+          <h2 className="text-xl font-semibold text-white mb-4">Pivot Points</h2>
+          <div className="grid grid-cols-3 md:grid-cols-7 gap-3 text-center">
+            <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
+              <p className="text-red-400 text-xs">S3</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.s3}</p>
+            </div>
+            <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
+              <p className="text-red-400 text-xs">S2</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.s2}</p>
+            </div>
+            <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
+              <p className="text-red-400 text-xs">S1</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.s1}</p>
+            </div>
+            <div className="bg-white/5 border border-white/20 rounded-lg p-3">
+              <p className="text-white text-xs font-bold">PIVOT</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.pivot}</p>
+            </div>
+            <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3">
+              <p className="text-green-400 text-xs">R1</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.r1}</p>
+            </div>
+            <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3">
+              <p className="text-green-400 text-xs">R2</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.r2}</p>
+            </div>
+            <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3">
+              <p className="text-green-400 text-xs">R3</p>
+              <p className="text-white font-mono text-sm font-bold">${data.pivot_points.r3}</p>
+            </div>
+          </div>
+          <p className="text-neutral-500 text-xs mt-3">
+            Price is {data.pivot_points.position} the pivot point (${data.pivot_points.pivot}).
+            20-day range: ${data.pivot_points.low_20d} — ${data.pivot_points.high_20d}
+          </p>
+        </div>
+      )}
+
       {/* Middle: Signal + Risk side by side */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1">
@@ -124,6 +275,27 @@ export default function AnalysisDashboard({ data }) {
 
       {/* Bottom: Technical Indicators */}
       <TechnicalIndicators chartData={data.chart_data} />
+
+      {/* Signal Reasoning */}
+      {data.signal.reasons && data.signal.reasons.length > 0 && (
+        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+          <h2 className="text-xl font-semibold text-white mb-3">Why {data.signal.direction}?</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {data.signal.reasons.map((r, i) => (
+              <div key={i} className="flex items-start gap-2 py-1">
+                <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${
+                  r.toLowerCase().includes('bullish') || r.toLowerCase().includes('oversold') || r.toLowerCase().includes('above') || r.toLowerCase().includes('positive')
+                    ? 'bg-green-500'
+                    : r.toLowerCase().includes('bearish') || r.toLowerCase().includes('overbought') || r.toLowerCase().includes('below') || r.toLowerCase().includes('weak')
+                    ? 'bg-red-500'
+                    : 'bg-neutral-500'
+                }`}></span>
+                <span className="text-neutral-300 text-sm">{r}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Trend Summary */}
       <div className="bg-black rounded-xl p-6 border border-neutral-700">

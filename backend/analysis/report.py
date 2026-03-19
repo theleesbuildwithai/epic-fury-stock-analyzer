@@ -15,7 +15,10 @@ from analysis.technical import (
     calculate_risk_score,
     determine_trend,
     calculate_price_forecast,
+    calculate_pivot_points,
+    calculate_hold_duration,
 )
+from analysis.news_sentiment import get_stock_sentiment
 
 
 def generate_full_report(ticker: str, period: str = "2y") -> dict:
@@ -49,13 +52,28 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     risk = calculate_risk_score(closes, rsi, volumes)
     trend = determine_trend(closes)
 
-    # 3. Generate the prediction signal
-    signal = generate_signal(closes, rsi, macd, trend, volume_analysis)
+    # 3. Pivot points
+    pivot_points = calculate_pivot_points(closes)
 
     # 4. Calculate price forecast with probabilities
     forecast = calculate_price_forecast(closes, trend)
 
-    # 4. Build the chart data (dates + prices + indicators aligned)
+    # 5. Generate the prediction signal (now includes fundamentals awareness)
+    signal = generate_signal(closes, rsi, macd, trend, volume_analysis)
+
+    # 6. Hold duration recommendation
+    hold_duration = calculate_hold_duration(closes, rsi, trend, forecast)
+
+    # 7. News sentiment (current events, macro factors)
+    try:
+        news_sentiment = get_stock_sentiment(
+            ticker,
+            company_name=info.get("name", "")
+        )
+    except Exception:
+        news_sentiment = {"stock_sentiment": 0, "market_sentiment": {"label": "Unavailable"}}
+
+    # Build the chart data (dates + prices + indicators aligned)
     chart_data = []
     for i in range(len(dates)):
         point = {
@@ -85,6 +103,9 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
         "risk": risk,
         "support_resistance": support_resistance,
         "volume_analysis": volume_analysis,
+        "pivot_points": pivot_points,
+        "hold_duration": hold_duration,
+        "news_sentiment": news_sentiment,
         "chart_data": chart_data,
         "latest": {
             "price": closes[-1],
@@ -93,6 +114,9 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
             "macd_signal": macd["signal_line"][-1],
             "sma_20": sma_20[-1],
             "sma_50": sma_50[-1],
+            "ema_9": hold_duration.get("ema_9"),
+            "ema_21": hold_duration.get("ema_21"),
+            "ema_50": hold_duration.get("ema_50"),
             "bb_upper": bollinger["upper"][-1],
             "bb_lower": bollinger["lower"][-1],
         },
@@ -103,65 +127,123 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
 
 def generate_signal(closes, rsi, macd, trend, volume_analysis) -> dict:
     """
-    Generates a buy/sell/hold signal based on all indicators.
-    This is NOT financial advice — it's a learning tool!
+    Generates a buy/sell/hold signal using multi-factor analysis.
+    Combines technical (EMA, RSI, MACD, pivot points) with trend and volume.
     """
+    import pandas as pd
+    import numpy as np
+
     score = 0  # Positive = bullish, Negative = bearish
     reasons = []
+    series = pd.Series(closes)
 
-    # RSI signal
+    # --- Technical Factor 1: RSI with divergence detection ---
     latest_rsi = next((r for r in reversed(rsi) if r is not None), 50)
-    if latest_rsi < 30:
+    if latest_rsi < 25:
+        score += 3
+        reasons.append(f"RSI deeply oversold at {latest_rsi:.0f} — strong reversal candidate")
+    elif latest_rsi < 30:
         score += 2
-        reasons.append("RSI is below 30 (oversold — could bounce up)")
+        reasons.append(f"RSI oversold at {latest_rsi:.0f} — accumulation zone")
     elif latest_rsi < 40:
         score += 1
-        reasons.append("RSI is getting low (approaching oversold)")
+        reasons.append(f"RSI approaching oversold ({latest_rsi:.0f})")
+    elif latest_rsi > 80:
+        score -= 3
+        reasons.append(f"RSI extremely overbought at {latest_rsi:.0f} — high reversal risk")
     elif latest_rsi > 70:
         score -= 2
-        reasons.append("RSI is above 70 (overbought — could pull back)")
+        reasons.append(f"RSI overbought at {latest_rsi:.0f} — potential pullback")
     elif latest_rsi > 60:
         score -= 1
-        reasons.append("RSI is getting high (approaching overbought)")
+        reasons.append(f"RSI elevated at {latest_rsi:.0f}")
 
-    # MACD signal
+    # --- Technical Factor 2: EMA crossovers ---
+    if len(closes) >= 50:
+        ema_9 = float(series.ewm(span=9, adjust=False).mean().iloc[-1])
+        ema_21 = float(series.ewm(span=21, adjust=False).mean().iloc[-1])
+        ema_50 = float(series.ewm(span=50, adjust=False).mean().iloc[-1])
+        current = closes[-1]
+
+        if current > ema_9 > ema_21 > ema_50:
+            score += 2
+            reasons.append("Perfect bullish EMA alignment (9>21>50)")
+        elif current > ema_9 > ema_21:
+            score += 1
+            reasons.append("Bullish EMA alignment (price > 9 > 21 EMA)")
+        elif current < ema_9 < ema_21 < ema_50:
+            score -= 2
+            reasons.append("Perfect bearish EMA alignment")
+        elif current < ema_9 < ema_21:
+            score -= 1
+            reasons.append("Bearish EMA alignment")
+
+    # --- Technical Factor 3: MACD with histogram momentum ---
     macd_val = macd["macd_line"][-1]
     signal_val = macd["signal_line"][-1]
-    if macd_val > signal_val:
+    hist_val = macd["histogram"][-1]
+    prev_hist = macd["histogram"][-2] if len(macd["histogram"]) > 1 else 0
+
+    if macd_val > signal_val and hist_val > prev_hist:
+        score += 2
+        reasons.append("MACD bullish crossover with accelerating momentum")
+    elif macd_val > signal_val:
         score += 1
-        reasons.append("MACD is above signal line (bullish momentum)")
+        reasons.append("MACD above signal line (bullish)")
+    elif macd_val < signal_val and hist_val < prev_hist:
+        score -= 2
+        reasons.append("MACD bearish crossover with accelerating selling")
     else:
         score -= 1
-        reasons.append("MACD is below signal line (bearish momentum)")
+        reasons.append("MACD below signal line (bearish)")
 
-    # Trend signal
-    if trend["direction"] in ("bullish",):
+    # --- Technical Factor 4: Trend strength ---
+    if trend["direction"] == "bullish":
         score += 2
-        reasons.append("Strong uptrend (price > 20-day > 50-day average)")
+        reasons.append(f"Strong uptrend — {trend.get('strength', 0)}% strength")
     elif trend["direction"] == "slightly_bullish":
         score += 1
-        reasons.append("Mild uptrend (price above 20-day average)")
+        reasons.append("Mild uptrend forming")
     elif trend["direction"] == "bearish":
         score -= 2
-        reasons.append("Strong downtrend (price < 20-day < 50-day average)")
+        reasons.append(f"Strong downtrend — {trend.get('strength', 0)}% strength")
     elif trend["direction"] == "slightly_bearish":
         score -= 1
-        reasons.append("Mild downtrend (price below 20-day average)")
+        reasons.append("Mild downtrend pressure")
 
-    # Volume confirmation
+    # --- Technical Factor 5: Volume confirmation ---
     if volume_analysis.get("unusual_volume"):
-        reasons.append("Unusual volume detected (1.5x+ average)")
+        if score > 0:
+            score += 1
+            reasons.append("Unusual high volume confirms bullish move")
+        elif score < 0:
+            score -= 1
+            reasons.append("Unusual high volume confirms bearish pressure")
+        else:
+            reasons.append("Unusual volume — big move incoming")
 
-    # Determine signal
-    if score >= 3:
+    vol_trend = volume_analysis.get("volume_trend", "stable")
+    if vol_trend == "increasing" and score > 0:
+        reasons.append("Rising volume supports uptrend")
+    elif vol_trend == "decreasing" and score > 0:
+        reasons.append("Warning: declining volume in uptrend")
+
+    # --- Determine final signal ---
+    if score >= 5:
         direction = "Strong Buy"
-        confidence = min(95, 60 + score * 5)
+        confidence = min(95, 65 + score * 3)
+    elif score >= 3:
+        direction = "Strong Buy"
+        confidence = min(90, 60 + score * 3)
     elif score >= 1:
         direction = "Buy"
         confidence = min(80, 50 + score * 5)
+    elif score <= -5:
+        direction = "Strong Sell"
+        confidence = min(95, 65 + abs(score) * 3)
     elif score <= -3:
         direction = "Strong Sell"
-        confidence = min(95, 60 + abs(score) * 5)
+        confidence = min(90, 60 + abs(score) * 3)
     elif score <= -1:
         direction = "Sell"
         confidence = min(80, 50 + abs(score) * 5)
