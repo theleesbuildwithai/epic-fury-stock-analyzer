@@ -39,6 +39,16 @@ export default function Navbar() {
               Resources
             </Link>
             <Link
+              to="/news"
+              className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                isActive('/news')
+                  ? 'bg-white text-black shadow-lg shadow-white/10'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-800/50'
+              }`}
+            >
+              News
+            </Link>
+            <Link
               to="/watchlist"
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
                 isActive('/watchlist')

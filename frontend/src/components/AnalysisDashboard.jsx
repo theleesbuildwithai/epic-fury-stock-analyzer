@@ -162,7 +162,11 @@ export default function AnalysisDashboard({ data }) {
                   <span className={`w-1.5 h-1.5 rounded-full ${
                     h.sentiment > 0 ? 'bg-green-500' : h.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-500'
                   }`}></span>
-                  <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  {h.link ? (
+                    <a href={h.link} target="_blank" rel="noopener noreferrer" className="text-neutral-300 text-sm truncate hover:text-white transition-colors">{h.title}</a>
+                  ) : (
+                    <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  )}
                   <span className="text-neutral-600 text-xs shrink-0">{h.source}</span>
                 </div>
               ))}
@@ -178,7 +182,11 @@ export default function AnalysisDashboard({ data }) {
                   <span className={`w-1.5 h-1.5 rounded-full ${
                     h.sentiment > 0 ? 'bg-green-500' : h.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-500'
                   }`}></span>
-                  <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  {h.link ? (
+                    <a href={h.link} target="_blank" rel="noopener noreferrer" className="text-neutral-300 text-sm truncate hover:text-white transition-colors">{h.title}</a>
+                  ) : (
+                    <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  )}
                   <span className="text-neutral-600 text-xs shrink-0">{h.source}</span>
                 </div>
               ))}

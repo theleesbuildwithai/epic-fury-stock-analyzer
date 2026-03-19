@@ -113,7 +113,11 @@ export default function ExtraResources() {
                     <span className={`w-1.5 h-1.5 rounded-full ${
                       event.sentiment > 0 ? 'bg-green-500' : event.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-500'
                     }`}></span>
-                    <span className="text-neutral-300 text-sm truncate">{event.title}</span>
+                    {event.link ? (
+                      <a href={event.link} target="_blank" rel="noopener noreferrer" className="text-neutral-300 text-sm truncate hover:text-white transition-colors">{event.title}</a>
+                    ) : (
+                      <span className="text-neutral-300 text-sm truncate">{event.title}</span>
+                    )}
                     <span className="text-neutral-600 text-xs shrink-0">{event.source}</span>
                   </div>
                 ))}
@@ -255,12 +259,13 @@ export default function ExtraResources() {
           <h2 className="text-xl font-bold text-white mb-4">Latest Market News</h2>
           <div className="space-y-2">
             {news.headlines.slice(0, 12).map((h, i) => (
-              <div key={i} className="flex items-center justify-between py-2 border-b border-neutral-900">
+              <a key={i} href={h.link || '#'} target="_blank" rel="noopener noreferrer"
+                 className="flex items-center justify-between py-2 border-b border-neutral-900 hover:bg-neutral-900/50 transition-colors px-1 rounded">
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   <span className={`w-2 h-2 rounded-full shrink-0 ${
                     h.sentiment > 0 ? 'bg-green-500' : h.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-600'
                   }`}></span>
-                  <span className="text-neutral-300 text-sm truncate">{h.title}</span>
+                  <span className="text-neutral-300 text-sm truncate hover:text-white">{h.title}</span>
                 </div>
                 <div className="flex items-center gap-3 shrink-0 ml-3">
                   <span className={`text-xs font-mono ${sentimentColor(h.sentiment)}`}>
@@ -268,7 +273,7 @@ export default function ExtraResources() {
                   </span>
                   <span className="text-neutral-600 text-xs w-20 text-right">{h.source}</span>
                 </div>
-              </div>
+              </a>
             ))}
           </div>
         </div>
