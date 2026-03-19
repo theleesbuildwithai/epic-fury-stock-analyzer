@@ -19,6 +19,7 @@ from analysis.market_data import get_stock_info, get_historical_data, get_benchm
 from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar
 from analysis.news_sentiment import get_market_news
+from analysis.ai_analyst import answer_question
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 
@@ -193,6 +194,17 @@ def market_news():
         return get_market_news()
     except Exception as e:
         return {"headlines": [], "error": str(e)}
+
+
+@app.get("/api/ai-analyst")
+def ai_analyst(q: str = ""):
+    """AI Stock Analyst — ask any stock/trading question."""
+    if not q.strip():
+        return {"answer": "Ask me anything about stocks, trading, or investing!", "ticker": None, "question_type": "empty"}
+    try:
+        return answer_question(q)
+    except Exception as e:
+        return {"answer": f"I encountered an error processing your question. Please try again.\n\nError: {str(e)}", "ticker": None, "question_type": "error"}
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

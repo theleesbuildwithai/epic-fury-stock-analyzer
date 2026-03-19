@@ -6,6 +6,7 @@ import Home from './pages/Home'
 import Watchlist from './pages/Watchlist'
 import ExtraResources from './pages/ExtraResources'
 import News from './pages/News'
+import AIAnalyst from './pages/AIAnalyst'
 import CookieConsent from './components/CookieConsent'
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/extra-resources" element={<ExtraResources />} />
           <Route path="/news" element={<News />} />
+          <Route path="/ai-analyst" element={<AIAnalyst />} />
         </Routes>
         <CookieConsent />
       </div>
