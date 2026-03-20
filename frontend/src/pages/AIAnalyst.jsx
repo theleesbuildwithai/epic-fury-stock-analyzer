@@ -21,16 +21,26 @@ export default function AIAnalyst() {
     scrollToBottom()
   }, [messages])
 
-  const sendMessage = async () => {
+  const sendMessage = () => {
     const q = input.trim()
     if (!q || loading) return
+    askQuestion(q)
+  }
 
-    setMessages(prev => [...prev, { role: 'user', content: q }])
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage()
+    }
+  }
+
+  const askQuestion = async (question) => {
+    if (!question || loading) return
+    setMessages(prev => [...prev, { role: 'user', content: question }])
     setInput('')
     setLoading(true)
-
     try {
-      const res = await fetch(`/api/ai-analyst?q=${encodeURIComponent(q)}`)
+      const res = await fetch(`/api/ai-analyst?q=${encodeURIComponent(question)}`)
       const data = await res.json()
       setMessages(prev => [...prev, {
         role: 'assistant',
@@ -48,13 +58,6 @@ export default function AIAnalyst() {
     } finally {
       setLoading(false)
       inputRef.current?.focus()
-    }
-  }
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
     }
   }
 
@@ -99,7 +102,7 @@ export default function AIAnalyst() {
           {quickQuestions.map((q, i) => (
             <button
               key={i}
-              onClick={() => { setInput(q); setTimeout(() => { setInput(q); sendMessage() }, 50) }}
+              onClick={() => askQuestion(q)}
               className="px-3 py-1.5 text-xs font-medium bg-neutral-900 border border-neutral-700 rounded-full
                          text-neutral-400 hover:text-white hover:border-neutral-500 transition-all"
             >
