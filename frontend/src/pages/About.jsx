@@ -25,6 +25,24 @@ export default function About() {
           </p>
         </div>
 
+        {/* Contact */}
+        <div className="bg-neutral-900/50 border border-neutral-800 rounded-2xl p-8 mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
+            Contact
+          </h2>
+          <div className="flex flex-col sm:flex-row gap-4">
+            <a href="mailto:jacksonwhanglee@gmail.com" className="flex items-center gap-3 text-neutral-300 hover:text-white transition-colors">
+              <span className="text-lg">✉</span>
+              <span className="text-sm font-mono">jacksonwhanglee@gmail.com</span>
+            </a>
+            <a href="tel:+13108828097" className="flex items-center gap-3 text-neutral-300 hover:text-white transition-colors">
+              <span className="text-lg">☎</span>
+              <span className="text-sm font-mono">+1 (310) 882-8097</span>
+            </a>
+          </div>
+        </div>
+
         {/* Details */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="bg-neutral-900/50 border border-neutral-800 rounded-xl p-5 text-center">
