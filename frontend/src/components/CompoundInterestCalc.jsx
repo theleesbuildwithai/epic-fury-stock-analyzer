@@ -1,30 +1,41 @@
 import { useState, useMemo } from 'react'
 
 export default function CompoundInterestCalc() {
-  const [principal, setPrincipal] = useState(10000)
-  const [years, setYears] = useState(10)
-  const [rate, setRate] = useState(8)
-  const [contribution, setContribution] = useState(500)
+  const [principal, setPrincipal] = useState('0')
+  const [years, setYears] = useState('0')
+  const [rate, setRate] = useState('0')
+  const [contribution, setContribution] = useState('0')
   const [frequency, setFrequency] = useState('monthly')
 
+  const clearOnFocus = (setter) => (e) => {
+    if (e.target.value === '0') {
+      setter('')
+    }
+  }
+
+  const numPrincipal = Number(principal) || 0
+  const numYears = Number(years) || 0
+  const numRate = Number(rate) || 0
+  const numContribution = Number(contribution) || 0
+
   const results = useMemo(() => {
-    const r = rate / 100
+    const r = numRate / 100
     const periods = frequency === 'monthly' ? 12 : 1
     const periodicRate = r / periods
-    const totalPeriods = years * periods
-    const contrib = contribution
+    const totalPeriods = numYears * periods
+    const contrib = numContribution
 
     // Build year-by-year data for the graph
     const yearData = []
-    let balance = principal
-    let totalContributions = principal
+    let balance = numPrincipal
+    let totalContributions = numPrincipal
 
-    for (let year = 0; year <= years; year++) {
+    for (let year = 0; year <= numYears; year++) {
       if (year === 0) {
         yearData.push({
           year,
-          balance: principal,
-          contributions: principal,
+          balance: numPrincipal,
+          contributions: numPrincipal,
           interest: 0,
         })
         continue
@@ -48,7 +59,7 @@ export default function CompoundInterestCalc() {
     const totalInterest = yearData[yearData.length - 1]?.interest || 0
 
     return { yearData, finalBalance, totalContrib, totalInterest }
-  }, [principal, years, rate, contribution, frequency])
+  }, [numPrincipal, numYears, numRate, numContribution, frequency])
 
   // Find max value for scaling the chart
   const maxBalance = Math.max(...results.yearData.map(d => d.balance), 1)
@@ -73,7 +84,9 @@ export default function CompoundInterestCalc() {
             <input
               type="number"
               value={principal}
-              onChange={e => setPrincipal(Math.max(0, Number(e.target.value)))}
+              onChange={e => setPrincipal(e.target.value)}
+              onFocus={clearOnFocus(setPrincipal)}
+              placeholder="0"
               className="w-full bg-neutral-900 border border-neutral-700 rounded-lg pl-7 pr-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-white transition-colors"
             />
           </div>
@@ -83,7 +96,9 @@ export default function CompoundInterestCalc() {
           <input
             type="number"
             value={years}
-            onChange={e => setYears(Math.max(1, Math.min(50, Number(e.target.value))))}
+            onChange={e => setYears(e.target.value)}
+            onFocus={clearOnFocus(setYears)}
+            placeholder="0"
             className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-white transition-colors"
           />
         </div>
@@ -94,7 +109,9 @@ export default function CompoundInterestCalc() {
               type="number"
               step="0.1"
               value={rate}
-              onChange={e => setRate(Math.max(0, Math.min(50, Number(e.target.value))))}
+              onChange={e => setRate(e.target.value)}
+              onFocus={clearOnFocus(setRate)}
+              placeholder="0"
               className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 pr-7 py-2 text-white text-sm font-mono focus:outline-none focus:border-white transition-colors"
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500">%</span>
@@ -107,7 +124,9 @@ export default function CompoundInterestCalc() {
             <input
               type="number"
               value={contribution}
-              onChange={e => setContribution(Math.max(0, Number(e.target.value)))}
+              onChange={e => setContribution(e.target.value)}
+              onFocus={clearOnFocus(setContribution)}
+              placeholder="0"
               className="w-full bg-neutral-900 border border-neutral-700 rounded-lg pl-7 pr-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-white transition-colors"
             />
           </div>
@@ -172,7 +191,7 @@ export default function CompoundInterestCalc() {
                   style={{ height: `${contribHeight}%`, minHeight: '2px' }}
                 ></div>
                 {/* Year label */}
-                {(d.year % Math.max(1, Math.floor(years / 10)) === 0 || d.year === years) && (
+                {(d.year % Math.max(1, Math.floor(numYears / 10)) === 0 || d.year === numYears) && (
                   <span className="text-neutral-600 text-[10px] mt-1">{d.year}</span>
                 )}
               </div>
