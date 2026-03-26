@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import CompoundInterestCalc from '../components/CompoundInterestCalc'
 
 export default function ExtraResources() {
   const [picks, setPicks] = useState(null)
@@ -330,6 +331,11 @@ export default function ExtraResources() {
             <p className="text-neutral-600 text-sm">Check back during earnings season.</p>
           </div>
         )}
+      </div>
+
+      {/* Compound Interest Calculator */}
+      <div className="mb-8">
+        <CompoundInterestCalc />
       </div>
 
       <p className="text-neutral-600 text-xs mt-6 text-center italic">

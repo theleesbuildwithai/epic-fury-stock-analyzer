@@ -1,10 +1,66 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, Component } from 'react'
+
+// Error boundary to prevent crashes from resetting the whole page
+class ChatErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false }
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+  render() {
+    if (this.state.hasError) {
+      return <div className="text-red-400 text-sm p-3">Something went wrong rendering this message.</div>
+    }
+    return this.props.children
+  }
+}
+
+// Safe markdown renderer - returns React elements, not HTML strings
+function SafeMarkdown({ text }) {
+  if (!text) return null
+  const lines = text.split('\n')
+  return (
+    <div className="text-sm leading-relaxed space-y-1.5">
+      {lines.map((line, i) => {
+        if (!line && i > 0) return <div key={i} className="h-2" />
+        if (line === '---') return <hr key={i} className="border-neutral-800 my-2" />
+        // Bold text
+        const parts = []
+        let remaining = line
+        let partKey = 0
+        const boldRegex = /\*\*(.*?)\*\*/g
+        let match
+        let lastIndex = 0
+        while ((match = boldRegex.exec(remaining)) !== null) {
+          if (match.index > lastIndex) {
+            parts.push(<span key={partKey++}>{remaining.slice(lastIndex, match.index)}</span>)
+          }
+          parts.push(<strong key={partKey++} className="text-white font-semibold">{match[1]}</strong>)
+          lastIndex = match.index + match[0].length
+        }
+        if (lastIndex < remaining.length) {
+          parts.push(<span key={partKey++}>{remaining.slice(lastIndex)}</span>)
+        }
+        if (parts.length === 0) parts.push(<span key={0}>{line}</span>)
+
+        // Bullet points
+        const trimmed = line.trimStart()
+        if (trimmed.startsWith('- ') || trimmed.startsWith('• ')) {
+          return <div key={i} className="ml-4 text-neutral-300">{parts}</div>
+        }
+        return <div key={i}>{parts}</div>
+      })}
+    </div>
+  )
+}
 
 export default function AIAnalyst() {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
-      content: "I'm your **AI Stock Analyst** — think of me as a senior quant at a hedge fund.\n\nAsk me anything:\n- **\"Should I buy AAPL?\"** — Buy/sell signals with reasoning\n- **\"How long should I hold TSLA?\"** — Hold duration\n- **\"What's the price target for NVDA?\"** — Forecasts\n- **\"What are today's top picks?\"** — Symbols to buy\n- **\"Explain RSI\"** — Trading education\n- **\"How is the market?\"** — Live sentiment\n\nI use live data from Yahoo Finance, CNN, and CNBC with EMA, RSI, MACD, and pivot point analysis.",
+      content: "I'm your AI Stock Analyst — think of me as a senior quant at a hedge fund.\n\nAsk me anything:\n- \"Should I buy AAPL?\" — Buy/sell signals with reasoning\n- \"How long should I hold TSLA?\" — Hold duration\n- \"What's the price target for NVDA?\" — Forecasts\n- \"What are today's top picks?\" — Symbols to buy\n- \"Explain RSI\" — Trading education\n- \"How is the market?\" — Live sentiment\n\nI use live data from Yahoo Finance, CNN, and CNBC with EMA, RSI, MACD, and pivot point analysis.",
       ticker: null,
     }
   ])
@@ -21,35 +77,28 @@ export default function AIAnalyst() {
     scrollToBottom()
   }, [messages])
 
-  const sendMessage = () => {
-    const q = input.trim()
-    if (!q || loading) return
-    askQuestion(q)
-  }
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
-    }
-  }
-
   const askQuestion = async (question) => {
     if (!question || loading) return
-    setMessages(prev => [...prev, { role: 'user', content: question }])
+    const q = question.trim()
+    if (!q) return
+
     setInput('')
     setLoading(true)
+    setMessages(prev => [...prev, { role: 'user', content: q }])
+
     try {
-      const res = await fetch(`/api/ai-analyst?q=${encodeURIComponent(question)}`)
+      const res = await fetch('/api/ai-analyst?q=' + encodeURIComponent(q))
+      if (!res.ok) throw new Error('Request failed')
       const data = await res.json()
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: data.answer || 'No response generated.',
-        ticker: data.ticker,
-        questionType: data.question_type,
-        dataUsed: data.data_used,
+        ticker: data.ticker || null,
+        questionType: data.question_type || 'general',
+        dataUsed: data.data_used || [],
       }])
-    } catch {
+    } catch (err) {
+      console.error('AI Analyst error:', err)
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: 'Sorry, I encountered an error. Please try again.',
@@ -57,7 +106,15 @@ export default function AIAnalyst() {
       }])
     } finally {
       setLoading(false)
-      inputRef.current?.focus()
+      setTimeout(() => inputRef.current?.focus(), 100)
+    }
+  }
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    const q = input.trim()
+    if (q && !loading) {
+      askQuestion(q)
     }
   }
 
@@ -69,15 +126,6 @@ export default function AIAnalyst() {
     "How long should I hold AAPL?",
     "What's the price target for TSLA?",
   ]
-
-  const renderMarkdown = (text) => {
-    // Simple markdown: bold, line breaks, lists
-    return text
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\n/g, '<br/>')
-      .replace(/  - (.*?)(?=<br\/>|$)/g, '<span class="block ml-4 text-neutral-300">- $1</span>')
-      .replace(/---/g, '<hr class="border-neutral-800 my-2"/>')
-  }
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col" style={{ height: 'calc(100vh - 120px)' }}>
@@ -96,15 +144,17 @@ export default function AIAnalyst() {
         </div>
       </div>
 
-      {/* Quick questions */}
+      {/* Quick questions - only show before any conversation */}
       {messages.length <= 1 && (
         <div className="flex flex-wrap gap-2 mb-4">
           {quickQuestions.map((q, i) => (
             <button
               key={i}
               onClick={() => askQuestion(q)}
+              disabled={loading}
               className="px-3 py-1.5 text-xs font-medium bg-neutral-900 border border-neutral-700 rounded-full
-                         text-neutral-400 hover:text-white hover:border-neutral-500 transition-all"
+                         text-neutral-400 hover:text-white hover:border-neutral-500 transition-all
+                         disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {q}
             </button>
@@ -113,20 +163,17 @@ export default function AIAnalyst() {
       )}
 
       {/* Chat messages */}
-      <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-1 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-1">
         {messages.map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] rounded-2xl px-5 py-3.5 ${
+          <div key={i} className={'flex ' + (msg.role === 'user' ? 'justify-end' : 'justify-start')}>
+            <div className={'max-w-[85%] rounded-2xl px-5 py-3.5 ' + (
               msg.role === 'user'
                 ? 'bg-white text-black rounded-br-sm'
                 : 'bg-neutral-900 border border-neutral-800 text-neutral-200 rounded-bl-sm'
-            }`}>
+            )}>
               {msg.role === 'assistant' ? (
-                <div>
-                  <div
-                    className="text-sm leading-relaxed"
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
-                  />
+                <ChatErrorBoundary>
+                  <SafeMarkdown text={msg.content} />
                   {msg.dataUsed && msg.dataUsed.length > 0 && (
                     <div className="mt-2 pt-2 border-t border-neutral-800">
                       <span className="text-neutral-600 text-[10px] uppercase tracking-wider">
@@ -134,7 +181,7 @@ export default function AIAnalyst() {
                       </span>
                     </div>
                   )}
-                </div>
+                </ChatErrorBoundary>
               ) : (
                 <p className="text-sm">{msg.content}</p>
               )}
@@ -156,21 +203,20 @@ export default function AIAnalyst() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
-      <div className="bg-neutral-900 border border-neutral-700 rounded-2xl p-2 flex items-center gap-2">
+      {/* Input - using form for proper submit handling */}
+      <form onSubmit={handleSubmit} className="bg-neutral-900 border border-neutral-700 rounded-2xl p-2 flex items-center gap-2">
         <input
           ref={inputRef}
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
           placeholder="Ask about any stock, strategy, or market concept..."
           className="flex-1 bg-transparent text-white text-sm px-3 py-2.5 focus:outline-none placeholder-neutral-500"
           disabled={loading}
           autoComplete="off"
         />
         <button
-          onClick={sendMessage}
+          type="submit"
           disabled={loading || !input.trim()}
           className="px-5 py-2.5 bg-white text-black font-semibold text-sm rounded-xl
                      hover:bg-neutral-200 disabled:bg-neutral-800 disabled:text-neutral-600 transition-all shrink-0"
@@ -181,7 +227,7 @@ export default function AIAnalyst() {
             'Ask'
           )}
         </button>
-      </div>
+      </form>
 
       <p className="text-neutral-700 text-[10px] mt-2 text-center">
         Uses live Yahoo Finance data, CNN, CNBC news. Not financial advice. Always do your own research.

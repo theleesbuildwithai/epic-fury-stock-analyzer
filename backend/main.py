@@ -17,7 +17,7 @@ import os
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
 from analysis.ticker_search import search_tickers
-from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar
+from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary
 from analysis.news_sentiment import get_market_news
 from analysis.ai_analyst import answer_question
 from predictions.models import init_db, save_prediction, get_all_predictions
@@ -194,6 +194,15 @@ def market_news():
         return get_market_news()
     except Exception as e:
         return {"headlines": [], "error": str(e)}
+
+
+@app.get("/api/daily-summary")
+def daily_summary(watchlist: str = ""):
+    """Get daily market summary with top gainers, losers, and watchlist analysis."""
+    try:
+        return get_daily_summary(watchlist_tickers=watchlist if watchlist else None)
+    except Exception as e:
+        return {"gainers": [], "losers": [], "error": str(e)}
 
 
 @app.get("/api/ai-analyst")

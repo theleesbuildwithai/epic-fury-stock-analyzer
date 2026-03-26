@@ -583,3 +583,174 @@ def get_earnings_calendar():
         }
 
     return _get_cached("earnings_calendar", fetch, ttl=21600)  # 6 hour cache
+
+
+# --- Daily AI Summary ---
+
+SUMMARY_STOCKS = [s[0] for s in BANNER_SYMBOLS if not s[0].startswith("^")]
+
+
+def get_daily_summary(watchlist_tickers=None):
+    """
+    Daily AI Summary — top gainers, biggest losers among S&P 500 big caps,
+    plus watchlist summary for the user's stocks.
+    Cached for 5 minutes during market hours, 15 min otherwise.
+    """
+    def fetch():
+        _throttle()
+        try:
+            df = yf.download(SUMMARY_STOCKS, period="5d", progress=False, group_by="ticker")
+        except Exception:
+            return {"error": "Could not fetch market data", "gainers": [], "losers": [], "watchlist_summary": []}
+
+        if df is None or df.empty:
+            return {"error": "No data available", "gainers": [], "losers": [], "watchlist_summary": []}
+
+        symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
+        movers = []
+
+        for symbol in SUMMARY_STOCKS:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if symbol not in df.columns.get_level_values(0):
+                        continue
+                    close_series = df[(symbol, "Close")].dropna()
+                else:
+                    continue
+
+                if close_series is None or len(close_series) < 2:
+                    continue
+
+                current = float(close_series.iloc[-1])
+                prev = float(close_series.iloc[-2])
+                change = current - prev
+                change_pct = (change / prev) * 100
+
+                movers.append({
+                    "symbol": symbol,
+                    "name": symbol_to_name.get(symbol, symbol),
+                    "price": round(current, 2),
+                    "change": round(change, 2),
+                    "change_pct": round(change_pct, 2),
+                })
+            except Exception:
+                continue
+
+        # Sort for gainers and losers
+        movers.sort(key=lambda x: x["change_pct"], reverse=True)
+        gainers = movers[:10]
+        losers = sorted(movers, key=lambda x: x["change_pct"])[:10]
+
+        # Market overview
+        total_up = sum(1 for m in movers if m["change_pct"] > 0)
+        total_down = sum(1 for m in movers if m["change_pct"] < 0)
+        avg_change = sum(m["change_pct"] for m in movers) / len(movers) if movers else 0
+
+        if avg_change > 0.5:
+            market_mood = "Bullish"
+        elif avg_change > 0:
+            market_mood = "Slightly Bullish"
+        elif avg_change > -0.5:
+            market_mood = "Slightly Bearish"
+        else:
+            market_mood = "Bearish"
+
+        result = {
+            "gainers": gainers,
+            "losers": losers,
+            "market_overview": {
+                "total_stocks": len(movers),
+                "advancing": total_up,
+                "declining": total_down,
+                "avg_change_pct": round(avg_change, 2),
+                "mood": market_mood,
+            },
+            "generated_at": datetime.now().isoformat(),
+        }
+
+        return result
+
+    summary = _get_cached("daily_summary", fetch, ttl=300)
+
+    # Add watchlist summary if tickers provided
+    if watchlist_tickers:
+        wl_tickers = [t.strip().upper() for t in watchlist_tickers.split(",") if t.strip()]
+        if wl_tickers:
+            wl_summary = _get_watchlist_summary(wl_tickers)
+            summary = dict(summary)  # copy so we don't mutate cache
+            summary["watchlist_summary"] = wl_summary
+
+    return summary
+
+
+def _get_watchlist_summary(tickers):
+    """Get quick summary for user's watchlist stocks."""
+    results = []
+    _throttle()
+    try:
+        df = yf.download(tickers, period="1mo", progress=False, group_by="ticker")
+    except Exception:
+        return []
+
+    if df is None or df.empty:
+        return []
+
+    for symbol in tickers:
+        try:
+            if isinstance(df.columns, pd.MultiIndex):
+                if symbol not in df.columns.get_level_values(0):
+                    continue
+                close_series = df[(symbol, "Close")].dropna()
+            elif len(tickers) == 1:
+                close_series = df["Close"].dropna()
+            else:
+                continue
+
+            if close_series is None or len(close_series) < 2:
+                continue
+
+            closes = close_series.values.astype(float)
+            current = closes[-1]
+            prev = closes[-2]
+            day_change = ((current / prev) - 1) * 100
+
+            # Week change
+            week_change = ((current / closes[-5]) - 1) * 100 if len(closes) >= 5 else day_change
+
+            # Month change
+            month_change = ((current / closes[0]) - 1) * 100
+
+            # Simple RSI
+            deltas = np.diff(closes[-15:])
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            rs = avg_gain / avg_loss if avg_loss > 0 else 100
+            rsi = 100 - (100 / (1 + rs))
+
+            # Simple signal
+            if rsi < 30:
+                signal = "Oversold - Consider Buying"
+            elif rsi > 70:
+                signal = "Overbought - Consider Selling"
+            elif day_change > 2:
+                signal = "Strong Day - Monitor"
+            elif day_change < -2:
+                signal = "Down Day - Watch Support"
+            else:
+                signal = "Neutral - Hold"
+
+            results.append({
+                "symbol": symbol,
+                "price": round(current, 2),
+                "day_change_pct": round(day_change, 2),
+                "week_change_pct": round(week_change, 2),
+                "month_change_pct": round(month_change, 2),
+                "rsi": round(rsi, 1),
+                "signal": signal,
+            })
+        except Exception:
+            continue
+
+    return results
