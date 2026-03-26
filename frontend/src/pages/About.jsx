@@ -4,8 +4,8 @@ export default function About() {
       <div className="max-w-3xl mx-auto">
         {/* Header */}
         <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-gradient-to-br from-white/10 to-white/5 border border-neutral-700 mb-6">
-            <span className="text-4xl font-bold text-white">JL</span>
+          <div className="w-36 h-36 rounded-full overflow-hidden border-2 border-neutral-700 mb-6 mx-auto shadow-xl shadow-white/5">
+            <img src="/jackson.jpeg" alt="Jackson Lee" className="w-full h-full object-cover object-top" />
           </div>
           <h1 className="text-4xl font-bold tracking-tight mb-2">Jackson Lee</h1>
           <p className="text-neutral-500 text-lg">Creator of Epic Fury Stock Analyzer</p>
