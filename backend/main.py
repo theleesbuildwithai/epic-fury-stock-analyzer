@@ -26,6 +26,13 @@ from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 
 logger = logging.getLogger("epic-fury")
+logging.basicConfig(level=logging.WARNING)
+
+# ============================================================
+#  EPIC FURY APPLICATION FIREWALL (WAF)
+#  Protects against: DDoS, bots, injection, path traversal,
+#  scanner attacks, brute force, and more
+# ============================================================
 
 # --- Ticker Validation ---
 TICKER_PATTERN = re.compile(r"^[A-Za-z\.\-\^]{1,6}$")
@@ -37,23 +44,141 @@ def validate_ticker(ticker: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
     return clean
 
-# --- Rate Limiting ---
-rate_limit_store = defaultdict(list)
-RATE_LIMIT = 60          # max requests
-RATE_WINDOW = 60         # per 60 seconds
+# --- Rate Limiting with Auto-Ban ---
+rate_limit_store = defaultdict(list)   # IP -> [timestamps]
+banned_ips = {}                         # IP -> ban_expire_time
+strike_counter = defaultdict(int)       # IP -> number of violations
+RATE_LIMIT = 60          # max requests per window
+RATE_WINDOW = 60         # 60 second window
+BAN_DURATION = 300       # 5 minute ban after repeated violations
+MAX_STRIKES = 3          # strikes before auto-ban
 
 def check_rate_limit(client_ip: str):
-    """Simple in-memory rate limiter. 60 requests per minute per IP."""
+    """Rate limiter with auto-ban for repeat offenders."""
     now = time.time()
+
+    # Check if IP is banned
+    if client_ip in banned_ips:
+        if now < banned_ips[client_ip]:
+            raise HTTPException(status_code=403, detail="Access denied")
+        else:
+            del banned_ips[client_ip]
+            strike_counter[client_ip] = 0
+
     # Clean old entries
     rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if now - t < RATE_WINDOW]
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT:
+        strike_counter[client_ip] += 1
+        if strike_counter[client_ip] >= MAX_STRIKES:
+            banned_ips[client_ip] = now + BAN_DURATION
+            logger.warning(f"FIREWALL: Auto-banned IP {client_ip} for {BAN_DURATION}s")
+            raise HTTPException(status_code=403, detail="Access denied")
         raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
     rate_limit_store[client_ip].append(now)
 
-# --- Security Headers Middleware ---
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
+# --- Malicious Pattern Detection ---
+ATTACK_PATTERNS = [
+    re.compile(r"\.\./"),                           # Path traversal
+    re.compile(r"\.\.\%2[fF]"),                     # Encoded path traversal
+    re.compile(r"<script", re.IGNORECASE),          # XSS attempt
+    re.compile(r"javascript:", re.IGNORECASE),      # XSS via JS protocol
+    re.compile(r"(union|select|insert|drop|delete|update)\s", re.IGNORECASE),  # SQL injection
+    re.compile(r"(\%27|\'|\-\-)", re.IGNORECASE),   # SQL injection chars
+    re.compile(r"\{[\{%]"),                          # Template injection
+    re.compile(r"(etc/passwd|etc/shadow|proc/self)", re.IGNORECASE),  # Linux file access
+    re.compile(r"(\.env|\.git|\.aws|wp-admin|wp-login|phpmyadmin)", re.IGNORECASE),  # Scanner probes
+    re.compile(r"(eval|exec|import|__import__|os\.)", re.IGNORECASE),  # Python injection
+    re.compile(r"\x00"),                             # Null byte injection
+]
+
+# Known malicious bot user agents
+BOT_PATTERNS = [
+    re.compile(r"(sqlmap|nikto|nmap|masscan|dirbuster|gobuster|wfuzz|hydra|metasploit)", re.IGNORECASE),
+    re.compile(r"(scrapy|python-requests/2\.\d+\.\d+$)", re.IGNORECASE),
+    re.compile(r"(curl/\d|wget/\d)", re.IGNORECASE),
+]
+
+# Honeypot paths — any request to these = instant ban (only hackers/scanners hit these)
+HONEYPOT_PATHS = {
+    "/wp-admin", "/wp-login.php", "/.env", "/.git/config",
+    "/admin", "/administrator", "/phpmyadmin", "/phpinfo.php",
+    "/.aws/credentials", "/config.php", "/server-status",
+    "/actuator", "/debug", "/console", "/shell",
+    "/cgi-bin", "/.htaccess", "/.htpasswd", "/backup",
+    "/wp-content", "/xmlrpc.php", "/api/v1/admin",
+}
+
+def is_malicious_request(path: str, query: str, user_agent: str) -> str:
+    """Check if request matches known attack patterns. Returns reason or empty string."""
+    full_url = f"{path}?{query}" if query else path
+
+    # Honeypot — instant detection
+    path_lower = path.lower().rstrip("/")
+    if path_lower in HONEYPOT_PATHS:
+        return f"honeypot_path:{path}"
+
+    # Attack pattern matching
+    for pattern in ATTACK_PATTERNS:
+        if pattern.search(full_url):
+            return f"attack_pattern:{pattern.pattern}"
+
+    # Bot detection
+    if user_agent:
+        for bot in BOT_PATTERNS:
+            if bot.search(user_agent):
+                return f"malicious_bot:{user_agent[:50]}"
+
+    # Oversized URL (buffer overflow attempt)
+    if len(full_url) > 2000:
+        return "oversized_url"
+
+    return ""
+
+# --- Firewall Middleware (processes EVERY request) ---
+class FirewallMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host if request.client else "unknown"
+        path = request.url.path
+        query = str(request.url.query)
+        user_agent = request.headers.get("user-agent", "")
+        now = time.time()
+
+        # 1. Check IP ban list
+        if client_ip in banned_ips:
+            if now < banned_ips[client_ip]:
+                return JSONResponse(status_code=403, content={"detail": "Access denied"})
+            else:
+                del banned_ips[client_ip]
+                strike_counter[client_ip] = 0
+
+        # 2. Check for malicious patterns
+        attack = is_malicious_request(path, query, user_agent)
+        if attack:
+            logger.warning(f"FIREWALL BLOCKED: {client_ip} | {attack} | {path}")
+            # Auto-ban on honeypot hits or repeated attacks
+            strike_counter[client_ip] += 2
+            if strike_counter[client_ip] >= MAX_STRIKES:
+                banned_ips[client_ip] = now + BAN_DURATION * 2  # Double ban for attacks
+                logger.warning(f"FIREWALL: Auto-banned attacker {client_ip} for {BAN_DURATION * 2}s")
+            return JSONResponse(status_code=403, content={"detail": "Access denied"})
+
+        # 3. Block requests with no user agent (bots/scanners)
+        if not user_agent and not path.startswith("/health"):
+            return JSONResponse(status_code=403, content={"detail": "Access denied"})
+
+        # 4. Method restriction — only GET and POST allowed
+        if request.method not in ("GET", "POST", "OPTIONS", "HEAD"):
+            return JSONResponse(status_code=405, content={"detail": "Method not allowed"})
+
+        # 5. Request size limit (1MB max body)
+        content_length = request.headers.get("content-length", "0")
+        try:
+            if int(content_length) > 1_048_576:
+                return JSONResponse(status_code=413, content={"detail": "Request too large"})
+        except ValueError:
+            pass
+
+        # Process request and add security headers
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -61,6 +186,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"
+        # Hide server info
+        if "server" in response.headers:
+            del response.headers["server"]
         return response
 
 # Create the app
@@ -72,8 +201,8 @@ app = FastAPI(
     redoc_url=None,    # Disable ReDoc in production
 )
 
-# Security headers on every response
-app.add_middleware(SecurityHeadersMiddleware)
+# Firewall — processes every request before anything else
+app.add_middleware(FirewallMiddleware)
 
 # CORS — only allow our own domain (same-origin requests from frontend)
 app.add_middleware(
@@ -311,7 +440,10 @@ if os.path.exists(frontend_dir):
     @app.get("/{full_path:path}")
     def serve_frontend(full_path: str):
         """Serve the React frontend for any non-API route."""
-        file_path = os.path.join(frontend_dir, full_path)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path)
+        # Security: prevent path traversal attacks
+        safe_path = os.path.normpath(os.path.join(frontend_dir, full_path))
+        if not safe_path.startswith(os.path.normpath(frontend_dir)):
+            raise HTTPException(status_code=403, detail="Access denied")
+        if os.path.isfile(safe_path):
+            return FileResponse(safe_path)
         return FileResponse(os.path.join(frontend_dir, "index.html"))
