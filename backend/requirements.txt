@@ -6,3 +6,4 @@ scipy==1.14.1
 pydantic==2.10.4
 aiofiles==24.1.0
 pytz==2024.2
+apscheduler==3.10.4

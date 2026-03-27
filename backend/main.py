@@ -13,8 +13,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import os, re, logging, time
+import os, re, logging, time, threading
 from collections import defaultdict
+from datetime import datetime as dt
 
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
@@ -235,6 +236,123 @@ app.add_middleware(
 
 # Initialize the database when the app starts
 init_db()
+
+# ============================================================
+#  AUTONOMOUS TRADING SCHEDULER
+#  Runs server-side on App Runner — works 24/7, no human needed.
+#  The computer IS the hedge fund manager.
+# ============================================================
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# Track auto-trading state
+auto_trade_log = []
+MAX_AUTO_LOG = 200
+auto_trade_stats = {
+    "total_cycles": 0,
+    "total_trades_opened": 0,
+    "total_trades_closed": 0,
+    "last_run": None,
+    "last_result": None,
+    "errors": 0,
+    "started_at": None,
+    "status": "initializing",
+}
+
+def _run_auto_trade_cycle():
+    """
+    Autonomous trade cycle — the computer decides what to buy/sell.
+    Runs every 2 hours during market hours, once at night for after-hours analysis.
+    No human intervention needed.
+    """
+    global auto_trade_stats
+    cycle_start = dt.now()
+    auto_trade_stats["total_cycles"] += 1
+    auto_trade_stats["last_run"] = cycle_start.isoformat()
+    auto_trade_stats["status"] = "trading"
+
+    try:
+        logger.warning(f"AUTO-TRADE CYCLE #{auto_trade_stats['total_cycles']} starting at {cycle_start}")
+
+        # 1. Generate fresh quant picks (analyzes 100+ stocks)
+        picks = generate_quant_picks()
+
+        # 2. Execute trades based on signals
+        result = execute_trades_from_signals(picks)
+
+        # 3. Auto-adjust factor weights if enough data
+        try:
+            weight_update = auto_adjust_weights()
+            result["weight_update"] = weight_update
+        except Exception:
+            pass
+
+        # Track results
+        opened = len(result.get("opened", []))
+        closed = len(result.get("closed", []))
+        auto_trade_stats["total_trades_opened"] += opened
+        auto_trade_stats["total_trades_closed"] += closed
+        auto_trade_stats["last_result"] = {
+            "opened": opened,
+            "closed": closed,
+            "skipped": len(result.get("skipped", [])),
+            "regime": result.get("portfolio_after", {}).get("regime", "unknown"),
+            "cash": result.get("portfolio_after", {}).get("cash", 0),
+            "positions": result.get("portfolio_after", {}).get("num_positions", 0),
+        }
+        auto_trade_stats["status"] = "idle"
+
+        # Log the cycle
+        log_entry = {
+            "time": cycle_start.isoformat(),
+            "cycle": auto_trade_stats["total_cycles"],
+            "opened": opened,
+            "closed": closed,
+            "regime": result.get("portfolio_after", {}).get("regime"),
+        }
+        auto_trade_log.append(log_entry)
+        if len(auto_trade_log) > MAX_AUTO_LOG:
+            auto_trade_log.pop(0)
+
+        logger.warning(
+            f"AUTO-TRADE CYCLE #{auto_trade_stats['total_cycles']} complete: "
+            f"{opened} opened, {closed} closed"
+        )
+
+    except Exception as e:
+        auto_trade_stats["errors"] += 1
+        auto_trade_stats["status"] = "error"
+        auto_trade_stats["last_error"] = str(e)
+        logger.error(f"AUTO-TRADE ERROR: {e}")
+
+# Start the scheduler
+scheduler = BackgroundScheduler(timezone="US/Eastern")
+
+# Trade every 2 hours during extended market hours (7am-8pm ET)
+# This catches pre-market, market hours, and after-hours
+scheduler.add_job(
+    _run_auto_trade_cycle,
+    "cron",
+    hour="7,9,11,13,15,17,19",
+    minute=30,
+    id="auto_trade_cycle",
+    name="Autonomous Trading Cycle",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
+# Also run once at startup (after 60s delay to let app warm up)
+scheduler.add_job(
+    _run_auto_trade_cycle,
+    "date",
+    run_date=dt.now() + __import__("datetime").timedelta(seconds=60),
+    id="startup_trade",
+    name="Startup Trade Cycle",
+)
+
+scheduler.start()
+auto_trade_stats["started_at"] = dt.now().isoformat()
+auto_trade_stats["status"] = "running"
+logger.warning("AUTONOMOUS TRADING SCHEDULER STARTED — the computer is now the hedge fund manager")
 
 
 # --- Request/Response Models ---
@@ -500,14 +618,33 @@ def paper_performance(request: Request):
         raise HTTPException(status_code=500, detail="Failed to get performance")
 
 
+@app.get("/api/auto-trading-status")
+def auto_trading_status(request: Request):
+    """Get autonomous trading system status — the computer's brain."""
+    check_rate_limit(request.client.host)
+    next_run = None
+    try:
+        job = scheduler.get_job("auto_trade_cycle")
+        if job and job.next_run_time:
+            next_run = job.next_run_time.isoformat()
+    except Exception:
+        pass
+
+    return {
+        **auto_trade_stats,
+        "next_scheduled_run": next_run,
+        "schedule": "Every 2 hours (7:30am-7:30pm ET)",
+        "recent_activity": auto_trade_log[-20:],  # Last 20 cycles
+    }
+
+
 @app.post("/api/paper-trade/rebalance")
 def paper_rebalance(request: Request):
-    """Trigger a trade cycle: close expired positions, open new ones from quant signals."""
+    """Trigger an immediate trade cycle (also runs automatically on schedule)."""
     check_rate_limit(request.client.host)
     try:
         picks = generate_quant_picks()
         result = execute_trades_from_signals(picks)
-        # Auto-adjust weights if enough trades
         try:
             weight_update = auto_adjust_weights()
             result["weight_update"] = weight_update

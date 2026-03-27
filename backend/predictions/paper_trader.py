@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Portfolio configuration
 INITIAL_CAPITAL = 100_000.0
-MAX_POSITIONS = 15
-POSITION_SIZE_PCT = 0.06  # 6% of portfolio per position (conservative)
+MAX_POSITIONS = 999  # No limit — only constrained by cash
+POSITION_SIZE_PCT = 0.04  # 4% of portfolio per position (allows ~25 positions with full capital)
 STOP_LOSS_PCT = 0.07  # 7% stop loss
 DEFAULT_HOLD_DAYS = 30
 MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
@@ -311,9 +311,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     available_slots = MAX_POSITIONS - current_positions
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
-    # In BEAR market, reduce max positions
-    if regime == "BEAR":
-        available_slots = min(available_slots, 5)
+    # No position limits — the computer trades freely like a real hedge fund
 
     if available_slots > 0 and cash > 1000:
         # Combine long and short picks, prioritize by confidence

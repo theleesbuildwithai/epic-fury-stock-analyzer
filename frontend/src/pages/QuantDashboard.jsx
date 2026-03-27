@@ -13,15 +13,16 @@ export default function QuantDashboard() {
   const [performance, setPerformance] = useState(null)
   const [intelligence, setIntelligence] = useState(null)
   const [loading, setLoading] = useState({})
-  const [rebalancing, setRebalancing] = useState(false)
-  const [backtesting, setBacktesting] = useState(false)
-  const [rebalanceResult, setRebalanceResult] = useState(null)
-  const [backtestResult, setBacktestResult] = useState(null)
+  const [autoStatus, setAutoStatus] = useState(null)
 
   useEffect(() => {
     fetchQuantPicks()
     fetchPortfolio()
     fetchIntelligence()
+    fetchAutoStatus()
+    // Refresh auto-trading status every 30s
+    const interval = setInterval(fetchAutoStatus, 30000)
+    return () => clearInterval(interval)
   }, [])
 
   const fetchQuantPicks = async () => {
@@ -56,29 +57,11 @@ export default function QuantDashboard() {
     setLoading(p => ({ ...p, intel: false }))
   }
 
-  const handleRebalance = async () => {
-    setRebalancing(true)
-    setRebalanceResult(null)
+  const fetchAutoStatus = async () => {
     try {
-      const res = await fetch('/api/paper-trade/rebalance', { method: 'POST' })
-      const data = await res.json()
-      setRebalanceResult(data)
-      fetchPortfolio()
-      fetchIntelligence()
+      const res = await fetch('/api/auto-trading-status')
+      setAutoStatus(await res.json())
     } catch { }
-    setRebalancing(false)
-  }
-
-  const handleBacktest = async () => {
-    setBacktesting(true)
-    setBacktestResult(null)
-    try {
-      const res = await fetch('/api/paper-trade/backtest', { method: 'POST' })
-      const data = await res.json()
-      setBacktestResult(data)
-      fetchIntelligence()
-    } catch { }
-    setBacktesting(false)
   }
 
   const RegimeBadge = ({ regime }) => {
@@ -130,10 +113,7 @@ export default function QuantDashboard() {
         <PaperPortfolioTab
           portfolio={portfolio} performance={performance}
           loading={loading.portfolio}
-          onRebalance={handleRebalance} rebalancing={rebalancing}
-          rebalanceResult={rebalanceResult}
-          onBacktest={handleBacktest} backtesting={backtesting}
-          backtestResult={backtestResult}
+          autoStatus={autoStatus}
         />
       )}
       {activeTab === 2 && (
@@ -286,79 +266,65 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 // TAB 2: PAPER PORTFOLIO
 // ============================================================
-function PaperPortfolioTab({ portfolio, performance, loading, onRebalance, rebalancing,
-  rebalanceResult, onBacktest, backtesting, backtestResult }) {
+function PaperPortfolioTab({ portfolio, performance, loading, autoStatus }) {
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
 
   return (
     <div className="space-y-6">
-      {/* Actions */}
-      <div className="flex gap-3">
-        <button
-          onClick={onRebalance}
-          disabled={rebalancing}
-          className="px-5 py-2 bg-white text-black rounded-lg font-bold text-sm hover:bg-neutral-200 transition-all disabled:opacity-50"
-        >
-          {rebalancing ? 'Executing Trades...' : 'Rebalance Portfolio'}
-        </button>
-        <button
-          onClick={onBacktest}
-          disabled={backtesting}
-          className="px-5 py-2 bg-neutral-800 text-white rounded-lg font-bold text-sm hover:bg-neutral-700 transition-all disabled:opacity-50"
-        >
-          {backtesting ? 'Running Backtest...' : 'Run Backtest (500 trades)'}
-        </button>
-      </div>
-
-      {/* Rebalance Result */}
-      {rebalanceResult && (
-        <div className="bg-black border border-neutral-700 rounded-xl p-4">
-          <h3 className="text-white font-bold mb-2">Trade Execution Results</h3>
-          <div className="grid grid-cols-3 gap-3 text-sm">
-            <div className="bg-green-500/10 rounded-lg p-3">
-              <div className="text-green-400 font-bold text-lg">{rebalanceResult.opened?.length || 0}</div>
-              <div className="text-neutral-500">Opened</div>
-            </div>
-            <div className="bg-red-500/10 rounded-lg p-3">
-              <div className="text-red-400 font-bold text-lg">{rebalanceResult.closed?.length || 0}</div>
-              <div className="text-neutral-500">Closed</div>
-            </div>
-            <div className="bg-neutral-500/10 rounded-lg p-3">
-              <div className="text-neutral-400 font-bold text-lg">{rebalanceResult.skipped?.length || 0}</div>
-              <div className="text-neutral-500">Skipped</div>
-            </div>
+      {/* Autonomous Trading Status */}
+      {autoStatus && (
+        <div className="bg-black border border-blue-500/30 rounded-xl p-5">
+          <div className="flex items-center gap-3 mb-3">
+            <div className={`w-3 h-3 rounded-full ${
+              autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500 animate-pulse' :
+              autoStatus.status === 'trading' ? 'bg-blue-500 animate-pulse' :
+              'bg-red-500'
+            }`} />
+            <h3 className="text-white font-bold text-lg">Autonomous Trading</h3>
+            <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+              autoStatus.status === 'trading' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' :
+              autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
+              'bg-red-500/20 text-red-400 border border-red-500/30'
+            }`}>
+              {autoStatus.status === 'idle' ? 'ACTIVE' : autoStatus.status?.toUpperCase()}
+            </span>
           </div>
-        </div>
-      )}
-
-      {/* Backtest Result */}
-      {backtestResult && (
-        <div className="bg-black border border-neutral-700 rounded-xl p-4">
-          <h3 className="text-white font-bold mb-2">Backtest Results</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-            <StatCard label="Total Trades" value={backtestResult.total_trades} />
-            <StatCard label="Win Rate" value={`${backtestResult.win_rate}%`}
-              color={backtestResult.win_rate > 50 ? 'green' : 'red'} />
-            <StatCard label="Avg Return" value={`${backtestResult.avg_return_pct}%`}
-              color={backtestResult.avg_return_pct > 0 ? 'green' : 'red'} />
-            <StatCard label="Sharpe" value={backtestResult.sharpe_ratio}
-              color={backtestResult.sharpe_ratio > 1 ? 'green' : 'yellow'} />
-          </div>
-          {backtestResult.factor_results && (
-            <div className="mt-4">
-              <h4 className="text-neutral-400 text-xs font-bold uppercase mb-2">Strategy Breakdown</h4>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {Object.entries(backtestResult.factor_results).map(([name, stats]) => (
-                  <div key={name} className="bg-neutral-900 rounded-lg p-3">
-                    <div className="text-white font-bold text-sm">{name.replace(/_/g, ' ')}</div>
-                    <div className="text-neutral-400 text-xs mt-1">
-                      {stats.total_trades} trades | {stats.win_rate}% win | {stats.avg_return}% avg
-                    </div>
-                  </div>
-                ))}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Trade Cycles</div>
+              <div className="text-white font-bold font-mono text-lg">{autoStatus.total_cycles}</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Trades Opened</div>
+              <div className="text-green-400 font-bold font-mono text-lg">{autoStatus.total_trades_opened}</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Trades Closed</div>
+              <div className="text-red-400 font-bold font-mono text-lg">{autoStatus.total_trades_closed}</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Schedule</div>
+              <div className="text-blue-400 font-bold text-sm">Every 2hrs</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Next Run</div>
+              <div className="text-white font-mono text-sm">
+                {autoStatus.next_scheduled_run
+                  ? new Date(autoStatus.next_scheduled_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  : 'Soon'}
               </div>
             </div>
+          </div>
+          {autoStatus.last_result && (
+            <div className="mt-3 text-neutral-500 text-xs">
+              Last cycle: {autoStatus.last_result.opened} opened, {autoStatus.last_result.closed} closed
+              {autoStatus.last_result.regime && ` | ${autoStatus.last_result.regime} regime`}
+              {autoStatus.last_run && ` | ${new Date(autoStatus.last_run).toLocaleString()}`}
+            </div>
           )}
+          <p className="text-neutral-600 text-xs mt-2 italic">
+            The computer autonomously analyzes 100+ stocks and executes trades every 2 hours during market hours. No human intervention required.
+          </p>
         </div>
       )}
 
@@ -371,7 +337,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, onRebalance, rebal
             <StatCard label="Cash" value={`$${(portfolio.cash || 0).toLocaleString()}`} />
             <StatCard label="Return" value={`${portfolio.total_return_pct || 0}%`}
               color={(portfolio.total_return_pct || 0) >= 0 ? 'green' : 'red'} />
-            <StatCard label="Positions" value={`${portfolio.num_positions || 0} / ${portfolio.max_positions}`} />
+            <StatCard label="Positions" value={portfolio.num_positions || 0} />
           </div>
 
           {/* Win/Loss Stats */}
