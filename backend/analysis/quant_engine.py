@@ -834,6 +834,26 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             direction = "NEUTRAL"
             confidence = max(30, 50 - int(abs(final_score) * 5))
 
+        # TREND FILTER: Don't fight the trend — this is what separates pros from amateurs
+        # In BEAR: penalize longs that are below 50-EMA (trend is down, don't buy falling knives)
+        # In BEAR: boost shorts that are below 50-EMA (trend confirms short thesis)
+        # In BULL: penalize shorts above 50-EMA, boost longs above 50-EMA
+        ema50 = stock["ema_50"]
+        price_vs_ema50 = (stock["price"] - ema50) / ema50 * 100  # % above/below 50-EMA
+
+        if current_regime == "BEAR":
+            if direction == "LONG" and price_vs_ema50 < -3:
+                # Trying to go long on a stock 3%+ below its 50-EMA in a bear market = bad idea
+                confidence = int(confidence * 0.5)  # cut confidence in half
+            elif direction == "SHORT" and price_vs_ema50 < -5:
+                # Shorting a stock already 5%+ below 50-EMA in bear = confirmed trend
+                confidence = min(95, int(confidence * 1.2))  # boost confidence
+        elif current_regime == "BULL":
+            if direction == "SHORT" and price_vs_ema50 > 3:
+                confidence = int(confidence * 0.5)
+            elif direction == "LONG" and price_vs_ema50 > 5:
+                confidence = min(95, int(confidence * 1.2))
+
         # Apply regime multiplier to confidence
         confidence = int(confidence * regime_multiplier)
 

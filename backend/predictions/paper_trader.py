@@ -360,10 +360,27 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
 
+        # SECTOR CONCENTRATION LIMIT: max 3 positions per sector per direction
+        # Diversification is what separates hedge funds from retail gamblers
+        sector_counts = {}
+        for t in get_open_trades():
+            if t["ticker"] in open_tickers:
+                key = f"{t.get('sector', 'Unknown')}_{t['direction']}"
+                sector_counts[key] = sector_counts.get(key, 0) + 1
+
         for pick in all_picks[:available_slots]:
             symbol = pick["symbol"]
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
+
+            # Check sector concentration
+            sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
+            if sector_counts.get(sector_key, 0) >= 3:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Sector concentration limit ({pick.get('sector')} {direction})",
+                })
+                continue
 
             # Position sizing: REGIME-AWARE % of total portfolio value
             total_value = cash + sum(
@@ -435,6 +452,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 cash -= shares * price
                 open_tickers.add(symbol)
                 current_positions += 1
+                sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
 
                 results["opened"].append({
                     "trade_id": trade_id,
