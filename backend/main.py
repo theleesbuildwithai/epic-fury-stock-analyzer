@@ -214,6 +214,14 @@ class FirewallMiddleware(BaseHTTPMiddleware):
 
         # Process request and add security headers
         response = await call_next(request)
+        # Cache control — assets use long cache (they have hash in filename),
+        # everything else (HTML, API) always revalidates for fresh content
+        if path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
