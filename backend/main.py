@@ -54,10 +54,11 @@ BAN_DURATION = 300       # 5 minute ban after repeated violations
 MAX_STRIKES = 5          # strikes before auto-ban
 
 def check_rate_limit(client_ip: str):
-    """Rate limiter with auto-ban for repeat offenders."""
+    """Rate limiter — slows down excessive requests but NEVER bans normal users.
+    Banning only happens from attack pattern detection, not rate limits."""
     now = time.time()
 
-    # Check if IP is banned
+    # Check if IP is banned (only attacks cause bans, not rate limits)
     if client_ip in banned_ips:
         if now < banned_ips[client_ip]:
             raise HTTPException(status_code=403, detail="Access denied")
@@ -68,11 +69,7 @@ def check_rate_limit(client_ip: str):
     # Clean old entries
     rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if now - t < RATE_WINDOW]
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT:
-        strike_counter[client_ip] += 1
-        if strike_counter[client_ip] >= MAX_STRIKES:
-            banned_ips[client_ip] = now + BAN_DURATION
-            logger.warning(f"FIREWALL: Auto-banned IP {client_ip} for {BAN_DURATION}s")
-            raise HTTPException(status_code=403, detail="Access denied")
+        # Just slow them down — NO banning, NO strikes for rate limits
         raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
     rate_limit_store[client_ip].append(now)
 
