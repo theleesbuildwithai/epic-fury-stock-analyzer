@@ -134,9 +134,39 @@ def is_malicious_request(path: str, query: str, user_agent: str) -> str:
 
     return ""
 
+# --- Attack Log (in-memory, last 500 events) ---
+import hashlib
+from datetime import datetime
+
+attack_log = []          # list of attack event dicts
+MAX_LOG_SIZE = 500       # keep last 500 events
+total_attacks_blocked = 0
+total_requests_served = 0
+
+# Secret admin key — only Jackson knows this
+ADMIN_SECRET = hashlib.sha256(b"epicfury-jackson-2026").hexdigest()[:16]  # short hash
+
+def log_attack(client_ip: str, attack_type: str, path: str, user_agent: str):
+    """Record an attack attempt for the security dashboard."""
+    global total_attacks_blocked
+    total_attacks_blocked += 1
+    event = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ip": client_ip,
+        "type": attack_type,
+        "path": path,
+        "user_agent": user_agent[:100] if user_agent else "none",
+        "banned": client_ip in banned_ips,
+    }
+    attack_log.append(event)
+    if len(attack_log) > MAX_LOG_SIZE:
+        attack_log.pop(0)  # remove oldest
+
 # --- Firewall Middleware (processes EVERY request) ---
 class FirewallMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        global total_requests_served
+        total_requests_served += 1
         client_ip = request.client.host if request.client else "unknown"
         path = request.url.path
         query = str(request.url.query)
@@ -146,6 +176,7 @@ class FirewallMiddleware(BaseHTTPMiddleware):
         # 1. Check IP ban list
         if client_ip in banned_ips:
             if now < banned_ips[client_ip]:
+                log_attack(client_ip, "banned_ip_retry", path, user_agent)
                 return JSONResponse(status_code=403, content={"detail": "Access denied"})
             else:
                 del banned_ips[client_ip]
@@ -155,6 +186,7 @@ class FirewallMiddleware(BaseHTTPMiddleware):
         attack = is_malicious_request(path, query, user_agent)
         if attack:
             logger.warning(f"FIREWALL BLOCKED: {client_ip} | {attack} | {path}")
+            log_attack(client_ip, attack, path, user_agent)
             # Auto-ban on honeypot hits or repeated attacks
             strike_counter[client_ip] += 2
             if strike_counter[client_ip] >= MAX_STRIKES:
@@ -164,10 +196,12 @@ class FirewallMiddleware(BaseHTTPMiddleware):
 
         # 3. Block requests with no user agent (bots/scanners)
         if not user_agent and not path.startswith("/health"):
+            log_attack(client_ip, "no_user_agent", path, "")
             return JSONResponse(status_code=403, content={"detail": "Access denied"})
 
         # 4. Method restriction — only GET and POST allowed
         if request.method not in ("GET", "POST", "OPTIONS", "HEAD"):
+            log_attack(client_ip, f"blocked_method:{request.method}", path, user_agent)
             return JSONResponse(status_code=405, content={"detail": "Method not allowed"})
 
         # 5. Request size limit (1MB max body)
