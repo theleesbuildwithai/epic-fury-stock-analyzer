@@ -577,3 +577,479 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
         "data_points_used": len(log_returns),
         "forecasts": forecasts,
     }
+
+
+# ============================================================
+#  ADVANCED INDICATORS (Phase 5 Upgrade)
+# ============================================================
+
+def calculate_adx(highs: list, lows: list, closes: list, period: int = 14) -> dict:
+    """
+    Average Directional Index (ADX) — measures TREND STRENGTH (not direction).
+    ADX > 25 = strong trend, ADX < 20 = weak/no trend.
+    +DI > -DI = bullish trend, -DI > +DI = bearish trend.
+    """
+    if len(closes) < period + 2:
+        return {"adx": 0, "plus_di": 0, "minus_di": 0, "trend_strength": "insufficient_data"}
+
+    h = np.array(highs, dtype=float)
+    l = np.array(lows, dtype=float)
+    c = np.array(closes, dtype=float)
+
+    # True Range
+    tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
+
+    # Directional Movement
+    plus_dm = np.where((h[1:] - h[:-1]) > (l[:-1] - l[1:]),
+                       np.maximum(h[1:] - h[:-1], 0), 0)
+    minus_dm = np.where((l[:-1] - l[1:]) > (h[1:] - h[:-1]),
+                        np.maximum(l[:-1] - l[1:], 0), 0)
+
+    # Wilder's smoothing
+    atr = pd.Series(tr).ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    plus_di = (plus_dm_smooth / atr) * 100
+    minus_di = (minus_dm_smooth / atr) * 100
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
+    adx = dx.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    adx_val = float(adx.iloc[-1]) if not pd.isna(adx.iloc[-1]) else 0
+    plus_di_val = float(plus_di.iloc[-1]) if not pd.isna(plus_di.iloc[-1]) else 0
+    minus_di_val = float(minus_di.iloc[-1]) if not pd.isna(minus_di.iloc[-1]) else 0
+
+    if adx_val > 40:
+        strength = "very_strong"
+    elif adx_val > 25:
+        strength = "strong"
+    elif adx_val > 20:
+        strength = "moderate"
+    else:
+        strength = "weak"
+
+    return {
+        "adx": round(adx_val, 2),
+        "plus_di": round(plus_di_val, 2),
+        "minus_di": round(minus_di_val, 2),
+        "trend_strength": strength,
+        "trend_direction": "bullish" if plus_di_val > minus_di_val else "bearish",
+    }
+
+
+def calculate_stochastic(highs: list, lows: list, closes: list,
+                          k_period: int = 14, d_period: int = 3) -> dict:
+    """
+    Stochastic Oscillator — momentum indicator showing close relative to high-low range.
+    %K > 80 = overbought, %K < 20 = oversold.
+    %K crossing above %D = bullish signal.
+    """
+    if len(closes) < k_period + d_period:
+        return {"k": 50, "d": 50, "signal": "neutral"}
+
+    h = pd.Series(highs)
+    l = pd.Series(lows)
+    c = pd.Series(closes)
+
+    lowest_low = l.rolling(k_period).min()
+    highest_high = h.rolling(k_period).max()
+
+    k = ((c - lowest_low) / (highest_high - lowest_low + 1e-10)) * 100
+    d = k.rolling(d_period).mean()
+
+    k_val = float(k.iloc[-1]) if not pd.isna(k.iloc[-1]) else 50
+    d_val = float(d.iloc[-1]) if not pd.isna(d.iloc[-1]) else 50
+
+    if k_val > 80:
+        signal = "overbought"
+    elif k_val < 20:
+        signal = "oversold"
+    elif k_val > d_val:
+        signal = "bullish"
+    elif k_val < d_val:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+
+    return {
+        "k": round(k_val, 2),
+        "d": round(d_val, 2),
+        "signal": signal,
+    }
+
+
+def calculate_rsi2(prices: list) -> dict:
+    """
+    RSI(2) — Connors strategy. 2-period RSI for ultra-short-term mean reversion.
+    Buy when RSI(2) < 10 (if above 200-SMA). Historical win rate: 75-91%.
+    """
+    if len(prices) < 4:
+        return {"rsi2": 50, "signal": "neutral", "above_200sma": False}
+
+    series = pd.Series(prices)
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+
+    avg_gain = gain.ewm(alpha=0.5, min_periods=2, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=0.5, min_periods=2, adjust=False).mean()
+
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi2 = 100 - (100 / (1 + rs))
+
+    rsi2_val = float(rsi2.iloc[-1]) if not pd.isna(rsi2.iloc[-1]) else 50
+
+    above_200sma = True
+    if len(prices) >= 200:
+        sma200 = float(np.mean(prices[-200:]))
+        above_200sma = prices[-1] > sma200
+
+    if rsi2_val < 5 and above_200sma:
+        signal = "strong_buy"
+    elif rsi2_val < 10 and above_200sma:
+        signal = "buy"
+    elif rsi2_val < 25 and above_200sma:
+        signal = "mild_buy"
+    elif rsi2_val > 95:
+        signal = "strong_sell"
+    elif rsi2_val > 90:
+        signal = "sell"
+    else:
+        signal = "neutral"
+
+    return {
+        "rsi2": round(rsi2_val, 2),
+        "signal": signal,
+        "above_200sma": above_200sma,
+    }
+
+
+def calculate_obv(closes: list, volumes: list) -> dict:
+    """
+    On-Balance Volume (OBV) — tracks cumulative buying/selling pressure.
+    Rising OBV = accumulation (bullish). Falling OBV = distribution (bearish).
+    OBV divergence from price = potential reversal signal.
+    """
+    if len(closes) < 2 or len(volumes) < 2:
+        return {"obv_current": 0, "obv_trend": "neutral", "divergence": "none"}
+
+    n = min(len(closes), len(volumes))
+    closes_arr = np.array(closes[-n:], dtype=float)
+    volumes_arr = np.array(volumes[-n:], dtype=float)
+
+    price_changes = np.diff(closes_arr)
+    obv_changes = np.where(price_changes > 0, volumes_arr[1:],
+                  np.where(price_changes < 0, -volumes_arr[1:], 0))
+    obv = np.cumsum(obv_changes)
+
+    if len(obv) < 20:
+        return {"obv_current": int(obv[-1]) if len(obv) > 0 else 0,
+                "obv_trend": "neutral", "divergence": "none"}
+
+    # OBV trend (20-day slope)
+    obv_slope = float(np.polyfit(range(20), obv[-20:], 1)[0])
+    avg_vol = float(np.mean(volumes_arr[-20:])) + 1
+    normalized_slope = obv_slope / avg_vol
+
+    if normalized_slope > 0.5:
+        obv_trend = "strong_accumulation"
+    elif normalized_slope > 0.1:
+        obv_trend = "accumulation"
+    elif normalized_slope < -0.5:
+        obv_trend = "strong_distribution"
+    elif normalized_slope < -0.1:
+        obv_trend = "distribution"
+    else:
+        obv_trend = "neutral"
+
+    # Divergence detection: price up but OBV down = bearish divergence (and vice versa)
+    price_slope = float(np.polyfit(range(20), closes_arr[-20:], 1)[0])
+    price_up = price_slope > 0
+    obv_up = obv_slope > 0
+
+    if price_up and not obv_up:
+        divergence = "bearish"  # Price rising but volume declining
+    elif not price_up and obv_up:
+        divergence = "bullish"  # Price falling but volume increasing (accumulation)
+    else:
+        divergence = "none"
+
+    return {
+        "obv_current": int(obv[-1]),
+        "obv_trend": obv_trend,
+        "obv_slope_normalized": round(normalized_slope, 4),
+        "divergence": divergence,
+    }
+
+
+def calculate_bollinger_pct_b(prices: list, window: int = 20, num_std: float = 2.0) -> dict:
+    """
+    Bollinger %B — shows where price is relative to the bands.
+    %B > 1 = above upper band (overbought)
+    %B < 0 = below lower band (oversold)
+    %B = 0.5 = at middle band
+    """
+    if len(prices) < window:
+        return {"pct_b": 0.5, "bandwidth": 0, "signal": "neutral"}
+
+    series = pd.Series(prices)
+    sma = series.rolling(window).mean()
+    std = series.rolling(window).std()
+    upper = sma + std * num_std
+    lower = sma - std * num_std
+
+    pct_b = (series - lower) / (upper - lower + 1e-10)
+    bandwidth = ((upper - lower) / sma) * 100
+
+    pct_b_val = float(pct_b.iloc[-1]) if not pd.isna(pct_b.iloc[-1]) else 0.5
+    bw_val = float(bandwidth.iloc[-1]) if not pd.isna(bandwidth.iloc[-1]) else 0
+
+    # Squeeze detection
+    bw_20 = bandwidth.iloc[-20:].dropna() if len(bandwidth) >= 20 else bandwidth.dropna()
+    avg_bw = float(bw_20.mean()) if len(bw_20) > 0 else bw_val
+    is_squeeze = bw_val < avg_bw * 0.7
+
+    if pct_b_val > 1:
+        signal = "overbought"
+    elif pct_b_val < 0:
+        signal = "oversold"
+    elif is_squeeze:
+        signal = "squeeze"
+    elif pct_b_val > 0.8:
+        signal = "high"
+    elif pct_b_val < 0.2:
+        signal = "low"
+    else:
+        signal = "neutral"
+
+    return {
+        "pct_b": round(pct_b_val, 4),
+        "bandwidth": round(bw_val, 2),
+        "is_squeeze": is_squeeze,
+        "signal": signal,
+    }
+
+
+def calculate_atr(highs: list, lows: list, closes: list, period: int = 14) -> dict:
+    """
+    Average True Range (ATR) — measures volatility in dollar terms.
+    Used for position sizing and stop-loss placement.
+    """
+    if len(closes) < period + 1:
+        return {"atr": 0, "atr_pct": 0}
+
+    h = np.array(highs, dtype=float)
+    l = np.array(lows, dtype=float)
+    c = np.array(closes, dtype=float)
+
+    tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
+    atr = pd.Series(tr).ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    atr_val = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else 0
+    atr_pct = (atr_val / closes[-1]) * 100 if closes[-1] > 0 else 0
+
+    return {
+        "atr": round(atr_val, 2),
+        "atr_pct": round(atr_pct, 2),
+        "suggested_stop": round(closes[-1] - atr_val * 2, 2),
+        "suggested_target": round(closes[-1] + atr_val * 3, 2),
+    }
+
+
+def calculate_mfi(highs: list, lows: list, closes: list, volumes: list,
+                  period: int = 14) -> dict:
+    """
+    Money Flow Index (MFI) — volume-weighted RSI.
+    MFI > 80 = overbought, MFI < 20 = oversold.
+    More reliable than RSI because it includes volume.
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n < period + 1:
+        return {"mfi": 50, "signal": "neutral"}
+
+    typical_price = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n)]
+    money_flow = [typical_price[i] * volumes[i] for i in range(n)]
+
+    pos_flow = 0
+    neg_flow = 0
+
+    for i in range(n - period, n):
+        if typical_price[i] > typical_price[i - 1]:
+            pos_flow += money_flow[i]
+        else:
+            neg_flow += money_flow[i]
+
+    mfi = 100 - (100 / (1 + (pos_flow / (neg_flow + 1e-10))))
+
+    if mfi > 80:
+        signal = "overbought"
+    elif mfi < 20:
+        signal = "oversold"
+    elif mfi > 60:
+        signal = "bullish"
+    elif mfi < 40:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+
+    return {
+        "mfi": round(mfi, 2),
+        "signal": signal,
+    }
+
+
+def calculate_vwap(highs: list, lows: list, closes: list, volumes: list) -> dict:
+    """
+    VWAP (Volume Weighted Average Price) approximation.
+    Price above VWAP = bullish intraday bias.
+    Price below VWAP = bearish intraday bias.
+    Institutional traders use VWAP as execution benchmark.
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n < 2:
+        return {"vwap": 0, "price_vs_vwap": 0, "signal": "neutral"}
+
+    # Use last 20 bars for a rolling VWAP
+    window = min(20, n)
+    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(n - window, n)]
+    vols = volumes[n - window:n]
+
+    cum_tp_vol = sum(typical[i] * vols[i] for i in range(window))
+    cum_vol = sum(vols)
+
+    vwap = cum_tp_vol / (cum_vol + 1e-10)
+    current = closes[-1]
+    pct_diff = ((current / vwap) - 1) * 100
+
+    signal = "bullish" if current > vwap else "bearish" if current < vwap else "neutral"
+
+    return {
+        "vwap": round(vwap, 2),
+        "price_vs_vwap": round(pct_diff, 2),
+        "signal": signal,
+    }
+
+
+def calculate_fibonacci_levels(prices: list) -> dict:
+    """
+    Fibonacci Retracement Levels — key support/resistance based on
+    the golden ratio (0.236, 0.382, 0.5, 0.618, 0.786).
+
+    Uses the most recent significant swing high and low.
+    """
+    if len(prices) < 20:
+        return {"levels": {}, "trend": "unknown"}
+
+    # Find swing high and low from last 60 days
+    window = min(60, len(prices))
+    recent = prices[-window:]
+    high = max(recent)
+    low = min(recent)
+    current = prices[-1]
+
+    diff = high - low
+    if diff == 0:
+        return {"levels": {}, "trend": "flat"}
+
+    # Determine if we're retracing from a high or recovering from a low
+    high_idx = recent.index(high)
+    low_idx = recent.index(low)
+
+    if high_idx > low_idx:
+        # Uptrend — calculate retracement levels down from high
+        trend = "uptrend_retracement"
+        levels = {
+            "0.0 (High)": round(high, 2),
+            "0.236": round(high - diff * 0.236, 2),
+            "0.382": round(high - diff * 0.382, 2),
+            "0.500": round(high - diff * 0.500, 2),
+            "0.618": round(high - diff * 0.618, 2),
+            "0.786": round(high - diff * 0.786, 2),
+            "1.0 (Low)": round(low, 2),
+        }
+    else:
+        # Downtrend — calculate extension levels up from low
+        trend = "downtrend_recovery"
+        levels = {
+            "1.0 (Low)": round(low, 2),
+            "0.786": round(low + diff * 0.214, 2),
+            "0.618": round(low + diff * 0.382, 2),
+            "0.500": round(low + diff * 0.500, 2),
+            "0.382": round(low + diff * 0.618, 2),
+            "0.236": round(low + diff * 0.764, 2),
+            "0.0 (High)": round(high, 2),
+        }
+
+    # Find nearest support and resistance
+    all_levels = sorted(levels.values())
+    nearest_support = max([l for l in all_levels if l < current], default=low)
+    nearest_resistance = min([l for l in all_levels if l > current], default=high)
+
+    return {
+        "levels": levels,
+        "trend": trend,
+        "swing_high": round(high, 2),
+        "swing_low": round(low, 2),
+        "nearest_support": round(nearest_support, 2),
+        "nearest_resistance": round(nearest_resistance, 2),
+        "current_position": round((current - low) / (diff + 1e-10), 3),
+    }
+
+
+def calculate_ichimoku(highs: list, lows: list, closes: list) -> dict:
+    """
+    Ichimoku Cloud — the Japanese "one-look equilibrium chart".
+    Components:
+      - Tenkan-sen (9-period): Conversion line (fast)
+      - Kijun-sen (26-period): Base line (slow)
+      - Senkou A: (Tenkan + Kijun) / 2, plotted 26 periods ahead
+      - Senkou B: (52-period high + low) / 2, plotted 26 periods ahead
+      - Cloud: area between Senkou A and B
+
+    Price above cloud = bullish, below = bearish, inside = neutral.
+    """
+    n = min(len(highs), len(lows), len(closes))
+    if n < 52:
+        return {"signal": "insufficient_data"}
+
+    h = pd.Series(highs[-n:])
+    l = pd.Series(lows[-n:])
+
+    tenkan = (h.rolling(9).max() + l.rolling(9).min()) / 2
+    kijun = (h.rolling(26).max() + l.rolling(26).min()) / 2
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (h.rolling(52).max() + l.rolling(52).min()) / 2
+
+    current = closes[-1]
+    tenkan_val = float(tenkan.iloc[-1]) if not pd.isna(tenkan.iloc[-1]) else current
+    kijun_val = float(kijun.iloc[-1]) if not pd.isna(kijun.iloc[-1]) else current
+    senkou_a_val = float(senkou_a.iloc[-1]) if not pd.isna(senkou_a.iloc[-1]) else current
+    senkou_b_val = float(senkou_b.iloc[-1]) if not pd.isna(senkou_b.iloc[-1]) else current
+
+    cloud_top = max(senkou_a_val, senkou_b_val)
+    cloud_bottom = min(senkou_a_val, senkou_b_val)
+
+    if current > cloud_top:
+        signal = "bullish"
+        position = "above_cloud"
+    elif current < cloud_bottom:
+        signal = "bearish"
+        position = "below_cloud"
+    else:
+        signal = "neutral"
+        position = "inside_cloud"
+
+    # TK cross
+    tk_cross = "bullish" if tenkan_val > kijun_val else "bearish"
+
+    return {
+        "tenkan_sen": round(tenkan_val, 2),
+        "kijun_sen": round(kijun_val, 2),
+        "senkou_a": round(senkou_a_val, 2),
+        "senkou_b": round(senkou_b_val, 2),
+        "cloud_top": round(cloud_top, 2),
+        "cloud_bottom": round(cloud_bottom, 2),
+        "signal": signal,
+        "position": position,
+        "tk_cross": tk_cross,
+    }

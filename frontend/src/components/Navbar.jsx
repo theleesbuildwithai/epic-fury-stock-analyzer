@@ -59,6 +59,16 @@ export default function Navbar() {
               News
             </Link>
             <Link
+              to="/quant"
+              className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                isActive('/quant')
+                  ? 'bg-white text-black shadow-lg shadow-white/10'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-800/50'
+              }`}
+            >
+              Quant HF
+            </Link>
+            <Link
               to="/watchlist"
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
                 isActive('/watchlist')

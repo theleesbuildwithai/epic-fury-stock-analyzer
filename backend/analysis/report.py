@@ -17,6 +17,16 @@ from analysis.technical import (
     calculate_price_forecast,
     calculate_pivot_points,
     calculate_hold_duration,
+    calculate_adx,
+    calculate_stochastic,
+    calculate_rsi2,
+    calculate_obv,
+    calculate_bollinger_pct_b,
+    calculate_atr,
+    calculate_mfi,
+    calculate_vwap,
+    calculate_fibonacci_levels,
+    calculate_ichimoku,
 )
 from analysis.news_sentiment import get_stock_sentiment
 
@@ -35,6 +45,8 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
 
     # Extract price and volume arrays
     closes = [d["close"] for d in history]
+    highs = [d["high"] for d in history]
+    lows = [d["low"] for d in history]
     volumes = [d["volume"] for d in history]
     dates = [d["date"] for d in history]
 
@@ -54,6 +66,18 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
 
     # 3. Pivot points
     pivot_points = calculate_pivot_points(closes)
+
+    # 3b. Advanced indicators (Phase 5 upgrade)
+    adx = calculate_adx(highs, lows, closes)
+    stochastic = calculate_stochastic(highs, lows, closes)
+    rsi2 = calculate_rsi2(closes)
+    obv = calculate_obv(closes, volumes)
+    bollinger_pct_b = calculate_bollinger_pct_b(closes)
+    atr = calculate_atr(highs, lows, closes)
+    mfi = calculate_mfi(highs, lows, closes, volumes)
+    vwap = calculate_vwap(highs, lows, closes, volumes)
+    fibonacci = calculate_fibonacci_levels(closes)
+    ichimoku = calculate_ichimoku(highs, lows, closes)
 
     # 4. Calculate price forecast with probabilities
     forecast = calculate_price_forecast(closes, trend)
@@ -106,6 +130,18 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
         "pivot_points": pivot_points,
         "hold_duration": hold_duration,
         "news_sentiment": news_sentiment,
+        "advanced_indicators": {
+            "adx": adx,
+            "stochastic": stochastic,
+            "rsi2": rsi2,
+            "obv": obv,
+            "bollinger_pct_b": bollinger_pct_b,
+            "atr": atr,
+            "mfi": mfi,
+            "vwap": vwap,
+            "fibonacci": fibonacci,
+            "ichimoku": ichimoku,
+        },
         "chart_data": chart_data,
         "latest": {
             "price": closes[-1],

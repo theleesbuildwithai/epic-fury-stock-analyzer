@@ -22,8 +22,11 @@ from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary, get_sector_heatmap
 from analysis.news_sentiment import get_market_news
 from analysis.ai_analyst import answer_question
+from analysis.quant_engine import generate_quant_picks, detect_market_regime
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
+from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics
+from predictions.learner import generate_intelligence_report, auto_adjust_weights
 
 logger = logging.getLogger("epic-fury")
 logging.basicConfig(level=logging.WARNING)
@@ -458,6 +461,131 @@ def ai_analyst(request: Request, q: str = ""):
     except Exception as e:
         logger.error(f"AI analyst error: {e}")
         return {"answer": "I encountered an error processing your question. Please try again.", "ticker": None, "question_type": "error"}
+
+
+# ============================================================
+#  QUANT HEDGE FUND ENDPOINTS
+# ============================================================
+
+@app.get("/api/quant-picks")
+def quant_picks(request: Request):
+    """Get quantitative LONG/SHORT picks with regime, macro, and factor breakdown."""
+    check_rate_limit(request.client.host)
+    try:
+        return generate_quant_picks()
+    except Exception as e:
+        logger.error(f"Quant picks error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate quant picks")
+
+
+@app.get("/api/paper-portfolio")
+def paper_portfolio(request: Request):
+    """Get current paper trading portfolio state."""
+    check_rate_limit(request.client.host)
+    try:
+        return get_portfolio_state()
+    except Exception as e:
+        logger.error(f"Paper portfolio error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get portfolio")
+
+
+@app.get("/api/paper-performance")
+def paper_performance(request: Request):
+    """Get paper trading performance analytics (Sharpe, drawdown, equity curve)."""
+    check_rate_limit(request.client.host)
+    try:
+        return get_performance_analytics()
+    except Exception as e:
+        logger.error(f"Paper performance error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get performance")
+
+
+@app.post("/api/paper-trade/rebalance")
+def paper_rebalance(request: Request):
+    """Trigger a trade cycle: close expired positions, open new ones from quant signals."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        result = execute_trades_from_signals(picks)
+        # Auto-adjust weights if enough trades
+        try:
+            weight_update = auto_adjust_weights()
+            result["weight_update"] = weight_update
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        logger.error(f"Rebalance error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to rebalance")
+
+
+@app.post("/api/paper-trade/backtest")
+def paper_backtest(request: Request):
+    """Run rapid backtesting to populate trade history with simulated results."""
+    check_rate_limit(request.client.host)
+    try:
+        return run_backtest(days_back=180, num_trades_target=500)
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to run backtest")
+
+
+@app.get("/api/system-intelligence")
+def system_intelligence(request: Request):
+    """Get the self-learning system's intelligence report."""
+    check_rate_limit(request.client.host)
+    try:
+        return generate_intelligence_report()
+    except Exception as e:
+        logger.error(f"Intelligence report error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate intelligence report")
+
+
+@app.get("/api/chart-data/{ticker}")
+def chart_data(request: Request, ticker: str, period: str = "1y"):
+    """Get OHLCV data for interactive candlestick charts."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
+        raise HTTPException(status_code=400, detail="Invalid period")
+    try:
+        from analysis.technical import calculate_sma, calculate_ema, calculate_bollinger_bands
+        data = get_historical_data(clean_ticker, period)
+        if not data:
+            raise HTTPException(status_code=404, detail="No data found")
+
+        closes = [d["close"] for d in data]
+        sma_20 = calculate_sma(closes, 20)
+        sma_50 = calculate_sma(closes, 50)
+        sma_200 = calculate_sma(closes, 200)
+        ema_12 = calculate_ema(closes, 12)
+        bollinger = calculate_bollinger_bands(closes)
+
+        chart = []
+        for i, d in enumerate(data):
+            point = {
+                "date": d["date"],
+                "open": d["open"],
+                "high": d["high"],
+                "low": d["low"],
+                "close": d["close"],
+                "volume": d["volume"],
+                "sma_20": sma_20[i] if i < len(sma_20) else None,
+                "sma_50": sma_50[i] if i < len(sma_50) else None,
+                "sma_200": sma_200[i] if i < len(sma_200) else None,
+                "ema_12": ema_12[i] if i < len(ema_12) else None,
+                "bb_upper": bollinger["upper"][i] if i < len(bollinger["upper"]) else None,
+                "bb_middle": bollinger["middle"][i] if i < len(bollinger["middle"]) else None,
+                "bb_lower": bollinger["lower"][i] if i < len(bollinger["lower"]) else None,
+            }
+            chart.append(point)
+
+        return {"ticker": clean_ticker, "period": period, "chart_data": chart}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chart data error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get chart data")
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

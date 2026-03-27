@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import PriceChart from './PriceChart'
+import CandlestickChart from './CandlestickChart'
 import TechnicalIndicators from './TechnicalIndicators'
 import RiskScore from './RiskScore'
 import KeyStats from './KeyStats'
@@ -276,7 +277,10 @@ export default function AnalysisDashboard({ data }) {
         </div>
 
         <div className="lg:col-span-2">
-          {/* Price Chart */}
+          {/* Interactive Candlestick Chart */}
+          <CandlestickChart ticker={data.info?.ticker} chartData={data.chart_data} />
+
+          {/* Classic Price Chart */}
           <PriceChart chartData={data.chart_data} />
         </div>
       </div>
