@@ -316,6 +316,23 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     available_slots = MAX_POSITIONS - current_positions
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
+    # --- DRAWDOWN PROTECTION (hedge fund risk management) ---
+    # If portfolio has dropped 5%+, cut position sizes in half
+    # If dropped 10%+, stop opening new positions entirely (capital preservation)
+    total_current_value = cash + sum(
+        t.get("shares", 0) * t.get("entry_price", 0) for t in open_trades
+    )
+    drawdown_pct = ((total_current_value / INITIAL_CAPITAL) - 1) * 100
+    drawdown_multiplier = 1.0
+
+    if drawdown_pct <= -10:
+        logger.warning(f"DRAWDOWN PROTECTION: Portfolio down {drawdown_pct:.1f}% — HALTING new trades")
+        results["skipped"].append({"symbol": "ALL", "reason": f"Drawdown protection: portfolio down {drawdown_pct:.1f}%"})
+        available_slots = 0  # Stop all new trades
+    elif drawdown_pct <= -5:
+        logger.warning(f"DRAWDOWN PROTECTION: Portfolio down {drawdown_pct:.1f}% — halving position sizes")
+        drawdown_multiplier = 0.5  # Half-size positions
+
     # No position limits — the computer trades freely like a real hedge fund
 
     if available_slots > 0 and cash > 1000:
@@ -397,7 +414,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 size_pct = 0.05 if direction == "long" else 0.025
             else:
                 size_pct = POSITION_SIZE_PCT
-            position_value = total_value * size_pct
+            position_value = total_value * size_pct * drawdown_multiplier
             shares = round(position_value / price, 4)
 
             if shares * price > cash:

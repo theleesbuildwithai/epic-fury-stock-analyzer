@@ -529,6 +529,64 @@ def get_macro_overlay() -> dict:
         adjustments["Communication"] = round(comm_adj, 1)
 
         macro["sector_adjustments"] = adjustments
+
+        # --- ADVANCED: Yield Curve Inversion Detection ---
+        # 10Y-2Y spread: if negative = inverted = recession signal
+        # This predicted every recession since 1970 with 12-18 month lead
+        try:
+            _throttle()
+            tnx_2y_df = yf.download(["^TNX", "^IRX"], period="1mo", progress=False, group_by="ticker")
+            if tnx_2y_df is not None and not tnx_2y_df.empty:
+                try:
+                    tnx_close = tnx_2y_df[("^TNX", "Close")].dropna().values.astype(float)
+                    irx_close = tnx_2y_df[("^IRX", "Close")].dropna().values.astype(float)
+                    if len(tnx_close) > 0 and len(irx_close) > 0:
+                        spread = float(tnx_close[-1]) - float(irx_close[-1])
+                        macro["yield_curve"] = {
+                            "spread_10y_3m": round(spread, 2),
+                            "inverted": spread < 0,
+                            "signal": "recession_warning" if spread < 0 else (
+                                "caution" if spread < 0.5 else "normal"
+                            ),
+                        }
+                        if spread < 0:
+                            # Inverted yield curve: penalize cyclicals, boost defensives
+                            for sector in ["Technology", "Consumer Discretionary", "Financials", "Industrials"]:
+                                adjustments[sector] = round(adjustments.get(sector, 0) - 0.5, 1)
+                            for sector in ["Healthcare", "Consumer Staples", "Utilities"]:
+                                adjustments[sector] = round(adjustments.get(sector, 0) + 0.5, 1)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Yield curve check failed: {e}")
+
+        # --- ADVANCED: Dollar Strength (DXY proxy via UUP ETF) ---
+        # Strong dollar hurts multinationals, helps domestic companies
+        try:
+            _throttle()
+            uup_df = yf.download("UUP", period="1mo", progress=False)
+            if uup_df is not None and len(uup_df) >= 20:
+                uup_closes = uup_df["Close"].values.astype(float).flatten()
+                uup_sma20 = float(np.mean(uup_closes[-20:]))
+                uup_current = float(uup_closes[-1])
+                dollar_trend = "strengthening" if uup_current > uup_sma20 * 1.005 else (
+                    "weakening" if uup_current < uup_sma20 * 0.995 else "flat"
+                )
+                macro["dollar_index"] = {
+                    "proxy_value": round(uup_current, 2),
+                    "trend": dollar_trend,
+                }
+                # Strong dollar hurts Energy & Materials (commodity exporters)
+                if dollar_trend == "strengthening":
+                    adjustments["Energy"] = round(adjustments.get("Energy", 0) - 0.5, 1)
+                    adjustments["Materials"] = round(adjustments.get("Materials", 0) - 0.5, 1)
+                elif dollar_trend == "weakening":
+                    adjustments["Energy"] = round(adjustments.get("Energy", 0) + 0.3, 1)
+                    adjustments["Materials"] = round(adjustments.get("Materials", 0) + 0.3, 1)
+        except Exception as e:
+            logger.debug(f"Dollar check failed: {e}")
+
+        macro["sector_adjustments"] = adjustments
         return macro
 
     return _get_cached("macro_overlay", fetch, ttl=600)  # 10 min cache
@@ -700,6 +758,57 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             else:
                 volume_raw = 0.0
 
+            # --- Factor 7: SMART MONEY DIVERGENCE (Price-Volume Divergence) ---
+            # When price makes new lows but volume decreases = smart money accumulating
+            # When price makes new highs but volume decreases = smart money distributing
+            # This is what Goldman and Citadel look for — institutional footprint
+            smart_money_raw = 0.0
+            if len(closes) >= 20 and len(volumes) >= 20:
+                recent_closes = closes[-20:]
+                recent_vols = volumes[-20:]
+                first_half_price = np.mean(recent_closes[:10])
+                second_half_price = np.mean(recent_closes[10:])
+                first_half_vol = np.mean(recent_vols[:10])
+                second_half_vol = np.mean(recent_vols[10:])
+
+                price_direction = 1 if second_half_price > first_half_price else -1
+                vol_direction = 1 if second_half_vol > first_half_vol else -1
+
+                if price_direction == -1 and vol_direction == -1:
+                    # Price falling on declining volume = accumulation (bullish divergence)
+                    smart_money_raw = 2.0
+                elif price_direction == 1 and vol_direction == -1:
+                    # Price rising on declining volume = distribution (bearish divergence)
+                    smart_money_raw = -2.0
+                elif price_direction == 1 and vol_direction == 1:
+                    # Price rising on rising volume = confirmed uptrend
+                    smart_money_raw = 1.0
+                elif price_direction == -1 and vol_direction == 1:
+                    # Price falling on rising volume = confirmed downtrend (panic selling)
+                    smart_money_raw = -1.0
+
+            # --- Factor 8: RELATIVE STRENGTH vs SECTOR ---
+            # Don't just buy good stocks — buy the BEST in their sector
+            # A stock outperforming its sector peers has sector-relative alpha
+            relative_strength_raw = 0.0
+            sector = SECTOR_MAP.get(symbol, "Unknown")
+            sector_peers = [s for s, sec in SECTOR_MAP.items()
+                           if sec == sector and s != symbol and s in price_data]
+            if len(closes) >= 60 and sector_peers:
+                stock_ret_60d = (closes[-1] / closes[-60]) - 1
+                peer_rets = []
+                for peer in sector_peers:
+                    try:
+                        peer_closes = price_data[peer]["Close"].values.astype(float).flatten()
+                        if len(peer_closes) >= 60:
+                            peer_rets.append((peer_closes[-1] / peer_closes[-60]) - 1)
+                    except Exception:
+                        continue
+                if peer_rets:
+                    sector_avg_ret = float(np.mean(peer_rets))
+                    # How much this stock outperforms its sector (in %)
+                    relative_strength_raw = (stock_ret_60d - sector_avg_ret) * 100
+
             # --- RSI(14) for additional context ---
             if len(closes) >= 15:
                 deltas_14 = np.diff(closes[-15:])
@@ -728,6 +837,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "low_vol_raw": low_vol_raw,
                 "rsi2_raw": rsi2_raw,
                 "volume_raw": volume_raw,
+                "smart_money_raw": smart_money_raw,
+                "relative_strength_raw": relative_strength_raw,
                 "rsi2": round(rsi2, 1),
                 "rsi14": round(rsi14, 1),
                 "vol_60d": round(vol_60d, 1),
@@ -752,6 +863,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     low_vol_z = _safe_zscore([s["low_vol_raw"] for s in raw_factors])
     rsi2_z = _safe_zscore([s["rsi2_raw"] for s in raw_factors])
     volume_z = _safe_zscore([s["volume_raw"] for s in raw_factors])
+    smart_money_z = _safe_zscore([s["smart_money_raw"] for s in raw_factors])
+    relative_strength_z = _safe_zscore([s["relative_strength_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     regime_multiplier = 1.0  # default
@@ -771,25 +884,37 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             regime_multiplier = 0.85
 
     # Normalize weights to sum to 1
-    w_total = sum(weights.values())
-    w_mom = weights.get("momentum", 0.25) / w_total
-    w_val = weights.get("value", 0.20) / w_total
-    w_qual = weights.get("quality", 0.15) / w_total
-    w_lvol = weights.get("low_vol", 0.15) / w_total
-    w_rsi2 = weights.get("rsi2", 0.15) / w_total
-    w_vol = weights.get("volume", 0.10) / w_total
+    # Add new factors with fixed weights (not yet in learning system)
+    W_SMART_MONEY = 0.10   # Smart money divergence
+    W_REL_STRENGTH = 0.08  # Relative strength vs sector
+
+    # Scale existing weights down to make room for new factors
+    existing_total = sum(weights.values())
+    new_factor_total = W_SMART_MONEY + W_REL_STRENGTH
+    scale = (1.0 - new_factor_total)  # existing factors share this portion
+
+    w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
+    w_val = (weights.get("value", 0.20) / existing_total) * scale
+    w_qual = (weights.get("quality", 0.15) / existing_total) * scale
+    w_lvol = (weights.get("low_vol", 0.15) / existing_total) * scale
+    w_rsi2 = (weights.get("rsi2", 0.15) / existing_total) * scale
+    w_vol = (weights.get("volume", 0.10) / existing_total) * scale
+    w_smart = W_SMART_MONEY
+    w_relstr = W_REL_STRENGTH
 
     # --- Calculate composite scores ---
     scored = []
     for i, stock in enumerate(raw_factors):
-        # Weighted composite
+        # Weighted composite — 8 FACTORS (hedge fund grade)
         composite = (
             momentum_z[i] * w_mom +
             value_z[i] * w_val +
             quality_z[i] * w_qual +
             low_vol_z[i] * w_lvol +
             rsi2_z[i] * w_rsi2 +
-            volume_z[i] * w_vol
+            volume_z[i] * w_vol +
+            smart_money_z[i] * w_smart +
+            relative_strength_z[i] * w_relstr
         )
 
         # Apply macro overlay sector adjustment
@@ -877,6 +1002,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "volume": {"z": volume_z[i], "weight": round(w_vol, 3),
                        "raw": round(stock["volume_raw"], 2),
                        "contribution": round(volume_z[i] * w_vol, 3)},
+            "smart_money": {"z": smart_money_z[i], "weight": round(w_smart, 3),
+                           "raw": round(stock["smart_money_raw"], 2),
+                           "contribution": round(smart_money_z[i] * w_smart, 3)},
+            "relative_strength": {"z": relative_strength_z[i], "weight": round(w_relstr, 3),
+                                  "raw": round(stock["relative_strength_raw"], 2),
+                                  "contribution": round(relative_strength_z[i] * w_relstr, 3)},
         }
 
         # Generate human-readable reasons
