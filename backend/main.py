@@ -6,13 +6,15 @@ This is the "engine" of our app. It receives requests from the website,
 fetches real stock data, runs the analysis, and sends back results.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import os
+import os, re, logging, time
+from collections import defaultdict
 
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
@@ -23,20 +25,67 @@ from analysis.ai_analyst import answer_question
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 
+logger = logging.getLogger("epic-fury")
+
+# --- Ticker Validation ---
+TICKER_PATTERN = re.compile(r"^[A-Za-z\.\-\^]{1,6}$")
+
+def validate_ticker(ticker: str) -> str:
+    """Validate and sanitize ticker symbols. Only alphanumeric + . - ^ allowed, max 6 chars."""
+    clean = ticker.strip().upper()
+    if not TICKER_PATTERN.match(clean):
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+    return clean
+
+# --- Rate Limiting ---
+rate_limit_store = defaultdict(list)
+RATE_LIMIT = 60          # max requests
+RATE_WINDOW = 60         # per 60 seconds
+
+def check_rate_limit(client_ip: str):
+    """Simple in-memory rate limiter. 60 requests per minute per IP."""
+    now = time.time()
+    # Clean old entries
+    rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if now - t < RATE_WINDOW]
+    if len(rate_limit_store[client_ip]) >= RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
+    rate_limit_store[client_ip].append(now)
+
+# --- Security Headers Middleware ---
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
 # Create the app
 app = FastAPI(
     title="Epic Fury Stock Analyzer",
     description="Real-time stock analysis with technical indicators and performance tracking",
     version="1.0.0",
+    docs_url=None,     # Disable Swagger docs in production
+    redoc_url=None,    # Disable ReDoc in production
 )
 
-# Allow the frontend to talk to the backend
+# Security headers on every response
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS — only allow our own domain (same-origin requests from frontend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://ddfrkzcx4t.us-east-1.awsapprunner.com",
+        "http://localhost:5173",   # local dev
+        "http://localhost:8080",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 # Initialize the database when the app starts
@@ -64,73 +113,89 @@ def health_check():
 
 
 @app.get("/api/search")
-def search_stocks(q: str = ""):
+def search_stocks(request: Request, q: str = ""):
     """Search for stocks by company name or ticker symbol. Instant, no API calls."""
+    check_rate_limit(request.client.host)
+    if len(q) > 50:
+        raise HTTPException(status_code=400, detail="Query too long")
     results = search_tickers(q)
     return {"results": results}
 
 
 @app.get("/api/analyze/{ticker}")
-def analyze_stock(ticker: str, period: str = "1y"):
-    """
-    Full stock analysis — the main endpoint.
-    Takes a stock ticker (like AAPL) and returns a complete report
-    with technical indicators, signals, and risk score.
-    """
+def analyze_stock(request: Request, ticker: str, period: str = "1y"):
+    """Full stock analysis — the main endpoint."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
+        raise HTTPException(status_code=400, detail="Invalid period")
     try:
-        report = generate_full_report(ticker.upper(), period)
+        report = generate_full_report(clean_ticker, period)
         if "error" in report:
-            raise HTTPException(status_code=404, detail=report["error"])
+            raise HTTPException(status_code=404, detail="Stock not found")
         return report
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error analyzing {ticker}: {str(e)}")
+        logger.error(f"Analysis error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Analysis failed. Please try again.")
 
 
 @app.get("/api/quote/{ticker}")
-def get_quote(ticker: str):
+def get_quote(request: Request, ticker: str):
     """Get current quote and basic info for a stock."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
     try:
-        info = get_stock_info(ticker.upper())
+        info = get_stock_info(clean_ticker)
         if not info.get("current_price"):
-            raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
+            raise HTTPException(status_code=404, detail="Stock not found")
         return info
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching {ticker}: {str(e)}")
+        logger.error(f"Quote error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch quote")
 
 
 @app.get("/api/history/{ticker}")
-def get_history(ticker: str, period: str = "6mo"):
+def get_history(request: Request, ticker: str, period: str = "6mo"):
     """Get historical price data for charting."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
+        raise HTTPException(status_code=400, detail="Invalid period")
     try:
-        data = get_historical_data(ticker.upper(), period)
+        data = get_historical_data(clean_ticker, period)
         if not data:
-            raise HTTPException(status_code=404, detail=f"No history found for {ticker}")
-        return {"ticker": ticker.upper(), "period": period, "data": data}
+            raise HTTPException(status_code=404, detail="No history found")
+        return {"ticker": clean_ticker, "period": period, "data": data}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching history: {str(e)}")
+        logger.error(f"History error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch history")
 
 
 @app.get("/api/benchmarks")
-def get_benchmarks(period: str = "1y"):
+def get_benchmarks(request: Request, period: str = "1y"):
     """Get performance data for S&P 500, Nasdaq, and Dow Jones."""
+    check_rate_limit(request.client.host)
     try:
         return get_benchmark_data(period)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching benchmarks: {str(e)}")
+        logger.error(f"Benchmark error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch benchmarks")
 
 
 @app.post("/api/predictions")
-def create_prediction(pred: PredictionRequest):
+def create_prediction(request: Request, pred: PredictionRequest):
     """Save a new prediction to track."""
+    check_rate_limit(request.client.host)
     try:
+        clean_ticker = validate_ticker(pred.ticker)
         prediction_id = save_prediction(
-            ticker=pred.ticker,
+            ticker=clean_ticker,
             direction=pred.predicted_direction,
             confidence=pred.confidence_score,
             entry_price=pred.entry_price,
@@ -139,81 +204,102 @@ def create_prediction(pred: PredictionRequest):
             notes=pred.notes,
         )
         return {"id": prediction_id, "message": "Prediction saved!"}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error saving prediction: {str(e)}")
+        logger.error(f"Prediction save error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save prediction")
 
 
 @app.get("/api/predictions")
-def list_predictions():
+def list_predictions(request: Request):
     """Get all saved predictions."""
+    check_rate_limit(request.client.host)
     return {"predictions": get_all_predictions()}
 
 
 @app.get("/api/performance")
-def get_performance():
+def get_performance(request: Request):
     """Get overall performance stats and comparison vs market indices."""
+    check_rate_limit(request.client.host)
     try:
-        # Auto-check pending predictions
         check_and_resolve_predictions()
         return get_performance_stats()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error calculating performance: {str(e)}")
+        logger.error(f"Performance error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to calculate performance")
 
 
 @app.get("/api/banner")
-def get_banner():
+def get_banner(request: Request):
     """Get live prices for the scrolling ticker banner."""
+    check_rate_limit(request.client.host)
     try:
         return {"tickers": get_banner_data()}
     except Exception as e:
-        return {"tickers": [], "error": str(e)}
+        logger.error(f"Banner error: {e}")
+        return {"tickers": []}
 
 
 @app.get("/api/daily-picks")
-def daily_picks():
+def daily_picks(request: Request):
     """Get today's top 15 stock picks based on technical analysis."""
+    check_rate_limit(request.client.host)
     try:
         return get_daily_picks()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating picks: {str(e)}")
+        logger.error(f"Daily picks error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate picks")
 
 
 @app.get("/api/earnings-calendar")
-def earnings_calendar():
+def earnings_calendar(request: Request):
     """Get upcoming earnings for major stocks this week."""
+    check_rate_limit(request.client.host)
     try:
         return get_earnings_calendar()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching earnings: {str(e)}")
+        logger.error(f"Earnings error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch earnings")
 
 
 @app.get("/api/market-news")
-def market_news():
+def market_news(request: Request):
     """Get latest market news with sentiment analysis from Yahoo Finance, CNN, CNBC."""
+    check_rate_limit(request.client.host)
     try:
         return get_market_news()
     except Exception as e:
-        return {"headlines": [], "error": str(e)}
+        logger.error(f"News error: {e}")
+        return {"headlines": []}
 
 
 @app.get("/api/daily-summary")
-def daily_summary(watchlist: str = ""):
+def daily_summary(request: Request, watchlist: str = ""):
     """Get daily market summary with top gainers, losers, and watchlist analysis."""
+    check_rate_limit(request.client.host)
+    if len(watchlist) > 500:
+        raise HTTPException(status_code=400, detail="Watchlist too long")
     try:
         return get_daily_summary(watchlist_tickers=watchlist if watchlist else None)
     except Exception as e:
-        return {"gainers": [], "losers": [], "error": str(e)}
+        logger.error(f"Daily summary error: {e}")
+        return {"gainers": [], "losers": []}
 
 
 @app.get("/api/ai-analyst")
-def ai_analyst(q: str = ""):
+def ai_analyst(request: Request, q: str = ""):
     """AI Stock Analyst — ask any stock/trading question."""
+    check_rate_limit(request.client.host)
     if not q.strip():
         return {"answer": "Ask me anything about stocks, trading, or investing!", "ticker": None, "question_type": "empty"}
+    if len(q) > 1000:
+        return {"answer": "Question too long. Please keep it under 1000 characters.", "ticker": None, "question_type": "error"}
     try:
         return answer_question(q)
     except Exception as e:
-        return {"answer": f"I encountered an error processing your question. Please try again.\n\nError: {str(e)}", "ticker": None, "question_type": "error"}
+        logger.error(f"AI analyst error: {e}")
+        return {"answer": "I encountered an error processing your question. Please try again.", "ticker": None, "question_type": "error"}
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

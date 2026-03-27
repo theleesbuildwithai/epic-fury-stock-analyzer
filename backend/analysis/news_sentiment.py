@@ -135,8 +135,8 @@ def get_market_news():
 
     # CNN Business RSS
     cnn_feeds = [
-        "http://rss.cnn.com/rss/money_latest.rss",
-        "http://rss.cnn.com/rss/money_markets.rss",
+        "https://rss.cnn.com/rss/money_latest.rss",
+        "https://rss.cnn.com/rss/money_markets.rss",
     ]
     for feed_url in cnn_feeds:
         items = _fetch_rss(feed_url)
