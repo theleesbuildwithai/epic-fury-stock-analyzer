@@ -374,13 +374,18 @@ def get_performance(request: Request):
 
 @app.get("/api/banner")
 def get_banner(request: Request):
-    """Get live prices for the scrolling ticker banner."""
+    """Get prices for the scrolling ticker banner. Always returns most recent data."""
     check_rate_limit(request.client.host)
     try:
-        return {"tickers": get_banner_data()}
+        data = get_banner_data()
+        # data is now a dict with tickers, market_open, as_of
+        if isinstance(data, dict):
+            return data
+        # Fallback for old format
+        return {"tickers": data, "market_open": True, "as_of": None}
     except Exception as e:
         logger.error(f"Banner error: {e}")
-        return {"tickers": []}
+        return {"tickers": [], "market_open": False, "as_of": None}
 
 
 @app.get("/api/daily-picks")

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from scipy.stats import norm
+import pytz
 
 # Shared cache
 _extras_cache = {}
@@ -25,6 +26,18 @@ def _market_ttl():
 _extras_cache_ttl = 60  # Default, overridden by _market_ttl()
 _last_api_call = [0.0]
 _API_DELAY = 3.0
+
+
+def is_market_open():
+    """Check if US stock market is currently open (Mon-Fri, 9:30 AM - 4:00 PM ET)."""
+    et = pytz.timezone("US/Eastern")
+    now = datetime.now(et)
+    # Weekday check (0=Mon, 4=Fri)
+    if now.weekday() > 4:
+        return False
+    t = now.hour * 60 + now.minute
+    # Market hours: 9:30 AM (570) to 4:00 PM (960) ET
+    return 570 <= t <= 960
 
 
 def _throttle():
@@ -84,10 +97,10 @@ BANNER_SYMBOLS = [
 
 
 def get_banner_data():
-    """Get current prices and daily changes for banner tickers."""
+    """Get current prices and daily changes for banner tickers.
+    Always returns the most recent trading day's data, even when market is closed."""
     def fetch():
         results = []
-        # Download all at once to minimize API calls
         _throttle()
         symbols = [s[0] for s in BANNER_SYMBOLS]
         symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
@@ -95,24 +108,22 @@ def get_banner_data():
         try:
             df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
         except Exception:
-            return []
+            return {"tickers": [], "market_open": is_market_open(), "as_of": None}
 
         if df is None or df.empty:
-            return []
+            return {"tickers": [], "market_open": is_market_open(), "as_of": None}
 
+        as_of_date = None
         for symbol in symbols:
             try:
                 name = symbol_to_name[symbol]
 
-                # Handle both multi-level and flat column structures
                 if isinstance(df.columns, pd.MultiIndex):
-                    # Multi-ticker download: columns are (Ticker, Price)
                     if symbol in df.columns.get_level_values(0):
                         close_series = df[(symbol, "Close")].dropna()
                     else:
                         continue
                 else:
-                    # Single ticker or flat structure
                     if "Close" in df.columns:
                         close_series = df["Close"].dropna()
                     else:
@@ -126,6 +137,13 @@ def get_banner_data():
                 change = current - prev
                 change_pct = (change / prev) * 100
 
+                # Grab the date of the most recent data point
+                if as_of_date is None:
+                    try:
+                        as_of_date = str(close_series.index[-1].date())
+                    except Exception:
+                        pass
+
                 results.append({
                     "symbol": symbol,
                     "name": name,
@@ -136,7 +154,11 @@ def get_banner_data():
             except Exception:
                 continue
 
-        return results
+        return {
+            "tickers": results,
+            "market_open": is_market_open(),
+            "as_of": as_of_date,
+        }
 
     return _get_cached("banner_data", fetch)
 
@@ -159,7 +181,8 @@ SECTOR_ETFS = [
 
 
 def get_sector_heatmap():
-    """Get today's performance for each S&P 500 sector via SPDR ETFs."""
+    """Get performance for each S&P 500 sector via SPDR ETFs.
+    Always returns the most recent trading day's data."""
     def fetch():
         symbols = [s[0] for s in SECTOR_ETFS]
         symbol_to_name = {s[0]: s[1] for s in SECTOR_ETFS}
@@ -167,12 +190,13 @@ def get_sector_heatmap():
         try:
             df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
         except Exception:
-            return {"sectors": [], "error": "Could not fetch sector data"}
+            return {"sectors": [], "market_open": is_market_open(), "error": "Could not fetch sector data"}
 
         if df is None or df.empty:
-            return {"sectors": [], "error": "No data"}
+            return {"sectors": [], "market_open": is_market_open(), "error": "No data"}
 
         sectors = []
+        as_of_date = None
         for symbol in symbols:
             try:
                 if isinstance(df.columns, pd.MultiIndex):
@@ -189,6 +213,12 @@ def get_sector_heatmap():
                 prev = float(close_series.iloc[-2])
                 change_pct = ((current / prev) - 1) * 100
 
+                if as_of_date is None:
+                    try:
+                        as_of_date = str(close_series.index[-1].date())
+                    except Exception:
+                        pass
+
                 sectors.append({
                     "symbol": symbol,
                     "name": symbol_to_name[symbol],
@@ -198,10 +228,11 @@ def get_sector_heatmap():
             except Exception:
                 continue
 
-        # Sort by performance
         sectors.sort(key=lambda x: x["change_pct"], reverse=True)
         return {
             "sectors": sectors,
+            "market_open": is_market_open(),
+            "as_of": as_of_date,
             "generated_at": datetime.now().isoformat(),
         }
 

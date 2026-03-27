@@ -11,7 +11,7 @@ export default function SectorHeatmap() {
         const data = await res.json()
         setSectors(data)
       } catch {
-        setSectors({ sectors: [] })
+        setSectors({ sectors: [], market_open: false })
       } finally {
         setLoading(false)
       }
@@ -54,8 +54,16 @@ export default function SectorHeatmap() {
   return (
     <div className="bg-black border border-neutral-700 rounded-xl p-6 mb-8">
       <div className="mb-4">
-        <h2 className="text-xl font-bold text-white">Sector Heatmap</h2>
-        <p className="text-neutral-500 text-sm mt-1">S&P 500 sectors — today's performance via SPDR ETFs</p>
+        <div className="flex items-center gap-2">
+          <h2 className="text-xl font-bold text-white">Sector Heatmap</h2>
+          {!sectors?.market_open && (
+            <span className="text-[10px] font-medium tracking-wider uppercase bg-yellow-500/10 text-yellow-500 px-2 py-0.5 rounded">Market Closed</span>
+          )}
+        </div>
+        <p className="text-neutral-500 text-sm mt-1">
+          S&P 500 sectors — {sectors?.market_open ? "today's" : "last trading day's"} performance via SPDR ETFs
+          {sectors?.as_of && !sectors?.market_open && <span className="text-neutral-600"> ({sectors.as_of})</span>}
+        </p>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
