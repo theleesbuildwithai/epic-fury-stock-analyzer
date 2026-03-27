@@ -803,17 +803,31 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         # Scale composite to a more intuitive range (-10 to +10)
         final_score = round(composite * 3.0, 2)
 
-        # Determine direction
-        if final_score >= 4:
+        # Determine direction — REGIME AWARE
+        # In BEAR: raise threshold for LONG (harder to buy), lower for SHORT (easier to short)
+        # In BULL: lower threshold for LONG (easier to buy), raise for SHORT (harder to short)
+        current_regime = regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS"
+
+        if current_regime == "BEAR":
+            long_threshold_high, long_threshold_low = 5.5, 3.5   # much harder to go long
+            short_threshold_high, short_threshold_low = -3.0, -1.0  # easier to short
+        elif current_regime == "BULL":
+            long_threshold_high, long_threshold_low = 3.0, 1.0   # easier to go long
+            short_threshold_high, short_threshold_low = -5.5, -3.5  # harder to short
+        else:  # SIDEWAYS
+            long_threshold_high, long_threshold_low = 4.0, 2.0
+            short_threshold_high, short_threshold_low = -4.0, -2.0
+
+        if final_score >= long_threshold_high:
             direction = "LONG"
             confidence = min(95, 60 + int(final_score * 3))
-        elif final_score >= 2:
+        elif final_score >= long_threshold_low:
             direction = "LONG"
             confidence = min(85, 50 + int(final_score * 5))
-        elif final_score <= -4:
+        elif final_score <= short_threshold_high:
             direction = "SHORT"
             confidence = min(95, 60 + int(abs(final_score) * 3))
-        elif final_score <= -2:
+        elif final_score <= short_threshold_low:
             direction = "SHORT"
             confidence = min(85, 50 + int(abs(final_score) * 5))
         else:

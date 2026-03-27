@@ -278,6 +278,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             except Exception:
                 pass
 
+            # AGGRESSIVE BEAR PROTECTION: close losing longs faster in BEAR
+            if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
+                should_close = True
+                close_reason = f"BEAR regime protection — closing losing long ({pnl_pct:+.1f}%)"
+
             # Check if signal has reversed (optional aggressive exit)
             if not should_close and pnl_pct < -5:
                 # If losing more than 5% and we have new signals,
@@ -314,32 +319,68 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     # No position limits — the computer trades freely like a real hedge fund
 
     if available_slots > 0 and cash > 1000:
-        # Combine long and short picks, prioritize by confidence
+        # REGIME-AWARE PICK SELECTION
+        # In BEAR: prioritize shorts heavily, limit longs
+        # In BULL: prioritize longs heavily, limit shorts
         all_picks = []
 
-        for pick in quant_picks.get("long_picks", []):
-            if pick["confidence"] >= MIN_CONFIDENCE and pick["symbol"] not in open_tickers:
-                all_picks.append(pick)
+        long_candidates = [p for p in quant_picks.get("long_picks", [])
+                          if p["confidence"] >= MIN_CONFIDENCE and p["symbol"] not in open_tickers]
+        short_candidates = [p for p in quant_picks.get("short_picks", [])
+                           if p["confidence"] >= MIN_CONFIDENCE and p["symbol"] not in open_tickers]
 
-        for pick in quant_picks.get("short_picks", []):
-            if pick["confidence"] >= MIN_CONFIDENCE and pick["symbol"] not in open_tickers:
-                all_picks.append(pick)
+        if regime == "BEAR":
+            # BEAR: Take ALL qualifying shorts first, then only top 2 longs (only the strongest)
+            # Boost short confidence by 10 to prioritize them
+            for p in short_candidates:
+                p["_adj_confidence"] = p["confidence"] + 15
+                all_picks.append(p)
+            for p in long_candidates[:2]:  # max 2 longs in bear
+                p["_adj_confidence"] = p["confidence"] - 10  # penalize longs
+                all_picks.append(p)
+            logger.info(f"BEAR regime: {len(short_candidates)} shorts, {min(2, len(long_candidates))} longs selected")
+        elif regime == "BULL":
+            # BULL: Take ALL qualifying longs first, then only top 2 shorts
+            for p in long_candidates:
+                p["_adj_confidence"] = p["confidence"] + 15
+                all_picks.append(p)
+            for p in short_candidates[:2]:  # max 2 shorts in bull
+                p["_adj_confidence"] = p["confidence"] - 10
+                all_picks.append(p)
+            logger.info(f"BULL regime: {len(long_candidates)} longs, {min(2, len(short_candidates))} shorts selected")
+        else:
+            # SIDEWAYS: balanced
+            for p in long_candidates:
+                p["_adj_confidence"] = p["confidence"]
+                all_picks.append(p)
+            for p in short_candidates:
+                p["_adj_confidence"] = p["confidence"]
+                all_picks.append(p)
 
-        # Sort by confidence (highest first)
-        all_picks.sort(key=lambda x: x["confidence"], reverse=True)
+        # Sort by adjusted confidence (highest first)
+        all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
 
         for pick in all_picks[:available_slots]:
             symbol = pick["symbol"]
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
 
-            # Position sizing: % of total portfolio value
+            # Position sizing: REGIME-AWARE % of total portfolio value
             total_value = cash + sum(
                 t.get("shares", 0) * t.get("entry_price", 0)
                 for t in get_open_trades()
                 if t["ticker"] in open_tickers
             )
-            position_value = total_value * POSITION_SIZE_PCT
+            # In BEAR: bigger shorts (5%), smaller longs (2.5%)
+            # In BULL: bigger longs (5%), smaller shorts (2.5%)
+            # SIDEWAYS: equal (4%)
+            if regime == "BEAR":
+                size_pct = 0.05 if direction == "short" else 0.025
+            elif regime == "BULL":
+                size_pct = 0.05 if direction == "long" else 0.025
+            else:
+                size_pct = POSITION_SIZE_PCT
+            position_value = total_value * size_pct
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
@@ -350,13 +391,31 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # Calculate stop loss and target
-            stop_loss = pick.get("stop_loss") or round(price * (1 - STOP_LOSS_PCT), 2)
-            target = pick.get("target_price") or round(price * 1.15, 2)
+            # Calculate stop loss and target — REGIME AWARE
+            # BEAR: tighter stop on longs (4%), wider on shorts (10%)
+            # BULL: tighter stop on shorts (4%), wider on longs (10%)
+            if regime == "BEAR":
+                long_stop = 0.04   # tight stop on longs in bear
+                short_stop = 0.10  # give shorts room to run
+                long_target = 1.08  # modest target for longs
+                short_target = 0.80  # ambitious target for shorts (20% drop)
+            elif regime == "BULL":
+                long_stop = 0.10
+                short_stop = 0.04
+                long_target = 1.20
+                short_target = 0.92
+            else:
+                long_stop = STOP_LOSS_PCT
+                short_stop = STOP_LOSS_PCT
+                long_target = 1.15
+                short_target = 0.85
 
-            if direction == "short":
-                stop_loss = pick.get("stop_loss") or round(price * (1 + STOP_LOSS_PCT), 2)
-                target = pick.get("target_price") or round(price * 0.85, 2)
+            if direction == "long":
+                stop_loss = pick.get("stop_loss") or round(price * (1 - long_stop), 2)
+                target = pick.get("target_price") or round(price * long_target, 2)
+            else:  # short
+                stop_loss = pick.get("stop_loss") or round(price * (1 + short_stop), 2)
+                target = pick.get("target_price") or round(price * short_target, 2)
 
             try:
                 trade_id = save_paper_trade(
