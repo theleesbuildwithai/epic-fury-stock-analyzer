@@ -84,8 +84,35 @@ export default function QuantDashboard() {
           Quant Hedge Fund
         </h1>
         <p className="text-neutral-500 mt-1">
-          Quantitative analysis, paper trading, and self-learning system
+          10-factor AI engine • Autonomous trading • Self-learning system
         </p>
+
+        {/* $100K Challenge Banner */}
+        <div className="mt-4 bg-gradient-to-r from-orange-500/10 via-amber-500/10 to-yellow-500/10 border border-orange-500/20 rounded-xl p-4">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <p className="text-orange-400 font-bold text-sm tracking-wider uppercase">The $100K Challenge</p>
+              <p className="text-neutral-400 text-xs mt-1">
+                The computer started with $100,000 and is autonomously trading 24/7 to grow it as much as possible.
+                No human intervention — pure AI-driven quantitative strategy.
+              </p>
+            </div>
+            {portfolio && (
+              <div className="text-right">
+                <p className="text-2xl font-black text-white">${(portfolio.total_value || 100000).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+                <p className={`text-sm font-bold ${(portfolio.total_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {(portfolio.total_return_pct || 0) >= 0 ? '▲' : '▼'} {Math.abs(portfolio.total_return_pct || 0).toFixed(2)}% all-time
+                </p>
+              </div>
+            )}
+          </div>
+          <div className="flex gap-4 mt-3 text-xs text-neutral-500">
+            <span>🧠 10 Quant Factors</span>
+            <span>📊 100+ Stocks Analyzed</span>
+            <span>⚡ Trades Every 2 Hours</span>
+            <span>🔄 Self-Learning Weekly</span>
+          </div>
+        </div>
       </div>
 
       {/* Tabs */}

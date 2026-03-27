@@ -3,10 +3,15 @@ Quantitative Engine — the core intelligence of the Epic Fury hedge fund.
 
 This is the brain that institutional quant funds use to find edges:
   1. Market Regime Detection — BULL / BEAR / SIDEWAYS
-  2. Multi-Factor Composite Scoring — 6 orthogonal, z-scored factors
-  3. Global Macro Overlay — bonds, oil, gold, VIX → sector adjustments
+  2. Multi-Factor Composite Scoring — 10 orthogonal, z-scored factors
+  3. Global Macro Overlay — bonds, oil, gold, VIX, yield curve, dollar → sector adjustments
   4. Event-Driven — earnings proximity risk reduction
-  5. Long/Short Signal Generation — LONG score >= 4, SHORT score <= -4
+  5. Long/Short Signal Generation — regime-adaptive thresholds
+  6. VIX Term Structure Sentiment — contango vs backwardation (fear gauge)
+  7. Bollinger Band Squeeze Detection — volatility compression → breakout predictor
+  8. Correlation-Aware Diversification — avoid concentrated correlated bets
+  9. VWAP Factor — institutional execution quality signal
+  10. Trailing Stop Intelligence — lock in profits, don't give them back
 
 Designed for accuracy when real money is on the line:
   - Z-score normalization ensures fair cross-factor comparison
@@ -14,6 +19,7 @@ Designed for accuracy when real money is on the line:
   - Macro overlay prevents fighting the Fed / macro trends
   - Batch yfinance downloads to minimize API calls (CRITICAL)
   - Aggressive caching to avoid Yahoo Finance rate limits
+  - Self-learning: weights adjust based on historical performance
 
 All data comes from Yahoo Finance via yf.download() (bulk method).
 """
@@ -560,6 +566,45 @@ def get_macro_overlay() -> dict:
         except Exception as e:
             logger.debug(f"Yield curve check failed: {e}")
 
+        # --- ADVANCED: VIX Term Structure (Contango vs Backwardation) ---
+        # VIX futures in contango (VIX < VIX3M) = calm markets, normal = slightly bullish
+        # VIX futures in backwardation (VIX > VIX3M) = panic = strongly bearish
+        # This is what the smart money watches — it predicted the 2020 crash
+        try:
+            _throttle()
+            vix_term_df = yf.download(["^VIX", "^VIX3M"], period="5d", progress=False, group_by="ticker")
+            if vix_term_df is not None and not vix_term_df.empty:
+                try:
+                    vix_spot = float(vix_term_df[("^VIX", "Close")].dropna().iloc[-1])
+                    vix_3m = float(vix_term_df[("^VIX3M", "Close")].dropna().iloc[-1])
+                    term_ratio = vix_spot / vix_3m if vix_3m > 0 else 1.0
+                    macro["vix_term_structure"] = {
+                        "vix_spot": round(vix_spot, 2),
+                        "vix_3m": round(vix_3m, 2),
+                        "ratio": round(term_ratio, 3),
+                        "structure": "backwardation" if term_ratio > 1.05 else (
+                            "contango" if term_ratio < 0.95 else "flat"
+                        ),
+                        "signal": "extreme_fear" if term_ratio > 1.15 else (
+                            "fear" if term_ratio > 1.05 else (
+                                "complacent" if term_ratio < 0.85 else "normal"
+                            )
+                        ),
+                    }
+                    # Backwardation = panic: penalize all risk assets
+                    if term_ratio > 1.10:
+                        for sector in ["Technology", "Consumer Discretionary", "Communication"]:
+                            adjustments[sector] = round(adjustments.get(sector, 0) - 1.0, 1)
+                        for sector in ["Utilities", "Consumer Staples", "Healthcare"]:
+                            adjustments[sector] = round(adjustments.get(sector, 0) + 0.5, 1)
+                    elif term_ratio > 1.05:
+                        for sector in ["Technology", "Consumer Discretionary"]:
+                            adjustments[sector] = round(adjustments.get(sector, 0) - 0.5, 1)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"VIX term structure check failed: {e}")
+
         # --- ADVANCED: Dollar Strength (DXY proxy via UUP ETF) ---
         # Strong dollar hurts multinationals, helps domestic companies
         try:
@@ -847,6 +892,69 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 except Exception:
                     pass
 
+            # --- Factor 9: BOLLINGER BAND SQUEEZE (Volatility Compression) ---
+            # When Bollinger Bands narrow (squeeze), a big move is coming
+            # The direction of the breakout tells us which way
+            # This is John Bollinger's own recommended setup
+            bb_squeeze_raw = 0.0
+            if len(closes) >= 20:
+                sma20_bb = float(np.mean(closes[-20:]))
+                std20_bb = float(np.std(closes[-20:]))
+                bb_upper = sma20_bb + 2 * std20_bb
+                bb_lower = sma20_bb - 2 * std20_bb
+                bb_width = (bb_upper - bb_lower) / sma20_bb * 100  # as % of price
+
+                # Historical average BB width for comparison
+                if len(closes) >= 120:
+                    bb_widths_hist = []
+                    for k in range(100, len(closes), 5):
+                        s = float(np.mean(closes[k-20:k]))
+                        st = float(np.std(closes[k-20:k]))
+                        if s > 0:
+                            bb_widths_hist.append(((s + 2*st) - (s - 2*st)) / s * 100)
+                    if bb_widths_hist:
+                        avg_bb_width = float(np.mean(bb_widths_hist))
+                        # Squeeze = current width < 60% of average
+                        if bb_width < avg_bb_width * 0.6:
+                            # Squeeze detected! Direction based on price vs SMA
+                            if current_price > sma20_bb:
+                                bb_squeeze_raw = 3.0  # Squeeze + above SMA = bullish breakout
+                            else:
+                                bb_squeeze_raw = -3.0  # Squeeze + below SMA = bearish breakdown
+                        elif bb_width < avg_bb_width * 0.8:
+                            # Mild squeeze
+                            if current_price > sma20_bb:
+                                bb_squeeze_raw = 1.0
+                            else:
+                                bb_squeeze_raw = -1.0
+
+            # --- Factor 10: VWAP PROXIMITY (Institutional Execution Quality) ---
+            # VWAP = Volume Weighted Average Price — institutional benchmark
+            # Stocks trading above VWAP = institutions buying at premium = bullish
+            # Stocks trading below VWAP = institutions selling = bearish
+            # We use a 5-day VWAP proxy since we don't have intraday data
+            vwap_raw = 0.0
+            if len(closes) >= 5 and len(volumes) >= 5:
+                try:
+                    highs = df["High"].values.astype(float).flatten()
+                    lows = df["Low"].values.astype(float).flatten()
+                    if len(highs) >= 5 and len(lows) >= 5:
+                        # Typical price * volume / cumulative volume
+                        typical_prices = (highs[-5:] + lows[-5:] + closes[-5:]) / 3
+                        vwap_5d = float(np.sum(typical_prices * volumes[-5:]) /
+                                       (np.sum(volumes[-5:]) + 1))
+                        vwap_pct = (current_price - vwap_5d) / vwap_5d * 100
+                        if vwap_pct > 1.5:
+                            vwap_raw = 2.0  # Trading well above VWAP = institutional buying
+                        elif vwap_pct > 0.3:
+                            vwap_raw = 1.0
+                        elif vwap_pct < -1.5:
+                            vwap_raw = -2.0  # Trading well below VWAP = institutional selling
+                        elif vwap_pct < -0.3:
+                            vwap_raw = -1.0
+                except Exception:
+                    pass
+
             # --- RSI(14) for additional context ---
             if len(closes) >= 15:
                 deltas_14 = np.diff(closes[-15:])
@@ -877,6 +985,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "volume_raw": volume_raw,
                 "smart_money_raw": smart_money_raw,
                 "relative_strength_raw": relative_strength_raw,
+                "bb_squeeze_raw": bb_squeeze_raw,
+                "vwap_raw": vwap_raw,
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
                 "rsi2": round(rsi2, 1),
@@ -905,6 +1015,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     volume_z = _safe_zscore([s["volume_raw"] for s in raw_factors])
     smart_money_z = _safe_zscore([s["smart_money_raw"] for s in raw_factors])
     relative_strength_z = _safe_zscore([s["relative_strength_raw"] for s in raw_factors])
+    bb_squeeze_z = _safe_zscore([s["bb_squeeze_raw"] for s in raw_factors])
+    vwap_z = _safe_zscore([s["vwap_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     regime_multiplier = 1.0  # default
@@ -925,12 +1037,14 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
     # Normalize weights to sum to 1
     # Add new factors with fixed weights (not yet in learning system)
-    W_SMART_MONEY = 0.10   # Smart money divergence
-    W_REL_STRENGTH = 0.08  # Relative strength vs sector
+    W_SMART_MONEY = 0.08    # Smart money divergence
+    W_REL_STRENGTH = 0.06   # Relative strength vs sector
+    W_BB_SQUEEZE = 0.06     # Bollinger Band squeeze breakout
+    W_VWAP = 0.05           # VWAP institutional flow
 
     # Scale existing weights down to make room for new factors
     existing_total = sum(weights.values())
-    new_factor_total = W_SMART_MONEY + W_REL_STRENGTH
+    new_factor_total = W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -941,11 +1055,13 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_vol = (weights.get("volume", 0.10) / existing_total) * scale
     w_smart = W_SMART_MONEY
     w_relstr = W_REL_STRENGTH
+    w_bb = W_BB_SQUEEZE
+    w_vwap = W_VWAP
 
     # --- Calculate composite scores ---
     scored = []
     for i, stock in enumerate(raw_factors):
-        # Weighted composite — 8 FACTORS (hedge fund grade)
+        # Weighted composite — 10 FACTORS (institutional hedge fund grade)
         composite = (
             momentum_z[i] * w_mom +
             value_z[i] * w_val +
@@ -954,7 +1070,9 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             rsi2_z[i] * w_rsi2 +
             volume_z[i] * w_vol +
             smart_money_z[i] * w_smart +
-            relative_strength_z[i] * w_relstr
+            relative_strength_z[i] * w_relstr +
+            bb_squeeze_z[i] * w_bb +
+            vwap_z[i] * w_vwap
         )
 
         # Apply macro overlay sector adjustment
@@ -1063,6 +1181,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "relative_strength": {"z": relative_strength_z[i], "weight": round(w_relstr, 3),
                                   "raw": round(stock["relative_strength_raw"], 2),
                                   "contribution": round(relative_strength_z[i] * w_relstr, 3)},
+            "bb_squeeze": {"z": bb_squeeze_z[i], "weight": round(w_bb, 3),
+                          "raw": round(stock["bb_squeeze_raw"], 2),
+                          "contribution": round(bb_squeeze_z[i] * w_bb, 3)},
+            "vwap": {"z": vwap_z[i], "weight": round(w_vwap, 3),
+                    "raw": round(stock["vwap_raw"], 2),
+                    "contribution": round(vwap_z[i] * w_vwap, 3)},
         }
 
         # Generate human-readable reasons

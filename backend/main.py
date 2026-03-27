@@ -349,6 +349,75 @@ scheduler.add_job(
     name="Startup Trade Cycle",
 )
 
+# --- WEEKEND SELF-LEARNING CYCLE ---
+# Every Saturday at 10am ET: analyze ALL past trades, adjust weights,
+# learn from mistakes, and prepare strategy for Monday
+def _weekend_learning_cycle():
+    """
+    Weekend self-improvement: the system reviews all its trades,
+    identifies what's working and what's not, and adjusts its
+    factor weights for the coming week. This is what makes it
+    get smarter over time without human intervention.
+    """
+    try:
+        logger.warning("WEEKEND LEARNING CYCLE starting — reviewing all trades and adjusting strategy")
+
+        # 1. Auto-adjust factor weights from trade history
+        weight_result = auto_adjust_weights()
+        logger.warning(f"Weight adjustment: {weight_result}")
+
+        # 2. Generate intelligence report to log insights
+        intel = generate_intelligence_report()
+        logger.warning(f"Intelligence report generated: {len(intel.get('insights', []))} insights")
+
+        # 3. Run a fresh analysis cycle to prepare Monday's picks
+        # (This pre-caches the picks so Monday's first trade is instant)
+        picks = generate_quant_picks()
+        logger.warning(f"Monday prep: {len(picks.get('long_picks', []))} longs, {len(picks.get('short_picks', []))} shorts ready")
+
+        logger.warning("WEEKEND LEARNING CYCLE complete — system is smarter now")
+    except Exception as e:
+        logger.error(f"Weekend learning error: {e}")
+
+scheduler.add_job(
+    _weekend_learning_cycle,
+    "cron",
+    day_of_week="sat",
+    hour=10,
+    minute=0,
+    id="weekend_learning",
+    name="Weekend Self-Learning Cycle",
+    max_instances=1,
+    misfire_grace_time=7200,
+)
+
+# --- DAILY PERFORMANCE CHECK (6pm ET) ---
+# Every evening: check portfolio health, log daily P&L
+def _daily_health_check():
+    """Daily portfolio health check and performance logging."""
+    try:
+        portfolio = get_portfolio_state()
+        total_return = portfolio.get("total_return_pct", 0)
+        num_positions = portfolio.get("num_positions", 0)
+        total_value = portfolio.get("total_value", 0)
+        logger.warning(
+            f"DAILY HEALTH CHECK: Portfolio ${total_value:,.2f} | "
+            f"Return: {total_return:+.2f}% | Positions: {num_positions}"
+        )
+    except Exception as e:
+        logger.error(f"Daily health check error: {e}")
+
+scheduler.add_job(
+    _daily_health_check,
+    "cron",
+    hour=18,
+    minute=0,
+    id="daily_health",
+    name="Daily Health Check",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
 scheduler.start()
 auto_trade_stats["started_at"] = dt.now().isoformat()
 auto_trade_stats["status"] = "running"

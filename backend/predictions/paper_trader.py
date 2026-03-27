@@ -32,6 +32,112 @@ STOP_LOSS_PCT = 0.07  # 7% stop loss
 DEFAULT_HOLD_DAYS = 30
 MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
 
+# ============================================================
+#  ADVANCED: VIX-SCALED POSITION SIZING
+# ============================================================
+# When VIX is high (fear), we reduce position sizes to limit risk
+# When VIX is low (calm), we can be more aggressive
+# This is standard institutional risk management
+VIX_SIZE_SCALE = {
+    "low": 1.3,      # VIX < 15: calm markets, slightly bigger positions
+    "normal": 1.0,    # VIX 15-20: standard sizing
+    "elevated": 0.7,  # VIX 20-25: reduce size
+    "high": 0.5,      # VIX 25-35: half-size positions
+    "crisis": 0.25,   # VIX > 35: quarter-size (capital preservation)
+}
+
+def _get_vix_scale() -> float:
+    """Get position size multiplier based on current VIX level."""
+    try:
+        _throttle()
+        vix_df = yf.download("^VIX", period="5d", progress=False)
+        if vix_df is not None and not vix_df.empty:
+            vix = float(vix_df["Close"].dropna().iloc[-1])
+            if vix < 15:
+                return VIX_SIZE_SCALE["low"]
+            elif vix < 20:
+                return VIX_SIZE_SCALE["normal"]
+            elif vix < 25:
+                return VIX_SIZE_SCALE["elevated"]
+            elif vix < 35:
+                return VIX_SIZE_SCALE["high"]
+            else:
+                return VIX_SIZE_SCALE["crisis"]
+    except Exception:
+        pass
+    return 1.0
+
+
+# ============================================================
+#  ADVANCED: CORRELATION-BASED DIVERSIFICATION
+# ============================================================
+def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = None) -> dict:
+    """
+    Check if a new position would be too correlated with existing positions.
+    Returns correlation info and whether the trade should be blocked.
+
+    Correlation > 0.80 in same direction = too similar, skip
+    This prevents holding GOOGL + META + NFLX all at once (highly correlated)
+    """
+    result = {"correlated": False, "max_corr": 0, "correlated_with": None}
+
+    if not open_tickers or len(open_tickers) < 2:
+        return result
+
+    try:
+        check_symbols = list(open_tickers) + [new_symbol]
+        _throttle()
+        df = yf.download(check_symbols, period="3mo", progress=False, group_by="ticker")
+        if df is None or df.empty:
+            return result
+
+        # Extract close prices for each symbol
+        close_data = {}
+        for sym in check_symbols:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if sym in df.columns.get_level_values(0):
+                        close_series = df[(sym, "Close")].dropna()
+                        if len(close_series) >= 20:
+                            close_data[sym] = close_series.pct_change().dropna().values
+                elif len(check_symbols) == 1:
+                    close_series = df["Close"].dropna()
+                    if len(close_series) >= 20:
+                        close_data[sym] = close_series.pct_change().dropna().values
+            except Exception:
+                continue
+
+        if new_symbol not in close_data:
+            return result
+
+        new_returns = close_data[new_symbol]
+        max_corr = 0
+        corr_ticker = None
+
+        for sym, returns in close_data.items():
+            if sym == new_symbol:
+                continue
+            # Align lengths
+            min_len = min(len(new_returns), len(returns))
+            if min_len < 15:
+                continue
+            corr = float(np.corrcoef(new_returns[:min_len], returns[:min_len])[0, 1])
+            if abs(corr) > abs(max_corr):
+                max_corr = corr
+                corr_ticker = sym
+
+        result["max_corr"] = round(max_corr, 3)
+        result["correlated_with"] = corr_ticker
+
+        # Block if correlation > 0.80 with any existing position
+        if max_corr > 0.80:
+            result["correlated"] = True
+
+    except Exception as e:
+        logger.debug(f"Correlation check failed for {new_symbol}: {e}")
+
+    return result
+
 # Throttle for Yahoo Finance
 _last_call = [0.0]
 _DELAY = 3.0
@@ -227,6 +333,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     else:
         cash = INITIAL_CAPITAL
 
+    regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
+
     # --- Step 1: Check exits for open positions ---
     if open_trades:
         exit_symbols = list(set(t["ticker"] for t in open_trades))
@@ -277,6 +385,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     close_reason = f"Hold duration expired ({days_held} days)"
             except Exception:
                 pass
+
+            # TRAILING STOP LOSS — lock in profits, don't give them back
+            # If position is up 3%+, move stop to breakeven (entry price)
+            # If position is up 5%+, trail stop to 50% of max profit
+            # This is what separates profitable funds from those that give back gains
+            if not should_close and pnl_pct > 3:
+                # Check if we've pulled back significantly from peak
+                try:
+                    _throttle()
+                    hist_df = yf.download(ticker, period="1mo", progress=False)
+                    if hist_df is not None and len(hist_df) >= 5:
+                        hist_closes = hist_df["Close"].values.astype(float).flatten()
+                        if direction == "long":
+                            peak_price = float(np.max(hist_closes))
+                            peak_pnl = ((peak_price / entry_price) - 1) * 100
+                            # Trail at 50% of peak profit (if peak was 8%, trail stop at 4%)
+                            trail_level = peak_pnl * 0.5
+                            if peak_pnl > 5 and pnl_pct < trail_level:
+                                should_close = True
+                                close_reason = f"Trailing stop: peaked at {peak_pnl:+.1f}%, now {pnl_pct:+.1f}%"
+                        else:  # short
+                            trough_price = float(np.min(hist_closes))
+                            trough_pnl = ((entry_price / trough_price) - 1) * 100
+                            trail_level = trough_pnl * 0.5
+                            if trough_pnl > 5 and pnl_pct < trail_level:
+                                should_close = True
+                                close_reason = f"Trailing stop: peaked at {trough_pnl:+.1f}%, now {pnl_pct:+.1f}%"
+                except Exception:
+                    pass
 
             # AGGRESSIVE BEAR PROTECTION: close losing longs faster in BEAR
             if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
@@ -334,6 +471,10 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         drawdown_multiplier = 0.5  # Half-size positions
 
     # No position limits — the computer trades freely like a real hedge fund
+
+    # Get VIX-based position size multiplier
+    vix_multiplier = _get_vix_scale()
+    logger.info(f"VIX position size multiplier: {vix_multiplier}")
 
     if available_slots > 0 and cash > 1000:
         # REGIME-AWARE PICK SELECTION
@@ -413,6 +554,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
+            # CORRELATION CHECK: Don't hold highly correlated positions
+            # This is what separates hedge funds from retail — true diversification
+            if len(open_tickers) >= 3:
+                corr_check = _check_correlation(symbol, open_tickers)
+                if corr_check["correlated"]:
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": f"Too correlated with {corr_check['correlated_with']} (r={corr_check['max_corr']:.2f})",
+                    })
+                    continue
+
             # Check sector concentration
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
             if sector_counts.get(sector_key, 0) >= 3:
@@ -437,7 +589,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 size_pct = 0.05 if direction == "long" else 0.025
             else:
                 size_pct = POSITION_SIZE_PCT
-            position_value = total_value * size_pct * drawdown_multiplier
+            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
@@ -475,6 +627,38 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 target = pick.get("target_price") or round(price * short_target, 2)
 
             try:
+                # ADAPTIVE HOLD DURATION — like a real day trader / swing trader
+                # High confidence + strong trend = hold longer (up to 60 days)
+                # Low confidence + weak signal = quick scalp (1-5 days)
+                # Regime also matters: BEAR = shorter holds (faster exits)
+                confidence = pick.get("confidence", 50)
+                score_strength = abs(pick.get("composite_score", 0))
+
+                if regime == "BEAR":
+                    # Bear market: quick trades, don't overstay
+                    if confidence >= 80 and score_strength >= 6:
+                        adaptive_hold = 14  # 2 weeks max even for strong signals
+                    elif confidence >= 60:
+                        adaptive_hold = 7   # 1 week
+                    else:
+                        adaptive_hold = 3   # 3 days — scalp trade
+                elif regime == "BULL":
+                    # Bull market: let winners run longer
+                    if confidence >= 80 and score_strength >= 6:
+                        adaptive_hold = 60  # 2 months for high-conviction
+                    elif confidence >= 60:
+                        adaptive_hold = 30  # 1 month
+                    else:
+                        adaptive_hold = 10  # ~2 weeks
+                else:
+                    # Sideways: moderate holds
+                    if confidence >= 80:
+                        adaptive_hold = 21
+                    elif confidence >= 60:
+                        adaptive_hold = 14
+                    else:
+                        adaptive_hold = 5
+
                 trade_id = save_paper_trade(
                     ticker=symbol,
                     direction=direction,
@@ -485,7 +669,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     factors=pick.get("factors", {}),
                     stop_loss=stop_loss,
                     target_price=target,
-                    hold_days=DEFAULT_HOLD_DAYS,
+                    hold_days=adaptive_hold,
                     sector=pick.get("sector", ""),
                 )
 
