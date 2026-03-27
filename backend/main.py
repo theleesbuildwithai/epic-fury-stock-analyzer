@@ -44,32 +44,18 @@ def validate_ticker(ticker: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
     return clean
 
-# --- Rate Limiting with Auto-Ban ---
+# --- Rate Limiting (NO IP banning — App Runner shares IPs via load balancer) ---
 rate_limit_store = defaultdict(list)   # IP -> [timestamps]
-banned_ips = {}                         # IP -> ban_expire_time
-strike_counter = defaultdict(int)       # IP -> number of violations
 RATE_LIMIT = 200         # max requests per window (generous for search-as-you-type)
 RATE_WINDOW = 60         # 60 second window
-BAN_DURATION = 60        # 1 minute ban (short to avoid locking out real users behind shared IPs)
-MAX_STRIKES = 10         # strikes before auto-ban (higher threshold)
 
 def check_rate_limit(client_ip: str):
-    """Rate limiter — slows down excessive requests but NEVER bans normal users.
-    Banning only happens from attack pattern detection, not rate limits."""
+    """Rate limiter — slows down excessive requests but NEVER bans.
+    On App Runner, all users share load balancer IPs, so banning = banning everyone."""
     now = time.time()
-
-    # Check if IP is banned (only attacks cause bans, not rate limits)
-    if client_ip in banned_ips:
-        if now < banned_ips[client_ip]:
-            raise HTTPException(status_code=403, detail="Access denied")
-        else:
-            del banned_ips[client_ip]
-            strike_counter[client_ip] = 0
-
     # Clean old entries
     rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if now - t < RATE_WINDOW]
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT:
-        # Just slow them down — NO banning, NO strikes for rate limits
         raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
     rate_limit_store[client_ip].append(now)
 
@@ -152,13 +138,16 @@ def log_attack(client_ip: str, attack_type: str, path: str, user_agent: str):
         "type": attack_type,
         "path": path,
         "user_agent": user_agent[:100] if user_agent else "none",
-        "banned": client_ip in banned_ips,
+        "blocked": True,
     }
     attack_log.append(event)
     if len(attack_log) > MAX_LOG_SIZE:
         attack_log.pop(0)  # remove oldest
 
 # --- Firewall Middleware (processes EVERY request) ---
+# DESIGN: Block bad requests individually but NEVER ban IPs.
+# On App Runner, all users share the load balancer IP — banning an IP = banning everyone.
+# Instead we: reject each malicious request with 403, log it, and let the next clean request through.
 class FirewallMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         global total_requests_served
@@ -167,41 +156,26 @@ class FirewallMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         query = str(request.url.query)
         user_agent = request.headers.get("user-agent", "")
-        now = time.time()
 
-        # 1. Check IP ban list
-        if client_ip in banned_ips:
-            if now < banned_ips[client_ip]:
-                log_attack(client_ip, "banned_ip_retry", path, user_agent)
-                return JSONResponse(status_code=403, content={"detail": "Access denied"})
-            else:
-                del banned_ips[client_ip]
-                strike_counter[client_ip] = 0
-
-        # 2. Check for malicious patterns
+        # 1. Check for malicious patterns — block THIS request only (no IP ban)
         attack = is_malicious_request(path, query, user_agent)
         if attack:
             logger.warning(f"FIREWALL BLOCKED: {client_ip} | {attack} | {path}")
             log_attack(client_ip, attack, path, user_agent)
-            # Auto-ban on honeypot hits or repeated attacks
-            strike_counter[client_ip] += 2
-            if strike_counter[client_ip] >= MAX_STRIKES:
-                banned_ips[client_ip] = now + BAN_DURATION  # Short ban to avoid blocking real users
-                logger.warning(f"FIREWALL: Auto-banned attacker {client_ip} for {BAN_DURATION}s")
             return JSONResponse(status_code=403, content={"detail": "Access denied"})
 
-        # 3. Block requests with no user agent (bots/scanners)
-        # Allow health checks and asset requests without user agent
+        # 2. Block known malicious bot user agents
+        # (Normal browsers, curl, wget all allowed — only hacker tools blocked)
         if not user_agent and not path.startswith("/health") and not path.startswith("/assets"):
             log_attack(client_ip, "no_user_agent", path, "")
             return JSONResponse(status_code=403, content={"detail": "Access denied"})
 
-        # 4. Method restriction — only GET and POST allowed
+        # 3. Method restriction — only GET and POST allowed
         if request.method not in ("GET", "POST", "OPTIONS", "HEAD"):
             log_attack(client_ip, f"blocked_method:{request.method}", path, user_agent)
             return JSONResponse(status_code=405, content={"detail": "Method not allowed"})
 
-        # 5. Request size limit (1MB max body)
+        # 4. Request size limit (1MB max body)
         content_length = request.headers.get("content-length", "0")
         try:
             if int(content_length) > 1_048_576:
