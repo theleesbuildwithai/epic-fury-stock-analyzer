@@ -77,25 +77,24 @@ def check_rate_limit(client_ip: str):
     rate_limit_store[client_ip].append(now)
 
 # --- Malicious Pattern Detection ---
+# IMPORTANT: These patterns ONLY check the URL path and query string.
+# They must be specific enough to NOT block normal browser requests.
 ATTACK_PATTERNS = [
     re.compile(r"\.\./"),                           # Path traversal
     re.compile(r"\.\.\%2[fF]"),                     # Encoded path traversal
     re.compile(r"<script", re.IGNORECASE),          # XSS attempt
     re.compile(r"javascript:", re.IGNORECASE),      # XSS via JS protocol
-    re.compile(r"(union|select|insert|drop|delete|update)\s", re.IGNORECASE),  # SQL injection
-    re.compile(r"(\%27|\'|\-\-)", re.IGNORECASE),   # SQL injection chars
-    re.compile(r"\{[\{%]"),                          # Template injection
+    re.compile(r"union\s+(all\s+)?select\s", re.IGNORECASE),  # SQL injection (specific)
+    re.compile(r";\s*(drop|delete|insert|update)\s", re.IGNORECASE),  # SQL injection commands
     re.compile(r"(etc/passwd|etc/shadow|proc/self)", re.IGNORECASE),  # Linux file access
-    re.compile(r"(\.env|\.git|\.aws|wp-admin|wp-login|phpmyadmin)", re.IGNORECASE),  # Scanner probes
-    re.compile(r"(eval|exec|import|__import__|os\.)", re.IGNORECASE),  # Python injection
+    re.compile(r"(__import__|os\.system|os\.popen)", re.IGNORECASE),  # Python injection (specific)
     re.compile(r"\x00"),                             # Null byte injection
 ]
 
 # Known malicious bot user agents
 BOT_PATTERNS = [
     re.compile(r"(sqlmap|nikto|nmap|masscan|dirbuster|gobuster|wfuzz|hydra|metasploit)", re.IGNORECASE),
-    re.compile(r"(scrapy|python-requests/2\.\d+\.\d+$)", re.IGNORECASE),
-    re.compile(r"(curl/\d|wget/\d)", re.IGNORECASE),
+    re.compile(r"(scrapy)", re.IGNORECASE),
 ]
 
 # Honeypot paths — any request to these = instant ban (only hackers/scanners hit these)
@@ -195,7 +194,8 @@ class FirewallMiddleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=403, content={"detail": "Access denied"})
 
         # 3. Block requests with no user agent (bots/scanners)
-        if not user_agent and not path.startswith("/health"):
+        # Allow health checks and asset requests without user agent
+        if not user_agent and not path.startswith("/health") and not path.startswith("/assets"):
             log_attack(client_ip, "no_user_agent", path, "")
             return JSONResponse(status_code=403, content={"detail": "Access denied"})
 
@@ -220,7 +220,7 @@ class FirewallMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
         # Hide server info
         if "server" in response.headers:
             del response.headers["server"]
