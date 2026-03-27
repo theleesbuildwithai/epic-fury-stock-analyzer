@@ -19,7 +19,7 @@ from collections import defaultdict
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
 from analysis.ticker_search import search_tickers
-from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary
+from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary, get_sector_heatmap
 from analysis.news_sentiment import get_market_news
 from analysis.ai_analyst import answer_question
 from predictions.models import init_db, save_prediction, get_all_predictions
@@ -453,6 +453,17 @@ def daily_summary(request: Request, watchlist: str = ""):
     except Exception as e:
         logger.error(f"Daily summary error: {e}")
         return {"gainers": [], "losers": []}
+
+
+@app.get("/api/sector-heatmap")
+def sector_heatmap(request: Request):
+    """Get sector performance heatmap data."""
+    check_rate_limit(request.client.host)
+    try:
+        return get_sector_heatmap()
+    except Exception as e:
+        logger.error(f"Sector heatmap error: {e}")
+        return {"sectors": []}
 
 
 @app.get("/api/ai-analyst")

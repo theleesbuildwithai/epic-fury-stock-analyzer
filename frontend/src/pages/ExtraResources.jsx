@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import CompoundInterestCalc from '../components/CompoundInterestCalc'
+import SectorHeatmap from '../components/SectorHeatmap'
 
 export default function ExtraResources() {
   const [picks, setPicks] = useState(null)
@@ -80,6 +81,9 @@ export default function ExtraResources() {
           Hedge fund grade analysis — symbols to buy, market news sentiment, and upcoming earnings.
         </p>
       </div>
+
+      {/* Sector Heatmap */}
+      <SectorHeatmap />
 
       {/* Market Sentiment Summary */}
       {news?.market_sentiment && (

@@ -49,108 +49,37 @@ def _get_cached(key, fetch_fn, ttl=None):
 # --- Banner tickers ---
 
 BANNER_SYMBOLS = [
-    # 3 Major Indexes
+    # Major Indexes
     ("^GSPC", "S&P 500"),
     ("^IXIC", "Nasdaq"),
     ("^DJI", "Dow Jones"),
-    # Top 100 S&P 500 stocks by market cap
+    # Commodities & Bonds
+    ("GC=F", "Gold"),
+    ("CL=F", "Crude Oil"),
+    ("^TNX", "10Y Treasury"),
+    # Top stocks by market cap
     ("AAPL", "Apple"),
     ("MSFT", "Microsoft"),
     ("NVDA", "NVIDIA"),
     ("AMZN", "Amazon"),
     ("GOOGL", "Alphabet"),
     ("META", "Meta"),
-    ("BRK-B", "Berkshire"),
-    ("LLY", "Eli Lilly"),
-    ("AVGO", "Broadcom"),
     ("TSLA", "Tesla"),
+    ("BRK-B", "Berkshire"),
+    ("AVGO", "Broadcom"),
     ("JPM", "JPMorgan"),
-    ("WMT", "Walmart"),
+    ("LLY", "Eli Lilly"),
     ("V", "Visa"),
     ("UNH", "UnitedHealth"),
+    ("WMT", "Walmart"),
     ("XOM", "Exxon"),
-    ("MA", "Mastercard"),
-    ("COST", "Costco"),
-    ("PG", "P&G"),
-    ("JNJ", "J&J"),
-    ("HD", "Home Depot"),
-    ("ABBV", "AbbVie"),
     ("NFLX", "Netflix"),
-    ("CRM", "Salesforce"),
-    ("BAC", "BofA"),
-    ("KO", "Coca-Cola"),
-    ("CVX", "Chevron"),
-    ("MRK", "Merck"),
     ("AMD", "AMD"),
-    ("PEP", "PepsiCo"),
-    ("TMO", "Thermo Fisher"),
-    ("LIN", "Linde"),
-    ("CSCO", "Cisco"),
-    ("WFC", "Wells Fargo"),
-    ("ACN", "Accenture"),
-    ("ADBE", "Adobe"),
-    ("MCD", "McDonald's"),
-    ("ABT", "Abbott"),
-    ("IBM", "IBM"),
-    ("TXN", "Texas Inst."),
-    ("GE", "GE Aerospace"),
-    ("PM", "Philip Morris"),
-    ("QCOM", "Qualcomm"),
-    ("ISRG", "Intuitive Surg."),
-    ("INTU", "Intuit"),
-    ("NOW", "ServiceNow"),
-    ("DIS", "Disney"),
-    ("VZ", "Verizon"),
-    ("CAT", "Caterpillar"),
-    ("AMGN", "Amgen"),
-    ("GS", "Goldman Sachs"),
-    ("BKNG", "Booking"),
-    ("PFE", "Pfizer"),
-    ("T", "AT&T"),
-    ("AXP", "AmEx"),
-    ("SPGI", "S&P Global"),
-    ("BLK", "BlackRock"),
-    ("UBER", "Uber"),
-    ("RTX", "RTX"),
-    ("NEE", "NextEra"),
-    ("LOW", "Lowe's"),
-    ("HON", "Honeywell"),
+    ("CRM", "Salesforce"),
+    ("COST", "Costco"),
     ("BA", "Boeing"),
-    ("TJX", "TJX"),
-    ("SYK", "Stryker"),
-    ("SBUX", "Starbucks"),
-    ("DE", "Deere"),
-    ("PLD", "Prologis"),
-    ("UNP", "Union Pacific"),
-    ("AMAT", "Applied Mat."),
-    ("BMY", "Bristol-Myers"),
-    ("ELV", "Elevance"),
-    ("MDLZ", "Mondelez"),
-    ("NKE", "Nike"),
-    ("ADP", "ADP"),
-    ("LMT", "Lockheed"),
-    ("CB", "Chubb"),
-    ("GILD", "Gilead"),
-    ("SCHW", "Schwab"),
-    ("MMC", "Marsh McLen."),
-    ("CI", "Cigna"),
-    ("SO", "Southern Co"),
-    ("MO", "Altria"),
-    ("PYPL", "PayPal"),
-    ("CME", "CME Group"),
-    ("ICE", "ICE"),
-    ("CL", "Colgate"),
-    ("FI", "Fiserv"),
-    ("DUK", "Duke Energy"),
+    ("DIS", "Disney"),
     ("COIN", "Coinbase"),
-    ("REGN", "Regeneron"),
-    ("INTC", "Intel"),
-    ("PANW", "Palo Alto"),
-    ("SLB", "Schlumberger"),
-    ("COP", "ConocoPhillips"),
-    ("MS", "Morgan Stanley"),
-    ("CRWD", "CrowdStrike"),
-    ("ABNB", "Airbnb"),
 ]
 
 
@@ -210,6 +139,73 @@ def get_banner_data():
         return results
 
     return _get_cached("banner_data", fetch)
+
+
+# --- Sector Heatmap ---
+
+SECTOR_ETFS = [
+    ("XLK", "Technology"),
+    ("XLF", "Financials"),
+    ("XLV", "Healthcare"),
+    ("XLE", "Energy"),
+    ("XLY", "Consumer Disc."),
+    ("XLP", "Consumer Staples"),
+    ("XLI", "Industrials"),
+    ("XLB", "Materials"),
+    ("XLRE", "Real Estate"),
+    ("XLU", "Utilities"),
+    ("XLC", "Communication"),
+]
+
+
+def get_sector_heatmap():
+    """Get today's performance for each S&P 500 sector via SPDR ETFs."""
+    def fetch():
+        symbols = [s[0] for s in SECTOR_ETFS]
+        symbol_to_name = {s[0]: s[1] for s in SECTOR_ETFS}
+        _throttle()
+        try:
+            df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
+        except Exception:
+            return {"sectors": [], "error": "Could not fetch sector data"}
+
+        if df is None or df.empty:
+            return {"sectors": [], "error": "No data"}
+
+        sectors = []
+        for symbol in symbols:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if symbol not in df.columns.get_level_values(0):
+                        continue
+                    close_series = df[(symbol, "Close")].dropna()
+                else:
+                    continue
+
+                if close_series is None or len(close_series) < 2:
+                    continue
+
+                current = float(close_series.iloc[-1])
+                prev = float(close_series.iloc[-2])
+                change_pct = ((current / prev) - 1) * 100
+
+                sectors.append({
+                    "symbol": symbol,
+                    "name": symbol_to_name[symbol],
+                    "price": round(current, 2),
+                    "change_pct": round(change_pct, 2),
+                })
+            except Exception:
+                continue
+
+        # Sort by performance
+        sectors.sort(key=lambda x: x["change_pct"], reverse=True)
+        return {
+            "sectors": sectors,
+            "generated_at": datetime.now().isoformat(),
+        }
+
+    return _get_cached("sector_heatmap", fetch, ttl=300)
 
 
 # --- Top 15 Daily Picks ---

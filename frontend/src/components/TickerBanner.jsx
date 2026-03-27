@@ -38,8 +38,12 @@ export default function TickerBanner() {
 
   if (loading || tickers.length === 0) return null
 
-  // Triple the items for seamless loop with 100+ stocks
+  // Triple the items for seamless loop
   const scrollItems = [...tickers, ...tickers, ...tickers]
+
+  // Categorize items for styling
+  const isIndex = (sym) => ['^GSPC', '^IXIC', '^DJI'].includes(sym)
+  const isCommodity = (sym) => ['GC=F', 'CL=F', '^TNX'].includes(sym)
 
   return (
     <div className="bg-black/80 backdrop-blur-sm border-b border-neutral-800/50 overflow-hidden">
@@ -54,8 +58,14 @@ export default function TickerBanner() {
           <div className="ticker-scroll flex items-center whitespace-nowrap py-1.5">
             {scrollItems.map((t, i) => (
               <div key={`${t.symbol}-${i}`} className="inline-flex items-center gap-1.5 px-3">
-                <span className="text-neutral-500 text-[11px] font-medium tracking-wide">{t.name}</span>
-                <span className="text-white text-[11px] font-mono font-semibold">${t.price.toLocaleString()}</span>
+                <span className={`text-[11px] font-medium tracking-wide ${
+                  isIndex(t.symbol) ? 'text-yellow-500' :
+                  isCommodity(t.symbol) ? 'text-amber-400' :
+                  'text-neutral-500'
+                }`}>{t.name}</span>
+                <span className="text-white text-[11px] font-mono font-semibold">
+                  {t.symbol === '^TNX' ? `${t.price.toFixed(2)}%` : `$${t.price.toLocaleString()}`}
+                </span>
                 <span className={`text-[11px] font-mono font-bold px-1.5 py-0.5 rounded ${
                   t.change >= 0
                     ? 'text-green-400 bg-green-500/10'
@@ -72,7 +82,7 @@ export default function TickerBanner() {
 
       <style>{`
         .ticker-scroll {
-          animation: scroll-left 15s linear infinite;
+          animation: scroll-left 30s linear infinite;
         }
         .ticker-scroll:hover {
           animation-play-state: paused;
