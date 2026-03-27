@@ -486,12 +486,14 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
         trend_base = 0.0
 
     timeframes = [
+        {"label": "1 day", "days": 1},
         {"label": "7 days", "days": 7},
         {"label": "14 days", "days": 14},
         {"label": "30 days", "days": 30},
         {"label": "60 days", "days": 60},
         {"label": "90 days", "days": 90},
         {"label": "180 days", "days": 180},
+        {"label": "1 year", "days": 365},
     ]
 
     forecasts = []
