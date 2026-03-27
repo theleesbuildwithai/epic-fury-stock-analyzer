@@ -390,6 +390,29 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
 
+            # GROSS EXPOSURE LIMIT: Never invest more than 85% of portfolio
+            # Hedge funds always keep a cash buffer for opportunities and margin calls
+            gross_exposure = sum(
+                t.get("shares", 0) * t.get("entry_price", 0)
+                for t in get_open_trades() if t["ticker"] in open_tickers
+            )
+            max_exposure = total_current_value * 0.85  # 85% max gross exposure
+            if gross_exposure >= max_exposure:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Gross exposure limit (85% of portfolio)",
+                })
+                break  # Stop opening more positions
+
+            # CONFIDENCE GATE: In BEAR only take high-conviction shorts
+            # and ultra-high-conviction longs (prevents mediocre trades)
+            if regime == "BEAR" and direction == "long" and pick["confidence"] < 55:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Low conviction long in BEAR ({pick['confidence']}%)",
+                })
+                continue
+
             # Check sector concentration
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
             if sector_counts.get(sector_key, 0) >= 3:

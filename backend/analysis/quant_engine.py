@@ -809,6 +809,44 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                     # How much this stock outperforms its sector (in %)
                     relative_strength_raw = (stock_ret_60d - sector_avg_ret) * 100
 
+            # --- ADVANCED: MOMENTUM CRASH FILTER ---
+            # Momentum works great... until it doesn't. Momentum crashes happen when
+            # high-momentum stocks suddenly reverse. We detect this by checking if
+            # recent 5-day return is opposite to the 60-day trend. If a stock was
+            # trending up but just had a sharp 5-day drop = momentum unwinding = danger.
+            momentum_crash_flag = False
+            if len(closes) >= 60:
+                ret_60d = (closes[-1] / closes[-60]) - 1
+                ret_5d = (closes[-1] / closes[-5]) - 1
+                # Strong uptrend but sharp recent reversal
+                if ret_60d > 0.10 and ret_5d < -0.05:
+                    momentum_crash_flag = True  # momentum unwinding — avoid LONG
+                # Strong downtrend but sharp recent bounce
+                elif ret_60d < -0.10 and ret_5d > 0.05:
+                    momentum_crash_flag = True  # dead cat bounce — avoid LONG
+
+            # --- ADVANCED: GAP DETECTION ---
+            # Overnight gaps reveal institutional order flow
+            # Large gap up = institutions buying overnight = bullish
+            # Large gap down = institutions selling overnight = bearish
+            gap_signal = 0.0
+            if len(closes) >= 2:
+                try:
+                    opens = df["Open"].values.astype(float).flatten()
+                    if len(opens) >= 2:
+                        # Today's gap: today's open vs yesterday's close
+                        gap_pct = (opens[-1] / closes[-2] - 1) * 100
+                        if gap_pct > 1.5:
+                            gap_signal = 2.0   # big gap up = institutional buying
+                        elif gap_pct > 0.5:
+                            gap_signal = 1.0   # mild gap up
+                        elif gap_pct < -1.5:
+                            gap_signal = -2.0  # big gap down = institutional selling
+                        elif gap_pct < -0.5:
+                            gap_signal = -1.0  # mild gap down
+                except Exception:
+                    pass
+
             # --- RSI(14) for additional context ---
             if len(closes) >= 15:
                 deltas_14 = np.diff(closes[-15:])
@@ -839,6 +877,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "volume_raw": volume_raw,
                 "smart_money_raw": smart_money_raw,
                 "relative_strength_raw": relative_strength_raw,
+                "gap_signal": gap_signal,
+                "momentum_crash": momentum_crash_flag,
                 "rsi2": round(rsi2, 1),
                 "rsi14": round(rsi14, 1),
                 "vol_60d": round(vol_60d, 1),
@@ -958,6 +998,21 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         else:
             direction = "NEUTRAL"
             confidence = max(30, 50 - int(abs(final_score) * 5))
+
+        # MOMENTUM CRASH FILTER: avoid stocks where momentum is unwinding
+        if stock.get("momentum_crash") and direction == "LONG":
+            confidence = int(confidence * 0.4)  # massive penalty — momentum crashing
+
+        # GAP SIGNAL: institutional overnight order flow
+        gap = stock.get("gap_signal", 0)
+        if gap >= 2 and direction == "LONG":
+            confidence = min(95, int(confidence * 1.15))  # big gap up confirms long
+        elif gap <= -2 and direction == "SHORT":
+            confidence = min(95, int(confidence * 1.15))  # big gap down confirms short
+        elif gap >= 1.5 and direction == "SHORT":
+            confidence = int(confidence * 0.7)  # don't short into gap up
+        elif gap <= -1.5 and direction == "LONG":
+            confidence = int(confidence * 0.7)  # don't buy into gap down
 
         # TREND FILTER: Don't fight the trend — this is what separates pros from amateurs
         # In BEAR: penalize longs that are below 50-EMA (trend is down, don't buy falling knives)
