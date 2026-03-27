@@ -48,10 +48,10 @@ def validate_ticker(ticker: str) -> str:
 rate_limit_store = defaultdict(list)   # IP -> [timestamps]
 banned_ips = {}                         # IP -> ban_expire_time
 strike_counter = defaultdict(int)       # IP -> number of violations
-RATE_LIMIT = 60          # max requests per window
+RATE_LIMIT = 200         # max requests per window (generous for search-as-you-type)
 RATE_WINDOW = 60         # 60 second window
 BAN_DURATION = 300       # 5 minute ban after repeated violations
-MAX_STRIKES = 3          # strikes before auto-ban
+MAX_STRIKES = 5          # strikes before auto-ban
 
 def check_rate_limit(client_ip: str):
     """Rate limiter with auto-ban for repeat offenders."""
