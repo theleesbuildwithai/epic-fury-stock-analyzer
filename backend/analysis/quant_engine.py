@@ -627,7 +627,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             # Proxy: Sharpe ratio of daily returns over last 120 days
             # Stocks with consistently positive returns = higher quality
             if len(closes) >= 120:
-                daily_rets = np.diff(closes[-120:]) / closes[-121:-1]
+                window = closes[-120:]
+                daily_rets = np.diff(window) / window[:-1]
                 quality_raw = float(np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252)
             else:
                 daily_rets = np.diff(closes) / closes[:-1]
@@ -635,7 +636,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
             # --- Factor 4: LOW VOLATILITY (inverse of 60-day vol) ---
             if len(closes) >= 60:
-                daily_rets_60 = np.diff(closes[-60:]) / closes[-61:-1]
+                window_60 = closes[-60:]
+                daily_rets_60 = np.diff(window_60) / window_60[:-1]
                 vol_60d = float(np.std(daily_rets_60)) * np.sqrt(252) * 100
             else:
                 vol_60d = float(np.std(np.diff(closes) / closes[:-1])) * np.sqrt(252) * 100
