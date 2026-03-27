@@ -871,6 +871,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
         scored.append({
             "symbol": stock["symbol"],
+            "ticker": stock["symbol"],  # alias for frontend compatibility
             "price": stock["price"],
             "sector": stock["sector"],
             "composite_score": final_score,

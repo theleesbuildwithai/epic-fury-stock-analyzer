@@ -30,7 +30,7 @@ MAX_POSITIONS = 15
 POSITION_SIZE_PCT = 0.06  # 6% of portfolio per position (conservative)
 STOP_LOSS_PCT = 0.07  # 7% stop loss
 DEFAULT_HOLD_DAYS = 30
-MIN_CONFIDENCE = 55  # Don't trade below this confidence
+MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
 
 # Throttle for Yahoo Finance
 _last_call = [0.0]
