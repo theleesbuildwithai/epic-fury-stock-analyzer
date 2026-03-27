@@ -65,8 +65,10 @@ export default function CompoundInterestCalc() {
   const maxBalance = Math.max(...results.yearData.map(d => d.balance), 1)
 
   const formatMoney = (n) => {
-    if (n >= 1000000) return `$${(n / 1000000).toFixed(2)}M`
-    if (n >= 1000) return `$${(n / 1000).toFixed(1)}K`
+    if (n >= 1e12) return `$${(n / 1e12).toFixed(2)}T`
+    if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`
+    if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`
+    if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`
     return `$${n.toFixed(2)}`
   }
 

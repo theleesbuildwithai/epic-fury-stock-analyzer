@@ -50,8 +50,8 @@ banned_ips = {}                         # IP -> ban_expire_time
 strike_counter = defaultdict(int)       # IP -> number of violations
 RATE_LIMIT = 200         # max requests per window (generous for search-as-you-type)
 RATE_WINDOW = 60         # 60 second window
-BAN_DURATION = 300       # 5 minute ban after repeated violations
-MAX_STRIKES = 5          # strikes before auto-ban
+BAN_DURATION = 60        # 1 minute ban (short to avoid locking out real users behind shared IPs)
+MAX_STRIKES = 10         # strikes before auto-ban (higher threshold)
 
 def check_rate_limit(client_ip: str):
     """Rate limiter — slows down excessive requests but NEVER bans normal users.
@@ -186,8 +186,8 @@ class FirewallMiddleware(BaseHTTPMiddleware):
             # Auto-ban on honeypot hits or repeated attacks
             strike_counter[client_ip] += 2
             if strike_counter[client_ip] >= MAX_STRIKES:
-                banned_ips[client_ip] = now + BAN_DURATION * 2  # Double ban for attacks
-                logger.warning(f"FIREWALL: Auto-banned attacker {client_ip} for {BAN_DURATION * 2}s")
+                banned_ips[client_ip] = now + BAN_DURATION  # Short ban to avoid blocking real users
+                logger.warning(f"FIREWALL: Auto-banned attacker {client_ip} for {BAN_DURATION}s")
             return JSONResponse(status_code=403, content={"detail": "Access denied"})
 
         # 3. Block requests with no user agent (bots/scanners)
