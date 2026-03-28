@@ -1789,27 +1789,25 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         regime = detect_market_regime()
         macro = get_macro_overlay()
 
-        # Download 1 year of price data for this stock + SPY benchmark
+        # Download stock and SPY separately to avoid MultiIndex parsing issues
         _throttle()
-        df = yf.download([symbol, "SPY"], period="1y", progress=False, group_by="ticker")
-
-        if df is None or df.empty:
+        stock_df = yf.download(symbol, period="1y", progress=False)
+        if stock_df is None or stock_df.empty:
             result["error"] = "No price data available"
             return result
 
-        # Extract stock data
-        try:
-            if isinstance(df.columns, pd.MultiIndex):
-                if symbol in df.columns.get_level_values(0):
-                    stock_df = df[symbol].dropna(how="all")
-                else:
-                    result["error"] = "Ticker not found"
-                    return result
-            else:
-                stock_df = df
-        except Exception:
-            result["error"] = "Could not parse price data"
-            return result
+        # Flatten MultiIndex columns if present (yfinance sometimes returns ("Close","AAPL"))
+        if isinstance(stock_df.columns, pd.MultiIndex):
+            stock_df.columns = stock_df.columns.get_level_values(0)
+        stock_df = stock_df.dropna(how="all")
+
+        _throttle()
+        spy_df = yf.download("SPY", period="1y", progress=False)
+        if spy_df is not None and not spy_df.empty:
+            if isinstance(spy_df.columns, pd.MultiIndex):
+                spy_df.columns = spy_df.columns.get_level_values(0)
+        else:
+            spy_df = None
 
         if len(stock_df) < 60:
             result["error"] = "Not enough price history (need 60+ days)"
