@@ -23,7 +23,7 @@ from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary, get_sector_heatmap
 from analysis.news_sentiment import get_market_news
 from analysis.ai_analyst import answer_question
-from analysis.quant_engine import generate_quant_picks, detect_market_regime
+from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics
@@ -431,6 +431,55 @@ scheduler.add_job(
     misfire_grace_time=3600,
 )
 
+# --- PRE-MARKET INTELLIGENCE SCAN (6:30am ET) ---
+# Runs 1 hour before first trade cycle to check overnight futures,
+# global markets, weekend news impact, and Bitcoin (24/7 risk gauge).
+# This ensures the 7:30am trade cycle has fresh overnight data.
+def _premarket_scan():
+    """
+    Pre-market intelligence scan — wakes up early to check what
+    happened overnight and over the weekend. Updates the overnight
+    cache so the first trade cycle of the day is smarter.
+    """
+    try:
+        logger.warning("PRE-MARKET SCAN starting — checking overnight futures, global markets, Bitcoin")
+        intel = scan_overnight_intelligence()
+        logger.warning(
+            f"PRE-MARKET SCAN complete: {intel['futures_sentiment']} | "
+            f"gap={intel['overnight_gap_pct']:+.2f}% | "
+            f"weekend_shift={intel['weekend_shift_detected']} | "
+            f"signals={len(intel['signals'])}"
+        )
+        if intel["weekend_shift_detected"]:
+            logger.warning("WEEKEND SHIFT DETECTED — adjusting Monday strategy accordingly")
+    except Exception as e:
+        logger.error(f"Pre-market scan error: {e}")
+
+scheduler.add_job(
+    _premarket_scan,
+    "cron",
+    hour=6,
+    minute=30,
+    id="premarket_scan",
+    name="Pre-Market Intelligence Scan",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
+# Also run pre-market scan on Sundays at 8pm ET (futures open Sunday 6pm ET)
+# This catches weekend news before Monday
+scheduler.add_job(
+    _premarket_scan,
+    "cron",
+    day_of_week="sun",
+    hour=20,
+    minute=0,
+    id="sunday_premarket",
+    name="Sunday Evening Pre-Market Scan",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
 scheduler.start()
 auto_trade_stats["started_at"] = dt.now().isoformat()
 auto_trade_stats["status"] = "running"
@@ -712,10 +761,22 @@ def auto_trading_status(request: Request):
     except Exception:
         pass
 
+    # Get latest overnight intel (cached, no extra API calls)
+    try:
+        overnight = scan_overnight_intelligence()
+        overnight_summary = {
+            "futures_sentiment": overnight.get("futures_sentiment", "unknown"),
+            "overnight_gap_pct": overnight.get("overnight_gap_pct", 0),
+            "weekend_shift_detected": overnight.get("weekend_shift_detected", False),
+        }
+    except Exception:
+        overnight_summary = {"futures_sentiment": "unknown"}
+
     return {
         **auto_trade_stats,
         "next_scheduled_run": next_run,
-        "schedule": "Every hour (7:30am-7:30pm ET)",
+        "schedule": "Every hour (7:30am-7:30pm ET) + 6:30am pre-market scan + Sunday 8pm scan",
+        "overnight_intel": overnight_summary,
         "recent_activity": auto_trade_log[-20:],  # Last 20 cycles
     }
 
@@ -786,6 +847,29 @@ def paper_backtest(request: Request):
     except Exception as e:
         logger.error(f"Backtest error: {e}")
         raise HTTPException(status_code=500, detail="Failed to run backtest")
+
+
+@app.get("/api/overnight-intel")
+def overnight_intel(request: Request):
+    """Get overnight/pre-market intelligence — futures, global markets, weekend shifts."""
+    check_rate_limit(request.client.host)
+    try:
+        return scan_overnight_intelligence()
+    except Exception as e:
+        logger.error(f"Overnight intel error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get overnight intelligence")
+
+
+@app.get("/api/mistake-analysis")
+def mistake_analysis(request: Request):
+    """Get analysis of past trading mistakes and what the system learned."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.learner import analyze_mistakes
+        return analyze_mistakes()
+    except Exception as e:
+        logger.error(f"Mistake analysis error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to analyze mistakes")
 
 
 @app.get("/api/system-intelligence")

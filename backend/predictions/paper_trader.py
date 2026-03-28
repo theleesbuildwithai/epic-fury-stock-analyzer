@@ -476,6 +476,19 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     vix_multiplier = _get_vix_scale()
     logger.info(f"VIX position size multiplier: {vix_multiplier}")
 
+    # --- LEARN FROM MISTAKES: Apply corrections from past losing trades ---
+    try:
+        from predictions.learner import get_mistake_adjustments
+        mistake_adj = get_mistake_adjustments()
+        logger.info(f"Mistake adjustments loaded: {len(mistake_adj.get('sector_penalties', {}))} sector penalties, "
+                     f"{len(mistake_adj.get('blocked_combos', []))} blocked combos")
+    except Exception:
+        mistake_adj = {"sector_penalties": {}, "blocked_combos": [], "confidence_cap": 95, "tighten_stops": False}
+
+    # --- OVERNIGHT INTELLIGENCE: Apply pre-market position sizing ---
+    overnight = quant_picks.get("overnight", {})
+    overnight_size_mod = overnight.get("position_size_modifier", 1.0) if overnight else 1.0
+
     if available_slots > 0 and cash > 1000:
         # REGIME-AWARE PICK SELECTION
         # In BEAR: prioritize shorts heavily, limit longs
@@ -584,6 +597,34 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     })
                     continue
 
+            # MISTAKE LEARNING: Penalize sectors we've lost money in
+            pick_sector = pick.get("sector", "Unknown")
+            sector_penalty = mistake_adj.get("sector_penalties", {}).get(pick_sector, 0)
+            if sector_penalty != 0:
+                pick["confidence"] = max(15, pick["confidence"] + sector_penalty)
+                if pick["confidence"] < MIN_CONFIDENCE:
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": f"Learned mistake: {pick_sector} sector has high loss rate",
+                    })
+                    continue
+
+            # MISTAKE LEARNING: Block bad regime/direction combos
+            combo_key = f"{regime}_{direction.upper()}"
+            if combo_key in mistake_adj.get("blocked_combos", []):
+                # Don't fully block — just heavily penalize confidence
+                pick["confidence"] = max(15, pick["confidence"] - 15)
+                if pick["confidence"] < MIN_CONFIDENCE:
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": f"Learned mistake: {direction} in {regime} regime has high loss rate",
+                    })
+                    continue
+
+            # MISTAKE LEARNING: Cap max confidence if system has been overconfident
+            conf_cap = mistake_adj.get("confidence_cap", 95)
+            pick["confidence"] = min(pick["confidence"], conf_cap)
+
             # Check sector concentration
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
             if sector_counts.get(sector_key, 0) >= 5:
@@ -609,7 +650,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 size_pct = 0.03 if direction == "long" else 0.015
             else:
                 size_pct = POSITION_SIZE_PCT
-            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier
+            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
@@ -639,6 +680,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 short_stop = STOP_LOSS_PCT
                 long_target = 1.15
                 short_target = 0.85
+
+            # MISTAKE LEARNING: Tighten stops if we've been holding losers too long
+            if mistake_adj.get("tighten_stops"):
+                long_stop = max(0.03, long_stop * 0.7)   # 30% tighter
+                short_stop = max(0.03, short_stop * 0.7)
 
             if direction == "long":
                 stop_loss = pick.get("stop_loss") or round(price * (1 - long_stop), 2)

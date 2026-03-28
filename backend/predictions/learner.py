@@ -267,6 +267,189 @@ def auto_adjust_weights() -> dict:
     }
 
 
+def analyze_mistakes() -> dict:
+    """
+    Learn from past mistakes — the most important intelligence upgrade.
+
+    Analyzes every losing trade to find PATTERNS in what went wrong:
+      1. Bad sector timing (e.g., went long tech when yields were rising)
+      2. Wrong direction (longs in bear, shorts in bull)
+      3. Held too long (didn't cut losses fast enough)
+      4. Overconfident (high confidence but lost)
+      5. Correlated losses (multiple losses in same sector/timeframe)
+
+    Returns specific rules the system should follow to avoid repeating mistakes.
+    """
+    from predictions.models import get_closed_trades
+
+    closed = get_closed_trades(limit=500)
+    if not closed:
+        return {"lessons": [], "mistake_patterns": {}, "total_losses": 0}
+
+    losers = [t for t in closed if (t.get("pnl_pct", 0) or 0) < 0]
+    winners = [t for t in closed if (t.get("pnl_pct", 0) or 0) > 0]
+
+    if not losers:
+        return {"lessons": ["No losses yet — system is performing perfectly"], "total_losses": 0}
+
+    total = len(closed)
+    loss_count = len(losers)
+    avg_loss = float(np.mean([t.get("pnl_pct", 0) or 0 for t in losers]))
+    avg_win = float(np.mean([t.get("pnl_pct", 0) or 0 for t in winners])) if winners else 0
+    worst_loss = min([t.get("pnl_pct", 0) or 0 for t in losers])
+
+    lessons = []
+    mistake_patterns = {}
+
+    # --- Pattern 1: Sector-specific losses ---
+    sector_losses = {}
+    sector_wins = {}
+    for t in losers:
+        s = t.get("sector") or "Unknown"
+        sector_losses[s] = sector_losses.get(s, 0) + 1
+    for t in winners:
+        s = t.get("sector") or "Unknown"
+        sector_wins[s] = sector_wins.get(s, 0) + 1
+
+    bad_sectors = []
+    for sector, loss_n in sector_losses.items():
+        win_n = sector_wins.get(sector, 0)
+        total_sector = loss_n + win_n
+        if total_sector >= 3 and loss_n / total_sector > 0.65:
+            bad_sectors.append(sector)
+            lessons.append(
+                f"AVOID {sector}: {loss_n}/{total_sector} trades lost "
+                f"({round(loss_n / total_sector * 100)}% loss rate) — reduce confidence for this sector"
+            )
+    mistake_patterns["weak_sectors"] = bad_sectors
+
+    # --- Pattern 2: Direction mistakes by regime ---
+    regime_dir_losses = {}
+    regime_dir_total = {}
+    for t in closed:
+        regime = t.get("regime_at_entry") or "Unknown"
+        direction = t.get("direction") or "Unknown"
+        key = f"{regime}_{direction}"
+        regime_dir_total[key] = regime_dir_total.get(key, 0) + 1
+        if (t.get("pnl_pct", 0) or 0) < 0:
+            regime_dir_losses[key] = regime_dir_losses.get(key, 0) + 1
+
+    bad_combos = []
+    for key, loss_n in regime_dir_losses.items():
+        total_n = regime_dir_total.get(key, 1)
+        if total_n >= 3 and loss_n / total_n > 0.70:
+            bad_combos.append(key)
+            regime, direction = key.rsplit("_", 1)
+            lessons.append(
+                f"STOP going {direction} in {regime} regime: "
+                f"{loss_n}/{total_n} trades lost ({round(loss_n / total_n * 100)}%)"
+            )
+    mistake_patterns["bad_regime_direction_combos"] = bad_combos
+
+    # --- Pattern 3: Overconfidence analysis ---
+    high_conf_losses = [t for t in losers if (t.get("signal_score", 0) or 0) > 5]
+    if high_conf_losses and len(high_conf_losses) >= 3:
+        overconf_rate = len(high_conf_losses) / len(losers) * 100
+        lessons.append(
+            f"OVERCONFIDENCE DETECTED: {len(high_conf_losses)} high-confidence trades lost "
+            f"({overconf_rate:.0f}% of all losses) — reduce confidence threshold"
+        )
+        mistake_patterns["overconfidence_issue"] = True
+    else:
+        mistake_patterns["overconfidence_issue"] = False
+
+    # --- Pattern 4: Holding too long ---
+    long_hold_losses = []
+    quick_win_avg = []
+    for t in losers:
+        entry = t.get("entry_time")
+        exit_t = t.get("exit_time")
+        if entry and exit_t:
+            try:
+                from datetime import datetime as dt_class
+                e_time = dt_class.fromisoformat(entry) if isinstance(entry, str) else entry
+                x_time = dt_class.fromisoformat(exit_t) if isinstance(exit_t, str) else exit_t
+                hold_hours = (x_time - e_time).total_seconds() / 3600
+                if hold_hours > 48:  # Held more than 2 days
+                    long_hold_losses.append(hold_hours)
+            except Exception:
+                continue
+
+    if long_hold_losses and len(long_hold_losses) >= 3:
+        avg_hold = np.mean(long_hold_losses)
+        lessons.append(
+            f"CUT LOSSES FASTER: {len(long_hold_losses)} losing trades held for avg "
+            f"{avg_hold:.0f}hrs — consider tighter stop-loss or shorter hold period"
+        )
+        mistake_patterns["holding_too_long"] = True
+    else:
+        mistake_patterns["holding_too_long"] = False
+
+    # --- Pattern 5: Biggest individual mistakes ---
+    worst_trades = sorted(losers, key=lambda t: t.get("pnl_pct", 0) or 0)[:5]
+    worst_details = []
+    for t in worst_trades:
+        worst_details.append({
+            "ticker": t.get("ticker", "?"),
+            "direction": t.get("direction", "?"),
+            "pnl_pct": round(t.get("pnl_pct", 0) or 0, 2),
+            "sector": t.get("sector", "?"),
+            "regime": t.get("regime_at_entry", "?"),
+        })
+    mistake_patterns["worst_trades"] = worst_details
+
+    # --- Summary stats ---
+    return {
+        "total_trades": total,
+        "total_losses": loss_count,
+        "loss_rate": round(loss_count / total * 100, 1),
+        "avg_loss_pct": round(avg_loss, 2),
+        "avg_win_pct": round(avg_win, 2),
+        "win_loss_ratio": round(abs(avg_win / avg_loss), 2) if avg_loss != 0 else 0,
+        "worst_loss_pct": round(worst_loss, 2),
+        "lessons": lessons,
+        "mistake_patterns": mistake_patterns,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+def get_mistake_adjustments() -> dict:
+    """
+    Returns real-time adjustments based on learned mistakes.
+    Used by paper_trader to avoid repeating errors.
+
+    Returns:
+        dict with sector_penalties, regime_direction_blocks, confidence_cap
+    """
+    mistakes = analyze_mistakes()
+    adjustments = {
+        "sector_penalties": {},      # sector -> confidence penalty
+        "blocked_combos": [],        # ["BEAR_LONG", etc.] — combos to avoid
+        "confidence_cap": 95,        # max confidence (lower if overconfident)
+        "tighten_stops": False,      # if True, use tighter stop-loss
+    }
+
+    patterns = mistakes.get("mistake_patterns", {})
+
+    # Penalize weak sectors
+    for sector in patterns.get("weak_sectors", []):
+        adjustments["sector_penalties"][sector] = -10  # -10% confidence for bad sectors
+
+    # Don't completely block regime/direction combos, but heavily penalize
+    for combo in patterns.get("bad_regime_direction_combos", []):
+        adjustments["blocked_combos"].append(combo)
+
+    # Cap confidence if overconfident
+    if patterns.get("overconfidence_issue"):
+        adjustments["confidence_cap"] = 80
+
+    # Tighten stops if holding too long
+    if patterns.get("holding_too_long"):
+        adjustments["tighten_stops"] = True
+
+    return adjustments
+
+
 def generate_intelligence_report() -> dict:
     """
     System Intelligence Report — a comprehensive view of what the
@@ -340,6 +523,17 @@ def generate_intelligence_report() -> dict:
                 f"Struggling with {worst_sector} "
                 f"({sectors[worst_sector]['win_rate']}% win rate)"
             )
+
+    # Mistake analysis — learn from losses
+    mistake_analysis = analyze_mistakes()
+    report["mistake_analysis"] = mistake_analysis
+    for lesson in mistake_analysis.get("lessons", []):
+        weaknesses.append(lesson)
+    if mistake_analysis.get("win_loss_ratio", 0) > 1.5:
+        strengths.append(
+            f"Good risk/reward: wins avg {mistake_analysis['avg_win_pct']}% vs "
+            f"losses avg {mistake_analysis['avg_loss_pct']}%"
+        )
 
     # Regime insights
     regimes = regime_analysis.get("regimes", {})

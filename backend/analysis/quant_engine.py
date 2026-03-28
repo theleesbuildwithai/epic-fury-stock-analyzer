@@ -690,6 +690,241 @@ def get_macro_overlay() -> dict:
 
 
 # ============================================================
+#  2B. OVERNIGHT & PRE-MARKET INTELLIGENCE
+#  Detects weekend news impact, overnight futures shifts,
+#  and global market moves BEFORE the US opens.
+#  This is what separates smart funds from dumb money.
+# ============================================================
+
+_overnight_cache = {}
+_OVERNIGHT_CACHE_TTL = 300  # 5 min cache
+
+
+def scan_overnight_intelligence() -> dict:
+    """
+    Pre-market intelligence scanner — runs before first trade of the day.
+
+    Checks:
+      1. S&P 500 Futures (ES=F) — overnight direction of US market
+      2. Nasdaq Futures (NQ=F) — tech-heavy overnight signal
+      3. European markets (EZU ETF) — already trading before US open
+      4. Asian markets (EWJ Japan, FXI China) — closed by US open, shows overnight sentiment
+      5. US Dollar (UUP) — overnight dollar moves affect multinationals
+      6. Oil futures (CL=F) — overnight energy shifts
+      7. Gold (GC=F) — safe-haven demand overnight
+      8. Bitcoin (BTC-USD) — 24/7 risk sentiment proxy (trades weekends too)
+
+    Returns adjustment scores and signals the auto-trader uses to adapt.
+    """
+    now = time.time()
+    cache_key = "overnight_intel"
+    if cache_key in _overnight_cache and now - _overnight_cache[cache_key]["time"] < _OVERNIGHT_CACHE_TTL:
+        return _overnight_cache[cache_key]["data"]
+
+    intel = {
+        "futures_sentiment": "neutral",  # bullish / bearish / neutral
+        "overnight_gap_pct": 0.0,        # expected gap % at open
+        "global_risk_mood": "neutral",   # risk-on / risk-off / neutral
+        "weekend_shift_detected": False,
+        "signals": [],
+        "sector_adjustments": {},        # overnight-specific sector boosts/penalties
+        "confidence_modifier": 0,        # +/- applied to all trade confidence
+        "position_size_modifier": 1.0,   # multiply position sizes (0.5 = half size, 1.5 = bigger)
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    bullish_signals = 0
+    bearish_signals = 0
+
+    # --- 1. US Futures (ES=F for S&P, NQ=F for Nasdaq) ---
+    # These trade nearly 24/7 including Sunday evening — perfect for weekend shifts
+    try:
+        _throttle()
+        futures_df = yf.download(["ES=F", "NQ=F"], period="5d", progress=False, group_by="ticker")
+        if futures_df is not None and not futures_df.empty:
+            for sym, label in [("ES=F", "sp500_futures"), ("NQ=F", "nasdaq_futures")]:
+                try:
+                    if isinstance(futures_df.columns, pd.MultiIndex):
+                        closes = futures_df[(sym, "Close")].dropna().values.astype(float).flatten()
+                    else:
+                        continue
+                    if len(closes) >= 2:
+                        current = float(closes[-1])
+                        prev = float(closes[-2])
+                        change_pct = ((current / prev) - 1) * 100 if prev > 0 else 0
+
+                        intel[label] = {
+                            "price": round(current, 2),
+                            "change_pct": round(change_pct, 2),
+                        }
+
+                        if change_pct > 0.5:
+                            bullish_signals += 2
+                            intel["signals"].append(f"{label}: +{change_pct:.1f}% overnight (bullish)")
+                        elif change_pct > 0.2:
+                            bullish_signals += 1
+                            intel["signals"].append(f"{label}: +{change_pct:.1f}% overnight (mildly bullish)")
+                        elif change_pct < -0.5:
+                            bearish_signals += 2
+                            intel["signals"].append(f"{label}: {change_pct:.1f}% overnight (bearish)")
+                        elif change_pct < -0.2:
+                            bearish_signals += 1
+                            intel["signals"].append(f"{label}: {change_pct:.1f}% overnight (mildly bearish)")
+
+                        if sym == "ES=F":
+                            intel["overnight_gap_pct"] = round(change_pct, 2)
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"Overnight futures scan failed: {e}")
+
+    # --- 2. Global Markets (Europe + Asia) ---
+    # Shows what happened while the US was asleep
+    try:
+        _throttle()
+        global_df = yf.download(["EZU", "EWJ", "FXI"], period="5d", progress=False, group_by="ticker")
+        if global_df is not None and not global_df.empty:
+            for sym, region in [("EZU", "europe"), ("EWJ", "japan"), ("FXI", "china")]:
+                try:
+                    if isinstance(global_df.columns, pd.MultiIndex):
+                        closes = global_df[(sym, "Close")].dropna().values.astype(float).flatten()
+                    else:
+                        continue
+                    if len(closes) >= 2:
+                        current = float(closes[-1])
+                        prev = float(closes[-2])
+                        change_pct = ((current / prev) - 1) * 100 if prev > 0 else 0
+
+                        intel[f"global_{region}"] = {
+                            "change_pct": round(change_pct, 2),
+                        }
+
+                        if change_pct > 0.5:
+                            bullish_signals += 1
+                        elif change_pct < -0.5:
+                            bearish_signals += 1
+
+                        if abs(change_pct) > 1.0:
+                            intel["signals"].append(f"{region}: {change_pct:+.1f}% — significant move")
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"Global markets scan failed: {e}")
+
+    # --- 3. Bitcoin (24/7 risk sentiment — trades weekends) ---
+    # If BTC crashes over the weekend, Monday will likely be rough
+    try:
+        _throttle()
+        btc_df = yf.download("BTC-USD", period="5d", progress=False)
+        if btc_df is not None and len(btc_df) >= 2:
+            btc_closes = btc_df["Close"].values.astype(float).flatten()
+            btc_current = float(btc_closes[-1])
+            btc_prev = float(btc_closes[-2])
+            btc_change = ((btc_current / btc_prev) - 1) * 100 if btc_prev > 0 else 0
+
+            intel["bitcoin"] = {
+                "price": round(btc_current, 2),
+                "change_pct": round(btc_change, 2),
+            }
+
+            # BTC is a weekend risk gauge — big moves signal risk sentiment shift
+            if btc_change > 3:
+                bullish_signals += 1
+                intel["signals"].append(f"Bitcoin +{btc_change:.1f}% — risk-on weekend sentiment")
+            elif btc_change < -3:
+                bearish_signals += 2
+                intel["signals"].append(f"Bitcoin {btc_change:.1f}% — risk-off weekend sentiment")
+                intel["weekend_shift_detected"] = True
+            elif btc_change < -5:
+                bearish_signals += 3
+                intel["signals"].append(f"Bitcoin CRASH {btc_change:.1f}% — extreme risk-off, reduce exposure")
+                intel["weekend_shift_detected"] = True
+    except Exception as e:
+        logger.debug(f"Bitcoin overnight scan failed: {e}")
+
+    # --- 4. Safe Haven Check (Gold + Treasuries overnight) ---
+    try:
+        _throttle()
+        haven_df = yf.download(["GC=F", "TLT"], period="5d", progress=False, group_by="ticker")
+        if haven_df is not None and not haven_df.empty:
+            for sym, label in [("GC=F", "gold_overnight"), ("TLT", "bonds_overnight")]:
+                try:
+                    if isinstance(haven_df.columns, pd.MultiIndex):
+                        closes = haven_df[(sym, "Close")].dropna().values.astype(float).flatten()
+                    else:
+                        continue
+                    if len(closes) >= 2:
+                        current = float(closes[-1])
+                        prev = float(closes[-2])
+                        change_pct = ((current / prev) - 1) * 100 if prev > 0 else 0
+                        intel[label] = {"change_pct": round(change_pct, 2)}
+
+                        # Gold/bonds spiking = flight to safety = bearish for stocks
+                        if change_pct > 1.0:
+                            bearish_signals += 1
+                            intel["signals"].append(f"{label}: +{change_pct:.1f}% — flight to safety")
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"Safe haven overnight scan failed: {e}")
+
+    # --- Synthesize: Overall overnight sentiment ---
+    net = bullish_signals - bearish_signals
+
+    if net >= 4:
+        intel["futures_sentiment"] = "strong_bullish"
+        intel["confidence_modifier"] = 8
+        intel["position_size_modifier"] = 1.2
+        intel["signals"].append("OVERNIGHT VERDICT: Strong bullish — increase long exposure")
+    elif net >= 2:
+        intel["futures_sentiment"] = "bullish"
+        intel["confidence_modifier"] = 4
+        intel["position_size_modifier"] = 1.1
+        intel["signals"].append("OVERNIGHT VERDICT: Mildly bullish — favor longs")
+    elif net <= -4:
+        intel["futures_sentiment"] = "strong_bearish"
+        intel["confidence_modifier"] = -8
+        intel["position_size_modifier"] = 0.7
+        intel["signals"].append("OVERNIGHT VERDICT: Strong bearish — reduce exposure, favor shorts")
+        intel["weekend_shift_detected"] = True
+    elif net <= -2:
+        intel["futures_sentiment"] = "bearish"
+        intel["confidence_modifier"] = -4
+        intel["position_size_modifier"] = 0.85
+        intel["signals"].append("OVERNIGHT VERDICT: Mildly bearish — caution on longs")
+    else:
+        intel["futures_sentiment"] = "neutral"
+        intel["confidence_modifier"] = 0
+        intel["position_size_modifier"] = 1.0
+        intel["signals"].append("OVERNIGHT VERDICT: Neutral — no significant overnight shifts")
+
+    # Sector-specific overnight adjustments
+    gap = intel["overnight_gap_pct"]
+    sector_adj = {}
+    if gap > 0.5:
+        # Gap up: favor growth, reduce defensives
+        sector_adj["Technology"] = 0.5
+        sector_adj["Consumer Discretionary"] = 0.3
+        sector_adj["Utilities"] = -0.3
+        sector_adj["Consumer Staples"] = -0.2
+    elif gap < -0.5:
+        # Gap down: favor defensives, reduce growth
+        sector_adj["Technology"] = -0.5
+        sector_adj["Consumer Discretionary"] = -0.5
+        sector_adj["Healthcare"] = 0.3
+        sector_adj["Utilities"] = 0.3
+        sector_adj["Consumer Staples"] = 0.3
+    intel["sector_adjustments"] = sector_adj
+
+    intel["bullish_signals"] = bullish_signals
+    intel["bearish_signals"] = bearish_signals
+
+    _overnight_cache[cache_key] = {"data": intel, "time": now}
+    logger.warning(f"OVERNIGHT INTEL: {intel['futures_sentiment']} | gap={gap:+.2f}% | bull={bullish_signals} bear={bearish_signals}")
+    return intel
+
+
+# ============================================================
 #  3. MULTI-FACTOR COMPOSITE SCORING
 # ============================================================
 
@@ -1392,6 +1627,19 @@ def generate_quant_picks() -> dict:
         # Step 2: Macro overlay
         macro = get_macro_overlay()
 
+        # Step 2B: Overnight/pre-market intelligence
+        # Detects weekend news shifts, futures gaps, global market moves
+        overnight = scan_overnight_intelligence()
+
+        # Apply overnight sector adjustments to macro overlay
+        for sector, adj in overnight.get("sector_adjustments", {}).items():
+            if sector in macro.get("sector_adjustments", {}):
+                macro["sector_adjustments"][sector] = round(
+                    macro["sector_adjustments"][sector] + adj, 1
+                )
+            else:
+                macro["sector_adjustments"][sector] = adj
+
         # Step 3: Batch download price data
         # Split universe into 4 batches to avoid Yahoo Finance limits (200+ stocks)
         batch_size = len(QUANT_UNIVERSE) // 4 + 1
@@ -1448,6 +1696,24 @@ def generate_quant_picks() -> dict:
         top_longs = long_picks[:30]
         top_shorts = short_picks[:20]
 
+        # Step 5B: Apply overnight confidence modifier to all picks
+        # If futures tanked overnight, reduce long confidence; if bullish, boost it
+        overnight_mod = overnight.get("confidence_modifier", 0)
+        if overnight_mod != 0:
+            for pick in top_longs:
+                pick["confidence"] = max(15, min(95, pick["confidence"] + overnight_mod))
+                if overnight_mod > 0:
+                    pick["reasons"].append(f"Overnight bullish (+{overnight_mod}% confidence)")
+                else:
+                    pick["reasons"].append(f"Overnight bearish ({overnight_mod}% confidence)")
+            for pick in top_shorts:
+                # Shorts benefit from bearish overnight, hurt by bullish
+                pick["confidence"] = max(15, min(95, pick["confidence"] - overnight_mod))
+                if overnight_mod < 0:
+                    pick["reasons"].append(f"Overnight bearish — shorts favored (+{abs(overnight_mod)}%)")
+                elif overnight_mod > 0:
+                    pick["reasons"].append(f"Overnight bullish — shorts less favored (-{overnight_mod}%)")
+
         # Step 6: Check earnings proximity for top picks
         # (only for top picks to minimize API calls)
         for pick in (top_longs[:5] + top_shorts[:3]):
@@ -1457,7 +1723,7 @@ def generate_quant_picks() -> dict:
                 penalty = earnings["confidence_penalty"]
                 pick["confidence"] = max(20, pick["confidence"] - penalty)
                 pick["reasons"].append(
-                    f"⚠️ Earnings in {earnings['days_until_earnings']} days — confidence reduced"
+                    f"Earnings in {earnings['days_until_earnings']} days — confidence reduced"
                 )
 
         # Add rank
@@ -1471,6 +1737,7 @@ def generate_quant_picks() -> dict:
         return {
             "regime": regime,
             "macro": macro,
+            "overnight": overnight,
             "long_picks": top_longs,
             "short_picks": top_shorts,
             "neutral_count": len(neutral),
