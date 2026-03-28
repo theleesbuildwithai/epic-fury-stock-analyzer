@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import os, re, logging, time, threading
+import os, re, logging, time, threading, json
 import pandas as pd
 from collections import defaultdict
 from datetime import datetime as dt
@@ -946,8 +946,8 @@ def watchlist_analysis(request: Request, ticker: str):
 
 
 @app.get("/api/watchlist-backtest")
-def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo"):
-    """Portfolio visualizer — backtest watchlist stocks, show returns and correlations."""
+def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo", add_dates: str = ""):
+    """Portfolio visualizer — returns since added to watchlist, correlations, risk metrics."""
     check_rate_limit(request.client.host)
     if not tickers:
         raise HTTPException(status_code=400, detail="No tickers provided")
@@ -958,29 +958,51 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo")
     if period not in ("1mo", "3mo", "6mo", "1y", "2y"):
         period = "6mo"
 
+    # Parse add dates from frontend (when user added each stock to watchlist)
+    stock_add_dates = {}
+    if add_dates:
+        try:
+            stock_add_dates = json.loads(add_dates)
+        except Exception:
+            pass
+
     try:
         import yfinance as yf
         import numpy as np
+        from datetime import datetime as parse_dt
 
         _throttle()
-        df = yf.download(ticker_list, period=period, progress=False, group_by="ticker")
+        # Download enough history to cover the earliest add date
+        df = yf.download(ticker_list, period="2y", progress=False, group_by="ticker")
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="No data")
 
-        # Build returns matrix
+        # Build returns matrix — trim each stock to its add date
         returns_data = {}
         price_series = {}
         for sym in ticker_list:
             try:
                 if isinstance(df.columns, pd.MultiIndex) and len(ticker_list) > 1:
                     if sym in df.columns.get_level_values(0):
-                        closes = df[sym]["Close"].dropna().values.astype(float).flatten()
+                        sym_df = df[sym]["Close"].dropna()
                     else:
                         continue
                 else:
-                    closes = df["Close"].dropna().values.astype(float).flatten()
+                    sym_df = df["Close"].dropna()
 
-                if len(closes) < 20:
+                # Trim to add date if available
+                if sym in stock_add_dates and stock_add_dates[sym]:
+                    try:
+                        add_date = parse_dt.fromisoformat(stock_add_dates[sym].replace('Z', '+00:00'))
+                        add_date_naive = add_date.replace(tzinfo=None)
+                        # Filter to only data from add date onward
+                        sym_df = sym_df[sym_df.index >= pd.Timestamp(add_date_naive)]
+                    except Exception:
+                        pass
+
+                closes = sym_df.values.astype(float).flatten()
+
+                if len(closes) < 2:
                     continue
 
                 daily_rets = np.diff(closes) / closes[:-1]
@@ -1014,6 +1036,7 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo")
                 "sharpe_ratio": sharpe,
                 "max_drawdown": round(max_dd, 1),
                 "trading_days": len(rets),
+                "days_held": len(rets),
             }
 
         # Correlation matrix

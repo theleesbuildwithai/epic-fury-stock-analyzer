@@ -138,9 +138,12 @@ export default function Watchlist() {
   const fetchBacktest = async () => {
     const tickers = watchlist.map(s => s.ticker).join(',')
     if (!tickers) return
+    // Send add dates so backend calculates return since added to watchlist
+    const addDates = {}
+    watchlist.forEach(s => { addDates[s.ticker] = s.added_at })
     setBacktestLoading(true)
     try {
-      const res = await fetch(`/api/watchlist-backtest?tickers=${tickers}&period=${backtestPeriod}`)
+      const res = await fetch(`/api/watchlist-backtest?tickers=${tickers}&period=${backtestPeriod}&add_dates=${encodeURIComponent(JSON.stringify(addDates))}`)
       if (res.ok) {
         const data = await res.json()
         setBacktestData(data)
@@ -323,7 +326,7 @@ export default function Watchlist() {
           <div className="flex items-center justify-between mb-5">
             <div>
               <h2 className="text-white font-bold text-lg">Portfolio Visualizer</h2>
-              <p className="text-neutral-500 text-xs mt-1">Backtest returns, correlations, and risk metrics</p>
+              <p className="text-neutral-500 text-xs mt-1">Returns since added, correlations, and risk metrics</p>
             </div>
             <div className="flex items-center gap-2">
               {['1mo', '3mo', '6mo', '1y', '2y'].map(p => (
@@ -360,7 +363,7 @@ export default function Watchlist() {
                 <p className="text-neutral-500 text-xs uppercase tracking-wider mb-3">Equal-Weight Portfolio</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <div>
-                    <p className="text-neutral-500 text-[10px]">{backtestPeriod.toUpperCase()} Return</p>
+                    <p className="text-neutral-500 text-[10px]">Return Since Added</p>
                     <p className={`text-lg font-bold font-mono ${
                       backtestData.portfolio_stats.total_return >= 0 ? 'text-green-400' : 'text-red-400'
                     }`}>
@@ -399,7 +402,7 @@ export default function Watchlist() {
                     <thead>
                       <tr className="border-b border-neutral-800">
                         <th className="text-left text-neutral-500 text-[10px] py-2 px-3">TICKER</th>
-                        <th className="text-right text-neutral-500 text-[10px] py-2 px-3">{backtestPeriod.toUpperCase()} RETURN</th>
+                        <th className="text-right text-neutral-500 text-[10px] py-2 px-3">RETURN SINCE ADDED</th>
                         <th className="text-right text-neutral-500 text-[10px] py-2 px-3">ANN. VOL</th>
                         <th className="text-right text-neutral-500 text-[10px] py-2 px-3">SHARPE</th>
                         <th className="text-right text-neutral-500 text-[10px] py-2 px-3">MAX DD</th>
