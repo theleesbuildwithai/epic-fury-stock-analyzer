@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import os, re, logging, time, threading
+import pandas as pd
 from collections import defaultdict
 from datetime import datetime as dt
 
@@ -23,7 +24,7 @@ from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary, get_sector_heatmap
 from analysis.news_sentiment import get_market_news
 from analysis.ai_analyst import answer_question
-from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence
+from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence, analyze_watchlist_stock, _throttle
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
 from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics
@@ -928,6 +929,138 @@ def chart_data(request: Request, ticker: str, period: str = "1y"):
     except Exception as e:
         logger.error(f"Chart data error for {clean_ticker}: {e}")
         raise HTTPException(status_code=500, detail="Failed to get chart data")
+
+
+@app.get("/api/watchlist-analysis/{ticker}")
+def watchlist_analysis(request: Request, ticker: str):
+    """Run compressed quant analysis on a single watchlist stock.
+    Returns: signal, confidence, factors, technicals, macro impact — all in one call."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    try:
+        result = analyze_watchlist_stock(clean_ticker)
+        return result
+    except Exception as e:
+        logger.error(f"Watchlist analysis error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Analysis failed")
+
+
+@app.get("/api/watchlist-backtest")
+def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo"):
+    """Portfolio visualizer — backtest watchlist stocks, show returns and correlations."""
+    check_rate_limit(request.client.host)
+    if not tickers:
+        raise HTTPException(status_code=400, detail="No tickers provided")
+
+    ticker_list = [validate_ticker(t.strip()) for t in tickers.split(",") if t.strip()][:20]
+    if not ticker_list:
+        raise HTTPException(status_code=400, detail="No valid tickers")
+    if period not in ("1mo", "3mo", "6mo", "1y", "2y"):
+        period = "6mo"
+
+    try:
+        import yfinance as yf
+        import numpy as np
+
+        _throttle()
+        df = yf.download(ticker_list, period=period, progress=False, group_by="ticker")
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail="No data")
+
+        # Build returns matrix
+        returns_data = {}
+        price_series = {}
+        for sym in ticker_list:
+            try:
+                if isinstance(df.columns, pd.MultiIndex) and len(ticker_list) > 1:
+                    if sym in df.columns.get_level_values(0):
+                        closes = df[sym]["Close"].dropna().values.astype(float).flatten()
+                    else:
+                        continue
+                else:
+                    closes = df["Close"].dropna().values.astype(float).flatten()
+
+                if len(closes) < 20:
+                    continue
+
+                daily_rets = np.diff(closes) / closes[:-1]
+                returns_data[sym] = daily_rets
+                # Normalize to 100 for chart
+                price_series[sym] = (closes / closes[0] * 100).tolist()
+            except Exception:
+                continue
+
+        if not returns_data:
+            raise HTTPException(status_code=404, detail="No valid data for tickers")
+
+        # Calculate stats per stock
+        stock_stats = {}
+        for sym, rets in returns_data.items():
+            total_ret = float((np.prod(1 + rets) - 1) * 100)
+            ann_ret = float(total_ret * (252 / len(rets))) if len(rets) > 0 else 0
+            ann_vol = float(np.std(rets) * np.sqrt(252) * 100)
+            sharpe = round(ann_ret / ann_vol, 2) if ann_vol > 0 else 0
+            max_dd = 0
+            peak = 1.0
+            for r in rets:
+                peak = max(peak, peak * (1 + r))
+                dd = (peak * (1 + r) - peak) / peak * 100
+                max_dd = min(max_dd, dd)
+
+            stock_stats[sym] = {
+                "total_return": round(total_ret, 2),
+                "annualized_return": round(ann_ret, 1),
+                "annualized_vol": round(ann_vol, 1),
+                "sharpe_ratio": sharpe,
+                "max_drawdown": round(max_dd, 1),
+                "trading_days": len(rets),
+            }
+
+        # Correlation matrix
+        symbols = list(returns_data.keys())
+        min_len = min(len(returns_data[s]) for s in symbols)
+        corr_matrix = {}
+        for i, s1 in enumerate(symbols):
+            corr_matrix[s1] = {}
+            for j, s2 in enumerate(symbols):
+                r1 = returns_data[s1][-min_len:]
+                r2 = returns_data[s2][-min_len:]
+                corr = float(np.corrcoef(r1, r2)[0, 1])
+                corr_matrix[s1][s2] = round(corr, 3)
+
+        # Equal-weight portfolio performance
+        if len(symbols) >= 2:
+            port_rets = np.zeros(min_len)
+            for sym in symbols:
+                port_rets += returns_data[sym][-min_len:] / len(symbols)
+            port_total = float((np.prod(1 + port_rets) - 1) * 100)
+            port_vol = float(np.std(port_rets) * np.sqrt(252) * 100)
+            port_sharpe = round((port_total * 252 / min_len) / port_vol, 2) if port_vol > 0 else 0
+            portfolio_stats = {
+                "total_return": round(port_total, 2),
+                "annualized_vol": round(port_vol, 1),
+                "sharpe_ratio": port_sharpe,
+                "diversification_benefit": round(
+                    np.mean([stock_stats[s]["annualized_vol"] for s in symbols]) - port_vol, 1
+                ),
+            }
+        else:
+            portfolio_stats = stock_stats.get(symbols[0], {})
+
+        return {
+            "tickers": symbols,
+            "period": period,
+            "stock_stats": stock_stats,
+            "correlation_matrix": corr_matrix,
+            "portfolio_stats": portfolio_stats,
+            "price_series": price_series,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        raise HTTPException(status_code=500, detail="Backtest failed")
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

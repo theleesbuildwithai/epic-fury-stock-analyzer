@@ -1760,6 +1760,244 @@ def generate_quant_picks() -> dict:
     return _get_cached("quant_picks", fetch, ttl=900)  # 15 min cache
 
 
+def analyze_watchlist_stock(symbol: str) -> dict:
+    """
+    Run compressed quant analysis on a single stock — same intelligence
+    as the hedge fund engine, but for any ticker (not just our universe).
+
+    Returns a compact report card:
+      - Composite score, direction, confidence
+      - Key factor breakdown (momentum, value, quality, RSI, volume)
+      - Market regime context
+      - Macro sector impact
+      - Earnings proximity
+      - Signal (STRONG BUY / BUY / HOLD / SELL / STRONG SELL)
+    """
+    cache_key = f"watchlist_analysis_{symbol}"
+    cached = _quant_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 600:  # 10 min cache
+        return cached["data"]
+
+    result = {
+        "symbol": symbol,
+        "analyzed": False,
+        "error": None,
+    }
+
+    try:
+        # Get regime and macro context (cached)
+        regime = detect_market_regime()
+        macro = get_macro_overlay()
+
+        # Download 1 year of price data for this stock + SPY benchmark
+        _throttle()
+        df = yf.download([symbol, "SPY"], period="1y", progress=False, group_by="ticker")
+
+        if df is None or df.empty:
+            result["error"] = "No price data available"
+            return result
+
+        # Extract stock data
+        try:
+            if isinstance(df.columns, pd.MultiIndex):
+                if symbol in df.columns.get_level_values(0):
+                    stock_df = df[symbol].dropna(how="all")
+                else:
+                    result["error"] = "Ticker not found"
+                    return result
+            else:
+                stock_df = df
+        except Exception:
+            result["error"] = "Could not parse price data"
+            return result
+
+        if len(stock_df) < 60:
+            result["error"] = "Not enough price history (need 60+ days)"
+            return result
+
+        closes = stock_df["Close"].values.astype(float).flatten()
+        volumes = stock_df["Volume"].values.astype(float).flatten()
+        price = float(closes[-1])
+
+        # --- Calculate all factors ---
+        # Momentum (20d & 60d returns)
+        ret_20d = (closes[-1] / closes[-20] - 1) * 100 if len(closes) >= 20 else 0
+        ret_60d = (closes[-1] / closes[-60] - 1) * 100 if len(closes) >= 60 else 0
+        momentum = (ret_20d * 0.6 + ret_60d * 0.4)
+
+        # RSI-14
+        deltas = np.diff(closes[-15:])
+        gains = np.mean([d for d in deltas if d > 0]) if any(d > 0 for d in deltas) else 0.001
+        losses = np.mean([abs(d) for d in deltas if d < 0]) if any(d < 0 for d in deltas) else 0.001
+        rs = gains / losses if losses > 0 else 100
+        rsi14 = 100 - (100 / (1 + rs))
+
+        # RSI-2 (mean reversion signal)
+        deltas2 = np.diff(closes[-3:])
+        gains2 = np.mean([d for d in deltas2 if d > 0]) if any(d > 0 for d in deltas2) else 0.001
+        losses2 = np.mean([abs(d) for d in deltas2 if d < 0]) if any(d < 0 for d in deltas2) else 0.001
+        rs2 = gains2 / losses2 if losses2 > 0 else 100
+        rsi2 = 100 - (100 / (1 + rs2))
+
+        # Volatility (60d annualized)
+        daily_rets = np.diff(closes[-60:]) / closes[-61:-1] if len(closes) >= 61 else np.diff(closes) / closes[:-1]
+        vol_60d = float(np.std(daily_rets) * np.sqrt(252) * 100)
+
+        # Volume trend (20d avg vs 60d avg)
+        vol_20d_avg = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0
+        vol_60d_avg = float(np.mean(volumes[-60:])) if len(volumes) >= 60 else vol_20d_avg
+        vol_ratio = (vol_20d_avg / vol_60d_avg) if vol_60d_avg > 0 else 1.0
+
+        # EMAs
+        def ema(data, span):
+            return float(pd.Series(data).ewm(span=span, adjust=False).mean().iloc[-1])
+        ema_9 = ema(closes, 9)
+        ema_21 = ema(closes, 21)
+        ema_50 = ema(closes, 50) if len(closes) >= 50 else ema_21
+        sma_200 = float(np.mean(closes[-200:])) if len(closes) >= 200 else float(np.mean(closes))
+
+        # Bollinger Bands
+        sma_20 = float(np.mean(closes[-20:]))
+        std_20 = float(np.std(closes[-20:]))
+        bb_upper = sma_20 + 2 * std_20
+        bb_lower = sma_20 - 2 * std_20
+        bb_width = ((bb_upper - bb_lower) / sma_20) * 100 if sma_20 > 0 else 0
+        bb_position = ((price - bb_lower) / (bb_upper - bb_lower)) * 100 if (bb_upper - bb_lower) > 0 else 50
+
+        # Smart money signal
+        recent_closes = closes[-20:]
+        recent_vols = volumes[-20:]
+        first_half_price = float(np.mean(recent_closes[:10]))
+        second_half_price = float(np.mean(recent_closes[10:]))
+        first_half_vol = float(np.mean(recent_vols[:10]))
+        second_half_vol = float(np.mean(recent_vols[10:]))
+        price_dir = "up" if second_half_price > first_half_price else "down"
+        vol_dir = "up" if second_half_vol > first_half_vol else "down"
+
+        if price_dir == "down" and vol_dir == "down":
+            smart_money = "Accumulation (bullish)"
+        elif price_dir == "up" and vol_dir == "down":
+            smart_money = "Distribution (bearish)"
+        elif price_dir == "up" and vol_dir == "up":
+            smart_money = "Confirmed Uptrend"
+        else:
+            smart_money = "Confirmed Downtrend"
+
+        # Composite score (simplified — can't z-score a single stock, use raw signals)
+        score = 0
+        if momentum > 5: score += 2
+        elif momentum > 0: score += 1
+        elif momentum < -5: score -= 2
+        elif momentum < 0: score -= 1
+
+        if rsi14 < 30: score += 2  # oversold
+        elif rsi14 < 40: score += 1
+        elif rsi14 > 70: score -= 2  # overbought
+        elif rsi14 > 60: score -= 1
+
+        if vol_ratio > 1.3: score += 1  # rising volume
+        elif vol_ratio < 0.7: score -= 1
+
+        if price > ema_50: score += 1  # above 50 EMA
+        else: score -= 1
+
+        if price > sma_200: score += 1  # above 200 SMA
+        else: score -= 1
+
+        if bb_position < 20: score += 1  # near lower band
+        elif bb_position > 80: score -= 1  # near upper band
+
+        # Macro adjustment
+        sector = SECTOR_MAP.get(symbol, "Unknown")
+        macro_adj = 0
+        if macro and "sector_adjustments" in macro:
+            macro_adj = macro["sector_adjustments"].get(sector, 0)
+            score += macro_adj
+
+        # Direction and signal
+        if score >= 4:
+            signal = "STRONG BUY"
+            direction = "LONG"
+            confidence = min(90, 60 + score * 4)
+        elif score >= 2:
+            signal = "BUY"
+            direction = "LONG"
+            confidence = min(75, 50 + score * 4)
+        elif score <= -4:
+            signal = "STRONG SELL"
+            direction = "SHORT"
+            confidence = min(90, 60 + abs(score) * 4)
+        elif score <= -2:
+            signal = "SELL"
+            direction = "SHORT"
+            confidence = min(75, 50 + abs(score) * 4)
+        else:
+            signal = "HOLD"
+            direction = "NEUTRAL"
+            confidence = 40
+
+        # Regime adjustment
+        current_regime = regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS"
+        if current_regime == "BEAR":
+            if direction == "LONG":
+                confidence = int(confidence * 0.7)
+            elif direction == "SHORT":
+                confidence = min(95, int(confidence * 1.1))
+        elif current_regime == "BULL":
+            if direction == "LONG":
+                confidence = min(95, int(confidence * 1.1))
+            elif direction == "SHORT":
+                confidence = int(confidence * 0.7)
+
+        # Build compact result
+        result = {
+            "symbol": symbol,
+            "analyzed": True,
+            "price": round(price, 2),
+            "sector": sector,
+            "signal": signal,
+            "direction": direction,
+            "confidence": confidence,
+            "composite_score": round(score, 1),
+            "regime": current_regime,
+            "regime_confidence": regime.get("confidence", 50) if regime else 50,
+            "factors": {
+                "momentum": {"value": round(momentum, 1), "label": f"{'+' if momentum > 0 else ''}{round(momentum, 1)}%"},
+                "rsi14": {"value": round(rsi14, 1), "label": "Oversold" if rsi14 < 30 else "Overbought" if rsi14 > 70 else "Neutral"},
+                "rsi2": {"value": round(rsi2, 1), "label": "Oversold" if rsi2 < 10 else "Overbought" if rsi2 > 90 else "Neutral"},
+                "volatility": {"value": round(vol_60d, 1), "label": f"{round(vol_60d, 1)}% ann."},
+                "volume_trend": {"value": round(vol_ratio, 2), "label": "Rising" if vol_ratio > 1.1 else "Falling" if vol_ratio < 0.9 else "Stable"},
+                "smart_money": {"value": 0, "label": smart_money},
+                "bb_position": {"value": round(bb_position, 0), "label": f"{round(bb_position, 0)}% (width: {round(bb_width, 1)}%)"},
+            },
+            "technicals": {
+                "ema_9": round(ema_9, 2),
+                "ema_21": round(ema_21, 2),
+                "ema_50": round(ema_50, 2),
+                "sma_200": round(sma_200, 2),
+                "bb_upper": round(bb_upper, 2),
+                "bb_lower": round(bb_lower, 2),
+                "above_200sma": price > sma_200,
+                "above_50ema": price > ema_50,
+                "ema_trend": "Bullish" if ema_9 > ema_21 > ema_50 else "Bearish" if ema_9 < ema_21 < ema_50 else "Mixed",
+            },
+            "macro_impact": macro_adj,
+            "returns": {
+                "1m": round(ret_20d, 1),
+                "3m": round(ret_60d, 1),
+            },
+        }
+
+        # Cache it
+        _quant_cache[cache_key] = {"data": result, "time": time.time()}
+        return result
+
+    except Exception as e:
+        logger.warning(f"Watchlist analysis failed for {symbol}: {e}")
+        result["error"] = str(e)
+        return result
+
+
 def get_signal_weights_safe() -> dict:
     """Get signal weights with fallback if DB not initialized."""
     try:
