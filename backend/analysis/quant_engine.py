@@ -1840,7 +1840,8 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         rsi2 = 100 - (100 / (1 + rs2))
 
         # Volatility (60d annualized)
-        daily_rets = np.diff(closes[-60:]) / closes[-61:-1] if len(closes) >= 61 else np.diff(closes) / closes[:-1]
+        window_60 = closes[-60:] if len(closes) >= 60 else closes
+        daily_rets = np.diff(window_60) / window_60[:-1]
         vol_60d = float(np.std(daily_rets) * np.sqrt(252) * 100)
 
         # Volume trend (20d avg vs 60d avg)
