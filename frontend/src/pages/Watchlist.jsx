@@ -59,7 +59,6 @@ export default function Watchlist() {
   const [expandedStock, setExpandedStock] = useState(null)
   const [backtestData, setBacktestData] = useState(null)
   const [backtestLoading, setBacktestLoading] = useState(false)
-  const [backtestPeriod, setBacktestPeriod] = useState('6mo')
   const [showBacktest, setShowBacktest] = useState(false)
 
   useEffect(() => {
@@ -143,7 +142,7 @@ export default function Watchlist() {
     watchlist.forEach(s => { addDates[s.ticker] = s.added_at })
     setBacktestLoading(true)
     try {
-      const res = await fetch(`/api/watchlist-backtest?tickers=${tickers}&period=${backtestPeriod}&add_dates=${encodeURIComponent(JSON.stringify(addDates))}`)
+      const res = await fetch(`/api/watchlist-backtest?tickers=${tickers}&add_dates=${encodeURIComponent(JSON.stringify(addDates))}`)
       if (res.ok) {
         const data = await res.json()
         setBacktestData(data)
@@ -328,28 +327,13 @@ export default function Watchlist() {
               <h2 className="text-white font-bold text-lg">Portfolio Visualizer</h2>
               <p className="text-neutral-500 text-xs mt-1">Returns since added, correlations, and risk metrics</p>
             </div>
-            <div className="flex items-center gap-2">
-              {['1mo', '3mo', '6mo', '1y', '2y'].map(p => (
-                <button
-                  key={p}
-                  onClick={() => { setBacktestPeriod(p); setTimeout(() => fetchBacktest(), 50) }}
-                  className={`px-3 py-1 text-xs font-mono rounded ${
-                    backtestPeriod === p
-                      ? 'bg-purple-500/30 text-purple-300 border border-purple-500/50'
-                      : 'bg-neutral-900 text-neutral-500 border border-neutral-800 hover:text-white'
-                  }`}
-                >
-                  {p}
-                </button>
-              ))}
-              <button
-                onClick={fetchBacktest}
-                disabled={backtestLoading}
-                className="px-3 py-1 text-xs bg-purple-500/20 text-purple-300 rounded hover:bg-purple-500/30 ml-2"
-              >
-                {backtestLoading ? 'Loading...' : 'Refresh'}
-              </button>
-            </div>
+            <button
+              onClick={fetchBacktest}
+              disabled={backtestLoading}
+              className="px-3 py-1.5 text-xs bg-purple-500/20 text-purple-300 rounded hover:bg-purple-500/30"
+            >
+              {backtestLoading ? 'Loading...' : 'Refresh'}
+            </button>
           </div>
 
           {backtestLoading && !backtestData && (
