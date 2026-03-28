@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 # Portfolio configuration
 INITIAL_CAPITAL = 100_000.0
 MAX_POSITIONS = 999  # No limit — only constrained by cash
-POSITION_SIZE_PCT = 0.04  # 4% of portfolio per position (allows ~25 positions with full capital)
-STOP_LOSS_PCT = 0.07  # 7% stop loss
+POSITION_SIZE_PCT = 0.02  # 2% per position — allows 40+ positions for massive diversification
+STOP_LOSS_PCT = 0.06  # 6% stop loss (tighter = less downside)
 DEFAULT_HOLD_DAYS = 30
 MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
 
@@ -129,8 +129,8 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
         result["max_corr"] = round(max_corr, 3)
         result["correlated_with"] = corr_ticker
 
-        # Block if correlation > 0.80 with any existing position
-        if max_corr > 0.80:
+        # Block if correlation > 0.90 with any existing position (loosened to allow more trades)
+        if max_corr > 0.90:
             result["correlated"] = True
 
     except Exception as e:
@@ -488,15 +488,15 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                            if p["confidence"] >= MIN_CONFIDENCE and p["symbol"] not in open_tickers]
 
         if regime == "BEAR":
-            # BEAR: Take ALL qualifying shorts first, then only top 2 longs (only the strongest)
-            # Boost short confidence by 10 to prioritize them
+            # BEAR: Take ALL qualifying shorts, plus top 8 longs (long-term conviction picks)
+            # A smart investor always has some long positions — long-term success is still success
             for p in short_candidates:
-                p["_adj_confidence"] = p["confidence"] + 15
+                p["_adj_confidence"] = p["confidence"] + 10
                 all_picks.append(p)
-            for p in long_candidates[:2]:  # max 2 longs in bear
-                p["_adj_confidence"] = p["confidence"] - 10  # penalize longs
+            for p in long_candidates[:8]:  # Keep 8 long-term conviction longs even in bear
+                p["_adj_confidence"] = p["confidence"] - 5  # slight penalty, but still allow them
                 all_picks.append(p)
-            logger.info(f"BEAR regime: {len(short_candidates)} shorts, {min(2, len(long_candidates))} longs selected")
+            logger.info(f"BEAR regime: {len(short_candidates)} shorts, {min(8, len(long_candidates))} longs selected")
         elif regime == "BULL":
             # BULL: Take ALL qualifying longs first, then only top 2 shorts
             for p in long_candidates:
@@ -537,7 +537,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 t.get("shares", 0) * t.get("entry_price", 0)
                 for t in get_open_trades() if t["ticker"] in open_tickers
             )
-            max_exposure = total_current_value * 0.85  # 85% max gross exposure
+            max_exposure = total_current_value * 0.92  # 92% max gross exposure — deploy more capital
             if gross_exposure >= max_exposure:
                 results["skipped"].append({
                     "symbol": symbol,
@@ -545,9 +545,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 break  # Stop opening more positions
 
-            # CONFIDENCE GATE: In BEAR only take high-conviction shorts
-            # and ultra-high-conviction longs (prevents mediocre trades)
-            if regime == "BEAR" and direction == "long" and pick["confidence"] < 55:
+            # CONFIDENCE GATE: In BEAR only take decent-conviction longs
+            # Long-term success matters — keep some conviction longs
+            if regime == "BEAR" and direction == "long" and pick["confidence"] < 45:
                 results["skipped"].append({
                     "symbol": symbol,
                     "reason": f"Low conviction long in BEAR ({pick['confidence']}%)",
@@ -567,7 +567,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
             # Check sector concentration
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
-            if sector_counts.get(sector_key, 0) >= 3:
+            if sector_counts.get(sector_key, 0) >= 5:
                 results["skipped"].append({
                     "symbol": symbol,
                     "reason": f"Sector concentration limit ({pick.get('sector')} {direction})",
@@ -580,13 +580,14 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 for t in get_open_trades()
                 if t["ticker"] in open_tickers
             )
-            # In BEAR: bigger shorts (5%), smaller longs (2.5%)
-            # In BULL: bigger longs (5%), smaller shorts (2.5%)
-            # SIDEWAYS: equal (4%)
+            # Regime-aware position sizing — 2% base for massive diversification
+            # In BEAR: 3% shorts (conviction), 1.5% longs (careful long-term plays)
+            # In BULL: 3% longs (conviction), 1.5% shorts (hedges)
+            # SIDEWAYS: 2% equal
             if regime == "BEAR":
-                size_pct = 0.05 if direction == "short" else 0.025
+                size_pct = 0.03 if direction == "short" else 0.015
             elif regime == "BULL":
-                size_pct = 0.05 if direction == "long" else 0.025
+                size_pct = 0.03 if direction == "long" else 0.015
             else:
                 size_pct = POSITION_SIZE_PCT
             position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier

@@ -14,14 +14,16 @@ export default function QuantDashboard() {
   const [intelligence, setIntelligence] = useState(null)
   const [loading, setLoading] = useState({})
   const [autoStatus, setAutoStatus] = useState(null)
+  const [queuedTrades, setQueuedTrades] = useState(null)
 
   useEffect(() => {
     fetchQuantPicks()
     fetchPortfolio()
     fetchIntelligence()
     fetchAutoStatus()
+    fetchQueuedTrades()
     // Refresh auto-trading status every 30s
-    const interval = setInterval(fetchAutoStatus, 30000)
+    const interval = setInterval(() => { fetchAutoStatus(); fetchQueuedTrades() }, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -61,6 +63,13 @@ export default function QuantDashboard() {
     try {
       const res = await fetch('/api/auto-trading-status')
       setAutoStatus(await res.json())
+    } catch { }
+  }
+
+  const fetchQueuedTrades = async () => {
+    try {
+      const res = await fetch('/api/queued-trades')
+      setQueuedTrades(await res.json())
     } catch { }
   }
 
@@ -108,8 +117,8 @@ export default function QuantDashboard() {
           </div>
           <div className="flex gap-4 mt-3 text-xs text-neutral-500">
             <span>🧠 10 Quant Factors</span>
-            <span>📊 100+ Stocks Analyzed</span>
-            <span>⚡ Trades Every 2 Hours</span>
+            <span>📊 200+ Stocks Analyzed</span>
+            <span>⚡ Trades Every Hour</span>
             <span>🔄 Self-Learning Weekly</span>
           </div>
         </div>
@@ -141,6 +150,7 @@ export default function QuantDashboard() {
           portfolio={portfolio} performance={performance}
           loading={loading.portfolio}
           autoStatus={autoStatus}
+          queuedTrades={queuedTrades}
         />
       )}
       {activeTab === 2 && (
@@ -293,7 +303,7 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 // TAB 2: PAPER PORTFOLIO
 // ============================================================
-function PaperPortfolioTab({ portfolio, performance, loading, autoStatus }) {
+function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queuedTrades }) {
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
 
   return (
@@ -331,7 +341,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus }) {
             </div>
             <div className="bg-neutral-900 rounded-lg p-3">
               <div className="text-neutral-500 text-xs">Schedule</div>
-              <div className="text-blue-400 font-bold text-sm">Every 2hrs</div>
+              <div className="text-blue-400 font-bold text-sm">Every 1hr</div>
             </div>
             <div className="bg-neutral-900 rounded-lg p-3">
               <div className="text-neutral-500 text-xs">Next Run</div>
@@ -350,8 +360,85 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus }) {
             </div>
           )}
           <p className="text-neutral-600 text-xs mt-2 italic">
-            The computer autonomously analyzes 100+ stocks and executes trades every 2 hours during market hours. No human intervention required.
+            The computer autonomously analyzes 200+ stocks and executes trades every hour during market hours. No human intervention required.
           </p>
+        </div>
+      )}
+
+      {/* Queued Trades — what the AI wants to trade next */}
+      {queuedTrades && queuedTrades.total_queued > 0 && (
+        <div className="bg-black border border-purple-500/30 rounded-xl p-5">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="w-3 h-3 rounded-full bg-purple-500 animate-pulse" />
+            <h3 className="text-white font-bold text-lg">Queued Trades</h3>
+            <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+              {queuedTrades.total_queued} PENDING
+            </span>
+            <span className="text-neutral-500 text-xs ml-auto">
+              {queuedTrades.regime} regime
+            </span>
+          </div>
+          <p className="text-neutral-500 text-xs mb-3">
+            The AI is waiting to execute these trades on the next cycle. These are signals the computer has identified but hasn't traded yet.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Queued Longs */}
+            {queuedTrades.queued_longs?.filter(t => t.status === 'queued').length > 0 && (
+              <div>
+                <h4 className="text-green-400 text-sm font-bold mb-2">
+                  LONG Queue ({queuedTrades.queued_longs.filter(t => t.status === 'queued').length})
+                </h4>
+                <div className="space-y-1">
+                  {queuedTrades.queued_longs.filter(t => t.status === 'queued').slice(0, 10).map(t => (
+                    <div key={t.symbol} className="flex items-center justify-between bg-neutral-900 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-bold text-sm">{t.symbol}</span>
+                        <span className="text-neutral-600 text-xs">{t.sector}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-neutral-400 font-mono text-xs">${t.price}</span>
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                          t.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
+                          t.confidence >= 50 ? 'bg-yellow-500/20 text-yellow-400' :
+                          'bg-neutral-500/20 text-neutral-400'
+                        }`}>
+                          {t.confidence}%
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Queued Shorts */}
+            {queuedTrades.queued_shorts?.filter(t => t.status === 'queued').length > 0 && (
+              <div>
+                <h4 className="text-red-400 text-sm font-bold mb-2">
+                  SHORT Queue ({queuedTrades.queued_shorts.filter(t => t.status === 'queued').length})
+                </h4>
+                <div className="space-y-1">
+                  {queuedTrades.queued_shorts.filter(t => t.status === 'queued').slice(0, 10).map(t => (
+                    <div key={t.symbol} className="flex items-center justify-between bg-neutral-900 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white font-bold text-sm">{t.symbol}</span>
+                        <span className="text-neutral-600 text-xs">{t.sector}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-neutral-400 font-mono text-xs">${t.price}</span>
+                        <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                          t.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
+                          t.confidence >= 50 ? 'bg-yellow-500/20 text-yellow-400' :
+                          'bg-neutral-500/20 text-neutral-400'
+                        }`}>
+                          {t.confidence}%
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

@@ -327,12 +327,12 @@ def _run_auto_trade_cycle():
 # Start the scheduler
 scheduler = BackgroundScheduler(timezone="US/Eastern")
 
-# Trade every 2 hours during extended market hours (7am-8pm ET)
-# This catches pre-market, market hours, and after-hours
+# Trade every hour during extended market hours (7am-7pm ET)
+# More frequent = more responsive to market moves = better returns
 scheduler.add_job(
     _run_auto_trade_cycle,
     "cron",
-    hour="7,9,11,13,15,17,19",
+    hour="7,8,9,10,11,12,13,14,15,16,17,18,19",
     minute=30,
     id="auto_trade_cycle",
     name="Autonomous Trading Cycle",
@@ -702,9 +702,48 @@ def auto_trading_status(request: Request):
     return {
         **auto_trade_stats,
         "next_scheduled_run": next_run,
-        "schedule": "Every 2 hours (7:30am-7:30pm ET)",
+        "schedule": "Every hour (7:30am-7:30pm ET)",
         "recent_activity": auto_trade_log[-20:],  # Last 20 cycles
     }
+
+
+@app.get("/api/queued-trades")
+def queued_trades(request: Request):
+    """Show what the AI is planning to trade next — the trades it's waiting to execute."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        portfolio = get_portfolio_state()
+        open_tickers = set(p["ticker"] for p in portfolio.get("positions", []))
+
+        queued_longs = [
+            {"symbol": p["symbol"], "direction": "LONG", "confidence": p["confidence"],
+             "score": p["composite_score"], "price": p["price"], "sector": p.get("sector"),
+             "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
+             "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
+            for p in picks.get("long_picks", [])
+            if p["confidence"] >= 35
+        ]
+        queued_shorts = [
+            {"symbol": p["symbol"], "direction": "SHORT", "confidence": p["confidence"],
+             "score": p["composite_score"], "price": p["price"], "sector": p.get("sector"),
+             "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
+             "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
+            for p in picks.get("short_picks", [])
+            if p["confidence"] >= 35
+        ]
+
+        return {
+            "queued_longs": queued_longs,
+            "queued_shorts": queued_shorts,
+            "total_queued": len([t for t in queued_longs + queued_shorts if t["status"] == "queued"]),
+            "already_held": len([t for t in queued_longs + queued_shorts if t["status"] == "already_held"]),
+            "next_trade_cycle": auto_trade_stats.get("last_run"),
+            "regime": picks.get("regime", {}).get("regime", "UNKNOWN"),
+        }
+    except Exception as e:
+        logger.error(f"Queued trades error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get queued trades")
 
 
 @app.post("/api/paper-trade/rebalance")

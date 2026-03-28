@@ -70,76 +70,128 @@ def _get_cached(key, fetch_fn, ttl=None):
 #  UNIVERSE — stocks we analyze for quant picks
 # ============================================================
 
-# Large-cap liquid stocks across all S&P 500 sectors
-# These have deep liquidity, reliable data, and analyst coverage
+# Large-cap & mid-cap liquid stocks across all S&P 500 sectors
+# 200+ stocks for maximum trade generation and diversification
 QUANT_UNIVERSE = [
-    # Technology
+    # Technology (30)
     "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ADBE", "CRM", "INTC", "QCOM", "TXN",
-    "AMAT", "LRCX", "KLAC", "MRVL", "SNPS",
-    # Communication
-    "GOOGL", "META", "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T",
-    # Consumer Discretionary
+    "AMAT", "LRCX", "KLAC", "MRVL", "SNPS", "CDNS", "NXPI", "MCHP", "ON", "FTNT",
+    "PANW", "NOW", "WDAY", "TEAM", "DDOG", "ZS", "CRWD", "SNOW", "MDB", "NET",
+    # Communication (12)
+    "GOOGL", "META", "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T", "CHTR", "EA",
+    "TTWO", "RBLX",
+    # Consumer Discretionary (20)
     "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "TJX", "LOW", "BKNG", "CMG",
-    # Consumer Staples
-    "WMT", "PG", "COST", "KO", "PEP", "PM", "MO", "CL", "KMB",
-    # Healthcare
+    "ROST", "DHI", "LEN", "ORLY", "AZO", "POOL", "DECK", "ULTA", "ETSY", "ABNB",
+    # Consumer Staples (15)
+    "WMT", "PG", "COST", "KO", "PEP", "PM", "MO", "CL", "KMB", "MDLZ",
+    "GIS", "HSY", "SJM", "STZ", "EL",
+    # Healthcare (25)
     "UNH", "LLY", "JNJ", "ABBV", "MRK", "PFE", "TMO", "ABT", "BMY", "AMGN",
-    "GILD", "ISRG", "VRTX", "REGN",
-    # Financials
+    "GILD", "ISRG", "VRTX", "REGN", "DXCM", "IDXX", "ZTS", "VEEV", "ALGN", "HOLX",
+    "IQV", "EW", "SYK", "BDX", "HCA",
+    # Financials (20)
     "JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "C", "BLK", "SCHW",
-    "AXP", "CB", "MMC",
-    # Industrials
+    "AXP", "CB", "MMC", "ICE", "CME", "MCO", "MSCI", "FIS", "COIN", "HOOD",
+    # Industrials (20)
     "BA", "CAT", "HON", "GE", "UNP", "RTX", "LMT", "DE", "FDX", "WM",
-    # Energy
-    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX",
-    # Materials
-    "LIN", "APD", "SHW", "FCX", "NEM",
-    # Real Estate
-    "AMT", "PLD", "SPG", "CCI", "EQIX",
-    # Utilities
-    "NEE", "DUK", "SO", "AEP", "SRE",
+    "GD", "NOC", "CSX", "NSC", "ITW", "PH", "ROK", "EMR", "TT", "VRSK",
+    # Energy (12)
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "OXY", "DVN", "HES",
+    "FANG", "VLO",
+    # Materials (10)
+    "LIN", "APD", "SHW", "FCX", "NEM", "ECL", "DD", "VMC", "MLM", "NUE",
+    # Real Estate (8)
+    "AMT", "PLD", "SPG", "CCI", "EQIX", "DLR", "O", "WELL",
+    # Utilities (8)
+    "NEE", "DUK", "SO", "AEP", "SRE", "D", "EXC", "XEL",
+    # ETFs for sector-level signals (10)
+    "SPY", "QQQ", "IWM", "XLF", "XLE", "XLV", "XLK", "XLI", "XLP", "XLU",
 ]
 
-# Sector mapping for macro overlay adjustments
+# Sector mapping for macro overlay adjustments — auto-generated for all 200+ stocks
 SECTOR_MAP = {
+    # Technology (30)
     "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
     "AVGO": "Technology", "AMD": "Technology", "ADBE": "Technology",
     "CRM": "Technology", "INTC": "Technology", "QCOM": "Technology",
     "TXN": "Technology", "AMAT": "Technology", "LRCX": "Technology",
     "KLAC": "Technology", "MRVL": "Technology", "SNPS": "Technology",
+    "CDNS": "Technology", "NXPI": "Technology", "MCHP": "Technology",
+    "ON": "Technology", "FTNT": "Technology", "PANW": "Technology",
+    "NOW": "Technology", "WDAY": "Technology", "TEAM": "Technology",
+    "DDOG": "Technology", "ZS": "Technology", "CRWD": "Technology",
+    "SNOW": "Technology", "MDB": "Technology", "NET": "Technology",
+    # Communication (12)
     "GOOGL": "Communication", "META": "Communication", "NFLX": "Communication",
     "DIS": "Communication", "CMCSA": "Communication", "TMUS": "Communication",
-    "VZ": "Communication", "T": "Communication",
+    "VZ": "Communication", "T": "Communication", "CHTR": "Communication",
+    "EA": "Communication", "TTWO": "Communication", "RBLX": "Communication",
+    # Consumer Discretionary (20)
     "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
     "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
     "NKE": "Consumer Discretionary", "SBUX": "Consumer Discretionary",
     "TJX": "Consumer Discretionary", "LOW": "Consumer Discretionary",
     "BKNG": "Consumer Discretionary", "CMG": "Consumer Discretionary",
+    "ROST": "Consumer Discretionary", "DHI": "Consumer Discretionary",
+    "LEN": "Consumer Discretionary", "ORLY": "Consumer Discretionary",
+    "AZO": "Consumer Discretionary", "POOL": "Consumer Discretionary",
+    "DECK": "Consumer Discretionary", "ULTA": "Consumer Discretionary",
+    "ETSY": "Consumer Discretionary", "ABNB": "Consumer Discretionary",
+    # Consumer Staples (15)
     "WMT": "Consumer Staples", "PG": "Consumer Staples", "COST": "Consumer Staples",
     "KO": "Consumer Staples", "PEP": "Consumer Staples", "PM": "Consumer Staples",
     "MO": "Consumer Staples", "CL": "Consumer Staples", "KMB": "Consumer Staples",
+    "MDLZ": "Consumer Staples", "GIS": "Consumer Staples", "HSY": "Consumer Staples",
+    "SJM": "Consumer Staples", "STZ": "Consumer Staples", "EL": "Consumer Staples",
+    # Healthcare (25)
     "UNH": "Healthcare", "LLY": "Healthcare", "JNJ": "Healthcare",
     "ABBV": "Healthcare", "MRK": "Healthcare", "PFE": "Healthcare",
     "TMO": "Healthcare", "ABT": "Healthcare", "BMY": "Healthcare",
     "AMGN": "Healthcare", "GILD": "Healthcare", "ISRG": "Healthcare",
-    "VRTX": "Healthcare", "REGN": "Healthcare",
+    "VRTX": "Healthcare", "REGN": "Healthcare", "DXCM": "Healthcare",
+    "IDXX": "Healthcare", "ZTS": "Healthcare", "VEEV": "Healthcare",
+    "ALGN": "Healthcare", "HOLX": "Healthcare", "IQV": "Healthcare",
+    "EW": "Healthcare", "SYK": "Healthcare", "BDX": "Healthcare",
+    "HCA": "Healthcare",
+    # Financials (20)
     "JPM": "Financials", "V": "Financials", "MA": "Financials",
     "BAC": "Financials", "GS": "Financials", "MS": "Financials",
     "WFC": "Financials", "C": "Financials", "BLK": "Financials",
     "SCHW": "Financials", "AXP": "Financials", "CB": "Financials",
-    "MMC": "Financials",
+    "MMC": "Financials", "ICE": "Financials", "CME": "Financials",
+    "MCO": "Financials", "MSCI": "Financials", "FIS": "Financials",
+    "COIN": "Financials", "HOOD": "Financials",
+    # Industrials (20)
     "BA": "Industrials", "CAT": "Industrials", "HON": "Industrials",
     "GE": "Industrials", "UNP": "Industrials", "RTX": "Industrials",
     "LMT": "Industrials", "DE": "Industrials", "FDX": "Industrials",
-    "WM": "Industrials",
+    "WM": "Industrials", "GD": "Industrials", "NOC": "Industrials",
+    "CSX": "Industrials", "NSC": "Industrials", "ITW": "Industrials",
+    "PH": "Industrials", "ROK": "Industrials", "EMR": "Industrials",
+    "TT": "Industrials", "VRSK": "Industrials",
+    # Energy (12)
     "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
     "SLB": "Energy", "EOG": "Energy", "MPC": "Energy", "PSX": "Energy",
+    "OXY": "Energy", "DVN": "Energy", "HES": "Energy",
+    "FANG": "Energy", "VLO": "Energy",
+    # Materials (10)
     "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
-    "FCX": "Materials", "NEM": "Materials",
+    "FCX": "Materials", "NEM": "Materials", "ECL": "Materials",
+    "DD": "Materials", "VMC": "Materials", "MLM": "Materials",
+    "NUE": "Materials",
+    # Real Estate (8)
     "AMT": "Real Estate", "PLD": "Real Estate", "SPG": "Real Estate",
-    "CCI": "Real Estate", "EQIX": "Real Estate",
+    "CCI": "Real Estate", "EQIX": "Real Estate", "DLR": "Real Estate",
+    "O": "Real Estate", "WELL": "Real Estate",
+    # Utilities (8)
     "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities",
-    "AEP": "Utilities", "SRE": "Utilities",
+    "AEP": "Utilities", "SRE": "Utilities", "D": "Utilities",
+    "EXC": "Utilities", "XEL": "Utilities",
+    # ETFs (10) — sector-level signals
+    "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "XLF": "ETF",
+    "XLE": "ETF", "XLV": "ETF", "XLK": "ETF", "XLI": "ETF",
+    "XLP": "ETF", "XLU": "ETF",
 }
 
 
@@ -1334,14 +1386,13 @@ def generate_quant_picks() -> dict:
         macro = get_macro_overlay()
 
         # Step 3: Batch download price data
-        # Split universe into 2 batches to avoid Yahoo Finance limits
-        half = len(QUANT_UNIVERSE) // 2
-        batch1 = QUANT_UNIVERSE[:half]
-        batch2 = QUANT_UNIVERSE[half:]
+        # Split universe into 4 batches to avoid Yahoo Finance limits (200+ stocks)
+        batch_size = len(QUANT_UNIVERSE) // 4 + 1
+        batches = [QUANT_UNIVERSE[i:i+batch_size] for i in range(0, len(QUANT_UNIVERSE), batch_size)]
 
         price_data = {}
 
-        for batch in [batch1, batch2]:
+        for batch in batches:
             _throttle()
             try:
                 df = yf.download(
@@ -1386,9 +1437,9 @@ def generate_quant_picks() -> dict:
         long_picks.sort(key=lambda x: x["composite_score"], reverse=True)
         short_picks.sort(key=lambda x: x["composite_score"])
 
-        # Top picks only
-        top_longs = long_picks[:15]
-        top_shorts = short_picks[:10]
+        # Top picks — show more since we have 200+ stocks
+        top_longs = long_picks[:30]
+        top_shorts = short_picks[:20]
 
         # Step 6: Check earnings proximity for top picks
         # (only for top picks to minimize API calls)
