@@ -487,16 +487,31 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         short_candidates = [p for p in quant_picks.get("short_picks", [])
                            if p["confidence"] >= MIN_CONFIDENCE and p["symbol"] not in open_tickers]
 
+        # Defensive sectors — safe for long positions even in bear markets
+        # These are stable, dividend-paying, recession-resistant sectors
+        DEFENSIVE_SECTORS = {"Consumer Staples", "Healthcare", "Utilities", "ETF"}
+
         if regime == "BEAR":
-            # BEAR: Take ALL qualifying shorts, plus top 8 longs (long-term conviction picks)
-            # A smart investor always has some long positions — long-term success is still success
+            # BEAR: Take ALL qualifying shorts, plus safe defensive longs
+            # Smart investing = shorts for profit + defensive longs for stability
             for p in short_candidates:
                 p["_adj_confidence"] = p["confidence"] + 10
                 all_picks.append(p)
-            for p in long_candidates[:8]:  # Keep 8 long-term conviction longs even in bear
-                p["_adj_confidence"] = p["confidence"] - 5  # slight penalty, but still allow them
+
+            # FORCED SAFE LONGS: Only take longs in defensive sectors (low risk)
+            # Defensive stocks (WMT, JNJ, PG, KO) hold up in bear markets
+            safe_longs = [p for p in long_candidates
+                          if p.get("sector") in DEFENSIVE_SECTORS]
+            # Also allow any long with very high confidence (65%+) regardless of sector
+            high_conviction_longs = [p for p in long_candidates
+                                     if p["confidence"] >= 65 and p.get("sector") not in DEFENSIVE_SECTORS]
+            bear_longs = (safe_longs + high_conviction_longs)[:10]
+
+            for p in bear_longs:
+                p["_adj_confidence"] = p["confidence"]  # no penalty for safe longs
                 all_picks.append(p)
-            logger.info(f"BEAR regime: {len(short_candidates)} shorts, {min(8, len(long_candidates))} longs selected")
+            logger.info(f"BEAR regime: {len(short_candidates)} shorts, {len(bear_longs)} safe longs "
+                        f"({len(safe_longs)} defensive + {len(high_conviction_longs)} high-conviction)")
         elif regime == "BULL":
             # BULL: Take ALL qualifying longs first, then only top 2 shorts
             for p in long_candidates:
@@ -546,13 +561,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 break  # Stop opening more positions
 
             # CONFIDENCE GATE: In BEAR only take decent-conviction longs
-            # Long-term success matters — keep some conviction longs
-            if regime == "BEAR" and direction == "long" and pick["confidence"] < 45:
-                results["skipped"].append({
-                    "symbol": symbol,
-                    "reason": f"Low conviction long in BEAR ({pick['confidence']}%)",
-                })
-                continue
+            # Defensive sector longs get a lower gate (35%) — they're safe by nature
+            # Other sector longs need higher conviction (55%)
+            if regime == "BEAR" and direction == "long":
+                is_defensive = pick.get("sector") in DEFENSIVE_SECTORS
+                min_conf = 35 if is_defensive else 55
+                if pick["confidence"] < min_conf:
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": f"Low conviction long in BEAR ({pick['confidence']}%, need {min_conf}%)",
+                    })
+                    continue
 
             # CORRELATION CHECK: Don't hold highly correlated positions
             # This is what separates hedge funds from retail — true diversification
@@ -605,9 +624,10 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # BEAR: tighter stop on longs (4%), wider on shorts (10%)
             # BULL: tighter stop on shorts (4%), wider on longs (10%)
             if regime == "BEAR":
-                long_stop = 0.04   # tight stop on longs in bear
+                is_defensive_long = direction == "long" and pick.get("sector") in DEFENSIVE_SECTORS
+                long_stop = 0.08 if is_defensive_long else 0.04  # defensive = wider stop (safe stocks recover)
                 short_stop = 0.10  # give shorts room to run
-                long_target = 1.08  # modest target for longs
+                long_target = 1.06 if is_defensive_long else 1.08  # defensive = modest 6% target (safe, steady)
                 short_target = 0.80  # ambitious target for shorts (20% drop)
             elif regime == "BULL":
                 long_stop = 0.10

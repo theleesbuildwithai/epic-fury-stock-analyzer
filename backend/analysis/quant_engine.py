@@ -1144,7 +1144,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         current_regime = regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS"
 
         if current_regime == "BEAR":
-            long_threshold_high, long_threshold_low = 5.5, 3.5   # much harder to go long
+            long_threshold_high, long_threshold_low = 3.0, 1.5   # still allow quality longs — long-term success matters
             short_threshold_high, short_threshold_low = -3.0, -1.0  # easier to short
         elif current_regime == "BULL":
             long_threshold_high, long_threshold_low = 3.0, 1.0   # easier to go long
@@ -1191,10 +1191,17 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         ema50 = stock["ema_50"]
         price_vs_ema50 = (stock["price"] - ema50) / ema50 * 100  # % above/below 50-EMA
 
+        # Defensive sectors are safer for longs even in bear markets
+        _defensive = {"Consumer Staples", "Healthcare", "Utilities"}
+        _is_defensive = stock.get("sector") in _defensive
+
         if current_regime == "BEAR":
-            if direction == "LONG" and price_vs_ema50 < -3:
-                # Trying to go long on a stock 3%+ below its 50-EMA in a bear market = bad idea
+            if direction == "LONG" and price_vs_ema50 < -3 and not _is_defensive:
+                # Non-defensive stock 3%+ below 50-EMA in bear = bad idea
                 confidence = int(confidence * 0.5)  # cut confidence in half
+            elif direction == "LONG" and price_vs_ema50 < -8 and _is_defensive:
+                # Even defensive stocks 8%+ below EMA are risky
+                confidence = int(confidence * 0.6)
             elif direction == "SHORT" and price_vs_ema50 < -5:
                 # Shorting a stock already 5%+ below 50-EMA in bear = confirmed trend
                 confidence = min(95, int(confidence * 1.2))  # boost confidence

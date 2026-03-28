@@ -234,6 +234,13 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+# Restore portfolio from S3 (persists across deploys — no more resets)
+try:
+    from predictions.db_persistence import restore_db_from_s3, backup_db_to_s3
+    restore_db_from_s3()
+except Exception as e:
+    logger.warning(f"S3 restore skipped: {e}")
+
 # Initialize the database when the app starts
 init_db()
 
@@ -312,6 +319,12 @@ def _run_auto_trade_cycle():
         auto_trade_log.append(log_entry)
         if len(auto_trade_log) > MAX_AUTO_LOG:
             auto_trade_log.pop(0)
+
+        # Backup portfolio to S3 after every cycle (persist forever)
+        try:
+            backup_db_to_s3()
+        except Exception:
+            pass
 
         logger.warning(
             f"AUTO-TRADE CYCLE #{auto_trade_stats['total_cycles']} complete: "

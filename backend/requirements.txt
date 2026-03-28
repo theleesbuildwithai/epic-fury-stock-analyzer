@@ -7,3 +7,4 @@ pydantic==2.10.4
 aiofiles==24.1.0
 pytz==2024.2
 apscheduler==3.10.4
+boto3==1.35.0

@@ -116,10 +116,10 @@ export default function QuantDashboard() {
             )}
           </div>
           <div className="flex gap-4 mt-3 text-xs text-neutral-500">
-            <span>🧠 10 Quant Factors</span>
-            <span>📊 200+ Stocks Analyzed</span>
-            <span>⚡ Trades Every Hour</span>
-            <span>🔄 Self-Learning Weekly</span>
+            <span>10 Quant Factors</span>
+            <span>200+ Stocks Analyzed</span>
+            <span>Trades Every Hour</span>
+            <span>Self-Learning Weekly</span>
           </div>
         </div>
       </div>
