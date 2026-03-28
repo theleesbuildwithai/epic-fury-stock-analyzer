@@ -360,7 +360,7 @@ export default function Watchlist() {
                 <p className="text-neutral-500 text-xs uppercase tracking-wider mb-3">Equal-Weight Portfolio</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <div>
-                    <p className="text-neutral-500 text-[10px]">Total Return</p>
+                    <p className="text-neutral-500 text-[10px]">{backtestPeriod.toUpperCase()} Return</p>
                     <p className={`text-lg font-bold font-mono ${
                       backtestData.portfolio_stats.total_return >= 0 ? 'text-green-400' : 'text-red-400'
                     }`}>
@@ -399,7 +399,7 @@ export default function Watchlist() {
                     <thead>
                       <tr className="border-b border-neutral-800">
                         <th className="text-left text-neutral-500 text-[10px] py-2 px-3">TICKER</th>
-                        <th className="text-right text-neutral-500 text-[10px] py-2 px-3">RETURN</th>
+                        <th className="text-right text-neutral-500 text-[10px] py-2 px-3">{backtestPeriod.toUpperCase()} RETURN</th>
                         <th className="text-right text-neutral-500 text-[10px] py-2 px-3">ANN. VOL</th>
                         <th className="text-right text-neutral-500 text-[10px] py-2 px-3">SHARPE</th>
                         <th className="text-right text-neutral-500 text-[10px] py-2 px-3">MAX DD</th>
