@@ -993,11 +993,16 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                 # Trim to add date if available
                 if sym in stock_add_dates and stock_add_dates[sym]:
                     try:
-                        add_date = parse_dt.fromisoformat(stock_add_dates[sym].replace('Z', '+00:00'))
-                        add_date_naive = add_date.replace(tzinfo=None)
-                        # Filter to only data from add date onward
-                        sym_df = sym_df[sym_df.index >= pd.Timestamp(add_date_naive)]
-                    except Exception:
+                        add_str = stock_add_dates[sym].replace('Z', '+00:00')
+                        add_date = parse_dt.fromisoformat(add_str)
+                        # Make timezone-aware or naive to match index
+                        if sym_df.index.tz is not None:
+                            add_ts = pd.Timestamp(add_date).tz_convert(sym_df.index.tz) if add_date.tzinfo else pd.Timestamp(add_date).tz_localize(sym_df.index.tz)
+                        else:
+                            add_ts = pd.Timestamp(add_date.replace(tzinfo=None))
+                        sym_df = sym_df[sym_df.index >= add_ts]
+                    except Exception as e:
+                        logger.warning(f"Could not parse add date for {sym}: {e}")
                         pass
 
                 closes = sym_df.values.astype(float).flatten()

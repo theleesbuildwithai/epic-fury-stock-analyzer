@@ -1789,7 +1789,7 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         regime = detect_market_regime()
         macro = get_macro_overlay()
 
-        # Download stock and SPY separately to avoid MultiIndex parsing issues
+        # Download stock data only (SPY not needed for single-stock analysis)
         _throttle()
         stock_df = yf.download(symbol, period="1y", progress=False)
         if stock_df is None or stock_df.empty:
@@ -1800,14 +1800,6 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         if isinstance(stock_df.columns, pd.MultiIndex):
             stock_df.columns = stock_df.columns.get_level_values(0)
         stock_df = stock_df.dropna(how="all")
-
-        _throttle()
-        spy_df = yf.download("SPY", period="1y", progress=False)
-        if spy_df is not None and not spy_df.empty:
-            if isinstance(spy_df.columns, pd.MultiIndex):
-                spy_df.columns = spy_df.columns.get_level_values(0)
-        else:
-            spy_df = None
 
         if len(stock_df) < 60:
             result["error"] = "Not enough price history (need 60+ days)"
