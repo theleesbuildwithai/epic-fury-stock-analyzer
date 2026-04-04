@@ -86,13 +86,13 @@ export default function AnalysisDashboard({ data }) {
               <h2 className="text-xl font-semibold text-white mb-1">Investment Action</h2>
               <div className="flex items-center gap-4">
                 <span className={`text-3xl font-black ${
-                  data.signal.direction.includes('Buy') ? 'text-green-500' :
-                  data.signal.direction.includes('Sell') ? 'text-red-500' : 'text-neutral-300'
+                  data.signal?.direction?.includes('Buy') ? 'text-green-500' :
+                  data.signal?.direction?.includes('Sell') ? 'text-red-500' : 'text-neutral-300'
                 }`}>
-                  {data.signal.direction}
+                  {data.signal?.direction || 'N/A'}
                 </span>
                 <span className="text-neutral-500">|</span>
-                <span className="text-neutral-400 text-sm">Confidence: {data.signal.confidence}%</span>
+                <span className="text-neutral-400 text-sm">Confidence: {data.signal?.confidence ?? 0}%</span>
               </div>
             </div>
             <div className="flex items-center gap-6">

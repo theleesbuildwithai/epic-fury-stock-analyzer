@@ -2,7 +2,7 @@ export default function KeyStats({ info, latest, supportResistance }) {
   if (!info) return null
 
   const formatNum = (n) => {
-    if (!n) return 'N/A'
+    if (n == null || n === '') return 'N/A'
     if (n >= 1e12) return `$${(n / 1e12).toFixed(2)}T`
     if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`
     if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`
@@ -10,14 +10,14 @@ export default function KeyStats({ info, latest, supportResistance }) {
   }
 
   const formatVol = (n) => {
-    if (!n) return 'N/A'
+    if (n == null || n === '') return 'N/A'
     if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`
     if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
     return n.toLocaleString()
   }
 
-  const priceChange = info.current_price - info.previous_close
-  const priceChangePct = ((priceChange / info.previous_close) * 100).toFixed(2)
+  const priceChange = (info.current_price || 0) - (info.previous_close || 0)
+  const priceChangePct = info.previous_close ? ((priceChange / info.previous_close) * 100).toFixed(2) : '0.00'
   const isUp = priceChange >= 0
 
   const stats = [

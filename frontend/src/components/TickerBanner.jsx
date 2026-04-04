@@ -78,14 +78,14 @@ export default function TickerBanner() {
                     'text-neutral-500'
                   }`}>{t.name}</span>
                   <span className="text-white text-[11px] font-mono font-semibold">
-                    {t.symbol === '^TNX' ? `${t.price.toFixed(2)}%` : `$${t.price.toLocaleString()}`}
+                    {t.symbol === '^TNX' ? `${(t.price ?? 0).toFixed(2)}%` : `$${(t.price ?? 0).toLocaleString()}`}
                   </span>
                   <span className={`text-[11px] font-mono font-bold px-1.5 py-0.5 rounded ${
                     t.change >= 0
                       ? 'text-green-400 bg-green-500/10'
                       : 'text-red-400 bg-red-500/10'
                   }`}>
-                    {t.change >= 0 ? '+' : ''}{t.change_pct}%
+                    {(t.change ?? 0) >= 0 ? '+' : ''}{t.change_pct ?? 0}%
                   </span>
                   <span className="text-neutral-800 text-[10px] mx-1.5">|</span>
                 </div>

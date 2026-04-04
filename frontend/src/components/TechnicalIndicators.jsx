@@ -1,6 +1,7 @@
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine,
+  ComposedChart,
 } from 'recharts'
 
 function RSIChart({ chartData }) {
@@ -49,8 +50,6 @@ function MACDChart({ chartData }) {
     </div>
   )
 }
-
-import { ComposedChart } from 'recharts'
 
 export default function TechnicalIndicators({ chartData }) {
   if (!chartData || chartData.length === 0) return null

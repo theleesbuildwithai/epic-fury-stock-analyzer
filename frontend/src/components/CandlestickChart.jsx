@@ -216,8 +216,10 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
                   latestPrice.isUp ? 'text-green-400 bg-green-500/10' : 'text-red-400 bg-red-500/10'
                 }`}>
                   {latestPrice.isUp ? '+' : ''}
-                  {(((latestPrice.close - processedData[processedData.length - 2]?.close) /
-                    processedData[processedData.length - 2]?.close) * 100).toFixed(2)}%
+                  {processedData.length >= 2 && processedData[processedData.length - 2]?.close
+                    ? (((latestPrice.close - processedData[processedData.length - 2].close) /
+                        processedData[processedData.length - 2].close) * 100).toFixed(2)
+                    : '0.00'}%
                 </span>
               )}
             </div>
