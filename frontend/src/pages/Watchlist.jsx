@@ -68,6 +68,23 @@ export default function Watchlist() {
     // Auto-fetch quant data for all stocks
     wl.forEach(stock => fetchQuantAnalysis(stock.ticker))
 
+    // Auto-load Portfolio Visualizer if 2+ stocks
+    if (wl.length >= 2) {
+      setShowBacktest(true)
+      // Delay slightly so watchlist state is set first
+      setTimeout(() => {
+        const tickers = wl.map(s => s.ticker).join(',')
+        const addDates = {}
+        wl.forEach(s => { addDates[s.ticker] = s.added_at })
+        setBacktestLoading(true)
+        fetch(`/api/watchlist-backtest?tickers=${tickers}&add_dates=${encodeURIComponent(JSON.stringify(addDates))}`)
+          .then(res => res.ok ? res.json() : null)
+          .then(data => { if (data) setBacktestData(data) })
+          .catch(() => {})
+          .finally(() => setBacktestLoading(false))
+      }, 500)
+    }
+
     const isMarketHours = () => {
       const now = new Date()
       const hours = now.getHours()
