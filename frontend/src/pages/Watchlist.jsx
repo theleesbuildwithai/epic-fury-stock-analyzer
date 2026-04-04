@@ -152,11 +152,13 @@ export default function Watchlist() {
   }
 
   const fetchBacktest = async () => {
-    const tickers = watchlist.map(s => s.ticker).join(',')
+    // Always read from localStorage (source of truth) to avoid stale React state
+    const currentWatchlist = getWatchlist()
+    const tickers = currentWatchlist.map(s => s.ticker).join(',')
     if (!tickers) return
     // Send add dates so backend calculates return since added to watchlist
     const addDates = {}
-    watchlist.forEach(s => { addDates[s.ticker] = s.added_at })
+    currentWatchlist.forEach(s => { addDates[s.ticker] = s.added_at })
     setBacktestLoading(true)
     try {
       const res = await fetch(`/api/watchlist-backtest?tickers=${tickers}&add_dates=${encodeURIComponent(JSON.stringify(addDates))}`)
