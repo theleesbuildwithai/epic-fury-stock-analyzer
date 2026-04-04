@@ -1005,11 +1005,24 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         price_series = {}
         for sym in ticker_list:
             try:
+                sym_df = None
                 if isinstance(df.columns, pd.MultiIndex) and len(ticker_list) > 1:
                     if sym in df.columns.get_level_values(0):
                         sym_df = df[sym]["Close"].dropna()
                     else:
-                        continue
+                        # Retry individually — sometimes batch download misses a ticker
+                        try:
+                            _throttle()
+                            retry_df = yf.download(sym, period="2y", progress=False)
+                            if retry_df is not None and not retry_df.empty:
+                                if isinstance(retry_df.columns, pd.MultiIndex):
+                                    retry_df.columns = retry_df.columns.get_level_values(0)
+                                sym_df = retry_df["Close"].dropna()
+                                logger.info(f"Retry succeeded for {sym}")
+                        except Exception:
+                            pass
+                        if sym_df is None:
+                            continue
                 else:
                     sym_df = df["Close"].dropna()
 
