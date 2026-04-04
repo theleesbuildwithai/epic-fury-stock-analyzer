@@ -994,37 +994,23 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         import numpy as np
         from datetime import datetime as parse_dt
 
-        _throttle()
-        # Download enough history to cover the earliest add date
-        df = yf.download(ticker_list, period="2y", progress=False, group_by="ticker")
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="No data")
-
-        # Build returns matrix — trim each stock to its add date
+        # Download each stock individually to avoid MultiIndex column parsing nightmares
+        # yfinance changes column format between versions and single vs multi ticker
         returns_data = {}
         price_series = {}
+
         for sym in ticker_list:
             try:
-                sym_df = None
-                if isinstance(df.columns, pd.MultiIndex) and len(ticker_list) > 1:
-                    if sym in df.columns.get_level_values(0):
-                        sym_df = df[sym]["Close"].dropna()
-                    else:
-                        # Retry individually — sometimes batch download misses a ticker
-                        try:
-                            _throttle()
-                            retry_df = yf.download(sym, period="2y", progress=False)
-                            if retry_df is not None and not retry_df.empty:
-                                if isinstance(retry_df.columns, pd.MultiIndex):
-                                    retry_df.columns = retry_df.columns.get_level_values(0)
-                                sym_df = retry_df["Close"].dropna()
-                                logger.info(f"Retry succeeded for {sym}")
-                        except Exception:
-                            pass
-                        if sym_df is None:
-                            continue
-                else:
-                    sym_df = df["Close"].dropna()
+                _throttle()
+                raw = yf.download(sym, period="2y", progress=False)
+                if raw is None or raw.empty:
+                    continue
+                # Flatten MultiIndex columns (yfinance returns ("Close","NVDA") format)
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                if "Close" not in raw.columns:
+                    continue
+                sym_df = raw["Close"].dropna()
 
                 # Trim to add date if available
                 if sym in stock_add_dates and stock_add_dates[sym]:
@@ -1041,17 +1027,10 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
 
                 closes = sym_df.values.astype(float).flatten()
 
-                # Need at least 2 data points, but if trimmed too short just use all data
+                # Need at least 2 data points — if trimmed too short, use full history
                 if len(closes) < 2:
-                    # Re-fetch without date trimming — show full history rather than nothing
-                    try:
-                        if isinstance(df.columns, pd.MultiIndex) and len(ticker_list) > 1:
-                            sym_df = df[sym]["Close"].dropna()
-                        else:
-                            sym_df = df["Close"].dropna()
-                        closes = sym_df.values.astype(float).flatten()
-                    except Exception:
-                        pass
+                    sym_df = raw["Close"].dropna()
+                    closes = sym_df.values.astype(float).flatten()
                     if len(closes) < 2:
                         continue
 
