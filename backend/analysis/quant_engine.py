@@ -32,6 +32,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from scipy.stats import zscore as scipy_zscore
+from analysis.news_sentiment import assess_geopolitical_risk
 
 logger = logging.getLogger(__name__)
 
@@ -684,6 +685,28 @@ def get_macro_overlay() -> dict:
             logger.debug(f"Dollar check failed: {e}")
 
         macro["sector_adjustments"] = adjustments
+
+        # --- GEOPOLITICAL RISK LAYER ---
+        # Scans CNN, Yahoo, CNBC for military events, wars, sanctions
+        # Adjusts sectors: defense/energy UP during conflict, consumer/tech DOWN
+        try:
+            geo = assess_geopolitical_risk()
+            macro["geopolitical_risk"] = {
+                "level": geo.get("risk_level", "LOW"),
+                "score": geo.get("risk_score", 0),
+                "active_hotspots": geo.get("active_hotspots", []),
+                "regional_risks": geo.get("regional_risks", {}),
+            }
+            if geo.get("risk_level") in ("CRITICAL", "ELEVATED"):
+                geo_sector_adj = geo.get("sector_adjustments", {})
+                for sector, adj in geo_sector_adj.items():
+                    adjustments[sector] = round(adjustments.get(sector, 0) + adj, 1)
+                macro["sector_adjustments"] = adjustments
+                logger.info(f"Geopolitical risk {geo['risk_level']}: adjusted {len(geo_sector_adj)} sectors | Hotspots: {geo.get('active_hotspots', [])}")
+        except Exception as e:
+            logger.debug(f"Geopolitical risk check failed: {e}")
+            macro["geopolitical_risk"] = {"level": "UNKNOWN", "score": 0}
+
         return macro
 
     return _get_cached("macro_overlay", fetch, ttl=600)  # 10 min cache
@@ -1369,6 +1392,20 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             macro_adj = macro["sector_adjustments"].get(sector, 0)
             # Convert macro adj (-2 to +2) to z-score scale (-0.5 to +0.5)
             composite += macro_adj * 0.25
+
+        # Apply geopolitical ticker-specific boosts (defense, energy during war)
+        geo_adj = 0
+        if macro and "geopolitical_risk" in macro:
+            geo = macro["geopolitical_risk"]
+            if geo.get("level") in ("CRITICAL", "ELEVATED"):
+                try:
+                    geo_full = assess_geopolitical_risk()
+                    ticker_boosts = geo_full.get("ticker_adjustments", {})
+                    if stock["symbol"] in ticker_boosts:
+                        geo_adj = ticker_boosts[stock["symbol"]]
+                        composite += geo_adj * 0.15  # Scale to z-score range
+                except Exception:
+                    pass
 
         # Scale composite to a more intuitive range (-10 to +10)
         final_score = round(composite * 3.0, 2)

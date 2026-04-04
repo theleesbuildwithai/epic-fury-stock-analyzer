@@ -22,7 +22,7 @@ from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
 from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary, get_sector_heatmap
-from analysis.news_sentiment import get_market_news
+from analysis.news_sentiment import get_market_news, assess_geopolitical_risk
 from analysis.ai_analyst import answer_question
 from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence, analyze_watchlist_stock, _throttle
 from predictions.models import init_db, save_prediction, get_all_predictions
@@ -672,6 +672,17 @@ def market_news(request: Request):
     except Exception as e:
         logger.error(f"News error: {e}")
         return {"headlines": []}
+
+
+@app.get("/api/geopolitical-risk")
+def geopolitical_risk(request: Request):
+    """Geopolitical risk assessment — military events, wars, sanctions, and their market impact."""
+    check_rate_limit(request.client.host)
+    try:
+        return assess_geopolitical_risk()
+    except Exception as e:
+        logger.error(f"Geopolitical risk error: {e}")
+        return {"risk_level": "UNKNOWN", "risk_score": 0, "error": str(e)}
 
 
 @app.get("/api/daily-summary")
