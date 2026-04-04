@@ -1017,10 +1017,10 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                     try:
                         add_str = stock_add_dates[sym]
                         clean = add_str.split('T')[0]  # Just get YYYY-MM-DD
-                        add_ts = pd.Timestamp(clean)
-                        # Match timezone of add_ts to the index
+                        # Strip timezone from index to avoid tz mismatch errors
                         if sym_df.index.tz is not None:
-                            add_ts = add_ts.tz_localize(sym_df.index.tz)
+                            sym_df.index = sym_df.index.tz_localize(None)
+                        add_ts = pd.Timestamp(clean)
                         sym_df = sym_df[sym_df.index >= add_ts]
                     except Exception as e:
                         logger.warning(f"Could not parse add date for {sym}: {e}")
