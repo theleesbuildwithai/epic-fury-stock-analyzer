@@ -32,7 +32,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from scipy.stats import zscore as scipy_zscore
-from analysis.news_sentiment import assess_geopolitical_risk
+from analysis.news_sentiment import assess_geopolitical_risk, assess_tariff_risk
 
 logger = logging.getLogger(__name__)
 

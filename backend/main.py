@@ -22,7 +22,7 @@ from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
 from analysis.ticker_search import search_tickers
 from analysis.extras import get_banner_data, get_daily_picks, get_earnings_calendar, get_daily_summary, get_sector_heatmap
-from analysis.news_sentiment import get_market_news, assess_geopolitical_risk
+from analysis.news_sentiment import get_market_news, assess_geopolitical_risk, assess_tariff_risk
 from analysis.ai_analyst import answer_question
 from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence, analyze_watchlist_stock, _throttle
 from predictions.models import init_db, save_prediction, get_all_predictions
@@ -683,6 +683,17 @@ def geopolitical_risk(request: Request):
     except Exception as e:
         logger.error(f"Geopolitical risk error: {e}")
         return {"risk_level": "UNKNOWN", "risk_score": 0, "error": str(e)}
+
+
+@app.get("/api/tariff-risk")
+def tariff_risk(request: Request):
+    """Tariff/trade war risk assessment — escalation detection and sector impacts."""
+    check_rate_limit(request.client.host)
+    try:
+        return assess_tariff_risk()
+    except Exception as e:
+        logger.error(f"Tariff risk error: {e}")
+        return {"tariff_direction": "UNKNOWN", "risk_score": 0, "error": str(e)}
 
 
 @app.get("/api/daily-summary")
