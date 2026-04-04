@@ -17,11 +17,11 @@ import pytz
 # Shared cache
 _extras_cache = {}
 def _market_ttl():
-    """60s cache during market hours, 15min otherwise"""
+    """60s cache during market hours, 1hr otherwise (data doesn't change when closed)"""
     from datetime import datetime
     now = datetime.now()
     t = now.hour * 60 + now.minute
-    return 60 if (390 <= t <= 1050) else 900
+    return 60 if (390 <= t <= 1050) else 3600
 
 _extras_cache_ttl = 60  # Default, overridden by _market_ttl()
 _last_api_call = [0.0]

@@ -874,6 +874,7 @@ def mistake_analysis(request: Request):
 
 
 @app.get("/api/system-intelligence")
+@app.get("/api/intelligence-status")
 def system_intelligence(request: Request):
     """Get the self-learning system's intelligence report."""
     check_rate_limit(request.client.host)

@@ -1905,6 +1905,35 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             macro_adj = macro["sector_adjustments"].get(sector, 0)
             score += macro_adj
 
+        # --- Apply self-learning adjustments ---
+        learning_applied = False
+        try:
+            from predictions.learner import get_mistake_adjustments
+            mistake_adj = get_mistake_adjustments()
+            # Penalize sectors the AI has learned are weak
+            sector_penalty = mistake_adj.get("sector_penalties", {}).get(sector, 0)
+            if sector_penalty:
+                score += sector_penalty / 5  # Scale down for single-stock scoring
+                learning_applied = True
+            # Cap confidence if overconfidence detected
+            if mistake_adj.get("confidence_cap", 95) < 95:
+                learning_applied = True
+        except Exception:
+            mistake_adj = {}
+
+        # Apply learned factor weights to boost/reduce score
+        try:
+            from predictions.models import get_signal_weights
+            learned_weights = get_signal_weights()
+            if learned_weights:
+                # If momentum weight is high, momentum matters more
+                default_w = 1.0 / len(learned_weights) if learned_weights else 0.167
+                momentum_boost = (learned_weights.get("momentum", default_w) - default_w) * 10
+                score += momentum_boost * (1 if momentum > 0 else -1)
+                learning_applied = True
+        except Exception:
+            learned_weights = {}
+
         # Direction and signal
         if score >= 4:
             signal = "STRONG BUY"
@@ -1939,6 +1968,10 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 confidence = min(95, int(confidence * 1.1))
             elif direction == "SHORT":
                 confidence = int(confidence * 0.7)
+
+        # Apply learned confidence cap
+        conf_cap = mistake_adj.get("confidence_cap", 95) if mistake_adj else 95
+        confidence = min(confidence, conf_cap)
 
         # Build compact result
         result = {
@@ -1977,6 +2010,7 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 "1m": round(ret_20d, 1),
                 "3m": round(ret_60d, 1),
             },
+            "learning_applied": learning_applied,
         }
 
         # Cache it
