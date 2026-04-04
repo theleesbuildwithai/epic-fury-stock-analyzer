@@ -1030,21 +1030,30 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                 if sym in stock_add_dates and stock_add_dates[sym]:
                     try:
                         add_str = stock_add_dates[sym]
-                        # Parse date string — strip timezone info and compare naively
-                        # Handle ISO formats like "2026-04-01T00:00:00" or "2026-04-01T00:00:00.000Z"
                         clean = add_str.split('T')[0]  # Just get YYYY-MM-DD
                         add_ts = pd.Timestamp(clean)
-                        # Strip timezone from index if present
-                        idx = sym_df.index.tz_localize(None) if sym_df.index.tz else sym_df.index
-                        sym_df = sym_df[idx >= add_ts]
+                        # Match timezone of add_ts to the index
+                        if sym_df.index.tz is not None:
+                            add_ts = add_ts.tz_localize(sym_df.index.tz)
+                        sym_df = sym_df[sym_df.index >= add_ts]
                     except Exception as e:
                         logger.warning(f"Could not parse add date for {sym}: {e}")
-                        pass
 
                 closes = sym_df.values.astype(float).flatten()
 
+                # Need at least 2 data points, but if trimmed too short just use all data
                 if len(closes) < 2:
-                    continue
+                    # Re-fetch without date trimming — show full history rather than nothing
+                    try:
+                        if isinstance(df.columns, pd.MultiIndex) and len(ticker_list) > 1:
+                            sym_df = df[sym]["Close"].dropna()
+                        else:
+                            sym_df = df["Close"].dropna()
+                        closes = sym_df.values.astype(float).flatten()
+                    except Exception:
+                        pass
+                    if len(closes) < 2:
+                        continue
 
                 daily_rets = np.diff(closes) / closes[:-1]
                 returns_data[sym] = daily_rets
