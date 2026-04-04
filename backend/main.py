@@ -1029,14 +1029,14 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                 # Trim to add date if available
                 if sym in stock_add_dates and stock_add_dates[sym]:
                     try:
-                        add_str = stock_add_dates[sym].replace('Z', '+00:00')
-                        add_date = parse_dt.fromisoformat(add_str)
-                        # Make timezone-aware or naive to match index
-                        if sym_df.index.tz is not None:
-                            add_ts = pd.Timestamp(add_date).tz_convert(sym_df.index.tz) if add_date.tzinfo else pd.Timestamp(add_date).tz_localize(sym_df.index.tz)
-                        else:
-                            add_ts = pd.Timestamp(add_date.replace(tzinfo=None))
-                        sym_df = sym_df[sym_df.index >= add_ts]
+                        add_str = stock_add_dates[sym]
+                        # Parse date string — strip timezone info and compare naively
+                        # Handle ISO formats like "2026-04-01T00:00:00" or "2026-04-01T00:00:00.000Z"
+                        clean = add_str.split('T')[0]  # Just get YYYY-MM-DD
+                        add_ts = pd.Timestamp(clean)
+                        # Strip timezone from index if present
+                        idx = sym_df.index.tz_localize(None) if sym_df.index.tz else sym_df.index
+                        sym_df = sym_df[idx >= add_ts]
                     except Exception as e:
                         logger.warning(f"Could not parse add date for {sym}: {e}")
                         pass
@@ -1060,7 +1060,11 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         stock_stats = {}
         for sym, rets in returns_data.items():
             total_ret = float((np.prod(1 + rets) - 1) * 100)
-            ann_ret = float(total_ret * (252 / len(rets))) if len(rets) > 0 else 0
+            # Only annualize if we have 20+ trading days, otherwise just show total return
+            if len(rets) >= 20:
+                ann_ret = float(((1 + total_ret / 100) ** (252 / len(rets)) - 1) * 100)
+            else:
+                ann_ret = total_ret  # Don't annualize short periods (inflates numbers)
             ann_vol = float(np.std(rets) * np.sqrt(252) * 100)
             sharpe = round(ann_ret / ann_vol, 2) if ann_vol > 0 else 0
             max_dd = 0
