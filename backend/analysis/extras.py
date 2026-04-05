@@ -682,6 +682,19 @@ def get_daily_summary(watchlist_tickers=None):
         else:
             market_mood = "Bearish"
 
+        # Determine the actual trading date of this data
+        trading_date = None
+        try:
+            # Grab from the first available stock's close series
+            for symbol in SUMMARY_STOCKS:
+                if isinstance(df.columns, pd.MultiIndex) and symbol in df.columns.get_level_values(0):
+                    cs = df[(symbol, "Close")].dropna()
+                    if len(cs) >= 1:
+                        trading_date = str(cs.index[-1].date())
+                        break
+        except Exception:
+            pass
+
         result = {
             "gainers": gainers,
             "losers": losers,
@@ -692,6 +705,8 @@ def get_daily_summary(watchlist_tickers=None):
                 "avg_change_pct": round(avg_change, 2),
                 "mood": market_mood,
             },
+            "trading_date": trading_date,
+            "market_open": is_market_open(),
             "generated_at": datetime.now().isoformat(),
         }
 

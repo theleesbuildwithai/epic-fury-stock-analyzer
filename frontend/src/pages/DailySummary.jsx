@@ -38,6 +38,29 @@ export default function DailySummary() {
     return () => clearInterval(interval)
   }, [])
 
+  const formatTradingDate = () => {
+    if (!data?.trading_date) return "Today's"
+    try {
+      // Parse YYYY-MM-DD as local date (avoid timezone shift)
+      const [y, m, d] = data.trading_date.split('-').map(Number)
+      const tradeDate = new Date(y, m - 1, d)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      tradeDate.setHours(0, 0, 0, 0)
+
+      const diffDays = Math.round((today - tradeDate) / 86400000)
+
+      if (diffDays === 0) return "Today's"
+      if (diffDays === 1) return "Yesterday's"
+
+      const dayName = tradeDate.toLocaleDateString('en-US', { weekday: 'long' })
+      const monthDay = tradeDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      return `${dayName}, ${monthDay} —`
+    } catch {
+      return "Today's"
+    }
+  }
+
   const changeColor = (pct) => {
     if (pct > 0) return 'text-green-500'
     if (pct < 0) return 'text-red-500'
@@ -58,7 +81,7 @@ export default function DailySummary() {
         <div>
           <h1 className="text-3xl font-bold text-white mb-2">Daily AI Summary</h1>
           <p className="text-neutral-400">
-            Today's market movers, biggest gains & losses, and your watchlist at a glance.
+            {data ? `${formatTradingDate()} market movers, biggest gains & losses, and your watchlist.` : "Loading market summary..."}
           </p>
         </div>
         <div className="text-right">
@@ -78,7 +101,7 @@ export default function DailySummary() {
       {loading && !data ? (
         <div className="text-center py-20">
           <div className="inline-block w-10 h-10 border-2 border-neutral-700 border-t-white rounded-full animate-spin"></div>
-          <p className="text-neutral-500 mt-4">Analyzing today's market...</p>
+          <p className="text-neutral-500 mt-4">Analyzing market data...</p>
         </div>
       ) : data?.error && !data.gainers?.length ? (
         <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-6 text-center">
@@ -122,7 +145,7 @@ export default function DailySummary() {
             {/* Top Gainers */}
             <div className="bg-black border border-neutral-700 rounded-xl p-6">
               <h2 className="text-xl font-bold text-white mb-1">Top Gainers</h2>
-              <p className="text-neutral-500 text-sm mb-4">Biggest movers up today</p>
+              <p className="text-neutral-500 text-sm mb-4">{data?.market_open ? "Biggest movers up today" : "Biggest movers up last trading day"}</p>
               <div className="space-y-2">
                 {data.gainers?.map((stock, i) => (
                   <div key={stock.symbol} className={`flex items-center justify-between p-3 rounded-lg border ${changeBg(stock.change_pct)}`}>
@@ -147,7 +170,7 @@ export default function DailySummary() {
             {/* Top Losers */}
             <div className="bg-black border border-neutral-700 rounded-xl p-6">
               <h2 className="text-xl font-bold text-white mb-1">Top Losers</h2>
-              <p className="text-neutral-500 text-sm mb-4">Biggest decliners today</p>
+              <p className="text-neutral-500 text-sm mb-4">{data?.market_open ? "Biggest decliners today" : "Biggest decliners last trading day"}</p>
               <div className="space-y-2">
                 {data.losers?.map((stock, i) => (
                   <div key={stock.symbol} className={`flex items-center justify-between p-3 rounded-lg border ${changeBg(stock.change_pct)}`}>
@@ -181,7 +204,7 @@ export default function DailySummary() {
                     <tr className="border-b border-neutral-800">
                       <th className="text-left text-neutral-500 text-xs font-medium py-3 px-2">SYMBOL</th>
                       <th className="text-right text-neutral-500 text-xs font-medium py-3 px-2">PRICE</th>
-                      <th className="text-right text-neutral-500 text-xs font-medium py-3 px-2">TODAY</th>
+                      <th className="text-right text-neutral-500 text-xs font-medium py-3 px-2">{data?.market_open ? "TODAY" : "LAST DAY"}</th>
                       <th className="text-right text-neutral-500 text-xs font-medium py-3 px-2">WEEK</th>
                       <th className="text-right text-neutral-500 text-xs font-medium py-3 px-2">MONTH</th>
                       <th className="text-right text-neutral-500 text-xs font-medium py-3 px-2">RSI</th>
