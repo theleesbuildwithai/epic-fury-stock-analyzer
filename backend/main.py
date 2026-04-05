@@ -994,56 +994,30 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         import numpy as np
         from datetime import datetime as parse_dt
 
-        # Batch download all tickers at once (fast — single yfinance call)
-        _throttle()
-        df = yf.download(ticker_list, period="2y", progress=False)
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="No data")
-
-        # yfinance MultiIndex: could be (Price, Ticker) or (Ticker, Price)
-        # Detect format and extract Close for each symbol
+        # Download each stock individually — guarantees all tickers return data
         returns_data = {}
         price_series = {}
 
-        def _extract_close(df, sym, ticker_list):
-            """Extract Close series for a symbol from any yfinance DataFrame format."""
-            if not isinstance(df.columns, pd.MultiIndex):
-                return df["Close"].dropna() if "Close" in df.columns else None
-
-            level0 = df.columns.get_level_values(0).unique().tolist()
-            level1 = df.columns.get_level_values(1).unique().tolist()
-
-            # Format: (Price, Ticker) — e.g. ("Close", "NVDA")
-            if "Close" in level0:
-                try:
-                    s = df[("Close", sym)].dropna()
-                    if len(s) > 0:
-                        return s
-                except (KeyError, TypeError):
-                    pass
-
-            # Format: (Ticker, Price) — e.g. ("NVDA", "Close") with group_by="ticker"
-            if sym in level0:
-                try:
-                    s = df[(sym, "Close")].dropna()
-                    if len(s) > 0:
-                        return s
-                except (KeyError, TypeError):
-                    pass
-
-            # Single ticker: columns are ("Close", "NVDA") but no ticker grouping
-            if len(ticker_list) == 1:
-                flat = df.copy()
-                flat.columns = flat.columns.get_level_values(0)
-                if "Close" in flat.columns:
-                    return flat["Close"].dropna()
-
-            return None
+        def _download_single(sym):
+            """Download a single ticker and return its Close series."""
+            import time as _t
+            _t.sleep(1.0)  # Light throttle (1s) — safe for 5 sequential calls
+            sdf = yf.download(sym, period="2y", progress=False)
+            if sdf is None or sdf.empty:
+                return None
+            # Flatten MultiIndex if present (yfinance wraps single tickers too)
+            if isinstance(sdf.columns, pd.MultiIndex):
+                sdf.columns = sdf.columns.get_level_values(0)
+            if "Close" not in sdf.columns:
+                return None
+            s = sdf["Close"].dropna()
+            return s if len(s) >= 2 else None
 
         for sym in ticker_list:
             try:
-                sym_series = _extract_close(df, sym, ticker_list)
+                sym_series = _download_single(sym)
                 if sym_series is None or len(sym_series) < 2:
+                    logger.warning(f"Backtest: no data for {sym}")
                     continue
 
                 # Store full close prices before trimming
