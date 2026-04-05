@@ -154,7 +154,7 @@ export default function CompoundInterestCalc() {
         </div>
         <div className="bg-neutral-900 rounded-lg p-4 text-center">
           <p className="text-neutral-500 text-xs uppercase mb-1">Total Contributed</p>
-          <p className="text-2xl font-bold text-blue-400 font-mono">{formatMoney(results.totalContrib)}</p>
+          <p className="text-2xl font-bold text-white font-mono">{formatMoney(results.totalContrib)}</p>
         </div>
         <div className="bg-neutral-900 rounded-lg p-4 text-center">
           <p className="text-neutral-500 text-xs uppercase mb-1">Interest Earned</p>
@@ -179,7 +179,7 @@ export default function CompoundInterestCalc() {
                 <div className="absolute bottom-full mb-2 bg-neutral-800 border border-neutral-600 rounded-lg p-2 text-xs opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-10">
                   <p className="text-white font-bold">Year {d.year}</p>
                   <p className="text-neutral-300">Balance: {formatMoney(d.balance)}</p>
-                  <p className="text-blue-400">Contributed: {formatMoney(d.contributions)}</p>
+                  <p className="text-white">Contributed: {formatMoney(d.contributions)}</p>
                   <p className="text-green-500">Interest: {formatMoney(d.interest)}</p>
                 </div>
                 {/* Interest portion (green) */}
@@ -189,7 +189,7 @@ export default function CompoundInterestCalc() {
                 ></div>
                 {/* Contribution portion (blue) */}
                 <div
-                  className="w-full bg-blue-500/60"
+                  className="w-full bg-white/40"
                   style={{ height: `${contribHeight}%`, minHeight: '2px' }}
                 ></div>
                 {/* Year label */}
@@ -202,7 +202,7 @@ export default function CompoundInterestCalc() {
         </div>
         <div className="flex items-center gap-4 mt-3 justify-center">
           <div className="flex items-center gap-1">
-            <div className="w-3 h-3 bg-blue-500/60 rounded"></div>
+            <div className="w-3 h-3 bg-white/40 rounded"></div>
             <span className="text-neutral-500 text-xs">Contributions</span>
           </div>
           <div className="flex items-center gap-1">

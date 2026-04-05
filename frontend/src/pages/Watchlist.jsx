@@ -35,6 +35,7 @@ function ConfidenceBar({ value }) {
 }
 
 function CorrelationCell({ value }) {
+  if (value == null || isNaN(value)) return <td className="px-2 py-1.5 text-center text-[11px] font-mono bg-neutral-800 text-neutral-400">-</td>
   const abs = Math.abs(value)
   const bg = value >= 0.7 ? 'bg-red-500/30 text-red-300'
     : value >= 0.4 ? 'bg-yellow-500/20 text-yellow-300'

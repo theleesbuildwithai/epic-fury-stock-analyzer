@@ -157,9 +157,9 @@ export default function DailySummary() {
                       </div>
                     </div>
                     <div className="text-right">
-                      <span className="text-white font-mono text-sm">${stock.price}</span>
+                      <span className="text-white font-mono text-sm">${typeof stock.price === 'number' ? stock.price.toFixed(2) : stock.price}</span>
                       <p className={`text-sm font-bold ${changeColor(stock.change_pct)}`}>
-                        +{stock.change_pct}%
+                        +{typeof stock.change_pct === 'number' ? stock.change_pct.toFixed(2) : stock.change_pct}%
                       </p>
                     </div>
                   </div>
@@ -182,9 +182,9 @@ export default function DailySummary() {
                       </div>
                     </div>
                     <div className="text-right">
-                      <span className="text-white font-mono text-sm">${stock.price}</span>
+                      <span className="text-white font-mono text-sm">${typeof stock.price === 'number' ? stock.price.toFixed(2) : stock.price}</span>
                       <p className={`text-sm font-bold ${changeColor(stock.change_pct)}`}>
-                        {stock.change_pct}%
+                        {typeof stock.change_pct === 'number' ? stock.change_pct.toFixed(2) : stock.change_pct}%
                       </p>
                     </div>
                   </div>
@@ -218,21 +218,21 @@ export default function DailySummary() {
                           <span className="text-white font-mono font-bold text-sm">{stock.symbol}</span>
                         </td>
                         <td className="py-3 px-2 text-right">
-                          <span className="text-white font-mono text-sm">${stock.price}</span>
+                          <span className="text-white font-mono text-sm">${typeof stock.price === 'number' ? stock.price.toFixed(2) : stock.price}</span>
                         </td>
                         <td className="py-3 px-2 text-right">
                           <span className={`font-mono text-sm font-bold ${changeColor(stock.day_change_pct)}`}>
-                            {stock.day_change_pct > 0 ? '+' : ''}{stock.day_change_pct}%
+                            {stock.day_change_pct > 0 ? '+' : ''}{typeof stock.day_change_pct === 'number' ? stock.day_change_pct.toFixed(2) : stock.day_change_pct}%
                           </span>
                         </td>
                         <td className="py-3 px-2 text-right">
                           <span className={`font-mono text-sm ${changeColor(stock.week_change_pct)}`}>
-                            {stock.week_change_pct > 0 ? '+' : ''}{stock.week_change_pct}%
+                            {stock.week_change_pct > 0 ? '+' : ''}{typeof stock.week_change_pct === 'number' ? stock.week_change_pct.toFixed(2) : stock.week_change_pct}%
                           </span>
                         </td>
                         <td className="py-3 px-2 text-right">
                           <span className={`font-mono text-sm ${changeColor(stock.month_change_pct)}`}>
-                            {stock.month_change_pct > 0 ? '+' : ''}{stock.month_change_pct}%
+                            {stock.month_change_pct > 0 ? '+' : ''}{typeof stock.month_change_pct === 'number' ? stock.month_change_pct.toFixed(2) : stock.month_change_pct}%
                           </span>
                         </td>
                         <td className="py-3 px-2 text-right">
@@ -240,16 +240,16 @@ export default function DailySummary() {
                             stock.rsi < 30 ? 'text-green-500' :
                             stock.rsi > 70 ? 'text-red-500' : 'text-neutral-300'
                           }`}>
-                            {stock.rsi}
+                            {typeof stock.rsi === 'number' ? stock.rsi.toFixed(1) : stock.rsi}
                           </span>
                         </td>
                         <td className="py-3 px-2">
                           <span className={`text-xs font-medium px-2 py-1 rounded ${
-                            stock.signal.includes('Buy') ? 'text-green-400 bg-green-500/10' :
-                            stock.signal.includes('Sell') ? 'text-red-400 bg-red-500/10' :
+                            stock.signal?.includes('Buy') ? 'text-green-400 bg-green-500/10' :
+                            stock.signal?.includes('Sell') ? 'text-red-400 bg-red-500/10' :
                             'text-neutral-400 bg-neutral-500/10'
                           }`}>
-                            {stock.signal}
+                            {stock.signal || 'N/A'}
                           </span>
                         </td>
                       </tr>
