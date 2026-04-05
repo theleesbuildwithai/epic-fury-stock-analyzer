@@ -266,22 +266,141 @@ auto_trade_stats = {
     "status": "initializing",
 }
 
-def _run_auto_trade_cycle():
+# --- Event-Driven Trading Engine ---
+# Instead of trading on a fixed hourly clock, the system monitors the market
+# every 5 minutes and only trades when conditions warrant action:
+#   - Significant price moves (>1% on positions or watchlist)
+#   - News events (geopolitical, tariff, earnings)
+#   - Stop-loss triggers on open positions
+#   - Regime change (bull→bear, bear→bull)
+#   - New high-confidence signals appear
+#   - Market open/close transitions
+# This is how real hedge funds work — reactive, not on a timer.
+
+_last_regime = {"value": None}
+_last_vix = {"value": None}
+_last_news_score = {"value": 0}
+_last_trade_time = {"value": None}
+_scan_count = {"value": 0}
+MIN_TRADE_INTERVAL_MINUTES = 15  # Don't trade more than once every 15 min
+
+
+def _should_trade_now() -> dict:
     """
-    Autonomous trade cycle — the computer decides what to buy/sell.
-    Runs every 2 hours during market hours, once at night for after-hours analysis.
-    No human intervention needed.
+    Quick market scan — checks if conditions have changed enough to warrant
+    a full trade cycle. Runs every 5 minutes but only triggers trades when
+    something meaningful happens. Returns dict with 'should_trade' bool and 'reasons'.
+    """
+    reasons = []
+    import pytz
+    et = pytz.timezone("US/Eastern")
+    now_et = dt.now(et)
+    hour = now_et.hour
+    minute = now_et.minute
+    weekday = now_et.weekday()
+
+    # Don't trade on weekends
+    if weekday >= 5:
+        return {"should_trade": False, "reasons": ["Weekend — market closed"]}
+
+    # Only scan during extended hours (7am-8pm ET)
+    if hour < 7 or hour >= 20:
+        return {"should_trade": False, "reasons": ["Outside trading hours (7am-8pm ET)"]}
+
+    # Respect minimum interval between trades
+    if _last_trade_time["value"]:
+        elapsed = (dt.now() - _last_trade_time["value"]).total_seconds() / 60
+        if elapsed < MIN_TRADE_INTERVAL_MINUTES:
+            return {"should_trade": False, "reasons": [f"Too soon — last trade {elapsed:.0f}min ago (min {MIN_TRADE_INTERVAL_MINUTES}min)"]}
+
+    # --- TRIGGER 1: Market open — always trade at 9:30am ET ---
+    if hour == 9 and 28 <= minute <= 35:
+        reasons.append("MARKET OPEN — must rebalance positions")
+
+    # --- TRIGGER 2: Market close — always trade at 3:55pm ET ---
+    if hour == 15 and 53 <= minute <= 59:
+        reasons.append("MARKET CLOSE — end-of-day positioning")
+
+    # --- TRIGGER 3: First scan of the day — always trade ---
+    if hour == 7 and minute <= 10 and _scan_count["value"] == 0:
+        reasons.append("FIRST SCAN OF DAY — opening positions")
+
+    # --- TRIGGER 4: Check for regime change ---
+    try:
+        regime_data = detect_market_regime()
+        current_regime = regime_data.get("regime", "UNKNOWN")
+        if _last_regime["value"] and current_regime != _last_regime["value"]:
+            reasons.append(f"REGIME CHANGE: {_last_regime['value']} → {current_regime}")
+        _last_regime["value"] = current_regime
+
+        # Check VIX spike (>3 points since last check)
+        vix = regime_data.get("vix_level")
+        if vix and _last_vix["value"]:
+            vix_change = abs(vix - _last_vix["value"])
+            if vix_change >= 3:
+                reasons.append(f"VIX SPIKE: {_last_vix['value']:.1f} → {vix:.1f} ({vix_change:+.1f})")
+        if vix:
+            _last_vix["value"] = vix
+    except Exception:
+        pass
+
+    # --- TRIGGER 5: Breaking news / sentiment shift ---
+    try:
+        from backend.analysis.news_sentiment import get_news_sentiment
+        sentiment = get_news_sentiment("SPY")
+        news_score = sentiment.get("composite_score", 0)
+        score_change = abs(news_score - _last_news_score["value"])
+        if score_change >= 0.3:  # Significant sentiment shift
+            reasons.append(f"NEWS SHIFT: sentiment moved {score_change:+.2f} (was {_last_news_score['value']:.2f}, now {news_score:.2f})")
+        _last_news_score["value"] = news_score
+    except Exception:
+        pass
+
+    # --- TRIGGER 6: Check stop-losses on open positions ---
+    try:
+        portfolio = get_paper_portfolio()
+        for pos in portfolio.get("positions", []):
+            pnl = pos.get("pnl_pct", 0)
+            if pnl <= -5.5:  # Approaching 6% stop loss
+                reasons.append(f"STOP-LOSS WARNING: {pos['ticker']} at {pnl:.1f}%")
+    except Exception:
+        pass
+
+    # --- TRIGGER 7: Periodic full scan every 30 min during market hours ---
+    if 9 <= hour <= 16 and minute in (0, 1, 30, 31) and not reasons:
+        reasons.append("PERIODIC SCAN — 30-min market check")
+
+    should_trade = len(reasons) > 0
+    return {"should_trade": should_trade, "reasons": reasons}
+
+
+def _smart_trade_monitor():
+    """
+    Runs every 5 minutes. Checks if conditions warrant a trade.
+    Only executes a full trade cycle when something meaningful changes.
+    This is the brain of the event-driven system.
     """
     global auto_trade_stats
-    cycle_start = dt.now()
-    auto_trade_stats["total_cycles"] += 1
-    auto_trade_stats["last_run"] = cycle_start.isoformat()
-    auto_trade_stats["status"] = "trading"
+    _scan_count["value"] += 1
 
     try:
-        logger.warning(f"AUTO-TRADE CYCLE #{auto_trade_stats['total_cycles']} starting at {cycle_start}")
+        decision = _should_trade_now()
 
-        # 1. Generate fresh quant picks (analyzes 100+ stocks)
+        if not decision["should_trade"]:
+            # Log skipped scans occasionally (every 12th = once per hour)
+            if _scan_count["value"] % 12 == 0:
+                logger.info(f"MONITOR SCAN #{_scan_count['value']}: No action needed — {'; '.join(decision['reasons'])}")
+            return
+
+        # --- CONDITIONS MET — EXECUTE TRADE CYCLE ---
+        logger.warning(f"TRADE TRIGGERED — reasons: {'; '.join(decision['reasons'])}")
+
+        cycle_start = dt.now()
+        auto_trade_stats["total_cycles"] += 1
+        auto_trade_stats["last_run"] = cycle_start.isoformat()
+        auto_trade_stats["status"] = "trading"
+
+        # 1. Generate fresh quant picks (analyzes 200+ stocks)
         picks = generate_quant_picks()
 
         # 2. Execute trades based on signals
@@ -306,8 +425,10 @@ def _run_auto_trade_cycle():
             "regime": result.get("portfolio_after", {}).get("regime", "unknown"),
             "cash": result.get("portfolio_after", {}).get("cash", 0),
             "positions": result.get("portfolio_after", {}).get("num_positions", 0),
+            "trigger_reasons": decision["reasons"],
         }
         auto_trade_stats["status"] = "idle"
+        _last_trade_time["value"] = dt.now()
 
         # Log the cycle
         log_entry = {
@@ -316,6 +437,7 @@ def _run_auto_trade_cycle():
             "opened": opened,
             "closed": closed,
             "regime": result.get("portfolio_after", {}).get("regime"),
+            "triggered_by": decision["reasons"],
         }
         auto_trade_log.append(log_entry)
         if len(auto_trade_log) > MAX_AUTO_LOG:
@@ -328,33 +450,86 @@ def _run_auto_trade_cycle():
             pass
 
         logger.warning(
-            f"AUTO-TRADE CYCLE #{auto_trade_stats['total_cycles']} complete: "
-            f"{opened} opened, {closed} closed"
+            f"TRADE CYCLE #{auto_trade_stats['total_cycles']} complete: "
+            f"{opened} opened, {closed} closed | triggered by: {decision['reasons'][0]}"
         )
 
     except Exception as e:
         auto_trade_stats["errors"] += 1
         auto_trade_stats["status"] = "error"
         auto_trade_stats["last_error"] = str(e)
-        logger.error(f"AUTO-TRADE ERROR: {e}")
+        logger.error(f"TRADE MONITOR ERROR: {e}")
+
+
+def _run_auto_trade_cycle():
+    """Legacy function for manual triggers — always executes a full trade cycle."""
+    global auto_trade_stats
+    cycle_start = dt.now()
+    auto_trade_stats["total_cycles"] += 1
+    auto_trade_stats["last_run"] = cycle_start.isoformat()
+    auto_trade_stats["status"] = "trading"
+
+    try:
+        logger.warning(f"MANUAL TRADE CYCLE #{auto_trade_stats['total_cycles']} starting")
+        picks = generate_quant_picks()
+        result = execute_trades_from_signals(picks)
+        try:
+            auto_adjust_weights()
+        except Exception:
+            pass
+
+        opened = len(result.get("opened", []))
+        closed = len(result.get("closed", []))
+        auto_trade_stats["total_trades_opened"] += opened
+        auto_trade_stats["total_trades_closed"] += closed
+        auto_trade_stats["last_result"] = {
+            "opened": opened, "closed": closed,
+            "skipped": len(result.get("skipped", [])),
+            "regime": result.get("portfolio_after", {}).get("regime", "unknown"),
+            "cash": result.get("portfolio_after", {}).get("cash", 0),
+            "positions": result.get("portfolio_after", {}).get("num_positions", 0),
+            "trigger_reasons": ["Manual trigger"],
+        }
+        auto_trade_stats["status"] = "idle"
+        _last_trade_time["value"] = dt.now()
+
+        log_entry = {
+            "time": cycle_start.isoformat(), "cycle": auto_trade_stats["total_cycles"],
+            "opened": opened, "closed": closed,
+            "regime": result.get("portfolio_after", {}).get("regime"),
+            "triggered_by": ["Manual trigger"],
+        }
+        auto_trade_log.append(log_entry)
+        if len(auto_trade_log) > MAX_AUTO_LOG:
+            auto_trade_log.pop(0)
+        try:
+            backup_db_to_s3()
+        except Exception:
+            pass
+        logger.warning(f"MANUAL TRADE CYCLE complete: {opened} opened, {closed} closed")
+    except Exception as e:
+        auto_trade_stats["errors"] += 1
+        auto_trade_stats["status"] = "error"
+        auto_trade_stats["last_error"] = str(e)
+        logger.error(f"MANUAL TRADE ERROR: {e}")
+
 
 # Start the scheduler
 scheduler = BackgroundScheduler(timezone="US/Eastern")
 
-# Trade every hour during extended market hours (7am-7pm ET)
-# More frequent = more responsive to market moves = better returns
+# EVENT-DRIVEN: Monitor every 5 minutes, only trade when conditions change
+# This replaces the old hourly clock — the system now decides WHEN to trade
 scheduler.add_job(
-    _run_auto_trade_cycle,
-    "cron",
-    hour="7,8,9,10,11,12,13,14,15,16,17,18,19",
-    minute=30,
-    id="auto_trade_cycle",
-    name="Autonomous Trading Cycle",
+    _smart_trade_monitor,
+    "interval",
+    minutes=5,
+    id="smart_monitor",
+    name="Smart Trade Monitor (event-driven)",
     max_instances=1,
-    misfire_grace_time=3600,
+    misfire_grace_time=300,
 )
 
-# Also run once at startup (after 60s delay to let app warm up)
+# Startup scan (after 60s warm-up)
 scheduler.add_job(
     _run_auto_trade_cycle,
     "date",
@@ -822,7 +997,7 @@ def auto_trading_status(request: Request):
     check_rate_limit(request.client.host)
     next_run = None
     try:
-        job = scheduler.get_job("auto_trade_cycle")
+        job = scheduler.get_job("smart_monitor")
         if job and job.next_run_time:
             next_run = job.next_run_time.isoformat()
     except Exception:
@@ -839,12 +1014,20 @@ def auto_trading_status(request: Request):
     except Exception:
         overnight_summary = {"futures_sentiment": "unknown"}
 
+    # Check what would trigger a trade right now
+    try:
+        trade_decision = _should_trade_now()
+    except Exception:
+        trade_decision = {"should_trade": False, "reasons": ["Error checking"]}
+
     return {
         **auto_trade_stats,
-        "next_scheduled_run": next_run,
-        "schedule": "Every hour (7:30am-7:30pm ET) + 6:30am pre-market scan + Sunday 8pm scan",
+        "next_scan": next_run,
+        "trading_mode": "EVENT-DRIVEN",
+        "schedule": "Monitors every 5 min, trades only when conditions change (news, regime shift, VIX spike, stop-loss, market open/close)",
+        "would_trade_now": trade_decision,
         "overnight_intel": overnight_summary,
-        "recent_activity": auto_trade_log[-20:],  # Last 20 cycles
+        "recent_activity": auto_trade_log[-20:],
     }
 
 
