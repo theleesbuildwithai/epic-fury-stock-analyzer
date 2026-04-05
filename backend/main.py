@@ -1056,12 +1056,17 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                         add_str = str(stock_add_dates[sym])
                         clean = add_str.split('T')[0]  # YYYY-MM-DD
                         add_ts = pd.Timestamp(clean)
-                        # Handle both tz-aware and tz-naive indexes
+                        # Normalize both to naive for comparison
                         raw_idx = sym_series.index
-                        if hasattr(raw_idx, 'tz') and raw_idx.tz is not None:
-                            # Make add_ts tz-aware to match index
-                            add_ts = add_ts.tz_localize(str(raw_idx.tz))
-                        mask = raw_idx >= add_ts
+                        try:
+                            if hasattr(raw_idx, 'tz') and raw_idx.tz is not None:
+                                cmp_idx = raw_idx.tz_convert('UTC').tz_localize(None)
+                            else:
+                                cmp_idx = raw_idx
+                        except Exception:
+                            # Ultimate fallback: compare date strings
+                            cmp_idx = pd.DatetimeIndex(raw_idx.strftime('%Y-%m-%d'))
+                        mask = cmp_idx >= add_ts
                         n_after = int(mask.sum())
                         if n_after >= 2:
                             sym_series = sym_series[mask]
