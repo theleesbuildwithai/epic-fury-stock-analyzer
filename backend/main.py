@@ -499,6 +499,50 @@ class PredictionRequest(BaseModel):
     notes: Optional[str] = None
 
 
+# --- Manual Trigger Endpoints (for weekend prep & Monday readiness) ---
+
+@app.post("/api/trigger-learning")
+def trigger_learning():
+    """Manually trigger the weekend learning cycle — reviews trades, adjusts weights, preps Monday picks."""
+    import threading
+    def _run():
+        _weekend_learning_cycle()
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "triggered", "message": "Weekend learning cycle started in background"}
+
+@app.post("/api/trigger-premarket")
+def trigger_premarket():
+    """Manually trigger pre-market intelligence scan — checks futures, global markets, overnight news."""
+    _premarket_scan()
+    intel = scan_overnight_intelligence()
+    return {
+        "status": "complete",
+        "futures_sentiment": intel.get("futures_sentiment"),
+        "overnight_gap_pct": intel.get("overnight_gap_pct"),
+        "weekend_shift_detected": intel.get("weekend_shift_detected"),
+        "confidence_modifier": intel.get("confidence_modifier"),
+        "signals": intel.get("signals", []),
+    }
+
+@app.post("/api/trigger-trade-cycle")
+def trigger_trade_cycle():
+    """Manually trigger a single trade cycle — generates picks and executes trades."""
+    import threading
+    def _run():
+        _run_auto_trade_cycle()
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "triggered", "message": "Trade cycle started in background"}
+
+@app.get("/api/intelligence-report")
+def get_intelligence_report():
+    """Get the self-learning system's intelligence report — what it learned, strengths, weaknesses."""
+    try:
+        report = generate_intelligence_report()
+        return report
+    except Exception as e:
+        return {"error": str(e), "message": "Not enough trade data yet for intelligence report"}
+
+
 # --- API Endpoints ---
 
 @app.get("/health")
