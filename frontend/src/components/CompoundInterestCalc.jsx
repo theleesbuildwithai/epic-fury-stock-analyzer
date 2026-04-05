@@ -187,10 +187,10 @@ export default function CompoundInterestCalc() {
                   className="w-full bg-green-500/60 rounded-t"
                   style={{ height: `${totalHeight - contribHeight}%`, minHeight: d.interest > 0 ? '1px' : '0' }}
                 ></div>
-                {/* Contribution portion (blue) */}
+                {/* Contribution portion (white) */}
                 <div
-                  className="w-full bg-white/40"
-                  style={{ height: `${contribHeight}%`, minHeight: '2px' }}
+                  className="w-full"
+                  style={{ height: `${contribHeight}%`, minHeight: '2px', backgroundColor: 'rgba(255,255,255,0.4)' }}
                 ></div>
                 {/* Year label */}
                 {(d.year % Math.max(1, Math.floor(numYears / 10)) === 0 || d.year === numYears) && (
@@ -202,7 +202,7 @@ export default function CompoundInterestCalc() {
         </div>
         <div className="flex items-center gap-4 mt-3 justify-center">
           <div className="flex items-center gap-1">
-            <div className="w-3 h-3 bg-white/40 rounded"></div>
+            <div className="w-3 h-3 rounded" style={{ backgroundColor: 'rgba(255,255,255,0.4)' }}></div>
             <span className="text-neutral-500 text-xs">Contributions</span>
           </div>
           <div className="flex items-center gap-1">
