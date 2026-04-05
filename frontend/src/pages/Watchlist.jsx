@@ -85,20 +85,21 @@ export default function Watchlist() {
       }, 500)
     }
 
+    // Refresh prices: every 30s during market hours, every 5 min outside
     const isMarketHours = () => {
       const now = new Date()
-      const hours = now.getHours()
-      const mins = now.getMinutes()
-      const t = hours * 60 + mins
-      return t >= 390 && t <= 1050
+      const etOffset = -4 // EDT
+      const utcHours = now.getUTCHours()
+      const etHours = (utcHours + etOffset + 24) % 24
+      const etMins = now.getUTCMinutes()
+      const t = etHours * 60 + etMins
+      return t >= 570 && t <= 960 // 9:30am - 4:00pm ET
     }
 
     const interval = setInterval(() => {
-      if (isMarketHours()) {
-        const current = getWatchlist()
-        current.forEach(stock => refreshPrice(stock.ticker))
-      }
-    }, 60000)
+      const current = getWatchlist()
+      current.forEach(stock => refreshPrice(stock.ticker))
+    }, isMarketHours() ? 30000 : 300000) // 30s during market, 5min otherwise
     return () => clearInterval(interval)
   }, [])
 

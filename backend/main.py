@@ -1053,25 +1053,28 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                 trimmed_to_add_date = False
                 if sym in stock_add_dates and stock_add_dates[sym]:
                     try:
-                        add_str = stock_add_dates[sym]
+                        add_str = str(stock_add_dates[sym])
                         clean = add_str.split('T')[0]  # YYYY-MM-DD
                         add_ts = pd.Timestamp(clean)
-                        # Strip tz from index for safe comparison
+                        # Handle both tz-aware and tz-naive indexes
                         raw_idx = sym_series.index
                         if hasattr(raw_idx, 'tz') and raw_idx.tz is not None:
-                            cmp_idx = raw_idx.tz_localize(None)
-                        else:
-                            cmp_idx = raw_idx
-                        mask = cmp_idx >= add_ts
-                        trimmed = sym_series[mask.values]
-                        if len(trimmed) >= 2:
-                            sym_series = trimmed
+                            # Make add_ts tz-aware to match index
+                            add_ts = add_ts.tz_localize(str(raw_idx.tz))
+                        mask = raw_idx >= add_ts
+                        n_after = int(mask.sum())
+                        if n_after >= 2:
+                            sym_series = sym_series[mask]
                             trimmed_to_add_date = True
-                        elif len(trimmed) == 1:
-                            # Just added — use last 2 days for minimal return calc
+                        elif n_after == 1:
+                            # Added on last trading day — use last 2 days
                             sym_series = sym_series.iloc[-2:]
                             trimmed_to_add_date = True
-                        # If 0 points after trim (added in future?), keep full history
+                        else:
+                            # Added after last trading day (weekend/holiday/just now)
+                            # Show last 2 days as "since added" (closest approximation)
+                            sym_series = sym_series.iloc[-2:]
+                            trimmed_to_add_date = True
                     except Exception as e:
                         logger.warning(f"Could not parse add date for {sym}: {e}")
 
