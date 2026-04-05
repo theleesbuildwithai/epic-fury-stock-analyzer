@@ -1097,46 +1097,70 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                 dd = (peak * (1 + r) - peak) / peak * 100
                 max_dd = min(max_dd, dd)
 
+            def _safe(v, default=0):
+                """Convert to float, replacing NaN/Inf with default."""
+                f = float(v)
+                return default if (np.isnan(f) or np.isinf(f)) else f
+
             stock_stats[sym] = {
-                "total_return": round(total_ret, 2),
-                "annualized_return": round(ann_ret, 1),
-                "annualized_vol": round(ann_vol, 1),
-                "sharpe_ratio": sharpe,
-                "max_drawdown": round(max_dd, 1),
+                "total_return": round(_safe(total_ret), 2),
+                "annualized_return": round(_safe(ann_ret), 1),
+                "annualized_vol": round(_safe(ann_vol), 1),
+                "sharpe_ratio": round(_safe(sharpe), 2),
+                "max_drawdown": round(_safe(max_dd), 1),
                 "trading_days": len(rets),
                 "days_held": len(rets),
             }
 
-        # Correlation matrix
+        # Correlation matrix — need at least 2 returns per stock
         symbols = list(returns_data.keys())
         min_len = min(len(returns_data[s]) for s in symbols)
         corr_matrix = {}
-        for i, s1 in enumerate(symbols):
-            corr_matrix[s1] = {}
-            for j, s2 in enumerate(symbols):
-                r1 = returns_data[s1][-min_len:]
-                r2 = returns_data[s2][-min_len:]
-                corr = float(np.corrcoef(r1, r2)[0, 1])
-                corr_matrix[s1][s2] = round(corr, 3)
+        if min_len >= 2:
+            for i, s1 in enumerate(symbols):
+                corr_matrix[s1] = {}
+                for j, s2 in enumerate(symbols):
+                    r1 = returns_data[s1][-min_len:]
+                    r2 = returns_data[s2][-min_len:]
+                    try:
+                        corr = float(np.corrcoef(r1, r2)[0, 1])
+                        corr = 0.0 if (np.isnan(corr) or np.isinf(corr)) else corr
+                    except Exception:
+                        corr = 0.0
+                    corr_matrix[s1][s2] = round(corr, 3)
+        else:
+            # Not enough overlapping data for correlations
+            for s1 in symbols:
+                corr_matrix[s1] = {s2: (1.0 if s1 == s2 else 0.0) for s2 in symbols}
 
         # Equal-weight portfolio performance
-        if len(symbols) >= 2:
+        if len(symbols) >= 2 and min_len >= 2:
             port_rets = np.zeros(min_len)
             for sym in symbols:
                 port_rets += returns_data[sym][-min_len:] / len(symbols)
             port_total = float((np.prod(1 + port_rets) - 1) * 100)
             port_vol = float(np.std(port_rets) * np.sqrt(252) * 100)
-            port_sharpe = round((port_total * 252 / min_len) / port_vol, 2) if port_vol > 0 else 0
+            port_sharpe = round((_safe(port_total) * 252 / min_len) / port_vol, 2) if port_vol > 0 else 0
             portfolio_stats = {
-                "total_return": round(port_total, 2),
-                "annualized_vol": round(port_vol, 1),
-                "sharpe_ratio": port_sharpe,
-                "diversification_benefit": round(
-                    np.mean([stock_stats[s]["annualized_vol"] for s in symbols]) - port_vol, 1
-                ),
+                "total_return": round(_safe(port_total), 2),
+                "annualized_vol": round(_safe(port_vol), 1),
+                "sharpe_ratio": round(_safe(port_sharpe), 2),
+                "diversification_benefit": round(_safe(
+                    np.mean([stock_stats[s]["annualized_vol"] for s in symbols]) - port_vol
+                ), 1),
+            }
+        elif len(symbols) >= 1:
+            # Use simple average of individual stock stats
+            avg_ret = np.mean([stock_stats[s]["total_return"] for s in symbols])
+            avg_vol = np.mean([stock_stats[s]["annualized_vol"] for s in symbols])
+            portfolio_stats = {
+                "total_return": round(_safe(avg_ret), 2),
+                "annualized_vol": round(_safe(avg_vol), 1),
+                "sharpe_ratio": round(_safe(avg_ret / avg_vol if avg_vol > 0 else 0), 2),
+                "diversification_benefit": 0.0,
             }
         else:
-            portfolio_stats = stock_stats.get(symbols[0], {})
+            portfolio_stats = stock_stats.get(symbols[0], {}) if symbols else {}
 
         return {
             "tickers": symbols,
