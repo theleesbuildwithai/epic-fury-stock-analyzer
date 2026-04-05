@@ -18,19 +18,24 @@ export default function PriceForecast({ forecast }) {
   const downKeys = Object.keys(active.prob_down_by)
 
   return (
-    <div className="bg-black border border-neutral-700 rounded-xl p-6">
+    <div className="bg-black border border-neutral-700 rounded-xl p-6 gradient-border">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-1">
-        <h2 className="text-xl font-bold text-white">Price Forecast</h2>
-        <div className="flex items-center gap-3 mt-2 sm:mt-0">
-          <span className="text-neutral-500 text-xs">
-            Vol: {annualized_volatility}% (full) / {recent_volatility}% (recent)
+        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+          Price Forecast
+          <span className="text-[10px] font-mono font-bold tracking-wider px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 border border-neutral-700">
+            AI
           </span>
-          <span className="text-neutral-600 text-xs">|</span>
-          <span className="text-neutral-500 text-xs">{data_points_used} days of data</span>
+        </h2>
+        <div className="flex items-center gap-3 mt-2 sm:mt-0">
+          <span className="text-neutral-500 text-xs font-mono">
+            Vol: {annualized_volatility}% / {recent_volatility}%
+          </span>
+          <span className="text-neutral-700">|</span>
+          <span className="text-neutral-500 text-xs font-mono">{data_points_used}d data</span>
         </div>
       </div>
       <p className="text-neutral-500 text-sm mb-5">
-        Current: ${current_price} | Select a timeframe below
+        Current: <span className="text-white font-mono font-semibold">${current_price}</span> · Select a timeframe below
       </p>
 
       {/* Timeframe tabs */}
@@ -54,33 +59,39 @@ export default function PriceForecast({ forecast }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         {/* Left: Up/Down probability */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5">
-          <p className="text-neutral-400 text-sm font-medium mb-4">
+          <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-neutral-500 mb-4">
             Probability in {active.timeframe}
           </p>
 
-          <div className="space-y-4">
+          <div className="space-y-5">
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-green-500 font-bold text-2xl">{active.prob_up}%</span>
-                <span className="text-neutral-500 text-sm">chance UP</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-baseline gap-1">
+                  <span className="text-green-400 font-black text-3xl font-mono">{active.prob_up}%</span>
+                </div>
+                <span className="text-green-500/60 text-xs font-bold uppercase tracking-wider">Upside</span>
               </div>
               <div className="h-3 bg-neutral-800 rounded-full overflow-hidden">
                 <div
-                  className="h-full rounded-full transition-all duration-500"
-                  style={{ width: `${active.prob_up}%`, backgroundColor: '#22c55e' }}
+                  className="h-full rounded-full transition-all duration-500 bar-green"
+                  style={{ width: `${active.prob_up}%` }}
                 />
               </div>
             </div>
 
+            <div className="section-divider" />
+
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-red-500 font-bold text-2xl">{active.prob_down}%</span>
-                <span className="text-neutral-500 text-sm">chance DOWN</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-baseline gap-1">
+                  <span className="text-red-400 font-black text-3xl font-mono">{active.prob_down}%</span>
+                </div>
+                <span className="text-red-500/60 text-xs font-bold uppercase tracking-wider">Downside</span>
               </div>
               <div className="h-3 bg-neutral-800 rounded-full overflow-hidden">
                 <div
-                  className="h-full rounded-full transition-all duration-500"
-                  style={{ width: `${active.prob_down}%`, backgroundColor: '#ef4444' }}
+                  className="h-full rounded-full transition-all duration-500 bar-red"
+                  style={{ width: `${active.prob_down}%` }}
                 />
               </div>
             </div>

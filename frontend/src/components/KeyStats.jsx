@@ -36,48 +36,60 @@ export default function KeyStats({ info, latest, supportResistance }) {
   ]
 
   return (
-    <div className="bg-black rounded-xl p-6 border border-neutral-700">
-      <div className="flex items-baseline justify-between mb-4">
+    <div className={`bg-black rounded-xl p-6 border border-neutral-700 ${isUp ? 'card-accent-green' : 'card-accent-red'}`}>
+      <div className="flex items-baseline justify-between mb-5">
         <div>
-          <h2 className="text-2xl font-bold text-white">{info.name}</h2>
-          <p className="text-neutral-400">{info.ticker} · {info.industry}</p>
+          <div className="flex items-center gap-3 mb-1">
+            <h2 className="text-2xl font-bold text-white">{info.name}</h2>
+            <span className="text-[10px] font-mono font-bold tracking-wider px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 border border-neutral-700">
+              {info.ticker}
+            </span>
+          </div>
+          <p className="text-neutral-500 text-sm">{info.industry} · {info.sector || ''}</p>
         </div>
         <div className="text-right">
-          <p className="text-3xl font-bold text-white">${info.current_price?.toFixed(2)}</p>
-          <p className={isUp ? 'text-green-500' : 'text-red-500'}>
+          <p className="text-3xl font-bold text-white font-mono">${info.current_price?.toFixed(2)}</p>
+          <p className={`font-mono font-semibold ${isUp ? 'text-green-500' : 'text-red-500'}`}>
             {isUp ? '+' : ''}{priceChange.toFixed(2)} ({isUp ? '+' : ''}{priceChangePct}%)
+            <span className={`inline-block ml-1 text-xs ${isUp ? 'text-green-500/60' : 'text-red-500/60'}`}>
+              {isUp ? '\u25B2' : '\u25BC'}
+            </span>
           </p>
         </div>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
         {stats.map((stat) => (
-          <div key={stat.label} className="bg-neutral-900 rounded-lg p-3">
-            <p className="text-neutral-500 text-xs">{stat.label}</p>
-            <p className={`text-sm font-medium ${stat.color || 'text-white'}`}>{stat.value}</p>
+          <div key={stat.label} className="stat-card rounded-lg p-3">
+            <p className="text-neutral-500 text-[11px] uppercase tracking-wider font-medium">{stat.label}</p>
+            <p className={`text-sm font-semibold font-mono mt-0.5 ${stat.color || 'text-white'}`}>{stat.value}</p>
           </div>
         ))}
       </div>
 
       {supportResistance && (
         <div className="mt-4 grid grid-cols-2 gap-4">
-          <div className="bg-neutral-900 rounded-lg p-3 border border-green-900/50">
-            <p className="text-green-500 text-xs font-medium mb-1">Support Levels (Floor)</p>
-            {supportResistance.support.length > 0
-              ? supportResistance.support.map((s, i) => (
-                  <span key={i} className="text-green-500 text-sm mr-2">${s.toFixed(2)}</span>
-                ))
-              : <span className="text-neutral-500 text-sm">No clear levels</span>
-            }
+          <div className="bg-green-500/[0.03] rounded-lg p-4 border border-green-500/20 card-accent-green">
+            <p className="text-green-400 text-[11px] font-bold uppercase tracking-wider mb-2">Support Levels</p>
+            <div className="flex flex-wrap gap-2">
+              {supportResistance.support.length > 0
+                ? supportResistance.support.map((s, i) => (
+                    <span key={i} className="text-green-400 text-sm font-mono font-bold bg-green-500/10 px-2 py-0.5 rounded">${s.toFixed(2)}</span>
+                  ))
+                : <span className="text-neutral-500 text-sm">No clear levels</span>
+              }
+            </div>
           </div>
-          <div className="bg-neutral-900 rounded-lg p-3 border border-red-900/50">
-            <p className="text-red-500 text-xs font-medium mb-1">Resistance Levels (Ceiling)</p>
-            {supportResistance.resistance.length > 0
-              ? supportResistance.resistance.map((r, i) => (
-                  <span key={i} className="text-red-500 text-sm mr-2">${r.toFixed(2)}</span>
-                ))
-              : <span className="text-neutral-500 text-sm">No clear levels</span>
-            }
+          <div className="bg-red-500/[0.03] rounded-lg p-4 border border-red-500/20 card-accent-red">
+            <p className="text-red-400 text-[11px] font-bold uppercase tracking-wider mb-2">Resistance Levels</p>
+            <div className="flex flex-wrap gap-2">
+              {supportResistance.resistance.length > 0
+                ? supportResistance.resistance.map((r, i) => (
+                    <span key={i} className="text-red-400 text-sm font-mono font-bold bg-red-500/10 px-2 py-0.5 rounded">${r.toFixed(2)}</span>
+                  ))
+                : <span className="text-neutral-500 text-sm">No clear levels</span>
+              }
+            </div>
           </div>
         </div>
       )}

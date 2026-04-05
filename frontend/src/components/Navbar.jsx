@@ -5,16 +5,16 @@ export default function Navbar() {
   const isActive = (path) => location.pathname === path
 
   return (
-    <nav className="bg-neutral-950/90 backdrop-blur-md border-b border-neutral-800/50 sticky top-0 z-40">
+    <nav className="bg-neutral-950/90 backdrop-blur-md border-b border-neutral-800/50 sticky top-0 z-40 nav-accent">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-14">
           <Link to="/" className="flex items-center space-x-3 group">
-            <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center shadow-lg shadow-white/5">
+            <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center shadow-lg shadow-white/10 group-hover:shadow-white/20 transition-shadow">
               <span className="text-black font-black text-sm">EF</span>
             </div>
             <div className="flex items-baseline gap-2">
               <span className="text-lg font-bold text-white tracking-tight">Epic Fury</span>
-              <span className="text-xs text-neutral-500 font-medium hidden sm:block">Stock Analyzer</span>
+              <span className="text-[10px] text-neutral-600 font-medium hidden sm:block tracking-wider uppercase">Stock Analyzer</span>
             </div>
           </Link>
           <div className="flex items-center space-x-1">

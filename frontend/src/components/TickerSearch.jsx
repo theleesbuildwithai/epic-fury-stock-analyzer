@@ -110,24 +110,44 @@ export default function TickerSearch({ onAnalyze, loading }) {
   const popularTickers = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN', 'GOOGL', 'META']
 
   return (
-    <div className="text-center py-16 px-4">
+    <div className="text-center py-16 px-4 bg-dots relative">
+      {/* Subtle radial glow behind hero */}
+      <div className="absolute inset-0 pointer-events-none" style={{
+        background: 'radial-gradient(ellipse 600px 400px at 50% 30%, rgba(34,197,94,0.04) 0%, transparent 70%)'
+      }} />
+
       {/* Hero section */}
-      <div className="mb-12">
+      <div className="mb-12 relative">
+        <div className="flex items-center justify-center gap-3 mb-4">
+          <div className="h-px w-12 bg-gradient-to-r from-transparent to-green-500/40" />
+          <span className="text-[10px] font-bold tracking-[0.3em] uppercase text-neutral-500">Institutional-Grade Analytics</span>
+          <div className="h-px w-12 bg-gradient-to-l from-transparent to-red-500/40" />
+        </div>
         <h1 className="text-6xl sm:text-7xl font-black text-white mb-3 tracking-tight">
-          Epic Fury
+          Epic <span className="text-gradient">Fury</span>
         </h1>
         <p className="text-xl text-neutral-500 font-light tracking-wide">
           Stock Analyzer
         </p>
+        <div className="mt-4 flex items-center justify-center gap-4 text-[11px] font-mono text-neutral-600">
+          <span className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500/60 pulse-dot" />
+            Live Data
+          </span>
+          <span>|</span>
+          <span>6 Timeframes</span>
+          <span>|</span>
+          <span>10+ Indicators</span>
+        </div>
       </div>
 
-      <p className="text-neutral-400 text-base mb-10 max-w-xl mx-auto leading-relaxed">
+      <p className="text-neutral-400 text-base mb-10 max-w-xl mx-auto leading-relaxed relative">
         Real-time technical analysis, probability forecasts, and risk assessment.
         Search by ticker or company name.
       </p>
 
       {/* Search bar */}
-      <form onSubmit={handleSubmit} className="flex justify-center gap-2 mb-8">
+      <form onSubmit={handleSubmit} className="flex justify-center gap-2 mb-8 relative">
         <div className="relative" ref={wrapperRef}>
           <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
             <svg className="w-5 h-5 text-neutral-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">

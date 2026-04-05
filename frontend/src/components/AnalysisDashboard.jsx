@@ -80,29 +80,35 @@ export default function AnalysisDashboard({ data }) {
 
       {/* Hold Duration & Action Recommendation */}
       {data.hold_duration && (
-        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+        <div className={`bg-black rounded-xl p-6 border border-neutral-700 ${
+          data.signal?.direction?.includes('Buy') ? 'card-accent-green' :
+          data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
+        }`}>
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-              <h2 className="text-xl font-semibold text-white mb-1">Investment Action</h2>
+              <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-neutral-500 mb-1">Investment Action</p>
               <div className="flex items-center gap-4">
-                <span className={`text-3xl font-black ${
-                  data.signal?.direction?.includes('Buy') ? 'text-green-500' :
-                  data.signal?.direction?.includes('Sell') ? 'text-red-500' : 'text-neutral-300'
+                <span className={`text-4xl font-black ${
+                  data.signal?.direction?.includes('Buy') ? 'text-gradient-green' :
+                  data.signal?.direction?.includes('Sell') ? 'text-gradient-red' : 'text-neutral-300'
                 }`}>
                   {data.signal?.direction || 'N/A'}
                 </span>
-                <span className="text-neutral-500">|</span>
-                <span className="text-neutral-400 text-sm">Confidence: {data.signal?.confidence ?? 0}%</span>
+                <div className="h-8 w-px bg-neutral-800" />
+                <div>
+                  <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Confidence</p>
+                  <p className="text-white font-mono font-bold">{data.signal?.confidence ?? 0}%</p>
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-6">
-              <div className="text-center">
-                <p className="text-neutral-500 text-xs uppercase tracking-wider">Hold For</p>
+              <div className="text-center bg-neutral-900/50 rounded-lg px-5 py-3 border border-neutral-800/50">
+                <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Hold For</p>
                 <p className="text-white font-bold text-xl">{data.hold_duration.label}</p>
-                <p className="text-neutral-500 text-xs">~{data.hold_duration.days} days</p>
+                <p className="text-neutral-600 text-xs font-mono">~{data.hold_duration.days} days</p>
               </div>
-              <div className="text-center">
-                <p className="text-neutral-500 text-xs uppercase tracking-wider">Entry</p>
+              <div className="text-center bg-neutral-900/50 rounded-lg px-5 py-3 border border-neutral-800/50">
+                <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Entry</p>
                 <p className="text-white font-medium text-sm">{data.hold_duration.entry_guidance}</p>
               </div>
             </div>
@@ -140,9 +146,12 @@ export default function AnalysisDashboard({ data }) {
 
       {/* News Sentiment & Current Events */}
       {data.news_sentiment && (
-        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+        <div className="bg-black rounded-xl p-6 border border-neutral-700 card-accent-top">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-white">News & Current Events</h2>
+            <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 pulse-dot" />
+              News & Current Events
+            </h2>
             <span className={`text-sm font-bold px-3 py-1 rounded-full ${
               data.news_sentiment.market_sentiment?.label?.includes('Bullish') ? 'bg-green-500/10 text-green-500' :
               data.news_sentiment.market_sentiment?.label?.includes('Bearish') ? 'bg-red-500/10 text-red-500' :
@@ -198,7 +207,7 @@ export default function AnalysisDashboard({ data }) {
 
       {/* Pivot Points */}
       {data.pivot_points && data.pivot_points.pivot && (
-        <div className="bg-black rounded-xl p-6 border border-neutral-700">
+        <div className="bg-black rounded-xl p-6 border border-neutral-700 card-accent-top">
           <h2 className="text-xl font-semibold text-white mb-4">Pivot Points</h2>
           <div className="grid grid-cols-3 md:grid-cols-7 gap-3 text-center">
             <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-3">
@@ -290,51 +299,61 @@ export default function AnalysisDashboard({ data }) {
 
       {/* Signal Reasoning */}
       {data.signal.reasons && data.signal.reasons.length > 0 && (
-        <div className="bg-black rounded-xl p-6 border border-neutral-700">
-          <h2 className="text-xl font-semibold text-white mb-3">Why {data.signal.direction}?</h2>
+        <div className={`bg-black rounded-xl p-6 border border-neutral-700 ${
+          data.signal?.direction?.includes('Buy') ? 'card-accent-green' :
+          data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
+        }`}>
+          <h2 className="text-xl font-semibold text-white mb-3">
+            Why <span className={
+              data.signal.direction?.includes('Buy') ? 'text-green-400' :
+              data.signal.direction?.includes('Sell') ? 'text-red-400' : 'text-white'
+            }>{data.signal.direction}</span>?
+          </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {data.signal.reasons.map((r, i) => (
-              <div key={i} className="flex items-start gap-2 py-1">
-                <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${
-                  r.toLowerCase().includes('bullish') || r.toLowerCase().includes('oversold') || r.toLowerCase().includes('above') || r.toLowerCase().includes('positive')
-                    ? 'bg-green-500'
-                    : r.toLowerCase().includes('bearish') || r.toLowerCase().includes('overbought') || r.toLowerCase().includes('below') || r.toLowerCase().includes('weak')
-                    ? 'bg-red-500'
-                    : 'bg-neutral-500'
-                }`}></span>
-                <span className="text-neutral-300 text-sm">{r}</span>
-              </div>
-            ))}
+            {data.signal.reasons.map((r, i) => {
+              const isBull = r.toLowerCase().includes('bullish') || r.toLowerCase().includes('oversold') || r.toLowerCase().includes('above') || r.toLowerCase().includes('positive')
+              const isBear = r.toLowerCase().includes('bearish') || r.toLowerCase().includes('overbought') || r.toLowerCase().includes('below') || r.toLowerCase().includes('weak')
+              return (
+                <div key={i} className={`flex items-start gap-2.5 py-1.5 px-3 rounded-lg ${
+                  isBull ? 'bg-green-500/[0.03]' : isBear ? 'bg-red-500/[0.03]' : ''
+                }`}>
+                  <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${
+                    isBull ? 'bg-green-500' : isBear ? 'bg-red-500' : 'bg-neutral-500'
+                  }`} />
+                  <span className="text-neutral-300 text-sm">{r}</span>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Trend Summary */}
-      <div className="bg-black rounded-xl p-6 border border-neutral-700">
-        <h2 className="text-xl font-semibold text-white mb-3">Trend Analysis</h2>
+      <div className="bg-black rounded-xl p-6 border border-neutral-700 card-accent-top">
+        <h2 className="text-xl font-semibold text-white mb-4">Trend Analysis</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div>
-            <p className="text-neutral-400 text-sm">Direction</p>
-            <p className={`text-lg font-medium ${
+          <div className="stat-card rounded-lg p-3">
+            <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">Direction</p>
+            <p className={`text-lg font-bold mt-0.5 ${
               data.trend.direction.includes('bullish') ? 'text-green-500' :
               data.trend.direction.includes('bearish') ? 'text-red-500' : 'text-white'
             }`}>
               {data.trend.direction.replace('_', ' ')}
             </p>
           </div>
-          <div>
-            <p className="text-neutral-400 text-sm">Strength</p>
-            <p className="text-lg font-medium text-white">{data.trend.strength}%</p>
+          <div className="stat-card rounded-lg p-3">
+            <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">Strength</p>
+            <p className="text-lg font-bold text-white mt-0.5 font-mono">{data.trend.strength}%</p>
           </div>
-          <div>
-            <p className="text-neutral-400 text-sm">Price vs 20-day MA</p>
-            <p className={`text-lg font-medium ${data.trend.price_vs_sma20 >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+          <div className="stat-card rounded-lg p-3">
+            <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">vs 20-day MA</p>
+            <p className={`text-lg font-bold mt-0.5 font-mono ${data.trend.price_vs_sma20 >= 0 ? 'text-green-500' : 'text-red-500'}`}>
               {data.trend.price_vs_sma20 >= 0 ? '+' : ''}{data.trend.price_vs_sma20}%
             </p>
           </div>
-          <div>
-            <p className="text-neutral-400 text-sm">Price vs 50-day MA</p>
-            <p className={`text-lg font-medium ${data.trend.price_vs_sma50 >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+          <div className="stat-card rounded-lg p-3">
+            <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">vs 50-day MA</p>
+            <p className={`text-lg font-bold mt-0.5 font-mono ${data.trend.price_vs_sma50 >= 0 ? 'text-green-500' : 'text-red-500'}`}>
               {data.trend.price_vs_sma50 >= 0 ? '+' : ''}{data.trend.price_vs_sma50}%
             </p>
           </div>
@@ -342,20 +361,20 @@ export default function AnalysisDashboard({ data }) {
 
         {/* Volume Analysis */}
         {data.volume_analysis && (
-          <div className="mt-4 pt-4 border-t border-neutral-700">
-            <h3 className="text-sm font-medium text-neutral-400 mb-2">Volume Analysis</h3>
+          <div className="mt-4 pt-4 border-t border-neutral-800">
+            <h3 className="text-[10px] font-bold uppercase tracking-[0.15em] text-neutral-500 mb-3">Volume Analysis</h3>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div>
-                <p className="text-neutral-500 text-xs">Volume Trend</p>
-                <p className="text-white">{data.volume_analysis.volume_trend}</p>
+              <div className="stat-card rounded-lg p-3">
+                <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Trend</p>
+                <p className="text-white font-semibold mt-0.5">{data.volume_analysis.volume_trend}</p>
               </div>
-              <div>
-                <p className="text-neutral-500 text-xs">Volume Ratio</p>
-                <p className="text-white">{data.volume_analysis.volume_ratio}x avg</p>
+              <div className="stat-card rounded-lg p-3">
+                <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Ratio</p>
+                <p className="text-white font-mono font-semibold mt-0.5">{data.volume_analysis.volume_ratio}x avg</p>
               </div>
-              <div>
-                <p className="text-neutral-500 text-xs">Unusual Volume?</p>
-                <p className={data.volume_analysis.unusual_volume ? 'text-red-500' : 'text-neutral-400'}>
+              <div className="stat-card rounded-lg p-3">
+                <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Unusual Volume</p>
+                <p className={`font-semibold mt-0.5 ${data.volume_analysis.unusual_volume ? 'text-red-400' : 'text-neutral-400'}`}>
                   {data.volume_analysis.unusual_volume ? 'Yes' : 'No'}
                 </p>
               </div>
