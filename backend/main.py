@@ -1050,38 +1050,20 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
                 full_closes = sym_series.values.astype(float).flatten()
 
                 # Trim to add date if available
-                trimmed_to_add_date = False
                 if sym in stock_add_dates and stock_add_dates[sym]:
                     try:
-                        add_str = str(stock_add_dates[sym])
-                        clean = add_str.split('T')[0]  # YYYY-MM-DD
-                        add_ts = pd.Timestamp(clean)
-                        # Normalize both to naive for comparison
-                        raw_idx = sym_series.index
-                        try:
-                            if hasattr(raw_idx, 'tz') and raw_idx.tz is not None:
-                                cmp_idx = raw_idx.tz_convert('UTC').tz_localize(None)
-                            else:
-                                cmp_idx = raw_idx
-                        except Exception:
-                            # Ultimate fallback: compare date strings
-                            cmp_idx = pd.DatetimeIndex(raw_idx.strftime('%Y-%m-%d'))
-                        mask = cmp_idx >= add_ts
-                        n_after = int(mask.sum())
-                        if n_after >= 2:
-                            sym_series = sym_series[mask]
-                            trimmed_to_add_date = True
-                        elif n_after == 1:
-                            # Added on last trading day — use last 2 days
-                            sym_series = sym_series.iloc[-2:]
-                            trimmed_to_add_date = True
+                        add_date_str = str(stock_add_dates[sym]).split('T')[0]  # YYYY-MM-DD
+                        # Convert index dates to YYYY-MM-DD strings for safe comparison
+                        date_strs = [str(d)[:10] for d in sym_series.index]
+                        keep = [i for i, ds in enumerate(date_strs) if ds >= add_date_str]
+                        if len(keep) >= 2:
+                            sym_series = sym_series.iloc[keep]
+                        elif len(keep) == 1:
+                            sym_series = sym_series.iloc[-2:]  # Just added, use last 2 days
                         else:
-                            # Added after last trading day (weekend/holiday/just now)
-                            # Show last 2 days as "since added" (closest approximation)
-                            sym_series = sym_series.iloc[-2:]
-                            trimmed_to_add_date = True
+                            sym_series = sym_series.iloc[-2:]  # Added after last trading day
                     except Exception as e:
-                        logger.warning(f"Could not parse add date for {sym}: {e}")
+                        logger.warning(f"Date trim failed for {sym}: {e}")
 
                 closes = sym_series.values.astype(float).flatten()
                 if len(closes) < 2:
