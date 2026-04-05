@@ -994,51 +994,96 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         import numpy as np
         from datetime import datetime as parse_dt
 
-        # Download each stock individually to avoid MultiIndex column parsing nightmares
-        # yfinance changes column format between versions and single vs multi ticker
+        # Batch download all tickers at once (fast — single yfinance call)
+        _throttle()
+        df = yf.download(ticker_list, period="2y", progress=False)
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail="No data")
+
+        # yfinance MultiIndex: could be (Price, Ticker) or (Ticker, Price)
+        # Detect format and extract Close for each symbol
         returns_data = {}
         price_series = {}
 
+        def _extract_close(df, sym, ticker_list):
+            """Extract Close series for a symbol from any yfinance DataFrame format."""
+            if not isinstance(df.columns, pd.MultiIndex):
+                return df["Close"].dropna() if "Close" in df.columns else None
+
+            level0 = df.columns.get_level_values(0).unique().tolist()
+            level1 = df.columns.get_level_values(1).unique().tolist()
+
+            # Format: (Price, Ticker) — e.g. ("Close", "NVDA")
+            if "Close" in level0:
+                try:
+                    s = df[("Close", sym)].dropna()
+                    if len(s) > 0:
+                        return s
+                except (KeyError, TypeError):
+                    pass
+
+            # Format: (Ticker, Price) — e.g. ("NVDA", "Close") with group_by="ticker"
+            if sym in level0:
+                try:
+                    s = df[(sym, "Close")].dropna()
+                    if len(s) > 0:
+                        return s
+                except (KeyError, TypeError):
+                    pass
+
+            # Single ticker: columns are ("Close", "NVDA") but no ticker grouping
+            if len(ticker_list) == 1:
+                flat = df.copy()
+                flat.columns = flat.columns.get_level_values(0)
+                if "Close" in flat.columns:
+                    return flat["Close"].dropna()
+
+            return None
+
         for sym in ticker_list:
             try:
-                _throttle()
-                raw = yf.download(sym, period="2y", progress=False)
-                if raw is None or raw.empty:
+                sym_series = _extract_close(df, sym, ticker_list)
+                if sym_series is None or len(sym_series) < 2:
                     continue
-                # Flatten MultiIndex columns (yfinance returns ("Close","NVDA") format)
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-                if "Close" not in raw.columns:
-                    continue
-                sym_df = raw["Close"].dropna()
+
+                # Store full close prices before trimming
+                full_closes = sym_series.values.astype(float).flatten()
 
                 # Trim to add date if available
+                trimmed_to_add_date = False
                 if sym in stock_add_dates and stock_add_dates[sym]:
                     try:
                         add_str = stock_add_dates[sym]
-                        clean = add_str.split('T')[0]  # Just get YYYY-MM-DD
-                        # Strip timezone from index to avoid tz mismatch errors
-                        if sym_df.index.tz is not None:
-                            sym_df.index = sym_df.index.tz_localize(None)
+                        clean = add_str.split('T')[0]  # YYYY-MM-DD
                         add_ts = pd.Timestamp(clean)
-                        sym_df = sym_df[sym_df.index >= add_ts]
+                        # Strip tz from index for safe comparison
+                        raw_idx = sym_series.index
+                        if hasattr(raw_idx, 'tz') and raw_idx.tz is not None:
+                            cmp_idx = raw_idx.tz_localize(None)
+                        else:
+                            cmp_idx = raw_idx
+                        mask = cmp_idx >= add_ts
+                        trimmed = sym_series[mask.values]
+                        if len(trimmed) >= 2:
+                            sym_series = trimmed
+                            trimmed_to_add_date = True
+                        elif len(trimmed) == 1:
+                            # Just added — use last 2 days for minimal return calc
+                            sym_series = sym_series.iloc[-2:]
+                            trimmed_to_add_date = True
+                        # If 0 points after trim (added in future?), keep full history
                     except Exception as e:
                         logger.warning(f"Could not parse add date for {sym}: {e}")
 
-                closes = sym_df.values.astype(float).flatten()
-
-                # Need at least 2 data points — if trimmed too short, use full history
+                closes = sym_series.values.astype(float).flatten()
                 if len(closes) < 2:
-                    sym_df = raw["Close"].dropna()
-                    closes = sym_df.values.astype(float).flatten()
-                    if len(closes) < 2:
-                        continue
+                    continue
 
                 daily_rets = np.diff(closes) / closes[:-1]
                 returns_data[sym] = daily_rets
-                # Normalize to 100 for chart
                 price_series[sym] = (closes / closes[0] * 100).tolist()
-            except Exception:
+            except Exception as exc:
+                logger.warning(f"Backtest extract failed for {sym}: {exc}")
                 continue
 
         if not returns_data:
