@@ -27,7 +27,7 @@ from analysis.ai_analyst import answer_question
 from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence, analyze_watchlist_stock, _throttle
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
-from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics
+from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics, check_and_exit_positions
 from predictions.learner import generate_intelligence_report, auto_adjust_weights
 
 logger = logging.getLogger("epic-fury")
@@ -357,10 +357,10 @@ def _should_trade_now() -> dict:
 
     # --- TRIGGER 6: Check stop-losses on open positions ---
     try:
-        portfolio = get_paper_portfolio()
+        portfolio = get_portfolio_state()
         for pos in portfolio.get("positions", []):
-            pnl = pos.get("pnl_pct", 0)
-            if pnl <= -5.5:  # Approaching 6% stop loss
+            pnl = pos.get("unrealized_pct", 0)
+            if pnl <= -4:  # Approaching stop loss
                 reasons.append(f"STOP-LOSS WARNING: {pos['ticker']} at {pnl:.1f}%")
     except Exception:
         pass
@@ -524,6 +524,40 @@ scheduler.add_job(
     minutes=5,
     id="smart_monitor",
     name="Smart Trade Monitor (event-driven)",
+    max_instances=1,
+    misfire_grace_time=300,
+)
+
+# INDEPENDENT EXIT CHECKER — runs every 5 minutes, even on weekends
+# This is SEPARATE from the smart monitor so stop-losses ALWAYS fire
+def _exit_checker():
+    """Check all open positions for stop-loss/target/hold-duration exits.
+    Runs independently — never coupled to entry decisions."""
+    try:
+        regime_data = detect_market_regime()
+        regime = regime_data.get("regime", "SIDEWAYS")
+    except Exception:
+        regime = "SIDEWAYS"
+    try:
+        result = check_and_exit_positions(regime)
+        closed = result.get("closed", [])
+        if closed:
+            auto_trade_stats["total_trades_closed"] += len(closed)
+            logger.warning(f"EXIT CHECKER: Closed {len(closed)} positions — {[c['ticker'] for c in closed]}")
+            try:
+                from predictions.db_persistence import backup_db_to_s3
+                backup_db_to_s3()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"EXIT CHECKER ERROR: {e}")
+
+scheduler.add_job(
+    _exit_checker,
+    "interval",
+    minutes=5,
+    id="exit_checker",
+    name="Independent Exit Checker (stop-losses always fire)",
     max_instances=1,
     misfire_grace_time=300,
 )
@@ -977,6 +1011,75 @@ def paper_portfolio(request: Request):
     except Exception as e:
         logger.error(f"Paper portfolio error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get portfolio")
+
+
+@app.get("/api/trade-history")
+def trade_history(request: Request):
+    """Get closed trade history — every trade the fund has completed."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_closed_trades, get_all_paper_trades
+        closed = get_closed_trades(limit=200)
+        open_trades = [dict(t) for t in get_all_paper_trades() if t.get("status") == "open"]
+        wins = [t for t in closed if (t.get("pnl_pct") or 0) > 0]
+        losses = [t for t in closed if (t.get("pnl_pct") or 0) <= 0]
+        total_pnl = sum(t.get("pnl_dollars", 0) or 0 for t in closed)
+        return {
+            "total_closed": len(closed),
+            "total_open": len(open_trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0,
+            "total_pnl_dollars": round(total_pnl, 2),
+            "trades": [{
+                "id": t["id"],
+                "ticker": t["ticker"],
+                "direction": t["direction"],
+                "entry_price": t["entry_price"],
+                "exit_price": t.get("exit_price"),
+                "pnl_pct": t.get("pnl_pct", 0),
+                "pnl_dollars": t.get("pnl_dollars", 0),
+                "entry_date": t.get("entry_date"),
+                "exit_date": t.get("exit_date"),
+                "regime": t.get("regime_at_entry"),
+                "sector": t.get("sector"),
+            } for t in closed[:100]],
+        }
+    except Exception as e:
+        logger.error(f"Trade history error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get trade history")
+
+
+@app.get("/api/learning-status")
+def learning_status(request: Request):
+    """Get self-learning system status — what the AI has learned."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_signal_weights, get_closed_trades
+        from predictions.learner import analyze_factor_performance, analyze_sector_performance, analyze_mistake_patterns
+        weights = get_signal_weights()
+        closed = get_closed_trades(limit=500)
+        result = {
+            "current_weights": weights,
+            "total_trades_analyzed": len(closed),
+            "learning_active": len(closed) >= 20,
+        }
+        try:
+            result["factor_performance"] = analyze_factor_performance()
+        except Exception:
+            pass
+        try:
+            result["sector_performance"] = analyze_sector_performance()
+        except Exception:
+            pass
+        try:
+            result["mistakes_learned"] = analyze_mistake_patterns()
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        logger.error(f"Learning status error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get learning status")
 
 
 @app.get("/api/paper-performance")

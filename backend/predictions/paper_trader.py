@@ -270,7 +270,7 @@ def _get_current_prices(symbols: list) -> dict:
         return {}
     _throttle()
     try:
-        df = yf.download(symbols, period="1d", progress=False, group_by="ticker")
+        df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
         prices = {}
         if df is not None and not df.empty:
             for sym in symbols:
@@ -1250,3 +1250,115 @@ def get_performance_analytics() -> dict:
 
     result["timestamp"] = datetime.now().isoformat()
     return result
+
+
+# ============================================================
+#  STANDALONE EXIT CHECKER
+#  Runs independently of entry logic — checks stops/targets
+#  every cycle even when no new trades are planned.
+# ============================================================
+
+def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
+    """
+    Check all open positions for exit conditions WITHOUT generating new picks.
+    This decouples exit management from entry decisions so stop-losses always fire.
+    Returns dict with list of closed positions.
+    """
+    from predictions.models import get_open_trades, close_paper_trade, get_portfolio_snapshots, save_portfolio_snapshot
+
+    open_trades = get_open_trades()
+    if not open_trades:
+        return {"closed": [], "checked": 0}
+
+    exit_symbols = list(set(t["ticker"] for t in open_trades))
+    current_prices = _get_current_prices(exit_symbols)
+
+    if not current_prices:
+        return {"closed": [], "checked": len(open_trades), "error": "Could not fetch prices"}
+
+    closed = []
+    snapshots = get_portfolio_snapshots(days=5)
+    cash = snapshots[-1]["cash"] if snapshots else INITIAL_CAPITAL
+
+    for trade in open_trades:
+        ticker = trade["ticker"]
+        current_price = current_prices.get(ticker)
+        if current_price is None:
+            continue
+
+        entry_price = trade["entry_price"]
+        direction = trade["direction"]
+        should_close = False
+        close_reason = ""
+
+        # Calculate current P&L
+        if direction == "long":
+            pnl_pct = ((current_price / entry_price) - 1) * 100
+        else:
+            pnl_pct = ((entry_price / current_price) - 1) * 100
+
+        # Check stop loss
+        stop_loss = trade.get("stop_loss_price", 0)
+        if stop_loss and direction == "long" and current_price <= stop_loss:
+            should_close = True
+            close_reason = f"Stop loss hit (${stop_loss:.2f})"
+        elif stop_loss and direction == "short" and current_price >= stop_loss:
+            should_close = True
+            close_reason = f"Stop loss hit (${stop_loss:.2f})"
+
+        # Check target
+        target = trade.get("target_price", 0)
+        if target and direction == "long" and current_price >= target:
+            should_close = True
+            close_reason = f"Target hit (${target:.2f})"
+        elif target and direction == "short" and current_price <= target:
+            should_close = True
+            close_reason = f"Target hit (${target:.2f})"
+
+        # Check hold duration
+        try:
+            entry_date = datetime.fromisoformat(trade["entry_date"])
+            days_held = (datetime.now() - entry_date).days
+            max_hold = trade.get("hold_duration_days", DEFAULT_HOLD_DAYS)
+            if days_held >= max_hold:
+                should_close = True
+                close_reason = f"Hold duration expired ({days_held}/{max_hold} days)"
+        except Exception:
+            pass
+
+        # BEAR regime protection: close losing longs faster
+        if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
+            should_close = True
+            close_reason = f"BEAR regime protection — losing long ({pnl_pct:+.1f}%)"
+
+        if should_close:
+            try:
+                close_paper_trade(trade["id"], current_price)
+                position_value = trade["shares"] * current_price
+                cash += position_value
+                closed.append({
+                    "ticker": ticker,
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "exit_price": round(current_price, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "reason": close_reason,
+                })
+                logger.warning(f"EXIT: {ticker} {direction} | {pnl_pct:+.1f}% | {close_reason}")
+            except Exception as e:
+                logger.error(f"Failed to close {ticker}: {e}")
+
+    # Save snapshot if we closed anything
+    if closed:
+        try:
+            positions_value = sum(
+                current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
+                for t in get_open_trades()
+            )
+            total_value = cash + positions_value
+            cum_ret = ((total_value / INITIAL_CAPITAL) - 1) * 100
+            save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
+        except Exception:
+            pass
+
+    return {"closed": closed, "checked": len(open_trades)}
