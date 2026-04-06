@@ -76,6 +76,9 @@ MACRO_EVENTS = [
     "china", "russia", "ukraine", "middle east", "geopolitical",
     "debt ceiling", "government shutdown", "election", "regulation",
     "nuclear", "invasion", "nato", "iran", "israel",
+    "fomc minutes", "rate decision", "consumer price index",
+    "durable goods", "pharma tariff", "drug tariff", "section 232",
+    "military operation", "ground invasion", "liberation day",
 ]
 
 # ============================================================
@@ -87,6 +90,8 @@ TARIFF_KEYWORDS = [
     "retaliatory tariff", "counter-tariff", "trade restriction",
     "customs duty", "trade agreement", "trade negotiation",
     "reciprocal tariff", "liberation day", "trade policy",
+    "section 232", "pharma tariff", "drug tariff", "pharmaceutical tariff",
+    "steel tariff", "aluminum tariff", "copper tariff",
 ]
 
 # Which sectors get hit by tariffs and how
@@ -99,7 +104,7 @@ TARIFF_SECTOR_IMPACTS = {
         "Communication": -0.5,
         "Energy": +0.5,            # Domestic energy benefits
         "Consumer Staples": +0.5,  # Domestic producers benefit
-        "Healthcare": +0.3,        # Defensive
+        "Healthcare": -1.0,        # Pharma tariffs (100% on imported drugs)
         "Utilities": +0.3,         # Defensive/domestic
         "Financials": -0.5,        # Trade uncertainty
         "Real Estate": 0,
@@ -125,7 +130,8 @@ TARIFF_ESCALATION_WORDS = [
     "new tariff", "raise tariff", "increase tariff", "impose tariff",
     "retaliatory", "counter-tariff", "trade war escalat", "ban import",
     "export restriction", "trade restriction", "tariff hike",
-    "reciprocal tariff", "liberation day",
+    "reciprocal tariff", "liberation day", "section 232",
+    "100% tariff", "pharma tariff", "drug import tariff",
 ]
 TARIFF_DEESCALATION_WORDS = [
     "trade deal", "trade agreement", "remove tariff", "lower tariff",
