@@ -74,45 +74,148 @@ def _get_cached(key, fetch_fn, ttl=None):
 # Large-cap & mid-cap liquid stocks across all S&P 500 sectors
 # 200+ stocks for maximum trade generation and diversification
 QUANT_UNIVERSE = [
-    # Technology (30)
+    # ============================================================
+    # Technology (42) — expanded with volatile mid-caps for bigger moves
+    # ============================================================
     "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ADBE", "CRM", "INTC", "QCOM", "TXN",
     "AMAT", "LRCX", "KLAC", "MRVL", "SNPS", "CDNS", "NXPI", "MCHP", "ON", "FTNT",
     "PANW", "NOW", "WDAY", "TEAM", "DDOG", "ZS", "CRWD", "SNOW", "MDB", "NET",
-    # Communication (12)
+    # NEW: High-beta tech (big movers on macro news)
+    "SHOP",  # Shopify — tariff-exposed e-commerce, moves 3-5% on trade news
+    "SQ",    # Block — fintech, volatile, crypto-adjacent
+    "PLTR",  # Palantir — defense/AI play, moves on gov contracts + geopolitics
+    "U",     # Unity — high-beta gaming tech
+    "DOCN",  # DigitalOcean — small-cap cloud, big swings
+    "HUBS",  # HubSpot — SaaS bellwether
+    "OKTA",  # Okta — cybersecurity mid-cap
+    "BILL",  # Bill.com — fintech, volatile
+    "SMCI",  # Super Micro — AI hardware, massive mover
+    "ARM",   # ARM Holdings — chip designer, moves with NVDA
+    "UBER",  # Uber — consumer tech, tariff-sensitive
+    "DASH",  # DoorDash — gig economy, consumer spending indicator
+    # ============================================================
+    # Communication (15) — added streaming + social volatility plays
+    # ============================================================
     "GOOGL", "META", "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T", "CHTR", "EA",
     "TTWO", "RBLX",
-    # Consumer Discretionary (20)
+    "SNAP",  # Snap — ultra-volatile, moves 5-10% on any news
+    "PINS",  # Pinterest — social/ad revenue play
+    "ROKU",  # Roku — streaming hardware, consumer discretionary crossover
+    # ============================================================
+    # Consumer Discretionary (30) — added tariff-exposed retailers + autos
+    # ============================================================
     "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "TJX", "LOW", "BKNG", "CMG",
     "ROST", "DHI", "LEN", "ORLY", "AZO", "POOL", "DECK", "ULTA", "ETSY", "ABNB",
-    # Consumer Staples (15)
+    # NEW: Import-heavy retailers (CRUSHED by tariffs = great short targets)
+    "FIVE",  # Five Below — 100% import-dependent, tariff victim #1
+    "RH",    # RH (Restoration Hardware) — luxury imports, tariff-exposed
+    "W",     # Wayfair — furniture imports from China
+    "CROX",  # Crocs — manufactured overseas, tariff target
+    "LEVI",  # Levi Strauss — reports Tuesday, tariff-exposed apparel
+    "GPS",   # Gap — import-heavy apparel
+    "RIVN",  # Rivian — EV play, moves with TSLA
+    "LCID",  # Lucid — EV, volatile, tariff on parts
+    "GM",    # GM — auto tariffs, big mover this week
+    "F",     # Ford — auto tariffs, domestic manufacturer (could benefit)
+    # ============================================================
+    # Consumer Staples (18) — added domestic producers (tariff winners)
+    # ============================================================
     "WMT", "PG", "COST", "KO", "PEP", "PM", "MO", "CL", "KMB", "MDLZ",
     "GIS", "HSY", "SJM", "STZ", "EL",
-    # Healthcare (25)
+    "KR",    # Kroger — domestic grocery, defensive, tariff-resistant
+    "TSN",   # Tyson Foods — domestic protein, benefits from import tariffs
+    "ADM",   # Archer-Daniels-Midland — agriculture, trade war play
+    # ============================================================
+    # Healthcare (35) — expanded pharma (100% tariff on imported drugs!)
+    # ============================================================
     "UNH", "LLY", "JNJ", "ABBV", "MRK", "PFE", "TMO", "ABT", "BMY", "AMGN",
     "GILD", "ISRG", "VRTX", "REGN", "DXCM", "IDXX", "ZTS", "VEEV", "ALGN", "HOLX",
     "IQV", "EW", "SYK", "BDX", "HCA",
-    # Financials (20)
+    # NEW: Pharma tariff plays (100% tariffs on imported branded drugs)
+    "AZN",   # AstraZeneca — imports drugs to US, tariff victim
+    "NVO",   # Novo Nordisk — Ozempic/Wegovy, manufactured abroad
+    "SNY",   # Sanofi — French pharma, import tariff target
+    "GSK",   # GSK — UK pharma, import tariff target
+    "MRNA",  # Moderna — mRNA, volatile biotech
+    "BIIB",  # Biogen — biotech, volatile
+    "CI",    # Cigna — health insurer, benefits if drug costs forced down
+    "CVS",   # CVS Health — pharmacy, drug pricing plays
+    "HUM",   # Humana — health insurer
+    "TEVA",  # Teva — generic drugs, could BENEFIT from brand tariffs
+    # ============================================================
+    # Financials (25) — added regional banks + insurance
+    # ============================================================
     "JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "C", "BLK", "SCHW",
     "AXP", "CB", "MMC", "ICE", "CME", "MCO", "MSCI", "FIS", "COIN", "HOOD",
-    # Industrials (20)
+    "ALLY",  # Ally Financial — consumer lending, rate-sensitive
+    "SOFI",  # SoFi — fintech, volatile, rate-sensitive
+    "MARA",  # Marathon Digital — Bitcoin mining, ultra-volatile
+    "RIOT",  # Riot Platforms — Bitcoin mining, geopolitical hedge
+    "KRE",   # Regional Bank ETF — rate sensitivity play
+    # ============================================================
+    # Industrials (28) — expanded defense + tariff-exposed manufacturers
+    # ============================================================
     "BA", "CAT", "HON", "GE", "UNP", "RTX", "LMT", "DE", "FDX", "WM",
     "GD", "NOC", "CSX", "NSC", "ITW", "PH", "ROK", "EMR", "TT", "VRSK",
-    # Energy (12)
+    # NEW: Defense stocks (Iran escalation = these moon)
+    "HII",   # Huntington Ingalls — naval defense, Iran = bullish
+    "LHX",   # L3Harris — defense electronics
+    "TDG",   # TransDigm — aerospace parts
+    # NEW: Tariff-exposed manufacturers
+    "GNRC",  # Generac — generators, import parts
+    "URI",   # United Rentals — construction equipment
+    "SAIA",  # Saia Inc — trucking, trade volume indicator
+    "XPO",   # XPO Logistics — freight, trade volume indicator
+    "ODFL",  # Old Dominion Freight — trucking bellwether
+    # ============================================================
+    # Energy (18) — expanded for Iran/oil plays
+    # ============================================================
     "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "OXY", "DVN", "HES",
     "FANG", "VLO",
-    # Materials (10)
+    # NEW: More oil + natural gas (Iran/Strait of Hormuz = oil spikes)
+    "HAL",   # Halliburton — oilfield services, benefits from high oil
+    "BKR",   # Baker Hughes — oilfield services
+    "AR",    # Antero Resources — natural gas
+    "EQT",   # EQT Corp — largest natural gas producer
+    "CTRA",  # Coterra Energy — oil + gas combo
+    "OVV",   # Ovintiv — Canadian oil, less tariff-exposed
+    # ============================================================
+    # Materials (15) — expanded for steel/aluminum tariff plays
+    # ============================================================
     "LIN", "APD", "SHW", "FCX", "NEM", "ECL", "DD", "VMC", "MLM", "NUE",
-    # Real Estate (8)
+    # NEW: Steel/aluminum (tariff adjustments effective THIS WEEK)
+    "STLD",  # Steel Dynamics — US steelmaker, BENEFITS from tariffs
+    "X",     # US Steel — poster child for steel tariffs
+    "AA",    # Alcoa — aluminum producer, tariff beneficiary
+    "CLF",   # Cleveland-Cliffs — steel, tariff winner
+    "RGLD",  # Royal Gold — gold royalty, safe haven play
+    # ============================================================
+    # Real Estate (10) — added rate-sensitive plays
+    # ============================================================
     "AMT", "PLD", "SPG", "CCI", "EQIX", "DLR", "O", "WELL",
-    # Utilities (8)
+    "VNQ",   # Vanguard Real Estate ETF — sector-wide signal
+    "PSA",   # Public Storage — defensive REIT
+    # ============================================================
+    # Utilities (10) — added safe havens for defensive positioning
+    # ============================================================
     "NEE", "DUK", "SO", "AEP", "SRE", "D", "EXC", "XEL",
-    # ETFs for sector-level signals (10)
+    "AWK",   # American Water Works — ultimate defensive
+    "WEC",   # WEC Energy — stable dividend, safe haven
+    # ============================================================
+    # ETFs for sector-level signals (16) — expanded for macro reads
+    # ============================================================
     "SPY", "QQQ", "IWM", "XLF", "XLE", "XLV", "XLK", "XLI", "XLP", "XLU",
+    "GLD",   # Gold ETF — safe haven, Iran/geopolitical hedge
+    "TLT",   # 20+ Year Treasury ETF — rate/Fed play, CPI reaction
+    "USO",   # Oil ETF — Iran/Strait of Hormuz play
+    "XBI",   # Biotech ETF — pharma tariff impact
+    "ARKK",  # ARK Innovation — high-beta growth, biggest loser in selloffs
+    "VXX",   # VIX Short-Term Futures — volatility play
 ]
 
 # Sector mapping for macro overlay adjustments — auto-generated for all 200+ stocks
 SECTOR_MAP = {
-    # Technology (30)
+    # Technology (42)
     "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
     "AVGO": "Technology", "AMD": "Technology", "ADBE": "Technology",
     "CRM": "Technology", "INTC": "Technology", "QCOM": "Technology",
@@ -123,12 +226,17 @@ SECTOR_MAP = {
     "NOW": "Technology", "WDAY": "Technology", "TEAM": "Technology",
     "DDOG": "Technology", "ZS": "Technology", "CRWD": "Technology",
     "SNOW": "Technology", "MDB": "Technology", "NET": "Technology",
-    # Communication (12)
+    "SHOP": "Technology", "SQ": "Technology", "PLTR": "Technology",
+    "U": "Technology", "DOCN": "Technology", "HUBS": "Technology",
+    "OKTA": "Technology", "BILL": "Technology", "SMCI": "Technology",
+    "ARM": "Technology", "UBER": "Technology", "DASH": "Technology",
+    # Communication (15)
     "GOOGL": "Communication", "META": "Communication", "NFLX": "Communication",
     "DIS": "Communication", "CMCSA": "Communication", "TMUS": "Communication",
     "VZ": "Communication", "T": "Communication", "CHTR": "Communication",
     "EA": "Communication", "TTWO": "Communication", "RBLX": "Communication",
-    # Consumer Discretionary (20)
+    "SNAP": "Communication", "PINS": "Communication", "ROKU": "Communication",
+    # Consumer Discretionary (30)
     "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
     "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
     "NKE": "Consumer Discretionary", "SBUX": "Consumer Discretionary",
@@ -139,13 +247,19 @@ SECTOR_MAP = {
     "AZO": "Consumer Discretionary", "POOL": "Consumer Discretionary",
     "DECK": "Consumer Discretionary", "ULTA": "Consumer Discretionary",
     "ETSY": "Consumer Discretionary", "ABNB": "Consumer Discretionary",
-    # Consumer Staples (15)
+    "FIVE": "Consumer Discretionary", "RH": "Consumer Discretionary",
+    "W": "Consumer Discretionary", "CROX": "Consumer Discretionary",
+    "LEVI": "Consumer Discretionary", "GPS": "Consumer Discretionary",
+    "RIVN": "Consumer Discretionary", "LCID": "Consumer Discretionary",
+    "GM": "Consumer Discretionary", "F": "Consumer Discretionary",
+    # Consumer Staples (18)
     "WMT": "Consumer Staples", "PG": "Consumer Staples", "COST": "Consumer Staples",
     "KO": "Consumer Staples", "PEP": "Consumer Staples", "PM": "Consumer Staples",
     "MO": "Consumer Staples", "CL": "Consumer Staples", "KMB": "Consumer Staples",
     "MDLZ": "Consumer Staples", "GIS": "Consumer Staples", "HSY": "Consumer Staples",
     "SJM": "Consumer Staples", "STZ": "Consumer Staples", "EL": "Consumer Staples",
-    # Healthcare (25)
+    "KR": "Consumer Staples", "TSN": "Consumer Staples", "ADM": "Consumer Staples",
+    # Healthcare (35)
     "UNH": "Healthcare", "LLY": "Healthcare", "JNJ": "Healthcare",
     "ABBV": "Healthcare", "MRK": "Healthcare", "PFE": "Healthcare",
     "TMO": "Healthcare", "ABT": "Healthcare", "BMY": "Healthcare",
@@ -154,45 +268,59 @@ SECTOR_MAP = {
     "IDXX": "Healthcare", "ZTS": "Healthcare", "VEEV": "Healthcare",
     "ALGN": "Healthcare", "HOLX": "Healthcare", "IQV": "Healthcare",
     "EW": "Healthcare", "SYK": "Healthcare", "BDX": "Healthcare",
-    "HCA": "Healthcare",
-    # Financials (20)
+    "HCA": "Healthcare", "AZN": "Healthcare", "NVO": "Healthcare",
+    "SNY": "Healthcare", "GSK": "Healthcare", "MRNA": "Healthcare",
+    "BIIB": "Healthcare", "CI": "Healthcare", "CVS": "Healthcare",
+    "HUM": "Healthcare", "TEVA": "Healthcare",
+    # Financials (25)
     "JPM": "Financials", "V": "Financials", "MA": "Financials",
     "BAC": "Financials", "GS": "Financials", "MS": "Financials",
     "WFC": "Financials", "C": "Financials", "BLK": "Financials",
     "SCHW": "Financials", "AXP": "Financials", "CB": "Financials",
     "MMC": "Financials", "ICE": "Financials", "CME": "Financials",
     "MCO": "Financials", "MSCI": "Financials", "FIS": "Financials",
-    "COIN": "Financials", "HOOD": "Financials",
-    # Industrials (20)
+    "COIN": "Financials", "HOOD": "Financials", "ALLY": "Financials",
+    "SOFI": "Financials", "MARA": "Financials", "RIOT": "Financials",
+    "KRE": "Financials",
+    # Industrials (28)
     "BA": "Industrials", "CAT": "Industrials", "HON": "Industrials",
     "GE": "Industrials", "UNP": "Industrials", "RTX": "Industrials",
     "LMT": "Industrials", "DE": "Industrials", "FDX": "Industrials",
     "WM": "Industrials", "GD": "Industrials", "NOC": "Industrials",
     "CSX": "Industrials", "NSC": "Industrials", "ITW": "Industrials",
     "PH": "Industrials", "ROK": "Industrials", "EMR": "Industrials",
-    "TT": "Industrials", "VRSK": "Industrials",
-    # Energy (12)
+    "TT": "Industrials", "VRSK": "Industrials", "HII": "Industrials",
+    "LHX": "Industrials", "TDG": "Industrials", "GNRC": "Industrials",
+    "URI": "Industrials", "SAIA": "Industrials", "XPO": "Industrials",
+    "ODFL": "Industrials",
+    # Energy (18)
     "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
     "SLB": "Energy", "EOG": "Energy", "MPC": "Energy", "PSX": "Energy",
     "OXY": "Energy", "DVN": "Energy", "HES": "Energy",
-    "FANG": "Energy", "VLO": "Energy",
-    # Materials (10)
+    "FANG": "Energy", "VLO": "Energy", "HAL": "Energy",
+    "BKR": "Energy", "AR": "Energy", "EQT": "Energy",
+    "CTRA": "Energy", "OVV": "Energy",
+    # Materials (15)
     "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
     "FCX": "Materials", "NEM": "Materials", "ECL": "Materials",
     "DD": "Materials", "VMC": "Materials", "MLM": "Materials",
-    "NUE": "Materials",
-    # Real Estate (8)
+    "NUE": "Materials", "STLD": "Materials", "X": "Materials",
+    "AA": "Materials", "CLF": "Materials", "RGLD": "Materials",
+    # Real Estate (10)
     "AMT": "Real Estate", "PLD": "Real Estate", "SPG": "Real Estate",
     "CCI": "Real Estate", "EQIX": "Real Estate", "DLR": "Real Estate",
-    "O": "Real Estate", "WELL": "Real Estate",
-    # Utilities (8)
+    "O": "Real Estate", "WELL": "Real Estate", "VNQ": "Real Estate",
+    "PSA": "Real Estate",
+    # Utilities (10)
     "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities",
     "AEP": "Utilities", "SRE": "Utilities", "D": "Utilities",
-    "EXC": "Utilities", "XEL": "Utilities",
-    # ETFs (10) — sector-level signals
+    "EXC": "Utilities", "XEL": "Utilities", "AWK": "Utilities",
+    "WEC": "Utilities",
+    # ETFs (16) — sector + macro signals
     "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "XLF": "ETF",
     "XLE": "ETF", "XLV": "ETF", "XLK": "ETF", "XLI": "ETF",
-    "XLP": "ETF", "XLU": "ETF",
+    "XLP": "ETF", "XLU": "ETF", "GLD": "ETF", "TLT": "ETF",
+    "USO": "ETF", "XBI": "ETF", "ARKK": "ETF", "VXX": "ETF",
 }
 
 
