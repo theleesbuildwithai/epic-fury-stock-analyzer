@@ -695,6 +695,58 @@ auto_trade_stats["status"] = "running"
 logger.warning("AUTONOMOUS TRADING SCHEDULER STARTED — the computer is now the hedge fund manager")
 
 
+# --- FIX EXISTING BROKEN STOP/TARGET PRICES ON STARTUP ---
+# Previous code used quant pick values that produced insane stops
+# (e.g., COIN short: stop $419, target -$214). Fix all open positions.
+def _fix_broken_stops():
+    """Recalculate stop-loss and target for all open positions with sane values."""
+    try:
+        from predictions.models import get_open_trades, get_db
+        open_trades = get_open_trades()
+        fixed = 0
+        for trade in open_trades:
+            entry = trade["entry_price"]
+            direction = trade["direction"]
+            stop = trade.get("stop_loss_price", 0) or 0
+            target = trade.get("target_price", 0) or 0
+
+            # Detect broken stops: negative values, or stop > 2x entry for shorts
+            broken = False
+            if stop <= 0 or target <= 0:
+                broken = True
+            elif direction == "short" and stop > entry * 2:
+                broken = True
+            elif direction == "long" and stop < entry * 0.5:
+                broken = True
+
+            if broken:
+                # Recalculate with regime-aware defaults (BEAR regime)
+                if direction == "long":
+                    new_stop = round(entry * 0.94, 2)   # 6% stop
+                    new_target = round(entry * 1.08, 2)  # 8% target
+                else:
+                    new_stop = round(entry * 1.10, 2)    # 10% stop
+                    new_target = round(entry * 0.80, 2)  # 20% target
+
+                conn = get_db()
+                conn.execute(
+                    "UPDATE paper_trades SET stop_loss_price=?, target_price=? WHERE id=?",
+                    (new_stop, new_target, trade["id"])
+                )
+                conn.commit()
+                conn.close()
+                fixed += 1
+                logger.warning(f"FIXED STOP: {trade['ticker']} {direction} — stop ${stop:.2f}→${new_stop:.2f}, target ${target:.2f}→${new_target:.2f}")
+
+        if fixed:
+            logger.warning(f"Fixed {fixed} positions with broken stop/target prices")
+    except Exception as e:
+        logger.error(f"Fix broken stops error: {e}")
+
+# Run fix on startup
+_fix_broken_stops()
+
+
 # --- Request/Response Models ---
 
 class PredictionRequest(BaseModel):
@@ -1048,6 +1100,78 @@ def trade_history(request: Request):
     except Exception as e:
         logger.error(f"Trade history error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get trade history")
+
+
+@app.get("/api/equity-curve")
+def equity_curve(request: Request):
+    """Get equity curve data — fund vs S&P 500 since March 30, 2026."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_portfolio_snapshots
+        snapshots = get_portfolio_snapshots(days=365)
+
+        # Build fund equity curve
+        fund_curve = []
+        for s in snapshots:
+            fund_curve.append({
+                "date": s["snapshot_date"],
+                "value": round(s["total_value"], 2),
+                "return_pct": round(s.get("cumulative_return_pct", 0), 2),
+            })
+
+        # If no snapshots, create starting point
+        if not fund_curve:
+            fund_curve = [{"date": "2026-03-30", "value": 100000, "return_pct": 0}]
+
+        # Get S&P 500 comparison data since March 30
+        sp500_curve = []
+        try:
+            _throttle()
+            spy_df = yf.download("SPY", start="2026-03-28", progress=False)
+            if spy_df is not None and not spy_df.empty:
+                closes = spy_df["Close"].dropna()
+                if isinstance(closes, pd.DataFrame):
+                    closes = closes.iloc[:, 0]
+                if len(closes) >= 2:
+                    base_price = float(closes.iloc[0])
+                    for idx, price in closes.items():
+                        date_str = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
+                        ret = ((float(price) / base_price) - 1) * 100
+                        sp500_curve.append({
+                            "date": date_str,
+                            "value": round(100000 * (1 + ret / 100), 2),
+                            "return_pct": round(ret, 2),
+                        })
+        except Exception as e:
+            logger.error(f"S&P 500 data error: {e}")
+
+        # Get current portfolio state for latest data point
+        try:
+            portfolio = get_portfolio_state()
+            today = dt.now().strftime("%Y-%m-%d")
+            current_ret = portfolio.get("total_return_pct", 0)
+            # Add or update today's point
+            if fund_curve and fund_curve[-1]["date"] != today:
+                fund_curve.append({
+                    "date": today,
+                    "value": round(portfolio.get("total_value", 100000), 2),
+                    "return_pct": round(current_ret, 2),
+                })
+            elif fund_curve:
+                fund_curve[-1]["value"] = round(portfolio.get("total_value", 100000), 2)
+                fund_curve[-1]["return_pct"] = round(current_ret, 2)
+        except Exception:
+            pass
+
+        return {
+            "fund": fund_curve,
+            "sp500": sp500_curve,
+            "start_date": "2026-03-30",
+            "initial_capital": 100000,
+        }
+    except Exception as e:
+        logger.error(f"Equity curve error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get equity curve")
 
 
 @app.get("/api/learning-status")

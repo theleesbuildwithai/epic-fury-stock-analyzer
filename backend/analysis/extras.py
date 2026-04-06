@@ -169,61 +169,65 @@ BANNER_SYMBOLS = [
 
 def get_banner_data():
     """Get current prices and daily changes for banner tickers.
-    Always returns the most recent trading day's data, even when market is closed."""
+    Always returns the most recent trading day's data, even when market is closed.
+    Downloads in batches of 10 to avoid yfinance timeouts with 28+ symbols."""
     def fetch():
         results = []
-        _throttle()
         symbols = [s[0] for s in BANNER_SYMBOLS]
         symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
-
-        try:
-            df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
-        except Exception:
-            return {"tickers": [], "market_open": is_market_open(), "as_of": None}
-
-        if df is None or df.empty:
-            return {"tickers": [], "market_open": is_market_open(), "as_of": None}
-
         as_of_date = None
-        for symbol in symbols:
+
+        # Download in batches of 10 — large batch downloads drop tickers
+        batch_size = 10
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            _throttle()
             try:
-                name = symbol_to_name[symbol]
-
-                if isinstance(df.columns, pd.MultiIndex):
-                    if symbol in df.columns.get_level_values(0):
-                        close_series = df[(symbol, "Close")].dropna()
-                    else:
-                        continue
-                else:
-                    if "Close" in df.columns:
-                        close_series = df["Close"].dropna()
-                    else:
-                        continue
-
-                if close_series is None or len(close_series) < 2:
-                    continue
-
-                current = float(close_series.iloc[-1])
-                prev = float(close_series.iloc[-2])
-                change = current - prev
-                change_pct = (change / prev) * 100
-
-                # Grab the date of the most recent data point
-                if as_of_date is None:
-                    try:
-                        as_of_date = str(close_series.index[-1].date())
-                    except Exception:
-                        pass
-
-                results.append({
-                    "symbol": symbol,
-                    "name": name,
-                    "price": round(current, 2),
-                    "change": round(change, 2),
-                    "change_pct": round(change_pct, 2),
-                })
+                df = yf.download(batch, period="5d", progress=False, group_by="ticker")
             except Exception:
                 continue
+
+            if df is None or df.empty:
+                continue
+
+            for symbol in batch:
+                try:
+                    name = symbol_to_name[symbol]
+
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if symbol in df.columns.get_level_values(0):
+                            close_series = df[(symbol, "Close")].dropna()
+                        else:
+                            continue
+                    else:
+                        if "Close" in df.columns:
+                            close_series = df["Close"].dropna()
+                        else:
+                            continue
+
+                    if close_series is None or len(close_series) < 2:
+                        continue
+
+                    current = float(close_series.iloc[-1])
+                    prev = float(close_series.iloc[-2])
+                    change = current - prev
+                    change_pct = (change / prev) * 100
+
+                    if as_of_date is None:
+                        try:
+                            as_of_date = str(close_series.index[-1].date())
+                        except Exception:
+                            pass
+
+                    results.append({
+                        "symbol": symbol,
+                        "name": name,
+                        "price": round(current, 2),
+                        "change": round(change, 2),
+                        "change_pct": round(change_pct, 2),
+                    })
+                except Exception:
+                    continue
 
         return {
             "tickers": results,

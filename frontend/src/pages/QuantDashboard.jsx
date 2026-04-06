@@ -117,8 +117,8 @@ export default function QuantDashboard() {
           </div>
           <div className="flex gap-4 mt-3 text-xs text-neutral-500">
             <span>10 Quant Factors</span>
-            <span>200+ Stocks Analyzed</span>
-            <span>Trades Every Hour</span>
+            <span>270+ Stocks Analyzed</span>
+            <span>Event-Driven Trading</span>
             <span>Self-Learning Weekly</span>
           </div>
         </div>
@@ -303,11 +303,120 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 // TAB 2: PAPER PORTFOLIO
 // ============================================================
+function EquityCurveChart() {
+  const [curveData, setCurveData] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchCurve = async () => {
+      try {
+        const res = await fetch('/api/equity-curve')
+        const data = await res.json()
+        setCurveData(data)
+      } catch { }
+      setLoading(false)
+    }
+    fetchCurve()
+  }, [])
+
+  if (loading) return <div className="bg-black border border-green-500/30 rounded-xl p-6 animate-pulse h-80" />
+  if (!curveData) return null
+
+  // Merge fund + S&P 500 data by date
+  const dateMap = {}
+  curveData.fund?.forEach(d => {
+    dateMap[d.date] = { date: d.date, fund: d.return_pct, fundValue: d.value }
+  })
+  curveData.sp500?.forEach(d => {
+    if (!dateMap[d.date]) dateMap[d.date] = { date: d.date }
+    dateMap[d.date].sp500 = d.return_pct
+    dateMap[d.date].sp500Value = d.value
+  })
+  const chartData = Object.values(dateMap)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(d => ({
+      ...d,
+      label: new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+    }))
+
+  const fundReturn = chartData.length > 0 ? (chartData[chartData.length - 1].fund || 0) : 0
+  const sp500Return = chartData.length > 0 ? (chartData[chartData.length - 1].sp500 || 0) : 0
+  const beating = fundReturn > sp500Return
+
+  return (
+    <div className="bg-black border-2 border-green-500/40 rounded-xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-white font-black text-xl">📈 Performance vs S&P 500</h3>
+          <p className="text-neutral-500 text-xs mt-1">Since March 30, 2026 • Started with $100,000</p>
+        </div>
+        <div className="flex gap-4 text-right">
+          <div>
+            <p className="text-neutral-500 text-xs">Epic Fury Fund</p>
+            <p className={`text-lg font-black ${fundReturn >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {fundReturn >= 0 ? '+' : ''}{fundReturn.toFixed(2)}%
+            </p>
+          </div>
+          <div>
+            <p className="text-neutral-500 text-xs">S&P 500</p>
+            <p className={`text-lg font-black ${sp500Return >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {sp500Return >= 0 ? '+' : ''}{sp500Return.toFixed(2)}%
+            </p>
+          </div>
+          <div className={`flex items-center px-3 py-1 rounded-full text-sm font-bold ${
+            beating ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
+          }`}>
+            {beating ? '🏆 BEATING' : '📉 TRAILING'} S&P
+          </div>
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={320}>
+        <LineChart data={chartData}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#333" />
+          <XAxis dataKey="label" tick={{ fill: '#888', fontSize: 11 }} />
+          <YAxis tick={{ fill: '#888', fontSize: 11 }} tickFormatter={v => `${v}%`} />
+          <Tooltip
+            contentStyle={{ backgroundColor: '#111', border: '1px solid #444', borderRadius: '8px' }}
+            labelStyle={{ color: '#fff', fontWeight: 'bold' }}
+            formatter={(value, name) => [
+              `${value?.toFixed(2)}%`,
+              name === 'fund' ? '🟢 Epic Fury Fund' : '⚪ S&P 500'
+            ]}
+          />
+          <Line
+            type="monotone" dataKey="fund" name="fund"
+            stroke="#22c55e" strokeWidth={3} dot={{ r: 5, fill: '#22c55e', stroke: '#000', strokeWidth: 2 }}
+            activeDot={{ r: 7 }}
+          />
+          <Line
+            type="monotone" dataKey="sp500" name="sp500"
+            stroke="#666" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3, fill: '#666' }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+      <div className="flex items-center gap-6 mt-3 justify-center text-xs">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-1 bg-green-500 rounded"></div>
+          <span className="text-neutral-400">Epic Fury Fund</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-1 bg-neutral-500 rounded" style={{ borderBottom: '2px dashed #666' }}></div>
+          <span className="text-neutral-400">S&P 500</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queuedTrades }) {
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
 
   return (
     <div className="space-y-6">
+      {/* EQUITY CURVE — Fund vs S&P 500 */}
+      <EquityCurveChart />
+
       {/* Autonomous Trading Status */}
       {autoStatus && (
         <div className="bg-black border border-blue-500/30 rounded-xl p-5">
@@ -341,7 +450,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </div>
             <div className="bg-neutral-900 rounded-lg p-3">
               <div className="text-neutral-500 text-xs">Schedule</div>
-              <div className="text-blue-400 font-bold text-sm">Every 1hr</div>
+              <div className="text-blue-400 font-bold text-sm">Event-Driven</div>
             </div>
             <div className="bg-neutral-900 rounded-lg p-3">
               <div className="text-neutral-500 text-xs">Next Run</div>

@@ -386,34 +386,54 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             except Exception:
                 pass
 
-            # TRAILING STOP LOSS — lock in profits, don't give them back
-            # If position is up 3%+, move stop to breakeven (entry price)
-            # If position is up 5%+, trail stop to 50% of max profit
-            # This is what separates profitable funds from those that give back gains
-            if not should_close and pnl_pct > 3:
-                # Check if we've pulled back significantly from peak
+            # PROFIT PROTECTION — THE COIN FIX
+            # We lost 6% profit on COIN because we didn't sell when we were up.
+            # New aggressive trailing stop system:
+            #   +2% profit → trail at 40% of peak (close if drops to +0.8%)
+            #   +3% profit → trail at 50% of peak (close if drops to +1.5%)
+            #   +5% profit → trail at 60% of peak (close if drops to +3%)
+            #   +8% profit → trail at 70% of peak (close if drops to +5.6%)
+            # This locks in gains and NEVER gives back more than half the profit.
+            if not should_close and pnl_pct > 2:
                 try:
                     _throttle()
                     hist_df = yf.download(ticker, period="1mo", progress=False)
-                    if hist_df is not None and len(hist_df) >= 5:
+                    if hist_df is not None and len(hist_df) >= 3:
                         hist_closes = hist_df["Close"].values.astype(float).flatten()
+
+                        # Get peak P&L since entry
                         if direction == "long":
                             peak_price = float(np.max(hist_closes))
                             peak_pnl = ((peak_price / entry_price) - 1) * 100
-                            # Trail at 50% of peak profit (if peak was 8%, trail stop at 4%)
-                            trail_level = peak_pnl * 0.5
-                            if peak_pnl > 5 and pnl_pct < trail_level:
-                                should_close = True
-                                close_reason = f"Trailing stop: peaked at {peak_pnl:+.1f}%, now {pnl_pct:+.1f}%"
-                        else:  # short
+                        else:
                             trough_price = float(np.min(hist_closes))
-                            trough_pnl = ((entry_price / trough_price) - 1) * 100
-                            trail_level = trough_pnl * 0.5
-                            if trough_pnl > 5 and pnl_pct < trail_level:
-                                should_close = True
-                                close_reason = f"Trailing stop: peaked at {trough_pnl:+.1f}%, now {pnl_pct:+.1f}%"
+                            peak_pnl = ((entry_price / trough_price) - 1) * 100
+
+                        # Adaptive trail percentage based on how much profit we've made
+                        if peak_pnl >= 8:
+                            trail_pct = 0.70  # Keep 70% of gains
+                        elif peak_pnl >= 5:
+                            trail_pct = 0.60  # Keep 60%
+                        elif peak_pnl >= 3:
+                            trail_pct = 0.50  # Keep 50%
+                        else:
+                            trail_pct = 0.40  # Keep 40%
+
+                        trail_level = peak_pnl * trail_pct
+
+                        if peak_pnl >= 2 and pnl_pct < trail_level:
+                            should_close = True
+                            close_reason = (
+                                f"PROFIT LOCK: peaked at {peak_pnl:+.1f}%, "
+                                f"trail at {trail_level:+.1f}%, now {pnl_pct:+.1f}%"
+                            )
                 except Exception:
                     pass
+
+            # TAKE PROFIT: If we're up big (10%+), just take it
+            if not should_close and pnl_pct >= 10:
+                should_close = True
+                close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
 
             # AGGRESSIVE BEAR PROTECTION: close losing longs faster in BEAR
             if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
@@ -686,12 +706,15 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 long_stop = max(0.03, long_stop * 0.7)   # 30% tighter
                 short_stop = max(0.03, short_stop * 0.7)
 
+            # ALWAYS calculate stop/target from regime-aware formulas
+            # NEVER use quant pick values — they were producing insane numbers
+            # (e.g., COIN short: stop at $419, target at -$214)
             if direction == "long":
-                stop_loss = pick.get("stop_loss") or round(price * (1 - long_stop), 2)
-                target = pick.get("target_price") or round(price * long_target, 2)
+                stop_loss = round(price * (1 - long_stop), 2)
+                target = round(price * long_target, 2)
             else:  # short
-                stop_loss = pick.get("stop_loss") or round(price * (1 + short_stop), 2)
-                target = pick.get("target_price") or round(price * short_target, 2)
+                stop_loss = round(price * (1 + short_stop), 2)
+                target = round(price * short_target, 2)
 
             try:
                 # ADAPTIVE HOLD DURATION — like a real day trader / swing trader
@@ -1330,6 +1353,40 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
             should_close = True
             close_reason = f"BEAR regime protection — losing long ({pnl_pct:+.1f}%)"
+
+        # PROFIT PROTECTION — same trailing stop as main engine
+        if not should_close and pnl_pct > 2:
+            try:
+                _throttle()
+                hist_df = yf.download(ticker, period="1mo", progress=False)
+                if hist_df is not None and len(hist_df) >= 3:
+                    hist_closes = hist_df["Close"].values.astype(float).flatten()
+                    if direction == "long":
+                        peak_price = float(np.max(hist_closes))
+                        peak_pnl = ((peak_price / entry_price) - 1) * 100
+                    else:
+                        trough_price = float(np.min(hist_closes))
+                        peak_pnl = ((entry_price / trough_price) - 1) * 100
+
+                    if peak_pnl >= 8:
+                        trail_pct = 0.70
+                    elif peak_pnl >= 5:
+                        trail_pct = 0.60
+                    elif peak_pnl >= 3:
+                        trail_pct = 0.50
+                    else:
+                        trail_pct = 0.40
+                    trail_level = peak_pnl * trail_pct
+                    if peak_pnl >= 2 and pnl_pct < trail_level:
+                        should_close = True
+                        close_reason = f"PROFIT LOCK: peaked at {peak_pnl:+.1f}%, trail at {trail_level:+.1f}%, now {pnl_pct:+.1f}%"
+            except Exception:
+                pass
+
+        # TAKE PROFIT at 10%+
+        if not should_close and pnl_pct >= 10:
+            should_close = True
+            close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
 
         if should_close:
             try:
