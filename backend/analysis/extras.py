@@ -28,6 +28,77 @@ _last_api_call = [0.0]
 _API_DELAY = 3.0
 
 
+def _get_market_holidays(year):
+    """Return set of known US stock market holidays for a given year."""
+    from datetime import date
+    holidays = set()
+    # New Year's Day
+    holidays.add(date(year, 1, 1))
+    # MLK Day (3rd Monday of January)
+    d = date(year, 1, 1)
+    mondays = 0
+    while mondays < 3:
+        if d.weekday() == 0:
+            mondays += 1
+            if mondays == 3:
+                holidays.add(d)
+        d += timedelta(days=1)
+    # Presidents' Day (3rd Monday of February)
+    d = date(year, 2, 1)
+    mondays = 0
+    while mondays < 3:
+        if d.weekday() == 0:
+            mondays += 1
+            if mondays == 3:
+                holidays.add(d)
+        d += timedelta(days=1)
+    # Good Friday (2 days before Easter Sunday)
+    # Easter calculation (anonymous Gregorian algorithm)
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d_val = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d_val - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    easter = date(year, month, day)
+    good_friday = easter - timedelta(days=2)
+    holidays.add(good_friday)
+    # Memorial Day (last Monday of May)
+    d = date(year, 5, 31)
+    while d.weekday() != 0:
+        d -= timedelta(days=1)
+    holidays.add(d)
+    # Juneteenth
+    holidays.add(date(year, 6, 19))
+    # Independence Day
+    holidays.add(date(year, 7, 4))
+    # Labor Day (1st Monday of September)
+    d = date(year, 9, 1)
+    while d.weekday() != 0:
+        d += timedelta(days=1)
+    holidays.add(d)
+    # Thanksgiving (4th Thursday of November)
+    d = date(year, 11, 1)
+    thursdays = 0
+    while thursdays < 4:
+        if d.weekday() == 3:
+            thursdays += 1
+            if thursdays == 4:
+                holidays.add(d)
+        d += timedelta(days=1)
+    # Christmas
+    holidays.add(date(year, 12, 25))
+    return holidays
+
+
 def is_market_open():
     """Check if US stock market is currently open (Mon-Fri, 9:30 AM - 4:00 PM ET)."""
     et = pytz.timezone("US/Eastern")
@@ -682,15 +753,24 @@ def get_daily_summary(watchlist_tickers=None):
         else:
             market_mood = "Bearish"
 
-        # Determine the actual trading date of this data
+        # Determine the actual last TRADING date (skip weekends & major holidays)
         trading_date = None
         try:
-            # Grab from the first available stock's close series
+            # First try to get it from the actual price data
             for symbol in SUMMARY_STOCKS:
                 if isinstance(df.columns, pd.MultiIndex) and symbol in df.columns.get_level_values(0):
                     cs = df[(symbol, "Close")].dropna()
                     if len(cs) >= 1:
-                        trading_date = str(cs.index[-1].date())
+                        raw_date = cs.index[-1].date()
+                        # If the date falls on a weekend, walk back to Friday
+                        from datetime import timedelta
+                        while raw_date.weekday() >= 5:  # 5=Sat, 6=Sun
+                            raw_date -= timedelta(days=1)
+                        # Check for major US market holidays (Good Friday, etc.)
+                        us_holidays = _get_market_holidays(raw_date.year)
+                        while raw_date in us_holidays or raw_date.weekday() >= 5:
+                            raw_date -= timedelta(days=1)
+                        trading_date = str(raw_date)
                         break
         except Exception:
             pass
