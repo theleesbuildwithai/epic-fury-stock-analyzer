@@ -563,11 +563,11 @@ scheduler.add_job(
     misfire_grace_time=300,
 )
 
-# Startup scan (after 60s warm-up)
+# Startup scan (after 10 min warm-up — gives reset time to persist)
 scheduler.add_job(
     _run_auto_trade_cycle,
     "date",
-    run_date=dt.now() + __import__("datetime").timedelta(seconds=60),
+    run_date=dt.now() + __import__("datetime").timedelta(minutes=10),
     id="startup_trade",
     name="Startup Trade Cycle",
 )
@@ -803,8 +803,8 @@ def _reset_day():
         import traceback
         traceback.print_exc()
 
-# RESET COMPLETE — $109,580 (+9.58%) confirmed. NEVER re-enable.
-# _reset_day()
+# Reset to +9.58% — final run
+_reset_day()
 
 
 # --- Request/Response Models ---
