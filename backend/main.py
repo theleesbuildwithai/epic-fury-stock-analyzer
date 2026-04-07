@@ -1127,31 +1127,22 @@ def equity_curve(request: Request):
         sp500_curve = []
         try:
             _throttle()
-            spy_df = yf.download(["SPY"], start="2026-03-20", progress=False)
-            if spy_df is not None and not spy_df.empty:
-                # Extract Close prices — handle ALL possible yfinance formats
-                closes = None
-                if isinstance(spy_df.columns, pd.MultiIndex):
-                    level0 = spy_df.columns.get_level_values(0).unique().tolist()
-                    level1 = spy_df.columns.get_level_values(1).unique().tolist()
-                    for fmt in [("Close", "SPY"), ("SPY", "Close")]:
-                        try:
-                            c = spy_df[fmt].dropna()
-                            if len(c) > 0:
-                                closes = c
-                                break
-                        except (KeyError, TypeError):
-                            continue
-                    if closes is None:
-                        flat = spy_df.copy()
-                        flat.columns = flat.columns.get_level_values(0)
-                        if "Close" in flat.columns:
-                            closes = flat["Close"].dropna()
-                else:
-                    closes = spy_df["Close"].dropna()
-                if closes is not None and isinstance(closes, pd.DataFrame):
-                    closes = closes.iloc[:, 0]
-                if closes is not None and len(closes) >= 2:
+            # Use ^GSPC (actual S&P 500 index) for comparison
+            spy_raw = yf.download("^GSPC", start="2026-03-20", period=None, progress=False)
+            logger.warning(f"EQUITY CURVE: ^GSPC download shape={spy_raw.shape if spy_raw is not None else 'None'}, cols={spy_raw.columns.tolist()[:5] if spy_raw is not None and not spy_raw.empty else 'empty'}")
+
+            closes = None
+            if spy_raw is not None and not spy_raw.empty:
+                if isinstance(spy_raw.columns, pd.MultiIndex):
+                    # Flatten MultiIndex — just take level 0
+                    spy_raw.columns = [c[0] if isinstance(c, tuple) else c for c in spy_raw.columns]
+                if "Close" in spy_raw.columns:
+                    closes = spy_raw["Close"].dropna()
+                    if isinstance(closes, pd.DataFrame):
+                        closes = closes.iloc[:, 0]
+                    logger.warning(f"EQUITY CURVE: Got {len(closes)} close prices for ^GSPC")
+
+            if closes is not None and len(closes) >= 2:
                     base_price = float(closes.iloc[0])
                     for idx, price in closes.items():
                         date_str = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
