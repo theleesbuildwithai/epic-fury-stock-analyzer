@@ -303,7 +303,7 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 // TAB 2: PAPER PORTFOLIO
 // ============================================================
-function EquityCurveChart() {
+function EquityCurveChart({ portfolioReturn }) {
   const [curveData, setCurveData] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -339,7 +339,12 @@ function EquityCurveChart() {
       label: new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
     }))
 
-  const fundReturn = chartData.length > 0 ? (chartData[chartData.length - 1].fund || 0) : 0
+  // Use the SAME portfolio return value as the top banner so numbers always match
+  const fundReturn = portfolioReturn != null ? portfolioReturn : (chartData.length > 0 ? (chartData[chartData.length - 1].fund || 0) : 0)
+  // Update the last chart point to match the portfolio value exactly
+  if (chartData.length > 0 && portfolioReturn != null) {
+    chartData[chartData.length - 1].fund = portfolioReturn
+  }
   const sp500Return = chartData.length > 0 ? (chartData[chartData.length - 1].sp500 || 0) : 0
   const beating = fundReturn > sp500Return
 
@@ -415,7 +420,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
   return (
     <div className="space-y-6">
       {/* EQUITY CURVE — Fund vs S&P 500 */}
-      <EquityCurveChart />
+      <EquityCurveChart portfolioReturn={portfolio?.total_return_pct} />
 
       {/* Autonomous Trading Status */}
       {autoStatus && (
