@@ -1127,12 +1127,18 @@ def equity_curve(request: Request):
         sp500_curve = []
         try:
             _throttle()
-            spy_df = yf.download("SPY", start="2026-03-28", progress=False)
+            spy_df = yf.download("SPY", start="2026-03-20", progress=False)
             if spy_df is not None and not spy_df.empty:
                 # Handle MultiIndex columns from yfinance
                 if isinstance(spy_df.columns, pd.MultiIndex):
-                    spy_df.columns = spy_df.columns.get_level_values(0)
-                closes = spy_df["Close"].dropna()
+                    # Format: (Price, Ticker) e.g. ("Close", "SPY")
+                    try:
+                        closes = spy_df[("Close", "SPY")].dropna()
+                    except (KeyError, TypeError):
+                        spy_df.columns = spy_df.columns.get_level_values(0)
+                        closes = spy_df["Close"].dropna()
+                else:
+                    closes = spy_df["Close"].dropna()
                 if isinstance(closes, pd.DataFrame):
                     closes = closes.iloc[:, 0]
                 if len(closes) >= 2:
