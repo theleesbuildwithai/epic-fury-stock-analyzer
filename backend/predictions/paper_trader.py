@@ -155,12 +155,21 @@ def _throttle():
 #  PORTFOLIO STATE
 # ============================================================
 
+# Cache portfolio state for 15 seconds so both charts show identical values
+_portfolio_cache = {"state": None, "timestamp": 0}
+_CACHE_TTL = 15  # seconds
+
 def get_portfolio_state() -> dict:
     """
     Get current portfolio state: cash, positions, total value.
     Cash comes from paper_cash table — updated ATOMICALLY with every trade.
-    No more race conditions or stale snapshot values.
+    Cached for 15 seconds so all API endpoints show identical numbers.
     """
+    global _portfolio_cache
+    now = time.time()
+    if _portfolio_cache["state"] and (now - _portfolio_cache["timestamp"]) < _CACHE_TTL:
+        return _portfolio_cache["state"]
+
     from predictions.models import get_open_trades, get_closed_trades, get_cash
 
     open_trades = get_open_trades()
@@ -256,6 +265,12 @@ def get_portfolio_state() -> dict:
         },
         "timestamp": datetime.now().isoformat(),
     }
+
+    # Cache the result so all API endpoints show identical numbers
+    _portfolio_cache["state"] = result
+    _portfolio_cache["timestamp"] = time.time()
+
+    return result
 
 
 def _get_current_prices(symbols: list) -> dict:
