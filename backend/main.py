@@ -1276,6 +1276,25 @@ def equity_curve(request: Request):
                 p["return_pct"] = round(p["return_pct"] - base, 2)
                 p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
 
+        # Carry forward S&P 500 data for any fund dates missing S&P (weekends/holidays)
+        if sp500_curve and fund_curve:
+            sp500_by_date = {p["date"]: p for p in sp500_curve}
+            last_sp500 = sp500_curve[0]
+            filled_sp500 = []
+            for fp in fund_curve:
+                d = fp["date"]
+                if d in sp500_by_date:
+                    last_sp500 = sp500_by_date[d]
+                    filled_sp500.append(sp500_by_date[d])
+                else:
+                    # Carry forward last known S&P value
+                    filled_sp500.append({
+                        "date": d,
+                        "value": last_sp500["value"],
+                        "return_pct": last_sp500["return_pct"],
+                    })
+            sp500_curve = filled_sp500
+
         return {
             "fund": fund_curve,
             "sp500": sp500_curve,
