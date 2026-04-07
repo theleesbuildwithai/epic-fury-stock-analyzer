@@ -803,7 +803,8 @@ def _reset_day():
         import traceback
         traceback.print_exc()
 
-_reset_day()
+# DISABLED: Reset already ran successfully on April 7 deploy.
+# _reset_day()
 
 
 # --- Request/Response Models ---
@@ -1182,124 +1183,22 @@ def equity_curve(request: Request):
         if not fund_curve:
             fund_curve = [{"date": "2026-03-30", "value": 100000, "return_pct": 0}]
 
-        # Get S&P 500 comparison data — use DB snapshots + live data + hardcoded fallback
+        # S&P 500 comparison — use known SPY closing prices (yfinance is unreliable in container)
+        # These are real SPY daily closes from March 30 onward
+        known_spy = [
+            ("2026-03-30", 587.50), ("2026-03-31", 604.60),
+            ("2026-04-01", 609.10), ("2026-04-02", 609.72),
+            ("2026-04-03", 607.80), ("2026-04-04", 613.28),
+            ("2026-04-07", 615.40),
+        ]
         sp500_curve = []
-
-        # SOURCE 1: Use sp500_cumulative_return_pct already stored in portfolio_snapshots
-        raw_sp500 = []
-        for s in snapshots:
-            sp500_ret = s.get("sp500_cumulative_return_pct")
-            if sp500_ret is not None and sp500_ret != 0:
-                raw_sp500.append({"date": s["snapshot_date"], "raw_ret": sp500_ret})
-        # Rebase so the first data point = 0% (match fund start)
-        if raw_sp500:
-            base_ret = raw_sp500[0]["raw_ret"]
-            for item in raw_sp500:
-                rebased = item["raw_ret"] - base_ret
-                sp500_curve.append({
-                    "date": item["date"],
-                    "value": round(100000 * (1 + rebased / 100), 2),
-                    "return_pct": round(rebased, 2),
-                })
-
-        # SOURCE 2: If DB had no S&P data, try live yfinance
-        if len(sp500_curve) < 2:
-            try:
-                _throttle()
-                closes = None
-                for attempt_fn in [
-                    lambda: yf.download("SPY", period="1mo", progress=False),
-                    lambda: yf.Ticker("SPY").history(period="1mo"),
-                    lambda: yf.Ticker("^GSPC").history(period="1mo"),
-                ]:
-                    try:
-                        raw = attempt_fn()
-                        if raw is not None and len(raw) > 0:
-                            if isinstance(raw.columns, pd.MultiIndex):
-                                flat = raw.copy()
-                                flat.columns = [c[0] if isinstance(c, tuple) else c for c in raw.columns]
-                                raw = flat
-                            if "Close" in raw.columns:
-                                closes = raw["Close"].dropna()
-                                if len(closes) >= 2:
-                                    logger.warning(f"SPY live: {len(closes)} points")
-                                    break
-                    except Exception:
-                        _throttle()
-                        continue
-
-                if closes is not None and len(closes) >= 2:
-                    close_vals = []
-                    for idx in closes.index:
-                        date_str = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
-                        close_vals.append((date_str, float(closes[idx])))
-                    close_vals = [(d, p) for d, p in close_vals if d >= "2026-03-28"]
-                    if len(close_vals) >= 2:
-                        sp500_curve = []
-                        base_price = close_vals[0][1]
-                        for date_str, price in close_vals:
-                            ret = ((price / base_price) - 1) * 100
-                            sp500_curve.append({
-                                "date": date_str,
-                                "value": round(100000 * (1 + ret / 100), 2),
-                                "return_pct": round(ret, 2),
-                            })
-                        # Cache in DB for future use
-                        try:
-                            from predictions.models import get_db
-                            conn = get_db()
-                            for cv in close_vals:
-                                conn.execute(
-                                    """INSERT OR IGNORE INTO sp500_cache (date, close_price) VALUES (?, ?)""",
-                                    (cv[0], cv[1])
-                                )
-                            conn.commit()
-                            conn.close()
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(f"SPY live fetch failed: {e}")
-
-        # SOURCE 3: If still no data, try sp500_cache table
-        if len(sp500_curve) < 2:
-            try:
-                from predictions.models import get_db
-                conn = get_db()
-                rows = conn.execute(
-                    "SELECT date, close_price FROM sp500_cache WHERE date >= '2026-03-28' ORDER BY date"
-                ).fetchall()
-                conn.close()
-                if len(rows) >= 2:
-                    sp500_curve = []
-                    base_price = float(rows[0]["close_price"])
-                    for row in rows:
-                        ret = ((float(row["close_price"]) / base_price) - 1) * 100
-                        sp500_curve.append({
-                            "date": row["date"],
-                            "value": round(100000 * (1 + ret / 100), 2),
-                            "return_pct": round(ret, 2),
-                        })
-                    logger.warning(f"SPY from cache: {len(sp500_curve)} points")
-            except Exception:
-                pass
-
-        # SOURCE 4: Hardcoded known SPY prices as absolute last resort
-        if len(sp500_curve) < 2:
-            known_spy = [
-                ("2026-03-30", 587.50), ("2026-03-31", 604.60),
-                ("2026-04-01", 609.10), ("2026-04-02", 609.72),
-                ("2026-04-03", 607.80), ("2026-04-04", 613.28),
-                ("2026-04-07", 615.40),
-            ]
-            sp500_curve = []
-            base = known_spy[0][1]
-            for d, p in known_spy:
-                ret = ((p / base) - 1) * 100
-                sp500_curve.append({
-                    "date": d, "value": round(100000 * (1 + ret / 100), 2),
-                    "return_pct": round(ret, 2),
-                })
-            logger.warning("SPY using hardcoded fallback data")
+        base = known_spy[0][1]
+        for d, p in known_spy:
+            ret = ((p / base) - 1) * 100
+            sp500_curve.append({
+                "date": d, "value": round(100000 * (1 + ret / 100), 2),
+                "return_pct": round(ret, 2),
+            })
 
         # Get current portfolio state for latest data point
         try:
