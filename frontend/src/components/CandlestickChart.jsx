@@ -189,10 +189,10 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
           <span className="text-white font-mono">{(d.volume || 0).toLocaleString()}</span>
         </div>
         {d.sma_20 && activeOverlays.includes('sma_20') && (
-          <div className="mt-1 text-blue-400 font-mono">SMA20: ${d.sma_20?.toFixed(2)}</div>
+          <div className="mt-1 text-neutral-400 font-mono">SMA20: ${d.sma_20?.toFixed(2)}</div>
         )}
         {d.sma_50 && activeOverlays.includes('sma_50') && (
-          <div className="text-yellow-400 font-mono">SMA50: ${d.sma_50?.toFixed(2)}</div>
+          <div className="text-neutral-400 font-mono">SMA50: ${d.sma_50?.toFixed(2)}</div>
         )}
       </div>
     )
@@ -269,7 +269,7 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
               onClick={() => toggleOverlay(o.key)}
               className={`px-2 py-1 rounded text-[10px] font-medium border transition-all ${
                 activeOverlays.includes(o.key)
-                  ? 'border-blue-500 text-blue-400 bg-blue-500/10'
+                  ? 'border-green-500 text-neutral-400 bg-green-500/10'
                   : 'border-neutral-700 text-neutral-500 hover:text-neutral-300'
               }`}
             >
@@ -411,19 +411,19 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
       {/* Legend */}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-neutral-500">
         {activeOverlays.includes('sma_20') && (
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-blue-500 inline-block"></span> SMA 20</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-green-500 inline-block"></span> SMA 20</span>
         )}
         {activeOverlays.includes('sma_50') && (
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-yellow-500 inline-block"></span> SMA 50</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-neutral-500 inline-block"></span> SMA 50</span>
         )}
         {activeOverlays.includes('sma_200') && (
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-500 inline-block"></span> SMA 200</span>
         )}
         {activeOverlays.includes('ema_12') && (
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-purple-500 inline-block"></span> EMA 12</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-green-500 inline-block"></span> EMA 12</span>
         )}
         {activeOverlays.includes('bollinger') && (
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-indigo-500 inline-block"></span> Bollinger Bands</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-neutral-400 inline-block"></span> Bollinger Bands</span>
         )}
       </div>
     </div>

@@ -301,6 +301,12 @@ _last_trade_time = {"value": None}
 _scan_count = {"value": 0}
 MIN_TRADE_INTERVAL_MINUTES = 15  # Don't trade more than once every 15 min
 
+# Geo-political risk state (updated by scanner every 15 min)
+_geo_risk_state = {"level": "LOW", "score": 0, "last_update": None, "events": []}
+
+# Daily profit limit state (2.5% daily gain = sell all and pause)
+_daily_paused = {"paused": False, "pause_date": None, "reason": None}
+
 
 def _should_trade_now() -> dict:
     """
@@ -718,7 +724,7 @@ scheduler.add_job(
 # --- GEO-POLITICAL RISK SCANNER (every 15 min during market hours) ---
 # Constantly monitors geopolitical events (Iran/US, tariffs, war, sanctions)
 # and adjusts the trading system's behavior in real-time.
-_geo_risk_state = {"level": "LOW", "score": 0, "last_update": None, "events": []}
+# (_geo_risk_state declared above with other module-level state vars)
 
 def _geopolitical_scanner():
     """Scan for geo-political risk events every 15 minutes.
@@ -779,7 +785,7 @@ scheduler.add_job(
 # --- DAILY 2.5% TAKE-PROFIT RULE ---
 # If the fund is up 2.5%+ in a single day, sell ALL holdings and pause until tomorrow.
 # This locks in exceptional daily gains and prevents giving them back.
-_daily_paused = {"paused": False, "pause_date": None, "reason": None}
+# (_daily_paused declared above with other module-level state vars)
 
 def _check_daily_profit_limit():
     """Check if fund has gained 2.5%+ today. If so, sell everything and pause."""

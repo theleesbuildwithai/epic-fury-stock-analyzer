@@ -17,13 +17,13 @@ function saveWatchlist(list) {
 const SIGNAL_COLORS = {
   "STRONG BUY": "bg-green-500/20 text-green-400 border-green-500/30",
   "BUY": "bg-green-500/10 text-green-400 border-green-500/20",
-  "HOLD": "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
+  "HOLD": "bg-neutral-500/10 text-neutral-400 border-neutral-500/20",
   "SELL": "bg-red-500/10 text-red-400 border-red-500/20",
   "STRONG SELL": "bg-red-500/20 text-red-400 border-red-500/30",
 }
 
 function ConfidenceBar({ value }) {
-  const color = value >= 70 ? 'bg-green-500' : value >= 50 ? 'bg-yellow-500' : 'bg-red-500'
+  const color = value >= 70 ? 'bg-green-500' : value >= 50 ? 'bg-neutral-500' : 'bg-red-500'
   return (
     <div className="flex items-center gap-2">
       <div className="w-16 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
@@ -38,7 +38,7 @@ function CorrelationCell({ value }) {
   if (value == null || isNaN(value)) return <td className="px-2 py-1.5 text-center text-[11px] font-mono bg-neutral-800 text-neutral-400">-</td>
   const abs = Math.abs(value)
   const bg = value >= 0.7 ? 'bg-red-500/30 text-red-300'
-    : value >= 0.4 ? 'bg-yellow-500/20 text-yellow-300'
+    : value >= 0.4 ? 'bg-neutral-500/20 text-neutral-300'
     : value >= -0.1 ? 'bg-neutral-800 text-neutral-400'
     : 'bg-green-500/20 text-green-300'
   return (
@@ -332,8 +332,8 @@ export default function Watchlist() {
               setShowBacktest(!showBacktest)
               if (!showBacktest && !backtestData) fetchBacktest()
             }}
-            className="px-5 py-2.5 bg-purple-500/10 border border-purple-500/30 text-purple-400
-                       font-semibold text-sm rounded-lg hover:bg-purple-500/20 transition-all"
+            className="px-5 py-2.5 bg-green-500/10 border border-green-500/30 text-green-400
+                       font-semibold text-sm rounded-lg hover:bg-green-500/20 transition-all"
           >
             {showBacktest ? 'Hide' : 'Show'} Portfolio Visualizer
           </button>
@@ -342,7 +342,7 @@ export default function Watchlist() {
 
       {/* Portfolio Visualizer Panel */}
       {showBacktest && (
-        <div className="bg-black border border-purple-500/30 rounded-xl p-6 mb-6">
+        <div className="bg-black border border-green-500/30 rounded-xl p-6 mb-6">
           <div className="flex items-center justify-between mb-5">
             <div>
               <h2 className="text-white font-bold text-lg">Portfolio Visualizer</h2>
@@ -351,7 +351,7 @@ export default function Watchlist() {
             <button
               onClick={fetchBacktest}
               disabled={backtestLoading}
-              className="px-3 py-1.5 text-xs bg-purple-500/20 text-purple-300 rounded hover:bg-purple-500/30"
+              className="px-3 py-1.5 text-xs bg-green-500/20 text-green-300 rounded hover:bg-green-500/30"
             >
               {backtestLoading ? 'Loading...' : 'Refresh'}
             </button>
@@ -383,7 +383,7 @@ export default function Watchlist() {
                     <p className="text-neutral-500 text-[10px]">Sharpe Ratio</p>
                     <p className={`text-lg font-bold font-mono ${
                       backtestData.portfolio_stats.sharpe_ratio >= 1 ? 'text-green-400' :
-                      backtestData.portfolio_stats.sharpe_ratio >= 0 ? 'text-yellow-400' : 'text-red-400'
+                      backtestData.portfolio_stats.sharpe_ratio >= 0 ? 'text-neutral-400' : 'text-red-400'
                     }`}>
                       {backtestData.portfolio_stats.sharpe_ratio}
                     </p>
@@ -603,7 +603,7 @@ export default function Watchlist() {
                             <span className="text-neutral-400 text-[11px]">EMA Trend</span>
                             <span className={`text-[11px] font-mono ${
                               qd.technicals.ema_trend === 'Bullish' ? 'text-green-400' :
-                              qd.technicals.ema_trend === 'Bearish' ? 'text-red-400' : 'text-yellow-400'
+                              qd.technicals.ema_trend === 'Bearish' ? 'text-red-400' : 'text-neutral-400'
                             }`}>{qd.technicals.ema_trend}</span>
                           </div>
                           <div className="flex justify-between">
@@ -640,7 +640,7 @@ export default function Watchlist() {
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">Regime</span>
                             <span className={`text-[11px] font-bold ${
-                              qd.regime === 'BULL' ? 'text-green-400' : qd.regime === 'BEAR' ? 'text-red-400' : 'text-yellow-400'
+                              qd.regime === 'BULL' ? 'text-green-400' : qd.regime === 'BEAR' ? 'text-red-400' : 'text-neutral-400'
                             }`}>{qd.regime}</span>
                           </div>
                           <div className="flex justify-between">
@@ -700,7 +700,7 @@ export default function Watchlist() {
                   <div className="border-t border-neutral-800 px-5 py-6 bg-neutral-950 text-center">
                     <button
                       onClick={() => fetchQuantAnalysis(stock.ticker)}
-                      className="text-purple-400 text-sm hover:text-purple-300"
+                      className="text-green-400 text-sm hover:text-green-300"
                     >
                       Load Quant Analysis
                     </button>

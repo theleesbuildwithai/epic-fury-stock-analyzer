@@ -48,7 +48,7 @@ export default function TickerBanner() {
             </>
           ) : (
             <>
-              <div className={`w-1.5 h-1.5 rounded-full ${marketOpen ? 'bg-green-500 pulse-dot' : 'bg-yellow-500'}`}></div>
+              <div className={`w-1.5 h-1.5 rounded-full ${marketOpen ? 'bg-green-500 pulse-dot' : 'bg-neutral-500'}`}></div>
               <span className="text-neutral-500 text-[10px] font-medium tracking-widest uppercase">
                 {marketOpen ? 'Live' : 'Last Close'}
               </span>

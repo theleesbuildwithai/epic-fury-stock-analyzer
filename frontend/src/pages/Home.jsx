@@ -42,7 +42,7 @@ export default function Home() {
 
       {loading && (
         <div className="text-center py-20">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-slate-600 border-t-orange-500"></div>
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-slate-600 border-t-green-500"></div>
           <p className="text-slate-400 mt-4">Fetching real data and running analysis...</p>
         </div>
       )}

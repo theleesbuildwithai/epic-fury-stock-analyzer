@@ -57,7 +57,7 @@ export default function SectorHeatmap() {
         <div className="flex items-center gap-2">
           <h2 className="text-xl font-bold text-white">Sector Heatmap</h2>
           {!sectors?.market_open && (
-            <span className="text-[10px] font-medium tracking-wider uppercase bg-yellow-500/10 text-yellow-500 px-2 py-0.5 rounded">Market Closed</span>
+            <span className="text-[10px] font-medium tracking-wider uppercase bg-neutral-500/10 text-neutral-500 px-2 py-0.5 rounded">Market Closed</span>
           )}
         </div>
         <p className="text-neutral-500 text-sm mt-1">

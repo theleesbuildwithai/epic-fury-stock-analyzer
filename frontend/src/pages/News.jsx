@@ -56,9 +56,9 @@ export default function News() {
   }
 
   const sourceColor = (source) => {
-    if (source === 'Yahoo Finance') return 'bg-purple-500/20 text-purple-400 border-purple-500/30'
+    if (source === 'Yahoo Finance') return 'bg-green-500/20 text-green-400 border-green-500/30'
     if (source === 'CNN') return 'bg-red-500/20 text-red-400 border-red-500/30'
-    if (source === 'CNBC') return 'bg-blue-500/20 text-blue-400 border-blue-500/30'
+    if (source === 'CNBC') return 'bg-neutral-500/20 text-neutral-400 border-neutral-500/30'
     return 'bg-neutral-500/20 text-neutral-400 border-neutral-500/30'
   }
 
@@ -155,7 +155,7 @@ export default function News() {
                       {sourceIcon(h.source)}
                     </span>
                     {h.is_macro && (
-                      <span className="inline-block px-2 py-0.5 rounded text-xs font-bold bg-yellow-500/10 text-yellow-400 border border-yellow-500/30">
+                      <span className="inline-block px-2 py-0.5 rounded text-xs font-bold bg-neutral-500/10 text-neutral-400 border border-neutral-500/30">
                         MACRO
                       </span>
                     )}
