@@ -803,8 +803,8 @@ def _reset_day():
         import traceback
         traceback.print_exc()
 
-# Reset to +9.58% — final run
-_reset_day()
+# RESET DONE — $109,580 (+9.58%) confirmed April 7. DO NOT re-enable.
+# _reset_day()
 
 
 # --- Request/Response Models ---
