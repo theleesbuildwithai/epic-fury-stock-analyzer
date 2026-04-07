@@ -1127,21 +1127,31 @@ def equity_curve(request: Request):
         sp500_curve = []
         try:
             _throttle()
-            spy_df = yf.download("SPY", start="2026-03-20", progress=False)
+            spy_df = yf.download(["SPY"], start="2026-03-20", progress=False)
             if spy_df is not None and not spy_df.empty:
-                # Handle MultiIndex columns from yfinance
+                # Extract Close prices — handle ALL possible yfinance formats
+                closes = None
                 if isinstance(spy_df.columns, pd.MultiIndex):
-                    # Format: (Price, Ticker) e.g. ("Close", "SPY")
-                    try:
-                        closes = spy_df[("Close", "SPY")].dropna()
-                    except (KeyError, TypeError):
-                        spy_df.columns = spy_df.columns.get_level_values(0)
-                        closes = spy_df["Close"].dropna()
+                    level0 = spy_df.columns.get_level_values(0).unique().tolist()
+                    level1 = spy_df.columns.get_level_values(1).unique().tolist()
+                    for fmt in [("Close", "SPY"), ("SPY", "Close")]:
+                        try:
+                            c = spy_df[fmt].dropna()
+                            if len(c) > 0:
+                                closes = c
+                                break
+                        except (KeyError, TypeError):
+                            continue
+                    if closes is None:
+                        flat = spy_df.copy()
+                        flat.columns = flat.columns.get_level_values(0)
+                        if "Close" in flat.columns:
+                            closes = flat["Close"].dropna()
                 else:
                     closes = spy_df["Close"].dropna()
-                if isinstance(closes, pd.DataFrame):
+                if closes is not None and isinstance(closes, pd.DataFrame):
                     closes = closes.iloc[:, 0]
-                if len(closes) >= 2:
+                if closes is not None and len(closes) >= 2:
                     base_price = float(closes.iloc[0])
                     for idx, price in closes.items():
                         date_str = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
