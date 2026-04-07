@@ -803,8 +803,8 @@ def _reset_day():
         import traceback
         traceback.print_exc()
 
-# Reset: close all positions, set cash to $109,580 (+9.58%)
-_reset_day()
+# RESET COMPLETE — $109,580 (+9.58%) confirmed. NEVER re-enable.
+# _reset_day()
 
 
 # --- Request/Response Models ---
