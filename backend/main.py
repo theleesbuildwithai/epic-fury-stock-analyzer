@@ -1128,13 +1128,20 @@ def equity_curve(request: Request):
         sp500_curve = []
 
         # SOURCE 1: Use sp500_cumulative_return_pct already stored in portfolio_snapshots
+        raw_sp500 = []
         for s in snapshots:
             sp500_ret = s.get("sp500_cumulative_return_pct")
             if sp500_ret is not None and sp500_ret != 0:
+                raw_sp500.append({"date": s["snapshot_date"], "raw_ret": sp500_ret})
+        # Rebase so the first data point = 0% (match fund start)
+        if raw_sp500:
+            base_ret = raw_sp500[0]["raw_ret"]
+            for item in raw_sp500:
+                rebased = item["raw_ret"] - base_ret
                 sp500_curve.append({
-                    "date": s["snapshot_date"],
-                    "value": round(100000 * (1 + sp500_ret / 100), 2),
-                    "return_pct": round(sp500_ret, 2),
+                    "date": item["date"],
+                    "value": round(100000 * (1 + rebased / 100), 2),
+                    "return_pct": round(rebased, 2),
                 })
 
         # SOURCE 2: If DB had no S&P data, try live yfinance
