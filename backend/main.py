@@ -1260,6 +1260,22 @@ def equity_curve(request: Request):
         except Exception:
             pass
 
+        # Filter to only include dates >= March 30 (first real trading day)
+        fund_curve = [p for p in fund_curve if p["date"] >= "2026-03-30"]
+        sp500_curve = [p for p in sp500_curve if p["date"] >= "2026-03-30"]
+
+        # Rebase both curves so March 30 = 0%
+        if fund_curve and fund_curve[0]["return_pct"] != 0:
+            base = fund_curve[0]["return_pct"]
+            for p in fund_curve:
+                p["return_pct"] = round(p["return_pct"] - base, 2)
+                p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
+        if sp500_curve and sp500_curve[0]["return_pct"] != 0:
+            base = sp500_curve[0]["return_pct"]
+            for p in sp500_curve:
+                p["return_pct"] = round(p["return_pct"] - base, 2)
+                p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
+
         return {
             "fund": fund_curve,
             "sp500": sp500_curve,
