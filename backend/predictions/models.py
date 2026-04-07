@@ -93,6 +93,11 @@ def init_db():
             last_updated TEXT,
             weight_history TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS sp500_cache (
+            date TEXT PRIMARY KEY,
+            close_price REAL NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
