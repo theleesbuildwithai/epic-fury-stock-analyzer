@@ -72,11 +72,7 @@ export default function TickerBanner() {
             <div className="ticker-scroll flex items-center whitespace-nowrap py-1.5">
               {[...tickers, ...tickers, ...tickers].map((t, i) => (
                 <div key={`${t.symbol}-${i}`} className="inline-flex items-center gap-1.5 px-3">
-                  <span className={`text-[11px] font-medium tracking-wide ${
-                    isIndex(t.symbol) ? 'text-yellow-500' :
-                    isCommodity(t.symbol) ? 'text-amber-400' :
-                    'text-neutral-500'
-                  }`}>{t.name}</span>
+                  <span className="text-[11px] font-medium tracking-wide text-neutral-500">{t.name}</span>
                   <span className="text-white text-[11px] font-mono font-semibold">
                     {t.symbol === '^TNX' ? `${(t.price ?? 0).toFixed(2)}%` : `$${(t.price ?? 0).toLocaleString()}`}
                   </span>
@@ -97,7 +93,7 @@ export default function TickerBanner() {
 
       <style>{`
         .ticker-scroll {
-          animation: scroll-left 45s linear infinite;
+          animation: scroll-left 18s linear infinite;
         }
         .ticker-scroll:hover {
           animation-play-state: paused;

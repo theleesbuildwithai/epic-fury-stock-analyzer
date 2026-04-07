@@ -77,7 +77,7 @@ export default function QuantDashboard() {
     const colors = {
       BULL: 'bg-green-500/20 text-green-400 border-green-500/30',
       BEAR: 'bg-red-500/20 text-red-400 border-red-500/30',
-      SIDEWAYS: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+      SIDEWAYS: 'bg-neutral-500/20 text-neutral-400 border-neutral-500/30',
     }
     return (
       <span className={`px-3 py-1 rounded-full text-sm font-bold border ${colors[regime] || colors.SIDEWAYS}`}>
@@ -93,35 +93,28 @@ export default function QuantDashboard() {
           Quant Hedge Fund
         </h1>
         <p className="text-neutral-500 mt-1">
-          10-factor AI engine • Autonomous trading • Self-learning system
+          14-factor quant engine • Autonomous trading • Self-learning system
         </p>
 
-        {/* $100K Challenge Banner */}
-        <div className="mt-4 bg-gradient-to-r from-orange-500/10 via-amber-500/10 to-yellow-500/10 border border-orange-500/20 rounded-xl p-4">
-          <div className="flex items-center justify-between flex-wrap gap-3">
-            <div>
-              <p className="text-orange-400 font-bold text-sm tracking-wider uppercase">The $100K Challenge</p>
-              <p className="text-neutral-400 text-xs mt-1">
-                The computer started with $100,000 and is autonomously trading 24/7 to grow it as much as possible.
-                No human intervention — pure AI-driven quantitative strategy.
-              </p>
-            </div>
-            {portfolio && (
+        {/* Portfolio Value Display */}
+        {portfolio && (
+          <div className="mt-4 bg-gradient-to-r from-green-500/5 via-black to-red-500/5 border border-neutral-700 rounded-xl p-4">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex gap-4 text-xs text-neutral-500">
+                <span>14 Quant Factors</span>
+                <span>270+ Stocks Analyzed</span>
+                <span>Event-Driven Trading</span>
+                <span>Self-Learning Weekly</span>
+              </div>
               <div className="text-right">
                 <p className="text-2xl font-black text-white">${(portfolio.total_value || 100000).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
                 <p className={`text-sm font-bold ${(portfolio.total_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {(portfolio.total_return_pct || 0) >= 0 ? '▲' : '▼'} {Math.abs(portfolio.total_return_pct || 0).toFixed(2)}% all-time
+                  {(portfolio.total_return_pct || 0) >= 0 ? '+' : ''}{(portfolio.total_return_pct || 0).toFixed(2)}% all-time
                 </p>
               </div>
-            )}
+            </div>
           </div>
-          <div className="flex gap-4 mt-3 text-xs text-neutral-500">
-            <span>10 Quant Factors</span>
-            <span>270+ Stocks Analyzed</span>
-            <span>Event-Driven Trading</span>
-            <span>Self-Learning Weekly</span>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Tabs */}
@@ -283,7 +276,7 @@ function PicksTable({ picks, direction }) {
             <td className="py-2 px-2 text-right">
               <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                 p.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
-                p.confidence >= 55 ? 'bg-yellow-500/20 text-yellow-400' :
+                p.confidence >= 55 ? 'bg-neutral-500/20 text-neutral-400' :
                 'bg-neutral-500/20 text-neutral-400'
               }`}>
                 {p.confidence}%
@@ -424,16 +417,16 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
 
       {/* Autonomous Trading Status */}
       {autoStatus && (
-        <div className="bg-black border border-blue-500/30 rounded-xl p-5">
+        <div className="bg-black border border-green-500/30 rounded-xl p-5">
           <div className="flex items-center gap-3 mb-3">
             <div className={`w-3 h-3 rounded-full ${
               autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500 animate-pulse' :
-              autoStatus.status === 'trading' ? 'bg-blue-500 animate-pulse' :
+              autoStatus.status === 'trading' ? 'bg-green-500 animate-pulse' :
               'bg-red-500'
             }`} />
             <h3 className="text-white font-bold text-lg">Autonomous Trading</h3>
             <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-              autoStatus.status === 'trading' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' :
+              autoStatus.status === 'trading' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
               autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
               'bg-red-500/20 text-red-400 border border-red-500/30'
             }`}>
@@ -455,7 +448,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </div>
             <div className="bg-neutral-900 rounded-lg p-3">
               <div className="text-neutral-500 text-xs">Schedule</div>
-              <div className="text-blue-400 font-bold text-sm">Event-Driven</div>
+              <div className="text-green-400 font-bold text-sm">Event-Driven</div>
             </div>
             <div className="bg-neutral-900 rounded-lg p-3">
               <div className="text-neutral-500 text-xs">Next Run</div>
@@ -474,18 +467,18 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </div>
           )}
           <p className="text-neutral-600 text-xs mt-2 italic">
-            The computer autonomously analyzes 200+ stocks and executes trades every hour during market hours. No human intervention required.
+            The computer autonomously analyzes 270+ stocks and executes trades every hour during market hours. No human intervention required.
           </p>
         </div>
       )}
 
       {/* Queued Trades — what the AI wants to trade next */}
       {queuedTrades && queuedTrades.total_queued > 0 && (
-        <div className="bg-black border border-purple-500/30 rounded-xl p-5">
+        <div className="bg-black border border-neutral-700 rounded-xl p-5">
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-3 h-3 rounded-full bg-purple-500 animate-pulse" />
+            <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
             <h3 className="text-white font-bold text-lg">Queued Trades</h3>
-            <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+            <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">
               {queuedTrades.total_queued} PENDING
             </span>
             <span className="text-neutral-500 text-xs ml-auto">
@@ -513,7 +506,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                         <span className="text-neutral-400 font-mono text-xs">${t.price}</span>
                         <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                           t.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
-                          t.confidence >= 50 ? 'bg-yellow-500/20 text-yellow-400' :
+                          t.confidence >= 50 ? 'bg-neutral-500/20 text-neutral-400' :
                           'bg-neutral-500/20 text-neutral-400'
                         }`}>
                           {t.confidence}%
@@ -541,7 +534,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                         <span className="text-neutral-400 font-mono text-xs">${t.price}</span>
                         <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                           t.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
-                          t.confidence >= 50 ? 'bg-yellow-500/20 text-yellow-400' :
+                          t.confidence >= 50 ? 'bg-neutral-500/20 text-neutral-400' :
                           'bg-neutral-500/20 text-neutral-400'
                         }`}>
                           {t.confidence}%
@@ -558,7 +551,8 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
 
       {/* Portfolio Overview */}
       {portfolio && (
-        <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <div className="bg-black border border-neutral-700 rounded-xl p-6 relative overflow-hidden">
+          <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-green-500/50 via-green-500/20 to-red-500/50"></div>
           <h2 className="text-xl font-bold text-white mb-4">Portfolio Overview</h2>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
             <StatCard label="Total Value" value={`$${(portfolio.total_value || 0).toLocaleString()}`} />
@@ -599,7 +593,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                   </thead>
                   <tbody>
                     {portfolio.positions.map(p => (
-                      <tr key={p.trade_id} className="border-b border-neutral-800/50">
+                      <tr key={p.trade_id} className={`border-b border-neutral-800/50 ${(p.unrealized_pct || 0) >= 0 ? 'bg-green-500/[0.02]' : 'bg-red-500/[0.02]'}`}>
                         <td className="py-2 px-2 font-bold text-white">{p.ticker}</td>
                         <td className={`py-2 px-2 text-xs font-bold ${
                           p.direction === 'long' ? 'text-green-400' : 'text-red-400'
@@ -654,8 +648,8 @@ function IntelligenceTab({ intelligence, loading }) {
           <h2 className="text-xl font-bold text-white">System Status</h2>
           <span className={`px-3 py-1 rounded-full text-xs font-bold ${
             intelligence.system_status === 'confident' ? 'bg-green-500/20 text-green-400' :
-            intelligence.system_status === 'learning' ? 'bg-blue-500/20 text-blue-400' :
-            intelligence.system_status === 'adapting' ? 'bg-yellow-500/20 text-yellow-400' :
+            intelligence.system_status === 'learning' ? 'bg-green-500/20 text-green-400' :
+            intelligence.system_status === 'adapting' ? 'bg-neutral-500/20 text-neutral-400' :
             'bg-neutral-500/20 text-neutral-400'
           }`}>
             {intelligence.system_status?.toUpperCase()}
@@ -713,8 +707,8 @@ function IntelligenceTab({ intelligence, loading }) {
                 <Bar dataKey="weight" radius={[0, 4, 4, 0]}>
                   {weightData.map((entry, i) => (
                     <Cell key={i} fill={
-                      entry.weight > 20 ? '#3b82f6' :
-                      entry.weight > 15 ? '#6366f1' : '#737373'
+                      entry.weight > 20 ? '#22c55e' :
+                      entry.weight > 15 ? '#4ade80' : '#737373'
                     } />
                   ))}
                 </Bar>
@@ -775,14 +769,19 @@ function IntelligenceTab({ intelligence, loading }) {
 // SHARED COMPONENTS
 // ============================================================
 function StatCard({ label, value, color }) {
-  const textColor = color === 'green' ? 'text-green-400' : color === 'red' ? 'text-red-400' :
-    color === 'yellow' ? 'text-yellow-400' : 'text-white'
+  const textColor = color === 'green' ? 'text-green-400' : color === 'red' ? 'text-red-400' : 'text-white'
+  const borderColor = color === 'green' ? 'border-green-500/30' : color === 'red' ? 'border-red-500/30' : 'border-neutral-800'
+  const glowBg = color === 'green' ? 'bg-gradient-to-b from-green-500/5 to-transparent' : color === 'red' ? 'bg-gradient-to-b from-red-500/5 to-transparent' : ''
   return (
-    <div className="bg-neutral-900 rounded-lg p-3">
+    <div className={`bg-neutral-900 rounded-lg p-3 border ${borderColor} ${glowBg}`}>
       <div className="text-neutral-500 text-xs">{label}</div>
       <div className={`text-lg font-bold font-mono ${textColor}`}>{value}</div>
     </div>
   )
+}
+
+function GradientDivider() {
+  return <div className="h-px bg-gradient-to-r from-transparent via-green-500/30 to-transparent my-4" />
 }
 
 function LoadingSpinner({ text }) {

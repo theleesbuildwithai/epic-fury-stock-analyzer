@@ -1393,6 +1393,110 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 except Exception:
                     pass
 
+            # --- RENTECH FACTOR 1: HURST EXPONENT (Trend vs Mean-Reversion) ---
+            # H > 0.5 = trending (momentum works), H < 0.5 = mean-reverting (reversion works)
+            # Renaissance Technologies uses this to decide WHICH strategy to apply per stock
+            hurst_raw = 0.0
+            if len(closes) >= 100:
+                try:
+                    log_returns = np.diff(np.log(closes[-100:]))
+                    # Simplified R/S analysis for Hurst exponent
+                    n = len(log_returns)
+                    max_k = min(n // 2, 50)
+                    rs_values = []
+                    for k in [10, 20, 30, 40, 50]:
+                        if k > max_k:
+                            break
+                        n_blocks = n // k
+                        for b in range(n_blocks):
+                            block = log_returns[b*k:(b+1)*k]
+                            mean_block = np.mean(block)
+                            devs = np.cumsum(block - mean_block)
+                            r = float(np.max(devs) - np.min(devs))
+                            s = float(np.std(block))
+                            if s > 0:
+                                rs_values.append((np.log(k), np.log(r / s)))
+                    if len(rs_values) >= 3:
+                        x_vals = [v[0] for v in rs_values]
+                        y_vals = [v[1] for v in rs_values]
+                        hurst = float(np.polyfit(x_vals, y_vals, 1)[0])
+                        hurst = max(0.0, min(1.0, hurst))  # clamp
+                        # H > 0.6 = trending stock (momentum applies)
+                        # H < 0.4 = mean-reverting (reversion applies)
+                        if hurst > 0.6:
+                            hurst_raw = (hurst - 0.5) * 10  # boost momentum signals
+                        elif hurst < 0.4:
+                            hurst_raw = (0.5 - hurst) * -10  # boost mean-reversion
+                except Exception:
+                    pass
+
+            # --- RENTECH FACTOR 2: AUTOCORRELATION (Serial Return Correlation) ---
+            # Positive autocorrelation = trends persist, negative = reversals likely
+            # Rentech's core insight: exploit serial correlations that most traders miss
+            autocorr_raw = 0.0
+            if len(closes) >= 30:
+                try:
+                    rets = np.diff(closes[-30:]) / closes[-31:-1]
+                    # Lag-1 autocorrelation
+                    mean_r = np.mean(rets)
+                    numerator = np.sum((rets[1:] - mean_r) * (rets[:-1] - mean_r))
+                    denominator = np.sum((rets - mean_r) ** 2) + 1e-10
+                    lag1_corr = float(numerator / denominator)
+                    # Strong positive autocorr = trend continuation
+                    # Strong negative autocorr = mean reversion opportunity
+                    autocorr_raw = lag1_corr * 10  # scale for factor system
+                except Exception:
+                    pass
+
+            # --- RENTECH FACTOR 3: STAT ARB Z-SCORE (Distance from Fair Value) ---
+            # How many standard deviations is the current price from its statistical "fair value"
+            # (120-day rolling mean). Extreme z-scores = high probability of reversion.
+            # This is the core of statistical arbitrage — Rentech's bread and butter.
+            stat_arb_raw = 0.0
+            if len(closes) >= 120:
+                try:
+                    mean_120 = float(np.mean(closes[-120:]))
+                    std_120 = float(np.std(closes[-120:]))
+                    if std_120 > 0:
+                        z_score_120 = (current_price - mean_120) / std_120
+                        # Extreme z-scores signal reversion opportunities
+                        if z_score_120 < -2.0:
+                            stat_arb_raw = 5.0  # Very cheap vs history = strong buy
+                        elif z_score_120 < -1.5:
+                            stat_arb_raw = 3.0
+                        elif z_score_120 < -1.0:
+                            stat_arb_raw = 1.0
+                        elif z_score_120 > 2.0:
+                            stat_arb_raw = -5.0  # Very expensive vs history = strong sell
+                        elif z_score_120 > 1.5:
+                            stat_arb_raw = -3.0
+                        elif z_score_120 > 1.0:
+                            stat_arb_raw = -1.0
+                except Exception:
+                    pass
+
+            # --- RENTECH FACTOR 4: KURTOSIS (Fat Tail Risk Detection) ---
+            # High kurtosis = more extreme moves likely. Rentech avoids stocks with
+            # very high kurtosis (unpredictable) but trades those with moderate kurtosis
+            # at extreme z-scores (high probability reversion).
+            kurtosis_raw = 0.0
+            if len(closes) >= 60:
+                try:
+                    rets_60 = np.diff(closes[-60:]) / closes[-61:-1]
+                    mean_r = np.mean(rets_60)
+                    std_r = np.std(rets_60) + 1e-10
+                    kurt = float(np.mean(((rets_60 - mean_r) / std_r) ** 4)) - 3.0  # excess kurtosis
+                    # Moderate kurtosis (1-4) = tradeable volatility
+                    # Very high kurtosis (>6) = dangerous, unpredictable
+                    if kurt > 6:
+                        kurtosis_raw = -3.0  # Too risky, avoid
+                    elif kurt > 3:
+                        kurtosis_raw = -1.0  # Slightly elevated risk
+                    elif 1 < kurt < 3:
+                        kurtosis_raw = 1.0  # Good trading characteristics
+                except Exception:
+                    pass
+
             # --- RSI(14) for additional context ---
             if len(closes) >= 15:
                 deltas_14 = np.diff(closes[-15:])
@@ -1425,6 +1529,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "relative_strength_raw": relative_strength_raw,
                 "bb_squeeze_raw": bb_squeeze_raw,
                 "vwap_raw": vwap_raw,
+                "hurst_raw": hurst_raw,
+                "autocorr_raw": autocorr_raw,
+                "stat_arb_raw": stat_arb_raw,
+                "kurtosis_raw": kurtosis_raw,
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
                 "rsi2": round(rsi2, 1),
@@ -1455,6 +1563,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     relative_strength_z = _safe_zscore([s["relative_strength_raw"] for s in raw_factors])
     bb_squeeze_z = _safe_zscore([s["bb_squeeze_raw"] for s in raw_factors])
     vwap_z = _safe_zscore([s["vwap_raw"] for s in raw_factors])
+    # RENTECH FACTORS — statistical arbitrage edge
+    hurst_z = _safe_zscore([s["hurst_raw"] for s in raw_factors])
+    autocorr_z = _safe_zscore([s["autocorr_raw"] for s in raw_factors])
+    stat_arb_z = _safe_zscore([s["stat_arb_raw"] for s in raw_factors])
+    kurtosis_z = _safe_zscore([s["kurtosis_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     regime_multiplier = 1.0  # default
@@ -1475,14 +1588,20 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
     # Normalize weights to sum to 1
     # Add new factors with fixed weights (not yet in learning system)
-    W_SMART_MONEY = 0.08    # Smart money divergence
-    W_REL_STRENGTH = 0.06   # Relative strength vs sector
-    W_BB_SQUEEZE = 0.06     # Bollinger Band squeeze breakout
-    W_VWAP = 0.05           # VWAP institutional flow
+    W_SMART_MONEY = 0.06    # Smart money divergence
+    W_REL_STRENGTH = 0.05   # Relative strength vs sector
+    W_BB_SQUEEZE = 0.05     # Bollinger Band squeeze breakout
+    W_VWAP = 0.04           # VWAP institutional flow
+    # RENTECH FACTORS
+    W_HURST = 0.04          # Hurst exponent (trend vs mean-reversion detection)
+    W_AUTOCORR = 0.04       # Autocorrelation (serial return patterns)
+    W_STAT_ARB = 0.06       # Statistical arbitrage z-score (distance from fair value)
+    W_KURTOSIS = 0.03       # Fat tail risk detection
 
-    # Scale existing weights down to make room for new factors
+    # Scale existing weights down to make room for new factors (14 total now)
     existing_total = sum(weights.values())
-    new_factor_total = W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP
+    new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
+                        W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -1495,11 +1614,15 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_relstr = W_REL_STRENGTH
     w_bb = W_BB_SQUEEZE
     w_vwap = W_VWAP
+    w_hurst = W_HURST
+    w_autocorr = W_AUTOCORR
+    w_stat_arb = W_STAT_ARB
+    w_kurtosis = W_KURTOSIS
 
     # --- Calculate composite scores ---
     scored = []
     for i, stock in enumerate(raw_factors):
-        # Weighted composite — 10 FACTORS (institutional hedge fund grade)
+        # Weighted composite — 14 FACTORS (Renaissance Technologies grade)
         composite = (
             momentum_z[i] * w_mom +
             value_z[i] * w_val +
@@ -1510,7 +1633,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             smart_money_z[i] * w_smart +
             relative_strength_z[i] * w_relstr +
             bb_squeeze_z[i] * w_bb +
-            vwap_z[i] * w_vwap
+            vwap_z[i] * w_vwap +
+            hurst_z[i] * w_hurst +
+            autocorr_z[i] * w_autocorr +
+            stat_arb_z[i] * w_stat_arb +
+            kurtosis_z[i] * w_kurtosis
         )
 
         # Apply macro overlay sector adjustment

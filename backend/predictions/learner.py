@@ -21,10 +21,11 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-MIN_TRADES_FOR_UPDATE = 20  # Don't adjust weights with fewer trades
-WEIGHT_ADJUSTMENT_RATE = 0.15  # How much to shift weights (15% per cycle)
+MIN_TRADES_FOR_UPDATE = 10  # Don't adjust weights with fewer trades (was 20 — faster learning)
+WEIGHT_ADJUSTMENT_RATE = 0.20  # How much to shift weights (20% per cycle — more aggressive learning)
 MIN_WEIGHT = 0.05  # No factor can go below 5%
 MAX_WEIGHT = 0.40  # No factor can go above 40%
+RECENCY_DECAY = 0.95  # Recent trades matter more: each older trade has 5% less influence
 
 
 def analyze_factor_performance() -> dict:
@@ -47,6 +48,11 @@ def analyze_factor_performance() -> dict:
         return {"message": "No closed trades to analyze", "factors": {}}
 
     factor_names = ["momentum", "value", "quality", "low_vol", "rsi2", "volume"]
+
+    # Apply recency weighting — recent trades matter MORE than old ones
+    # This makes the system adapt faster to changing market conditions
+    n_trades = len(closed)
+    recency_weights = [RECENCY_DECAY ** (n_trades - 1 - i) for i in range(n_trades)]
     factor_perf = {f: {"wins": 0, "losses": 0, "returns": [], "contributions": []}
                    for f in factor_names}
 

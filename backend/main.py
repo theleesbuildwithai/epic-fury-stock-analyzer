@@ -320,6 +320,11 @@ def _should_trade_now() -> dict:
     if weekday >= 5:
         return {"should_trade": False, "reasons": ["Weekend — market closed"]}
 
+    # Don't trade if daily profit limit was hit (2.5%+ gain today)
+    if _daily_paused.get("paused") and _daily_paused.get("pause_date") == now_et.strftime("%Y-%m-%d"):
+        return {"should_trade": False, "reasons": [f"DAILY PROFIT LIMIT — {_daily_paused.get('reason', 'paused for today')}"]}
+
+
     # Only scan during extended hours (7am-8pm ET)
     if hour < 7 or hour >= 20:
         return {"should_trade": False, "reasons": ["Outside trading hours (7am-8pm ET)"]}
@@ -382,7 +387,11 @@ def _should_trade_now() -> dict:
     except Exception:
         pass
 
-    # --- TRIGGER 7: Periodic full scan every 30 min during market hours ---
+    # --- TRIGGER 7: Geo-political risk change ---
+    if _geo_risk_state.get("level") in ("HIGH", "CRITICAL"):
+        reasons.append(f"GEO-RISK {_geo_risk_state['level']} (score {_geo_risk_state.get('score', 0)}) — defensive rebalance needed")
+
+    # --- TRIGGER 8: Periodic full scan every 30 min during market hours ---
     if 9 <= hour <= 16 and minute in (0, 1, 30, 31) and not reasons:
         reasons.append("PERIODIC SCAN — 30-min market check")
 
@@ -702,6 +711,165 @@ scheduler.add_job(
     minute=0,
     id="sunday_premarket",
     name="Sunday Evening Pre-Market Scan",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
+# --- GEO-POLITICAL RISK SCANNER (every 15 min during market hours) ---
+# Constantly monitors geopolitical events (Iran/US, tariffs, war, sanctions)
+# and adjusts the trading system's behavior in real-time.
+_geo_risk_state = {"level": "LOW", "score": 0, "last_update": None, "events": []}
+
+def _geopolitical_scanner():
+    """Scan for geo-political risk events every 15 minutes.
+    If risk is HIGH/CRITICAL, tighten stop losses on all positions."""
+    global _geo_risk_state
+    try:
+        geo = assess_geopolitical_risk()
+        level = geo.get("risk_level", "LOW")
+        score = geo.get("risk_score", 0)
+        events = geo.get("key_events", [])
+
+        _geo_risk_state = {
+            "level": level,
+            "score": score,
+            "last_update": dt.now().isoformat(),
+            "events": events[:10],
+        }
+
+        # If risk is HIGH or CRITICAL, tighten all stops immediately
+        if level in ("HIGH", "CRITICAL") and score >= 7:
+            logger.warning(f"GEO-RISK {level} (score {score}) — tightening all stops")
+            try:
+                from predictions.models import get_open_trades, get_db
+                open_trades = get_open_trades()
+                conn = get_db()
+                for trade in open_trades:
+                    entry = trade["entry_price"]
+                    direction = trade["direction"]
+                    # Emergency tight stops: 3% for longs, 4% for shorts
+                    if direction == "long":
+                        new_stop = round(entry * 0.97, 2)
+                    else:
+                        new_stop = round(entry * 1.04, 2)
+                    conn.execute(
+                        "UPDATE paper_trades SET stop_loss_price=? WHERE id=? AND status='open'",
+                        (new_stop, trade["id"])
+                    )
+                conn.commit()
+                conn.close()
+                logger.warning(f"GEO-RISK: Tightened stops on {len(open_trades)} positions")
+            except Exception as e:
+                logger.error(f"GEO-RISK stop tightening error: {e}")
+
+        logger.info(f"GEO-RISK SCAN: {level} (score {score}), {len(events)} events")
+    except Exception as e:
+        logger.error(f"GEO-RISK SCANNER ERROR: {e}")
+
+scheduler.add_job(
+    _geopolitical_scanner,
+    "interval",
+    minutes=15,
+    id="geo_risk_scanner",
+    name="Geo-Political Risk Scanner (constant monitoring)",
+    max_instances=1,
+    misfire_grace_time=600,
+)
+
+# --- DAILY 2.5% TAKE-PROFIT RULE ---
+# If the fund is up 2.5%+ in a single day, sell ALL holdings and pause until tomorrow.
+# This locks in exceptional daily gains and prevents giving them back.
+_daily_paused = {"paused": False, "pause_date": None, "reason": None}
+
+def _check_daily_profit_limit():
+    """Check if fund has gained 2.5%+ today. If so, sell everything and pause."""
+    global _daily_paused
+    import pytz
+    et = pytz.timezone("US/Eastern")
+    now_et = dt.now(et)
+    today_str = now_et.strftime("%Y-%m-%d")
+
+    # Reset pause at start of new day
+    if _daily_paused["pause_date"] and _daily_paused["pause_date"] != today_str:
+        _daily_paused = {"paused": False, "pause_date": None, "reason": None}
+        logger.warning("DAILY PROFIT LIMIT: New day — trading resumed")
+
+    if _daily_paused["paused"]:
+        return  # Already paused for today
+
+    try:
+        portfolio = get_portfolio_state()
+        total_value = portfolio.get("total_value", 100000)
+
+        # Get yesterday's closing value from snapshots
+        from predictions.models import get_db
+        conn = get_db()
+        row = conn.execute(
+            "SELECT total_value FROM portfolio_snapshots WHERE snapshot_date < ? ORDER BY snapshot_date DESC LIMIT 1",
+            (today_str,)
+        ).fetchone()
+        conn.close()
+
+        if row:
+            yesterday_value = row[0]
+            daily_return = ((total_value / yesterday_value) - 1) * 100
+
+            if daily_return >= 2.5:
+                logger.warning(f"DAILY PROFIT LIMIT HIT: +{daily_return:.2f}% today — selling all and pausing")
+
+                # Sell all positions
+                from predictions.models import get_open_trades, close_paper_trade
+                from predictions.paper_trader import _get_current_prices
+                open_trades = get_open_trades()
+                symbols = list(set(t["ticker"] for t in open_trades))
+                prices = _get_current_prices(symbols)
+
+                for trade in open_trades:
+                    price = prices.get(trade["ticker"], trade["entry_price"])
+                    try:
+                        close_paper_trade(trade["id"], price)
+                    except Exception:
+                        pass
+
+                _daily_paused["paused"] = True
+                _daily_paused["pause_date"] = today_str
+                _daily_paused["reason"] = f"Daily gain +{daily_return:.2f}% exceeded 2.5% limit"
+                logger.warning(f"ALL POSITIONS CLOSED. Trading paused until tomorrow.")
+
+                try:
+                    backup_db_to_s3()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"DAILY PROFIT CHECK ERROR: {e}")
+
+scheduler.add_job(
+    _check_daily_profit_limit,
+    "interval",
+    minutes=5,
+    id="daily_profit_check",
+    name="Daily 2.5% Profit Limit Check",
+    max_instances=1,
+    misfire_grace_time=300,
+)
+
+# --- DAILY LEARNING (not just weekends) ---
+# Every evening at 7pm: quick learning cycle to adjust weights
+def _daily_learning():
+    """Daily learning — more frequent than weekend-only. Keeps the system adaptive."""
+    try:
+        weight_result = auto_adjust_weights()
+        logger.warning(f"DAILY LEARNING: weights adjusted — {weight_result}")
+    except Exception as e:
+        logger.error(f"Daily learning error: {e}")
+
+scheduler.add_job(
+    _daily_learning,
+    "cron",
+    hour=19,
+    minute=30,
+    id="daily_learning",
+    name="Daily Learning Cycle (7:30pm)",
     max_instances=1,
     misfire_grace_time=3600,
 )
@@ -1056,13 +1224,18 @@ def market_news(request: Request):
 
 @app.get("/api/geopolitical-risk")
 def geopolitical_risk(request: Request):
-    """Geopolitical risk assessment — military events, wars, sanctions, and their market impact."""
+    """Geopolitical risk assessment — military events, wars, sanctions, and their market impact.
+    Includes real-time scanner state (updates every 15 min)."""
     check_rate_limit(request.client.host)
     try:
-        return assess_geopolitical_risk()
+        full_report = assess_geopolitical_risk()
+        # Merge in the continuous scanner state
+        full_report["scanner_state"] = _geo_risk_state
+        full_report["daily_profit_status"] = _daily_paused
+        return full_report
     except Exception as e:
         logger.error(f"Geopolitical risk error: {e}")
-        return {"risk_level": "UNKNOWN", "risk_score": 0, "error": str(e)}
+        return {"risk_level": "UNKNOWN", "risk_score": 0, "error": str(e), "scanner_state": _geo_risk_state}
 
 
 @app.get("/api/tariff-risk")
