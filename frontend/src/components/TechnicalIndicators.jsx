@@ -14,10 +14,10 @@ function RSIChart({ chartData }) {
       </p>
       <ResponsiveContainer width="100%" height={200}>
         <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-          <XAxis dataKey="date" stroke="#64748b" tick={{ fontSize: 10 }} interval={interval} tickFormatter={(d) => d.slice(5)} />
-          <YAxis stroke="#64748b" domain={[0, 100]} tick={{ fontSize: 10 }} />
-          <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
+          <XAxis dataKey="date" stroke="#737373" tick={{ fontSize: 10 }} interval={interval} tickFormatter={(d) => d.slice(5)} />
+          <YAxis stroke="#737373" domain={[0, 100]} tick={{ fontSize: 10 }} />
+          <Tooltip contentStyle={{ backgroundColor: '#171717', border: '1px solid #525252', borderRadius: '8px' }} />
           <ReferenceLine y={70} stroke="#ef4444" strokeDasharray="3 3" label={{ value: '70', fill: '#ef4444', fontSize: 10 }} />
           <ReferenceLine y={30} stroke="#22c55e" strokeDasharray="3 3" label={{ value: '30', fill: '#22c55e', fontSize: 10 }} />
           <Line type="monotone" dataKey="rsi" stroke="#22c55e" strokeWidth={2} dot={false} name="RSI" />
@@ -37,12 +37,12 @@ function MACDChart({ chartData }) {
       </p>
       <ResponsiveContainer width="100%" height={200}>
         <ComposedChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-          <XAxis dataKey="date" stroke="#64748b" tick={{ fontSize: 10 }} interval={interval} tickFormatter={(d) => d.slice(5)} />
-          <YAxis stroke="#64748b" tick={{ fontSize: 10 }} />
-          <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} />
-          <ReferenceLine y={0} stroke="#475569" />
-          <Bar dataKey="macd_histogram" name="Histogram" fill="#64748b" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
+          <XAxis dataKey="date" stroke="#737373" tick={{ fontSize: 10 }} interval={interval} tickFormatter={(d) => d.slice(5)} />
+          <YAxis stroke="#737373" tick={{ fontSize: 10 }} />
+          <Tooltip contentStyle={{ backgroundColor: '#171717', border: '1px solid #525252', borderRadius: '8px' }} />
+          <ReferenceLine y={0} stroke="#525252" />
+          <Bar dataKey="macd_histogram" name="Histogram" fill="#737373" />
           <Line type="monotone" dataKey="macd" stroke="#ffffff" strokeWidth={2} dot={false} name="MACD" />
           <Line type="monotone" dataKey="macd_signal" stroke="#ef4444" strokeWidth={1} dot={false} name="Signal" />
         </ComposedChart>

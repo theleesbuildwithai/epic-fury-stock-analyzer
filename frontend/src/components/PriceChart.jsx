@@ -15,19 +15,19 @@ export default function PriceChart({ chartData }) {
 
       <ResponsiveContainer width="100%" height={400}>
         <ComposedChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
           <XAxis
             dataKey="date"
-            stroke="#64748b"
+            stroke="#737373"
             tick={{ fontSize: 12 }}
             interval={interval}
             tickFormatter={(d) => d.slice(5)} // Show MM-DD
           />
-          <YAxis stroke="#64748b" tick={{ fontSize: 12 }} domain={['auto', 'auto']} />
+          <YAxis stroke="#737373" tick={{ fontSize: 12 }} domain={['auto', 'auto']} />
           <Tooltip
-            contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }}
-            labelStyle={{ color: '#e2e8f0' }}
-            itemStyle={{ color: '#e2e8f0' }}
+            contentStyle={{ backgroundColor: '#171717', border: '1px solid #525252', borderRadius: '8px' }}
+            labelStyle={{ color: '#e5e5e5' }}
+            itemStyle={{ color: '#e5e5e5' }}
           />
           <Legend />
 
@@ -43,17 +43,17 @@ export default function PriceChart({ chartData }) {
 
           {/* Price */}
           <Line
-            type="monotone" dataKey="close" stroke="#f97316" strokeWidth={2}
+            type="monotone" dataKey="close" stroke="#ffffff" strokeWidth={2}
             name="Price" dot={false}
           />
 
           {/* Moving Averages */}
           <Line
-            type="monotone" dataKey="sma_20" stroke="#22d3ee" strokeWidth={1}
+            type="monotone" dataKey="sma_20" stroke="#22c55e" strokeWidth={1}
             strokeDasharray="4 2" name="SMA 20" dot={false}
           />
           <Line
-            type="monotone" dataKey="sma_50" stroke="#a78bfa" strokeWidth={1}
+            type="monotone" dataKey="sma_50" stroke="#a3a3a3" strokeWidth={1}
             strokeDasharray="4 2" name="SMA 50" dot={false}
           />
         </ComposedChart>

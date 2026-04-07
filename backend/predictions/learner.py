@@ -11,7 +11,7 @@ After every batch of trades, this system:
 The key insight: markets change, so a static model will decay.
 This system continuously adapts to what's actually working NOW.
 
-Weight updates happen after every 20 closed trades (minimum sample).
+Weight updates happen after every 10 closed trades (minimum sample).
 """
 
 import numpy as np

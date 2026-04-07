@@ -41,7 +41,7 @@ BULLISH_WEIGHTED = {
     "outperform": 2, "strong earnings": 2, "revenue beat": 2,
     "bullish": 2, "breakthrough": 2, "milestone": 2, "stimulus": 2,
     "rate cut": 2, "fed cut": 2, "dovish": 2, "merger": 2,
-    "acquisition": 2, "all-time high": 2,
+    "acquisition": 2,
     # Mild bullish (weight 1)
     "gain": 1, "rise": 1, "buy": 1, "growth": 1, "profit": 1,
     "positive": 1, "optimistic": 1, "upbeat": 1, "recovery": 1,

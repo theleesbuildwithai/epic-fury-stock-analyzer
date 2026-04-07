@@ -3,8 +3,8 @@ Paper Trading System — the execution engine of the Epic Fury hedge fund.
 
 This manages a $100K virtual portfolio that:
   1. Auto-executes trades based on quant signals (LONG/SHORT picks)
-  2. Manages position sizing (max 15 concurrent positions)
-  3. Enforces risk management (7% stop-loss, target exits, time exits)
+  2. Manages position sizing (uncapped — constrained by cash)
+  3. Enforces risk management (6% stop-loss, target exits, time exits)
   4. Runs rapid backtesting using historical data to learn quickly
   5. Tracks portfolio performance vs S&P 500 benchmark
 

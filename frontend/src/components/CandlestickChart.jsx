@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Area
+  Tooltip, ResponsiveContainer, Area
 } from 'recharts'
 
 const PERIODS = [
@@ -316,16 +316,16 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
                     <Area
                       dataKey="bb_upper"
                       stroke="none"
-                      fill="#6366f1"
+                      fill="#a3a3a3"
                       fillOpacity={0.05}
                       dot={false}
                       isAnimationActive={false}
                     />
-                    <Line dataKey="bb_upper" stroke="#6366f1" strokeWidth={1} dot={false}
+                    <Line dataKey="bb_upper" stroke="#a3a3a3" strokeWidth={1} dot={false}
                       strokeDasharray="4 2" opacity={0.5} isAnimationActive={false} />
-                    <Line dataKey="bb_lower" stroke="#6366f1" strokeWidth={1} dot={false}
+                    <Line dataKey="bb_lower" stroke="#a3a3a3" strokeWidth={1} dot={false}
                       strokeDasharray="4 2" opacity={0.5} isAnimationActive={false} />
-                    <Line dataKey="bb_middle" stroke="#6366f1" strokeWidth={1} dot={false}
+                    <Line dataKey="bb_middle" stroke="#a3a3a3" strokeWidth={1} dot={false}
                       opacity={0.3} isAnimationActive={false} />
                   </>
                 )}
@@ -373,7 +373,7 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
                     isAnimationActive={false} connectNulls />
                 )}
                 {activeOverlays.includes('ema_12') && (
-                  <Line dataKey="ema_12" stroke="#a855f7" strokeWidth={1.5} dot={false}
+                  <Line dataKey="ema_12" stroke="#d4d4d4" strokeWidth={1.5} dot={false}
                     isAnimationActive={false} connectNulls />
                 )}
               </ComposedChart>

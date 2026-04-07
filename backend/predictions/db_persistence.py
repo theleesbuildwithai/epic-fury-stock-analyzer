@@ -103,10 +103,9 @@ def _ensure_bucket(s3):
         s3.head_bucket(Bucket=S3_BUCKET)
     except Exception:
         try:
-            s3.create_bucket(
-                Bucket=S3_BUCKET,
-                CreateBucketConfiguration={"LocationConstraint": "us-east-1"}
-            )
+            # us-east-1 is the default — do NOT pass LocationConstraint
+            # (AWS throws IllegalLocationConstraintException for us-east-1)
+            s3.create_bucket(Bucket=S3_BUCKET)
             logger.info(f"Created S3 bucket: {S3_BUCKET}")
         except Exception as e:
             # Bucket might already exist or we don't have permissions
