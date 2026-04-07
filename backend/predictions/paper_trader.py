@@ -158,21 +158,16 @@ def _throttle():
 def get_portfolio_state() -> dict:
     """
     Get current portfolio state: cash, positions, total value.
-    Cash is calculated DYNAMICALLY to ensure accuracy:
-      cash = INITIAL_CAPITAL - cost_of_open_positions + realized_pnl_from_closed_trades
+    Cash comes from paper_cash table — updated ATOMICALLY with every trade.
+    No more race conditions or stale snapshot values.
     """
-    from predictions.models import get_open_trades, get_closed_trades, get_portfolio_snapshots, get_db
+    from predictions.models import get_open_trades, get_closed_trades, get_cash
 
     open_trades = get_open_trades()
     closed_trades = get_closed_trades(limit=50)
-    snapshots = get_portfolio_snapshots(days=365)
 
-    # Cash from latest snapshot — updated immediately after every trade cycle
-    if snapshots:
-        last_snapshot = snapshots[-1]
-        cash = last_snapshot["cash"]
-    else:
-        cash = INITIAL_CAPITAL
+    # Cash from atomic paper_cash table — ALWAYS accurate
+    cash = get_cash()
 
     # Get current prices for open positions
     positions = []
@@ -312,7 +307,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     """
     from predictions.models import (
         get_open_trades, close_paper_trade, save_paper_trade,
-        get_portfolio_snapshots, save_portfolio_snapshot
+        get_portfolio_snapshots, save_portfolio_snapshot, get_cash
     )
 
     results = {
@@ -326,11 +321,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     open_tickers = set(t["ticker"] for t in open_trades)
     snapshots = get_portfolio_snapshots(days=5)
 
-    # Determine current cash
-    if snapshots:
-        cash = snapshots[-1]["cash"]
-    else:
-        cash = INITIAL_CAPITAL
+    # Cash from atomic paper_cash table — ALWAYS accurate
+    cash = get_cash()
 
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
@@ -429,8 +421,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 except Exception:
                     pass
 
-            # TAKE PROFIT: If we're up big (8%+), just take it
-            if not should_close and pnl_pct >= 8:
+            # TAKE PROFIT: If we're up 5%+, just take it (tighter = more consistent)
+            if not should_close and pnl_pct >= 5:
                 should_close = True
                 close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
 
@@ -494,9 +486,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if should_close:
                 try:
                     close_paper_trade(trade["id"], current_price)
-                    # Return cash from closed position
-                    position_value = trade["shares"] * current_price
-                    cash += position_value
+                    # Cash is updated atomically in close_paper_trade()
                     open_tickers.discard(ticker)
                     results["closed"].append({
                         "ticker": ticker,
@@ -509,6 +499,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 except Exception as e:
                     results["errors"].append(f"Failed to close {ticker}: {str(e)}")
 
+    # Refresh cash after closes (atomic paper_cash is always current)
+    cash = get_cash()
+
     # --- Step 2: Open new positions ---
     current_positions = len(open_tickers)
     available_slots = MAX_POSITIONS - current_positions
@@ -516,9 +509,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
     # --- WIN-LOCK SYSTEM: Stop opening new trades when we're winning big today ---
     # If up 1.5%+ today, LOCK IN the wins. Don't risk giving them back.
-    total_current_value = cash + sum(
-        t.get("shares", 0) * t.get("entry_price", 0) for t in open_trades
+    # Use atomic cash + current position values for accuracy
+    current_prices_for_winlock = _get_current_prices(list(open_tickers)) if open_tickers else {}
+    positions_value_now = sum(
+        current_prices_for_winlock.get(t["ticker"], t["entry_price"]) * t["shares"]
+        for t in get_open_trades()
     )
+    total_current_value = cash + positions_value_now
     total_return_now = ((total_current_value / INITIAL_CAPITAL) - 1) * 100
 
     # Compare to yesterday's snapshot to get TODAY's gain
@@ -527,10 +524,33 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         yesterday_val = snapshots[-1].get("total_value", INITIAL_CAPITAL)
         daily_gain = ((total_current_value / yesterday_val) - 1) * 100
 
+    # WIN-LOCK: If up 1.5%+ today, sell ALL positions to lock in the gain
     if daily_gain >= 1.5:
-        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today — LOCKING IN gains, no new trades")
-        results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% today — protecting gains"})
-        available_slots = 0  # Stop all new trades — keep the win
+        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today — SELLING ALL to lock gains!")
+        # Close ALL open positions to lock in the daily win
+        for trade in get_open_trades():
+            t_ticker = trade["ticker"]
+            t_price = current_prices_for_winlock.get(t_ticker)
+            if t_price:
+                try:
+                    close_paper_trade(trade["id"], t_price)
+                    t_dir = trade["direction"]
+                    t_entry = trade["entry_price"]
+                    if t_dir == "long":
+                        t_pnl = ((t_price / t_entry) - 1) * 100
+                    else:
+                        t_pnl = ((t_entry / t_price) - 1) * 100
+                    results["closed"].append({
+                        "ticker": t_ticker, "direction": t_dir,
+                        "entry_price": t_entry, "exit_price": round(t_price, 2),
+                        "pnl_pct": round(t_pnl, 2), "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}%",
+                    })
+                    open_tickers.discard(t_ticker)
+                except Exception as e:
+                    results["errors"].append(f"WIN-LOCK close {t_ticker}: {e}")
+        cash = get_cash()  # Refresh after closing all
+        results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% — sold all, locked in gains"})
+        available_slots = 0
     elif daily_gain >= 1.0:
         logger.warning(f"WIN-LOCK CAUTION: Up {daily_gain:+.1f}% today — reducing new trade size by 50%")
 
@@ -711,11 +731,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 continue
 
             # Position sizing: REGIME-AWARE % of total portfolio value
-            total_value = cash + sum(
-                t.get("shares", 0) * t.get("entry_price", 0)
-                for t in get_open_trades()
-                if t["ticker"] in open_tickers
-            )
+            # Use atomic cash for accuracy
+            cash = get_cash()  # Always fresh
+            total_value = cash + positions_value_now
             # Regime-aware position sizing — 2% base for massive diversification
             # In BEAR: 3% shorts (conviction), 1.5% longs (careful long-term plays)
             # In BULL: 3% longs (conviction), 1.5% shorts (hedges)
@@ -819,7 +837,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     sector=pick.get("sector", ""),
                 )
 
-                cash -= shares * price
+                # Cash deducted atomically inside save_paper_trade()
+                cash = get_cash()  # Refresh from DB
                 open_tickers.add(symbol)
                 current_positions += 1
                 sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
@@ -842,11 +861,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
     # --- Step 3: Save portfolio snapshot ---
     try:
-        positions_value = sum(
-            p.get("position_value", 0)
-            for p in get_portfolio_state()["positions"]
-        )
-        total_value = cash + positions_value
+        # Use atomic cash — always accurate
+        cash = get_cash()
+        state = get_portfolio_state()
+        positions_value = state["positions_value"]
+        total_value = state["total_value"]  # Already uses atomic cash
 
         # Get S&P 500 performance for comparison
         sp500_daily = 0
@@ -1341,9 +1360,10 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     """
     Check all open positions for exit conditions WITHOUT generating new picks.
     This decouples exit management from entry decisions so stop-losses always fire.
+    Also handles WIN-LOCK: sells everything when up 1.5%+ for the day.
     Returns dict with list of closed positions.
     """
-    from predictions.models import get_open_trades, close_paper_trade, get_portfolio_snapshots, save_portfolio_snapshot
+    from predictions.models import get_open_trades, close_paper_trade, get_portfolio_snapshots, save_portfolio_snapshot, get_cash
 
     open_trades = get_open_trades()
     if not open_trades:
@@ -1357,7 +1377,45 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
 
     closed = []
     snapshots = get_portfolio_snapshots(days=5)
-    cash = snapshots[-1]["cash"] if snapshots else INITIAL_CAPITAL
+    cash = get_cash()  # Atomic cash — always accurate
+
+    # --- WIN-LOCK CHECK: If up 1.5%+ today, sell EVERYTHING ---
+    positions_val = sum(
+        current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
+        for t in open_trades
+    )
+    total_now = cash + positions_val
+    yesterday_val = snapshots[-1]["total_value"] if snapshots else INITIAL_CAPITAL
+    daily_gain = ((total_now / yesterday_val) - 1) * 100
+
+    if daily_gain >= 1.5:
+        logger.warning(f"EXIT CHECKER WIN-LOCK: Up {daily_gain:+.1f}% today — SELLING ALL!")
+        for trade in open_trades:
+            ticker = trade["ticker"]
+            price = current_prices.get(ticker)
+            if price:
+                try:
+                    close_paper_trade(trade["id"], price)
+                    direction = trade["direction"]
+                    entry_price = trade["entry_price"]
+                    if direction == "long":
+                        pnl_pct = ((price / entry_price) - 1) * 100
+                    else:
+                        pnl_pct = ((entry_price / price) - 1) * 100
+                    closed.append({
+                        "ticker": ticker, "direction": direction,
+                        "entry_price": entry_price, "exit_price": round(price, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}% — locking in",
+                    })
+                except Exception as e:
+                    logger.error(f"WIN-LOCK close {ticker}: {e}")
+        # Save snapshot after closing all
+        cash = get_cash()
+        total_value = cash  # No positions left
+        cum_ret = ((total_value / INITIAL_CAPITAL) - 1) * 100
+        save_portfolio_snapshot(total_value, cash, 0, daily_gain, cum_ret, 0, 0, 0)
+        return {"closed": closed, "checked": len(open_trades), "win_lock": True}
 
     for trade in open_trades:
         ticker = trade["ticker"]
@@ -1485,8 +1543,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         if should_close:
             try:
                 close_paper_trade(trade["id"], current_price)
-                position_value = trade["shares"] * current_price
-                cash += position_value
+                # Cash updated atomically in close_paper_trade()
                 closed.append({
                     "ticker": ticker,
                     "direction": direction,
@@ -1502,6 +1559,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     # Save snapshot if we closed anything
     if closed:
         try:
+            cash = get_cash()  # Refresh atomic cash after all closes
             positions_value = sum(
                 current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
                 for t in get_open_trades()

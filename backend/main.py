@@ -246,6 +246,22 @@ except Exception as e:
 # Initialize the database when the app starts
 init_db()
 
+# --- Sync paper_cash with reality on startup ---
+# If paper_cash was just created (default $100K), sync it to the latest snapshot
+try:
+    from predictions.models import get_cash, set_cash, get_portfolio_snapshots, get_open_trades
+    current_cash = get_cash()
+    snapshots = get_portfolio_snapshots(days=5)
+    if snapshots and abs(current_cash - 100000.0) < 1.0:
+        # paper_cash was just initialized — sync to latest snapshot
+        snap_cash = snapshots[-1]["cash"]
+        set_cash(snap_cash)
+        logger.warning(f"PAPER_CASH INIT: Synced to snapshot cash ${snap_cash:,.2f}")
+    else:
+        logger.info(f"PAPER_CASH: Already set at ${current_cash:,.2f}")
+except Exception as e:
+    logger.warning(f"Paper cash sync: {e}")
+
 # ============================================================
 #  AUTONOMOUS TRADING SCHEDULER
 #  Runs server-side on App Runner — works 24/7, no human needed.

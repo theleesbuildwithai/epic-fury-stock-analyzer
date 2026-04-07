@@ -98,7 +98,40 @@ def init_db():
             date TEXT PRIMARY KEY,
             close_price REAL NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS paper_cash (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            cash REAL NOT NULL
+        );
     """)
+    # Initialize paper_cash if empty
+    existing = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
+    if not existing:
+        conn.execute("INSERT INTO paper_cash (id, cash) VALUES (1, 100000.0)")
+    conn.commit()
+    conn.close()
+
+
+def get_cash() -> float:
+    """Get current cash — always accurate, updated atomically with every trade."""
+    conn = get_db()
+    row = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
+    conn.close()
+    return row["cash"] if row else 100000.0
+
+
+def set_cash(amount: float):
+    """Set cash to a specific amount (for resets)."""
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO paper_cash (id, cash) VALUES (1, ?)", (round(amount, 2),))
+    conn.commit()
+    conn.close()
+
+
+def adjust_cash(delta: float):
+    """Atomically add/subtract from cash. Positive = add, negative = subtract."""
+    conn = get_db()
+    conn.execute("UPDATE paper_cash SET cash = cash + ? WHERE id=1", (round(delta, 2),))
     conn.commit()
     conn.close()
 
@@ -195,8 +228,10 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
                      factors: dict = None, stop_loss: float = 0,
                      target_price: float = 0, hold_days: int = 30,
                      sector: str = "") -> int:
-    """Save a new paper trade."""
+    """Save a new paper trade and atomically deduct cash."""
+    cost = round(entry_price * shares, 2)
     conn = get_db()
+    # Atomically: insert trade AND deduct cash in same transaction
     cursor = conn.execute(
         """INSERT INTO paper_trades
            (ticker, direction, entry_price, shares, entry_date, signal_score,
@@ -208,6 +243,7 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
          json.dumps(factors or {}), stop_loss, target_price, hold_days, sector)
     )
     trade_id = cursor.lastrowid
+    conn.execute("UPDATE paper_cash SET cash = cash - ? WHERE id=1", (cost,))
     conn.commit()
     conn.close()
     return trade_id
@@ -245,7 +281,7 @@ def get_all_paper_trades() -> list:
 
 
 def close_paper_trade(trade_id: int, exit_price: float):
-    """Close a paper trade and calculate P&L."""
+    """Close a paper trade, calculate P&L, and atomically return cash."""
     conn = get_db()
     trade = conn.execute(
         "SELECT * FROM paper_trades WHERE id = ?", (trade_id,)
@@ -259,6 +295,13 @@ def close_paper_trade(trade_id: int, exit_price: float):
         else:  # short
             pnl_pct = ((entry - exit_price) / entry) * 100
         pnl_dollars = pnl_pct / 100 * entry * shares
+        # Atomically: close trade AND return cash in same transaction
+        # For longs: get back exit_price * shares
+        # For shorts: get back entry_price * shares + pnl (entry cost + profit/loss)
+        if direction == "long":
+            cash_returned = exit_price * shares
+        else:
+            cash_returned = entry * shares + pnl_dollars  # Original collateral + P&L
         conn.execute(
             """UPDATE paper_trades
                SET exit_price=?, exit_date=?, pnl_dollars=?, pnl_pct=?, status='closed'
@@ -266,6 +309,7 @@ def close_paper_trade(trade_id: int, exit_price: float):
             (exit_price, datetime.now().isoformat(),
              round(pnl_dollars, 2), round(pnl_pct, 2), trade_id)
         )
+        conn.execute("UPDATE paper_cash SET cash = cash + ? WHERE id=1", (round(cash_returned, 2),))
         conn.commit()
     conn.close()
 
