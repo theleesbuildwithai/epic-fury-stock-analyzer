@@ -776,8 +776,8 @@ def _reset_day():
             except Exception as e:
                 logger.error(f"RESET: Failed to close {ticker}: {e}")
 
-        # Now set cash to $107,000 (yesterday's value, our +7% baseline)
-        RESET_VALUE = 107000.0
+        # Reset to $109,580 (+9.58% — our peak before the drop)
+        RESET_VALUE = 109580.0
         conn = get_db()
         # Delete today's snapshot if it exists
         today = datetime.now().strftime("%Y-%m-%d")
@@ -791,7 +791,7 @@ def _reset_day():
             cash=RESET_VALUE,
             positions_value=0,
             daily_ret=0,
-            cum_ret=7.0,
+            cum_ret=9.58,
             sp500_daily=0,
             sp500_cum=0,
             num_pos=0
@@ -803,8 +803,9 @@ def _reset_day():
         import traceback
         traceback.print_exc()
 
-# DISABLED: Reset already ran successfully on April 7 deploy.
-# _reset_day()
+# Reset to +9.58% peak — runs once on this deploy, then disable
+_reset_day()
+# TODO: Comment out _reset_day() on next deploy
 
 
 # --- Request/Response Models ---

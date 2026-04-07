@@ -158,22 +158,44 @@ def _throttle():
 def get_portfolio_state() -> dict:
     """
     Get current portfolio state: cash, positions, total value.
-    Calculates unrealized P&L for all open positions.
+    Cash is calculated DYNAMICALLY to ensure accuracy:
+      cash = INITIAL_CAPITAL - cost_of_open_positions + realized_pnl_from_closed_trades
     """
-    from predictions.models import get_open_trades, get_closed_trades, get_portfolio_snapshots
+    from predictions.models import get_open_trades, get_closed_trades, get_portfolio_snapshots, get_db
 
     open_trades = get_open_trades()
     closed_trades = get_closed_trades(limit=50)
     snapshots = get_portfolio_snapshots(days=365)
 
-    # Calculate current portfolio value
-    if snapshots:
-        last_snapshot = snapshots[-1]
-        cash = last_snapshot["cash"]
-        total_value = last_snapshot["total_value"]
-    else:
-        cash = INITIAL_CAPITAL
-        total_value = INITIAL_CAPITAL
+    # DYNAMIC CASH CALCULATION — never stale
+    # Start with initial capital, subtract open position costs, add back all realized P&L
+    try:
+        conn = get_db()
+        # Total cost of all open positions (entry_price * shares)
+        open_cost_row = conn.execute(
+            "SELECT COALESCE(SUM(entry_price * shares), 0) as total_cost FROM paper_trades WHERE status='open'"
+        ).fetchone()
+        open_cost = float(open_cost_row["total_cost"])
+
+        # Total realized P&L from all closed trades
+        # For longs: proceeds = exit_price * shares, cost = entry_price * shares
+        # For shorts: proceeds = entry_price * shares, cost = exit_price * shares
+        realized_row = conn.execute("""
+            SELECT COALESCE(SUM(
+                CASE WHEN direction='long' THEN (exit_price - entry_price) * shares
+                     ELSE (entry_price - exit_price) * shares END
+            ), 0) as total_realized FROM paper_trades WHERE status='closed' AND exit_price IS NOT NULL
+        """).fetchone()
+        realized_pnl = float(realized_row["total_realized"])
+        conn.close()
+
+        cash = INITIAL_CAPITAL - open_cost + realized_pnl
+    except Exception:
+        # Fallback to snapshot-based cash
+        if snapshots:
+            cash = snapshots[-1]["cash"]
+        else:
+            cash = INITIAL_CAPITAL
 
     # Get current prices for open positions
     positions = []
@@ -430,10 +452,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 except Exception:
                     pass
 
-            # TAKE PROFIT: If we're up big (10%+), just take it
-            if not should_close and pnl_pct >= 10:
+            # TAKE PROFIT: If we're up big (8%+), just take it
+            if not should_close and pnl_pct >= 8:
                 should_close = True
                 close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
+
+            # SELL AT HIGHS: If near intraday high and starting to reverse, sell
+            # This prevents giving back gains by waiting too long
+            if not should_close and pnl_pct >= 3:
+                try:
+                    _throttle()
+                    intra_df = yf.download(ticker, period="1d", interval="5m", progress=False)
+                    if intra_df is not None and len(intra_df) >= 5:
+                        intra_highs = intra_df["Close"].values.astype(float).flatten()
+                        intra_peak = float(np.max(intra_highs))
+                        intra_now = float(intra_highs[-1])
+                        # If price dropped 1%+ from intraday peak and we're in profit, sell
+                        drop_from_peak = ((intra_peak - intra_now) / intra_peak) * 100
+                        if direction == "long" and drop_from_peak >= 1.0:
+                            should_close = True
+                            close_reason = f"SELL AT HIGH: peaked at ${intra_peak:.2f}, now ${intra_now:.2f} ({drop_from_peak:.1f}% off peak), locking {pnl_pct:+.1f}%"
+                        elif direction == "short":
+                            # For shorts, check if price bounced up from intraday low
+                            intra_low = float(np.min(intra_highs))
+                            bounce = ((intra_now - intra_low) / intra_low) * 100
+                            if bounce >= 1.0:
+                                should_close = True
+                                close_reason = f"SELL AT HIGH: short bounced {bounce:.1f}% from low, locking {pnl_pct:+.1f}%"
+                except Exception:
+                    pass
 
             # AGGRESSIVE BEAR PROTECTION: close losing longs faster in BEAR
             if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
@@ -490,22 +537,37 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     available_slots = MAX_POSITIONS - current_positions
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
-    # --- DRAWDOWN PROTECTION (hedge fund risk management) ---
-    # If portfolio has dropped 5%+, cut position sizes in half
-    # If dropped 10%+, stop opening new positions entirely (capital preservation)
+    # --- WIN-LOCK SYSTEM: Stop opening new trades when we're winning big today ---
+    # If up 1.5%+ today, LOCK IN the wins. Don't risk giving them back.
     total_current_value = cash + sum(
         t.get("shares", 0) * t.get("entry_price", 0) for t in open_trades
     )
-    drawdown_pct = ((total_current_value / INITIAL_CAPITAL) - 1) * 100
+    total_return_now = ((total_current_value / INITIAL_CAPITAL) - 1) * 100
+
+    # Compare to yesterday's snapshot to get TODAY's gain
+    daily_gain = 0
+    if snapshots:
+        yesterday_val = snapshots[-1].get("total_value", INITIAL_CAPITAL)
+        daily_gain = ((total_current_value / yesterday_val) - 1) * 100
+
+    if daily_gain >= 1.5:
+        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today — LOCKING IN gains, no new trades")
+        results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% today — protecting gains"})
+        available_slots = 0  # Stop all new trades — keep the win
+    elif daily_gain >= 1.0:
+        logger.warning(f"WIN-LOCK CAUTION: Up {daily_gain:+.1f}% today — reducing new trade size by 50%")
+
+    # --- DRAWDOWN PROTECTION (hedge fund risk management) ---
+    drawdown_pct = total_return_now
     drawdown_multiplier = 1.0
 
     if drawdown_pct <= -10:
         logger.warning(f"DRAWDOWN PROTECTION: Portfolio down {drawdown_pct:.1f}% — HALTING new trades")
         results["skipped"].append({"symbol": "ALL", "reason": f"Drawdown protection: portfolio down {drawdown_pct:.1f}%"})
-        available_slots = 0  # Stop all new trades
+        available_slots = 0
     elif drawdown_pct <= -5:
         logger.warning(f"DRAWDOWN PROTECTION: Portfolio down {drawdown_pct:.1f}% — halving position sizes")
-        drawdown_multiplier = 0.5  # Half-size positions
+        drawdown_multiplier = 0.5
 
     # No position limits — the computer trades freely like a real hedge fund
 
@@ -1416,10 +1478,32 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             except Exception:
                 pass
 
-        # TAKE PROFIT at 10%+
-        if not should_close and pnl_pct >= 10:
+        # TAKE PROFIT at 8%+
+        if not should_close and pnl_pct >= 8:
             should_close = True
             close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
+
+        # SELL AT HIGHS: If near intraday peak and reversing, sell to lock profit
+        if not should_close and pnl_pct >= 3:
+            try:
+                _throttle()
+                intra_df = yf.download(ticker, period="1d", interval="5m", progress=False)
+                if intra_df is not None and len(intra_df) >= 5:
+                    intra_highs = intra_df["Close"].values.astype(float).flatten()
+                    intra_peak = float(np.max(intra_highs))
+                    intra_now = float(intra_highs[-1])
+                    drop_from_peak = ((intra_peak - intra_now) / intra_peak) * 100
+                    if direction == "long" and drop_from_peak >= 1.0:
+                        should_close = True
+                        close_reason = f"SELL AT HIGH: {drop_from_peak:.1f}% off peak, locking {pnl_pct:+.1f}%"
+                    elif direction == "short":
+                        intra_low = float(np.min(intra_highs))
+                        bounce = ((intra_now - intra_low) / intra_low) * 100
+                        if bounce >= 1.0:
+                            should_close = True
+                            close_reason = f"SELL AT HIGH: short bounced {bounce:.1f}% from low, locking {pnl_pct:+.1f}%"
+            except Exception:
+                pass
 
         if should_close:
             try:
