@@ -17,7 +17,7 @@ import os, re, logging, time, threading, json
 import pandas as pd
 import yfinance as yf
 from collections import defaultdict
-from datetime import datetime as dt
+from datetime import datetime as dt, timedelta
 
 from analysis.report import generate_full_report
 from analysis.market_data import get_stock_info, get_historical_data, get_benchmark_data
@@ -375,7 +375,7 @@ def _should_trade_now() -> dict:
     # --- TRIGGER 5: Breaking news / sentiment shift ---
     try:
         sentiment = get_stock_sentiment("SPY")
-        news_score = sentiment.get("composite_score", 0)
+        news_score = sentiment.get("stock_sentiment", 0)
         score_change = abs(news_score - _last_news_score["value"])
         if score_change >= 0.3:  # Significant sentiment shift
             reasons.append(f"NEWS SHIFT: sentiment moved {score_change:+.2f} (was {_last_news_score['value']:.2f}, now {news_score:.2f})")
@@ -394,7 +394,7 @@ def _should_trade_now() -> dict:
         pass
 
     # --- TRIGGER 7: Geo-political risk change ---
-    if _geo_risk_state.get("level") in ("HIGH", "CRITICAL"):
+    if _geo_risk_state.get("level") in ("ELEVATED", "CRITICAL"):
         reasons.append(f"GEO-RISK {_geo_risk_state['level']} (score {_geo_risk_state.get('score', 0)}) — defensive rebalance needed")
 
     # --- TRIGGER 8: Periodic full scan every 30 min during market hours ---
@@ -598,7 +598,7 @@ scheduler.add_job(
 scheduler.add_job(
     _run_auto_trade_cycle,
     "date",
-    run_date=dt.now() + __import__("datetime").timedelta(minutes=10),
+    run_date=dt.now() + timedelta(minutes=10),
     id="startup_trade",
     name="Startup Trade Cycle",
 )
@@ -1465,7 +1465,7 @@ def learning_status(request: Request):
     check_rate_limit(request.client.host)
     try:
         from predictions.models import get_signal_weights, get_closed_trades
-        from predictions.learner import analyze_factor_performance, analyze_sector_performance, analyze_mistake_patterns
+        from predictions.learner import analyze_factor_performance, analyze_sector_performance, analyze_mistakes
         weights = get_signal_weights()
         closed = get_closed_trades(limit=500)
         result = {
@@ -1482,7 +1482,7 @@ def learning_status(request: Request):
         except Exception:
             pass
         try:
-            result["mistakes_learned"] = analyze_mistake_patterns()
+            result["mistakes_learned"] = analyze_mistakes()
         except Exception:
             pass
         return result
