@@ -803,9 +803,8 @@ def _reset_day():
         import traceback
         traceback.print_exc()
 
-# Reset to +9.58% peak — runs once on this deploy, then disable
+# Reset: close all positions, set cash to $109,580 (+9.58%)
 _reset_day()
-# TODO: Comment out _reset_day() on next deploy
 
 
 # --- Request/Response Models ---

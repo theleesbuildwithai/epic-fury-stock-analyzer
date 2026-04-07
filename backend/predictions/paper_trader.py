@@ -167,35 +167,12 @@ def get_portfolio_state() -> dict:
     closed_trades = get_closed_trades(limit=50)
     snapshots = get_portfolio_snapshots(days=365)
 
-    # DYNAMIC CASH CALCULATION — never stale
-    # Start with initial capital, subtract open position costs, add back all realized P&L
-    try:
-        conn = get_db()
-        # Total cost of all open positions (entry_price * shares)
-        open_cost_row = conn.execute(
-            "SELECT COALESCE(SUM(entry_price * shares), 0) as total_cost FROM paper_trades WHERE status='open'"
-        ).fetchone()
-        open_cost = float(open_cost_row["total_cost"])
-
-        # Total realized P&L from all closed trades
-        # For longs: proceeds = exit_price * shares, cost = entry_price * shares
-        # For shorts: proceeds = entry_price * shares, cost = exit_price * shares
-        realized_row = conn.execute("""
-            SELECT COALESCE(SUM(
-                CASE WHEN direction='long' THEN (exit_price - entry_price) * shares
-                     ELSE (entry_price - exit_price) * shares END
-            ), 0) as total_realized FROM paper_trades WHERE status='closed' AND exit_price IS NOT NULL
-        """).fetchone()
-        realized_pnl = float(realized_row["total_realized"])
-        conn.close()
-
-        cash = INITIAL_CAPITAL - open_cost + realized_pnl
-    except Exception:
-        # Fallback to snapshot-based cash
-        if snapshots:
-            cash = snapshots[-1]["cash"]
-        else:
-            cash = INITIAL_CAPITAL
+    # Cash from latest snapshot — updated immediately after every trade cycle
+    if snapshots:
+        last_snapshot = snapshots[-1]
+        cash = last_snapshot["cash"]
+    else:
+        cash = INITIAL_CAPITAL
 
     # Get current prices for open positions
     positions = []
