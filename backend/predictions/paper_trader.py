@@ -440,6 +440,23 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 should_close = True
                 close_reason = f"BEAR regime protection — closing losing long ({pnl_pct:+.1f}%)"
 
+            # QUICK-CUT RULE: Shorts losing >3% in first 2 days = bad trade, cut immediately
+            # Shorts can gap up violently — don't wait for stop-loss
+            if not should_close and direction == "short" and pnl_pct < -3:
+                try:
+                    entry_date = datetime.fromisoformat(trade["entry_date"])
+                    days_held = (datetime.now() - entry_date).days
+                    if days_held <= 2:
+                        should_close = True
+                        close_reason = f"QUICK-CUT: short losing {pnl_pct:+.1f}% in {days_held} days — bad entry"
+                except Exception:
+                    pass
+
+            # SHORTS MAX LOSS: Never let a short lose more than 5%
+            if not should_close and direction == "short" and pnl_pct < -5:
+                should_close = True
+                close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap reached"
+
             # Check if signal has reversed (optional aggressive exit)
             if not should_close and pnl_pct < -5:
                 # If losing more than 5% and we have new signals,
@@ -682,24 +699,24 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 continue
 
             # Calculate stop loss and target — REGIME AWARE
-            # BEAR: tighter stop on longs (4%), wider on shorts (10%)
-            # BULL: tighter stop on shorts (4%), wider on longs (10%)
+            # KEY LESSON: Shorts are RISKIER than longs (unlimited upside risk).
+            # NEVER give shorts more than 5% room. Cut them fast.
             if regime == "BEAR":
                 is_defensive_long = direction == "long" and pick.get("sector") in DEFENSIVE_SECTORS
-                long_stop = 0.08 if is_defensive_long else 0.04  # defensive = wider stop (safe stocks recover)
-                short_stop = 0.10  # give shorts room to run
-                long_target = 1.06 if is_defensive_long else 1.08  # defensive = modest 6% target (safe, steady)
-                short_target = 0.80  # ambitious target for shorts (20% drop)
+                long_stop = 0.08 if is_defensive_long else 0.04
+                short_stop = 0.05  # MAX 5% stop for shorts — they can gap up
+                long_target = 1.06 if is_defensive_long else 1.08
+                short_target = 0.85  # 15% target (realistic, not 20%)
             elif regime == "BULL":
                 long_stop = 0.10
-                short_stop = 0.04
+                short_stop = 0.04  # Tight stop for shorts in bull market
                 long_target = 1.20
                 short_target = 0.92
             else:
                 long_stop = STOP_LOSS_PCT
-                short_stop = STOP_LOSS_PCT
+                short_stop = 0.05  # MAX 5% for shorts
                 long_target = 1.15
-                short_target = 0.85
+                short_target = 0.88
 
             # MISTAKE LEARNING: Tighten stops if we've been holding losers too long
             if mistake_adj.get("tighten_stops"):
@@ -1353,6 +1370,22 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
             should_close = True
             close_reason = f"BEAR regime protection — losing long ({pnl_pct:+.1f}%)"
+
+        # QUICK-CUT RULE: Shorts losing >3% in first 2 days = bad trade
+        if not should_close and direction == "short" and pnl_pct < -3:
+            try:
+                entry_date = datetime.fromisoformat(trade["entry_date"])
+                days_held = (datetime.now() - entry_date).days
+                if days_held <= 2:
+                    should_close = True
+                    close_reason = f"QUICK-CUT: short losing {pnl_pct:+.1f}% in {days_held} days"
+            except Exception:
+                pass
+
+        # SHORTS MAX LOSS: Never let a short lose more than 5%
+        if not should_close and direction == "short" and pnl_pct < -5:
+            should_close = True
+            close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap"
 
         # PROFIT PROTECTION — same trailing stop as main engine
         if not should_close and pnl_pct > 2:

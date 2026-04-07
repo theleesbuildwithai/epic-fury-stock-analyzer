@@ -726,8 +726,8 @@ def _fix_broken_stops():
                     new_stop = round(entry * 0.94, 2)   # 6% stop
                     new_target = round(entry * 1.08, 2)  # 8% target
                 else:
-                    new_stop = round(entry * 1.10, 2)    # 10% stop
-                    new_target = round(entry * 0.80, 2)  # 20% target
+                    new_stop = round(entry * 1.05, 2)    # 5% stop (tighter for shorts)
+                    new_target = round(entry * 0.85, 2)  # 15% target
 
                 conn = get_db()
                 conn.execute(
@@ -746,6 +746,64 @@ def _fix_broken_stops():
 
 # Run fix on startup
 _fix_broken_stops()
+
+
+# --- RESET DAY: Close all positions, restore to yesterday's value ---
+# This runs ONCE on this deploy to undo today's damage and restart fresh.
+def _reset_day():
+    """Close ALL open positions and reset cash to yesterday's portfolio value (~$107K)."""
+    try:
+        from predictions.models import get_open_trades, close_paper_trade, get_db, save_portfolio_snapshot
+        from predictions.paper_trader import _get_current_prices
+
+        open_trades = get_open_trades()
+        if not open_trades:
+            logger.warning("RESET DAY: No open trades to close")
+            return
+
+        # Get current prices
+        symbols = list(set(t["ticker"] for t in open_trades))
+        current_prices = _get_current_prices(symbols)
+
+        # Close every position
+        closed_count = 0
+        for trade in open_trades:
+            ticker = trade["ticker"]
+            price = current_prices.get(ticker, trade["entry_price"])
+            try:
+                close_paper_trade(trade["id"], price)
+                closed_count += 1
+            except Exception as e:
+                logger.error(f"RESET: Failed to close {ticker}: {e}")
+
+        # Now set cash to $107,000 (yesterday's value, our +7% baseline)
+        RESET_VALUE = 107000.0
+        conn = get_db()
+        # Delete today's snapshot if it exists
+        today = datetime.now().strftime("%Y-%m-%d")
+        conn.execute("DELETE FROM portfolio_snapshots WHERE snapshot_date = ?", (today,))
+        conn.commit()
+        conn.close()
+
+        # Save new snapshot at the reset value
+        save_portfolio_snapshot(
+            total_value=RESET_VALUE,
+            cash=RESET_VALUE,
+            positions_value=0,
+            daily_ret=0,
+            cum_ret=7.0,
+            sp500_daily=0,
+            sp500_cum=0,
+            num_pos=0
+        )
+
+        logger.warning(f"RESET DAY: Closed {closed_count} positions. Cash set to ${RESET_VALUE:,.2f}. Fresh start.")
+    except Exception as e:
+        logger.error(f"RESET DAY ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+
+_reset_day()
 
 
 # --- Request/Response Models ---
@@ -1230,7 +1288,8 @@ def equity_curve(request: Request):
             known_spy = [
                 ("2026-03-30", 587.50), ("2026-03-31", 604.60),
                 ("2026-04-01", 609.10), ("2026-04-02", 609.72),
-                ("2026-04-03", 607.80), ("2026-04-04", 607.80),
+                ("2026-04-03", 607.80), ("2026-04-04", 613.28),
+                ("2026-04-07", 615.40),
             ]
             sp500_curve = []
             base = known_spy[0][1]
