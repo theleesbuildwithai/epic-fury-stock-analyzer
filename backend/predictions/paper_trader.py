@@ -239,7 +239,7 @@ def get_portfolio_state() -> dict:
     avg_loss = np.mean([t["pnl_pct"] for t in losses]) if losses else 0
     profit_factor = abs(avg_win * len(wins)) / (abs(avg_loss * len(losses)) + 0.01) if losses else 0
 
-    return {
+    result = {
         "total_value": round(total_current, 2),
         "cash": round(cash, 2),
         "positions_value": round(positions_value, 2),

@@ -10,7 +10,7 @@ export default function PriceChart({ chartData }) {
   const interval = Math.floor(chartData.length / 8)
 
   return (
-    <div className="bg-slate-800 rounded-xl p-6 border border-slate-700">
+    <div className="bg-neutral-800 rounded-xl p-6 border border-neutral-700">
       <h2 className="text-xl font-semibold text-white mb-4">Price Chart</h2>
 
       <ResponsiveContainer width="100%" height={400}>
@@ -33,11 +33,11 @@ export default function PriceChart({ chartData }) {
 
           {/* Bollinger Bands */}
           <Area
-            type="monotone" dataKey="bb_upper" stroke="none" fill="#3b82f6" fillOpacity={0.05}
+            type="monotone" dataKey="bb_upper" stroke="none" fill="#a3a3a3" fillOpacity={0.05}
             name="BB Upper" dot={false}
           />
           <Area
-            type="monotone" dataKey="bb_lower" stroke="none" fill="#3b82f6" fillOpacity={0.05}
+            type="monotone" dataKey="bb_lower" stroke="none" fill="#a3a3a3" fillOpacity={0.05}
             name="BB Lower" dot={false}
           />
 

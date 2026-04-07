@@ -467,7 +467,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </div>
           )}
           <p className="text-neutral-600 text-xs mt-2 italic">
-            The computer autonomously analyzes 270+ stocks and executes trades every hour during market hours. No human intervention required.
+            The computer autonomously analyzes 270+ stocks and executes trades event-driven during market hours. No human intervention required.
           </p>
         </div>
       )}

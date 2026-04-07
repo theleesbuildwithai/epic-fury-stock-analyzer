@@ -334,7 +334,7 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
                 {chartType === 'line' && (
                   <Line
                     dataKey="close"
-                    stroke="#3b82f6"
+                    stroke="#ffffff"
                     strokeWidth={2}
                     dot={false}
                     isAnimationActive={false}
@@ -343,9 +343,9 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
                 {chartType === 'area' && (
                   <Area
                     dataKey="close"
-                    stroke="#3b82f6"
+                    stroke="#ffffff"
                     strokeWidth={2}
-                    fill="#3b82f6"
+                    fill="#ffffff"
                     fillOpacity={0.1}
                     dot={false}
                     isAnimationActive={false}
@@ -361,11 +361,11 @@ export default function CandlestickChart({ ticker, chartData: initialData }) {
 
                 {/* Moving average overlays */}
                 {activeOverlays.includes('sma_20') && (
-                  <Line dataKey="sma_20" stroke="#3b82f6" strokeWidth={1.5} dot={false}
+                  <Line dataKey="sma_20" stroke="#ffffff" strokeWidth={1.5} dot={false}
                     isAnimationActive={false} connectNulls />
                 )}
                 {activeOverlays.includes('sma_50') && (
-                  <Line dataKey="sma_50" stroke="#eab308" strokeWidth={1.5} dot={false}
+                  <Line dataKey="sma_50" stroke="#a3a3a3" strokeWidth={1.5} dot={false}
                     isAnimationActive={false} connectNulls />
                 )}
                 {activeOverlays.includes('sma_200') && (
