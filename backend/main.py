@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from typing import Optional
 import os, re, logging, time, threading, json
 import pandas as pd
+import yfinance as yf
 from collections import defaultdict
 from datetime import datetime as dt
 
@@ -1127,31 +1128,81 @@ def equity_curve(request: Request):
         sp500_curve = []
         try:
             _throttle()
-            # Use ^GSPC (actual S&P 500 index) for comparison
-            spy_raw = yf.download("^GSPC", start="2026-03-20", period=None, progress=False)
-            logger.warning(f"EQUITY CURVE: ^GSPC download shape={spy_raw.shape if spy_raw is not None else 'None'}, cols={spy_raw.columns.tolist()[:5] if spy_raw is not None and not spy_raw.empty else 'empty'}")
-
             closes = None
-            if spy_raw is not None and not spy_raw.empty:
-                if isinstance(spy_raw.columns, pd.MultiIndex):
-                    # Flatten MultiIndex — just take level 0
-                    spy_raw.columns = [c[0] if isinstance(c, tuple) else c for c in spy_raw.columns]
-                if "Close" in spy_raw.columns:
-                    closes = spy_raw["Close"].dropna()
-                    if isinstance(closes, pd.DataFrame):
-                        closes = closes.iloc[:, 0]
-                    logger.warning(f"EQUITY CURVE: Got {len(closes)} close prices for ^GSPC")
+
+            # APPROACH 1: yf.download with period (most reliable in this codebase)
+            try:
+                raw = yf.download("SPY", period="1mo", progress=False)
+                if raw is not None and len(raw) > 0:
+                    # Handle both MultiIndex and flat columns
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        # Try (Close, SPY) first
+                        for col_name in [("Close", "SPY"), ("Close",)]:
+                            try:
+                                closes = raw[col_name].dropna()
+                                if len(closes) > 0:
+                                    break
+                            except (KeyError, TypeError):
+                                continue
+                        if closes is None or len(closes) == 0:
+                            # Flatten MultiIndex and look for Close
+                            flat = raw.copy()
+                            flat.columns = [c[0] if isinstance(c, tuple) else c for c in raw.columns]
+                            if "Close" in flat.columns:
+                                closes = flat["Close"].dropna()
+                    else:
+                        if "Close" in raw.columns:
+                            closes = raw["Close"].dropna()
+                    logger.warning(f"SPY APPROACH 1: {len(closes) if closes is not None else 0} points")
+            except Exception as e1:
+                logger.warning(f"SPY approach 1 failed: {e1}")
+
+            # APPROACH 2: yf.Ticker().history() as fallback
+            if closes is None or len(closes) == 0:
+                try:
+                    _throttle()
+                    t = yf.Ticker("SPY")
+                    hist = t.history(period="1mo")
+                    if hist is not None and "Close" in hist.columns and len(hist) > 0:
+                        closes = hist["Close"].dropna()
+                        logger.warning(f"SPY APPROACH 2: {len(closes)} points")
+                except Exception as e2:
+                    logger.warning(f"SPY approach 2 failed: {e2}")
+
+            # APPROACH 3: Try ^GSPC (actual S&P 500 index)
+            if closes is None or len(closes) == 0:
+                try:
+                    _throttle()
+                    t = yf.Ticker("^GSPC")
+                    hist = t.history(period="1mo")
+                    if hist is not None and "Close" in hist.columns and len(hist) > 0:
+                        closes = hist["Close"].dropna()
+                        logger.warning(f"SPY APPROACH 3 (^GSPC): {len(closes)} points")
+                except Exception as e3:
+                    logger.warning(f"SPY approach 3 failed: {e3}")
 
             if closes is not None and len(closes) >= 2:
-                    base_price = float(closes.iloc[0])
-                    for idx, price in closes.items():
-                        date_str = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
-                        ret = ((float(price) / base_price) - 1) * 100
+                # Filter to dates >= March 28 (a couple days before fund start)
+                close_vals = []
+                for idx in closes.index:
+                    date_str = str(idx.date()) if hasattr(idx, 'date') else str(idx)[:10]
+                    close_vals.append((date_str, float(closes[idx])))
+                close_vals = [(d, p) for d, p in close_vals if d >= "2026-03-28"]
+
+                if len(close_vals) >= 2:
+                    base_price = close_vals[0][1]
+                    for date_str, price in close_vals:
+                        ret = ((price / base_price) - 1) * 100
                         sp500_curve.append({
                             "date": date_str,
                             "value": round(100000 * (1 + ret / 100), 2),
                             "return_pct": round(ret, 2),
                         })
+                    logger.warning(f"SPY FINAL: {len(sp500_curve)} curve points built")
+                else:
+                    logger.warning(f"SPY: only {len(close_vals)} points after date filter")
+            else:
+                logger.warning("SPY: all approaches returned 0 data points")
         except Exception as e:
             logger.error(f"S&P 500 data error: {e}")
 

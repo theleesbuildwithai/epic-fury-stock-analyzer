@@ -347,7 +347,7 @@ function EquityCurveChart() {
     <div className="bg-black border-2 border-green-500/40 rounded-xl p-6">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-white font-black text-xl">📈 Performance vs S&P 500</h3>
+          <h3 className="text-white font-black text-xl">Performance vs S&P 500</h3>
           <p className="text-neutral-500 text-xs mt-1">Since March 30, 2026 • Started with $100,000</p>
         </div>
         <div className="flex gap-4 text-right">
@@ -366,7 +366,7 @@ function EquityCurveChart() {
           <div className={`flex items-center px-3 py-1 rounded-full text-sm font-bold ${
             beating ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
           }`}>
-            {beating ? '🏆 BEATING' : '📉 TRAILING'} S&P
+            {beating ? 'BEATING' : 'TRAILING'} S&P
           </div>
         </div>
       </div>
@@ -380,7 +380,7 @@ function EquityCurveChart() {
             labelStyle={{ color: '#fff', fontWeight: 'bold' }}
             formatter={(value, name) => [
               `${value?.toFixed(2)}%`,
-              name === 'fund' ? '🟢 Epic Fury Fund' : '⚪ S&P 500'
+              name === 'fund' ? 'Epic Fury Fund' : 'S&P 500'
             ]}
           />
           <Line
@@ -620,29 +620,6 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
         </div>
       )}
 
-      {/* Equity Curve */}
-      {performance?.equity_curve?.length > 1 && (
-        <div className="bg-black border border-neutral-700 rounded-xl p-6">
-          <h2 className="text-xl font-bold text-white mb-4">Equity Curve</h2>
-          <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={performance.equity_curve}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#262626" />
-                <XAxis dataKey="date" tick={{ fill: '#737373', fontSize: 10 }} />
-                <YAxis tick={{ fill: '#737373', fontSize: 10 }} tickFormatter={v => `${v}%`} />
-                <Tooltip
-                  contentStyle={{ background: '#171717', border: '1px solid #404040', borderRadius: 8 }}
-                  labelStyle={{ color: '#a3a3a3' }}
-                />
-                <Line dataKey="portfolio_return" stroke="#3b82f6" strokeWidth={2}
-                  dot={false} name="Portfolio" />
-                <Line dataKey="sp500_return" stroke="#737373" strokeWidth={1}
-                  strokeDasharray="4 2" dot={false} name="S&P 500" />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
