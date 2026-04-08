@@ -160,7 +160,7 @@ GEO_TENSION_KEYWORDS = [
     "proxy war", "insurgency", "coup", "regime change",
     "humanitarian crisis", "refugee", "evacuation", "no-fly zone",
     "arms deal", "weapons shipment", "military aid", "nato",
-    "ceasefire", "peace talks", "negotiations collapse",
+    "negotiations collapse",
     "troop buildup", "military exercise", "show of force",
     "diplomatic expulsion", "asset freeze", "travel ban",
 ]
@@ -631,11 +631,36 @@ def assess_geopolitical_risk():
 
     military_hits = []
     tension_hits = []
+    ceasefire_hits = []
     hotspot_hits = set()
+
+    # Ceasefire / peace keywords — these REDUCE risk, not increase it
+    CEASEFIRE_KEYWORDS = [
+        "ceasefire", "cease fire", "peace deal", "peace agreement", "peace talks",
+        "peace treaty", "truce", "armistice", "de-escalation", "de-escalate",
+        "diplomatic resolution", "negotiations succeed", "peace plan",
+        "withdrawal of troops", "stand down", "end of hostilities",
+    ]
 
     for h in headlines:
         title_lower = h["title"].lower()
         recency = h.get("recency_weight", 1.0)
+
+        # Check for ceasefire/peace FIRST (takes priority)
+        ceasefire_found = False
+        for kw in CEASEFIRE_KEYWORDS:
+            if kw in title_lower:
+                ceasefire_hits.append({
+                    "headline": h["title"], "keyword": kw,
+                    "source": h.get("source", ""),
+                    "recency_weight": recency,
+                    "age_hours": h.get("age_hours", 999),
+                })
+                ceasefire_found = True
+                break
+
+        if ceasefire_found:
+            continue  # Don't also count this as military/tension
 
         for kw in GEO_MILITARY_KEYWORDS:
             if kw in title_lower:
@@ -662,11 +687,20 @@ def assess_geopolitical_risk():
 
     military_count = len(military_hits)
     tension_count = len(tension_hits)
+    ceasefire_count = len(ceasefire_hits)
 
     # Weight recent military events higher
     recent_military = sum(1 for m in military_hits if m.get("age_hours", 999) < 12)
+    recent_ceasefire = sum(1 for c in ceasefire_hits if c.get("age_hours", 999) < 24)
 
-    if military_count >= 3 or recent_military >= 2:
+    # CEASEFIRE OVERRIDE: If ceasefire headlines exist, dramatically reduce risk
+    # Ceasefire news = the conflict is winding down, not ramping up
+    if ceasefire_count >= 2 or recent_ceasefire >= 1:
+        # Strong ceasefire signal — override to LOW
+        risk_level = "LOW"
+        risk_score = max(0, min(2, military_count - ceasefire_count))
+        logger.info(f"CEASEFIRE DETECTED: {ceasefire_count} headlines — overriding risk to LOW")
+    elif military_count >= 3 or recent_military >= 2:
         risk_level = "CRITICAL"
         risk_score = min(10, 5 + military_count + recent_military)
     elif military_count >= 1:
@@ -718,6 +752,9 @@ def assess_geopolitical_risk():
     result = {
         "risk_level": risk_level,
         "risk_score": risk_score,
+        "ceasefire_detected": ceasefire_count > 0,
+        "ceasefire_count": ceasefire_count,
+        "ceasefire_headlines": [c["headline"] for c in ceasefire_hits[:5]],
         "military_events": military_hits[:5],
         "tension_events": tension_hits[:5],
         "active_hotspots": sorted(list(hotspot_hits)),
