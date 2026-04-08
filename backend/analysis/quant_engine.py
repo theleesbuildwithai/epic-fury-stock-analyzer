@@ -543,7 +543,7 @@ def detect_market_regime() -> dict:
 
         return regime_data
 
-    return _get_cached("market_regime", fetch, ttl=600)  # 10 min cache
+    return _get_cached("market_regime", fetch, ttl=60)  # 1 min cache — S&P 500 price updates every minute
 
 
 # ============================================================

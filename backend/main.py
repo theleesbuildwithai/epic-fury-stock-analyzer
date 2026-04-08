@@ -1061,6 +1061,77 @@ def health_check():
     return {"status": "healthy", "app": "Epic Fury Stock Analyzer"}
 
 
+@app.get("/api/live-prices")
+def live_prices(request: Request):
+    """
+    Lightweight live price endpoint — updates every 60 seconds.
+    Returns S&P 500 price and our fund's current value without
+    running the full quant analysis (which takes 100+ seconds).
+    """
+    check_rate_limit(request.client.host)
+    try:
+        import yfinance as yf
+        from predictions.models import get_cash, get_open_trades
+
+        # S&P 500 — uses 1-min cached regime detection
+        regime = detect_market_regime()
+        sp500_price = regime.get("sp500_price", 0)
+        vix = regime.get("vix_level", 0)
+
+        # Our fund value
+        cash = get_cash()
+        open_trades = get_open_trades()
+        positions_value = 0
+        position_prices = {}
+
+        if open_trades:
+            tickers = list(set(t["ticker"] for t in open_trades))
+            try:
+                _throttle()
+                data = yf.download(tickers, period="1d", progress=False)
+                for t in open_trades:
+                    try:
+                        if len(tickers) == 1:
+                            price = float(data["Close"].iloc[-1])
+                        else:
+                            price = float(data[t["ticker"]]["Close"].iloc[-1])
+                        pv = price * t["shares"]
+                        if t["direction"] == "short":
+                            pv = (t["entry_price"] * t["shares"] * 2) - pv
+                        positions_value += pv
+                        position_prices[t["ticker"]] = round(price, 2)
+                    except Exception:
+                        positions_value += t["entry_price"] * t["shares"]
+            except Exception:
+                for t in open_trades:
+                    positions_value += t["entry_price"] * t["shares"]
+
+        total_value = cash + positions_value
+        total_return = ((total_value / 100_000) - 1) * 100  # vs ORIGINAL_CAPITAL
+
+        return {
+            "sp500": {
+                "price": sp500_price,
+                "sma200": regime.get("sp500_sma200", 0),
+                "sma50": regime.get("sp500_sma50", 0),
+            },
+            "fund": {
+                "total_value": round(total_value, 2),
+                "cash": round(cash, 2),
+                "positions_value": round(positions_value, 2),
+                "total_return_pct": round(total_return, 2),
+                "num_positions": len(open_trades),
+            },
+            "vix": round(vix, 2),
+            "regime": regime.get("regime", "UNKNOWN"),
+            "position_prices": position_prices,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Live prices error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get live prices")
+
+
 @app.get("/api/search")
 def search_stocks(request: Request, q: str = ""):
     """Search for stocks by company name or ticker symbol. Instant, no API calls."""
