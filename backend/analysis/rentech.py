@@ -891,6 +891,7 @@ def run_rentech_analysis(price_data: dict, open_trades: list = None,
         "portfolio_risk": {},
         "circuit_breaker": {},
         "alt_data": {},
+        "portfolio_beta": {"beta": 0, "hedge_needed": False},
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -994,16 +995,17 @@ def get_earnings_shield(price_data: dict) -> dict:
     blocked = []
     warning = []
 
-    symbols = list(price_data.keys())[:50]
+    symbols = list(price_data.keys())[:30]  # Limit to 30 to avoid Yahoo rate limits
 
     for symbol in symbols:
         try:
+            _throttle_rentech()
             ticker = yf.Ticker(symbol)
             cal = ticker.calendar
             if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
                 next_earnings = None
                 if isinstance(cal, dict):
-                    earnings_date = cal.get("Earnings Date")
+                    earnings_date = cal.get("Earnings Date") or cal.get("earnings_date")
                     if earnings_date:
                         if isinstance(earnings_date, list) and len(earnings_date) > 0:
                             next_earnings = pd.Timestamp(earnings_date[0])
@@ -1019,6 +1021,9 @@ def get_earnings_shield(price_data: dict) -> dict:
                     continue
 
                 now = pd.Timestamp.now()
+                # Handle timezone mismatch — yfinance may return tz-aware dates
+                if next_earnings.tzinfo is not None:
+                    next_earnings = next_earnings.tz_localize(None)
                 days_until = (next_earnings - now).days
 
                 if 0 <= days_until <= 1:
@@ -1037,7 +1042,6 @@ def get_earnings_shield(price_data: dict) -> dict:
                     })
         except Exception:
             continue
-        time.sleep(0.3)
 
     result = {"blocked": blocked, "warning": warning}
     _rentech_cache[cache_key] = {"data": result, "time": time.time()}
@@ -1078,6 +1082,8 @@ def detect_sector_rotation(price_data: dict) -> dict:
                     closes = data[etf]["Close"].values.astype(float).flatten()
 
                 if len(closes) < 22:
+                    continue
+                if closes[-5] == 0 or closes[-22] == 0 or np.isnan(closes[-5]) or np.isnan(closes[-22]):
                     continue
 
                 ret_1w = (closes[-1] / closes[-5] - 1) * 100
@@ -1264,7 +1270,7 @@ def predict_regime_transition(price_data: dict) -> dict:
 
 def get_stock_news_sentiment(symbols: list) -> dict:
     """Analyze headlines for positive/negative keywords per stock."""
-    cache_key = f"news_sentiment_{'_'.join(sorted(symbols[:5]))}"
+    cache_key = f"news_sentiment_{'_'.join(sorted(symbols[:20]))}"
     cached = _rentech_cache.get(cache_key)
     if cached and time.time() - cached["time"] < 1800:
         return cached["data"]
@@ -1279,14 +1285,20 @@ def get_stock_news_sentiment(symbols: list) -> dict:
     sentiments = {}
     for symbol in symbols[:20]:
         try:
+            _throttle_rentech()
             ticker = yf.Ticker(symbol)
             news = ticker.news
-            if not news:
+            # yfinance 0.2.36+ may return dict with "news" key
+            if isinstance(news, dict):
+                news = news.get("news", [])
+            if not news or not isinstance(news, list):
                 sentiments[symbol] = {"sentiment": "NEUTRAL", "score": 0, "headlines": 0}
                 continue
 
             pos = neg = 0
             for article in news[:10]:
+                if not isinstance(article, dict):
+                    continue
                 title = article.get("title", "").lower()
                 pos += sum(1 for w in POSITIVE if w in title)
                 neg += sum(1 for w in NEGATIVE if w in title)
@@ -1303,7 +1315,6 @@ def get_stock_news_sentiment(symbols: list) -> dict:
                 "positive_signals": pos, "negative_signals": neg,
                 "headlines_analyzed": len(news[:10]),
             }
-            time.sleep(0.2)
         except Exception:
             sentiments[symbol] = {"sentiment": "NEUTRAL", "score": 0, "headlines": 0}
 
@@ -1317,7 +1328,7 @@ def get_stock_news_sentiment(symbols: list) -> dict:
 
 def detect_unusual_options(symbols: list) -> dict:
     """Detect unusual options volume and put/call ratio spikes."""
-    cache_key = "unusual_options"
+    cache_key = f"unusual_options_{'_'.join(sorted(symbols[:15]))}"
     cached = _rentech_cache.get(cache_key)
     if cached and time.time() - cached["time"] < 1800:
         return cached["data"]
@@ -1325,16 +1336,17 @@ def detect_unusual_options(symbols: list) -> dict:
     signals = {}
     for symbol in symbols[:15]:
         try:
+            _throttle_rentech()
             ticker = yf.Ticker(symbol)
             expirations = ticker.options
             if not expirations:
                 continue
 
             chain = ticker.option_chain(expirations[0])
-            call_vol = int(chain.calls["volume"].sum()) if "volume" in chain.calls.columns else 0
-            put_vol = int(chain.puts["volume"].sum()) if "volume" in chain.puts.columns else 0
-            call_oi = int(chain.calls["openInterest"].sum()) if "openInterest" in chain.calls.columns else 0
-            put_oi = int(chain.puts["openInterest"].sum()) if "openInterest" in chain.puts.columns else 0
+            call_vol = int(chain.calls["volume"].fillna(0).sum()) if "volume" in chain.calls.columns else 0
+            put_vol = int(chain.puts["volume"].fillna(0).sum()) if "volume" in chain.puts.columns else 0
+            call_oi = int(chain.calls["openInterest"].fillna(0).sum()) if "openInterest" in chain.calls.columns else 0
+            put_oi = int(chain.puts["openInterest"].fillna(0).sum()) if "openInterest" in chain.puts.columns else 0
 
             total_vol = call_vol + put_vol
             total_oi = call_oi + put_oi
@@ -1355,7 +1367,6 @@ def detect_unusual_options(symbols: list) -> dict:
                     "call_volume": call_vol, "put_volume": put_vol,
                     "vol_oi_ratio": round(vol_oi_ratio, 2), "expiration": expirations[0],
                 }
-            time.sleep(0.3)
         except Exception:
             continue
 

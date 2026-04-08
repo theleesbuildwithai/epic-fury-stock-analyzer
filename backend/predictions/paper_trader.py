@@ -1707,6 +1707,8 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                     elif isinstance(cal, pd.DataFrame) and not cal.empty:
                         next_earn = pd.Timestamp(cal.iloc[0, 0]) if len(cal.columns) > 0 else None
                     if next_earn:
+                        if next_earn.tzinfo is not None:
+                            next_earn = next_earn.tz_localize(None)
                         days_to_earn = (next_earn - pd.Timestamp.now()).days
                         if 0 <= days_to_earn <= 1:
                             should_close = True
