@@ -2118,32 +2118,52 @@ def generate_quant_picks() -> dict:
             )
 
             # Inject mean reversion setups into long/short picks if they aren't already there
+            # SMART FILTER: Don't inject MR picks that conflict with the macro thesis
+            # e.g., don't short tech/healthcare during ceasefire (those sectors should rally)
             mr_setups = rentech_data.get("mean_reversion_setups", [])
             existing_long_syms = {p["symbol"] for p in top_longs}
             existing_short_syms = {p["symbol"] for p in top_shorts}
 
+            # Determine which sectors are boosted by macro (ceasefire, etc.)
+            boosted_sectors = set()
+            penalized_sectors = set()
+            if macro and "sector_adjustments" in macro:
+                for sector, adj in macro["sector_adjustments"].items():
+                    if adj >= 1.0:
+                        boosted_sectors.add(sector)
+                    elif adj <= -1.0:
+                        penalized_sectors.add(sector)
+
             for mr in mr_setups:
                 sym = mr["symbol"]
+                mr_pick = next((s for s in all_scored if s["symbol"] == sym), None)
+                if not mr_pick:
+                    continue
+
+                pick_sector = mr_pick.get("sector", "Unknown")
+
                 if mr["direction"] == "LONG" and sym not in existing_long_syms:
-                    # Add as a mean reversion pick to longs
-                    mr_pick = next((s for s in all_scored if s["symbol"] == sym), None)
-                    if mr_pick:
-                        mr_pick["mean_reversion"] = True
-                        mr_pick["mr_score"] = mr["mr_score"]
-                        mr_pick["reasons"].append(f"Mean reversion: {mr['reasons'][0]}")
-                        # Boost confidence for MR signals (they have high win rates)
-                        mr_pick["confidence"] = min(95, mr_pick["confidence"] + 10)
-                        top_longs.append(mr_pick)
-                        existing_long_syms.add(sym)
+                    # Don't go LONG on sectors the macro is penalizing
+                    if pick_sector in penalized_sectors:
+                        logger.debug(f"MR FILTER: Skipping LONG {sym} — {pick_sector} is macro-penalized")
+                        continue
+                    mr_pick["mean_reversion"] = True
+                    mr_pick["mr_score"] = mr["mr_score"]
+                    mr_pick["reasons"].append(f"Mean reversion: {mr['reasons'][0]}")
+                    mr_pick["confidence"] = min(95, mr_pick["confidence"] + 10)
+                    top_longs.append(mr_pick)
+                    existing_long_syms.add(sym)
                 elif mr["direction"] == "SHORT" and sym not in existing_short_syms:
-                    mr_pick = next((s for s in all_scored if s["symbol"] == sym), None)
-                    if mr_pick:
-                        mr_pick["mean_reversion"] = True
-                        mr_pick["mr_score"] = mr["mr_score"]
-                        mr_pick["reasons"].append(f"Mean reversion: {mr['reasons'][0]}")
-                        mr_pick["confidence"] = min(95, mr_pick["confidence"] + 10)
-                        top_shorts.append(mr_pick)
-                        existing_short_syms.add(sym)
+                    # Don't SHORT sectors the macro is boosting (ceasefire = don't short tech)
+                    if pick_sector in boosted_sectors:
+                        logger.info(f"MR FILTER: Skipping SHORT {sym} — {pick_sector} is macro-boosted (ceasefire/bullish)")
+                        continue
+                    mr_pick["mean_reversion"] = True
+                    mr_pick["mr_score"] = mr["mr_score"]
+                    mr_pick["reasons"].append(f"Mean reversion: {mr['reasons'][0]}")
+                    mr_pick["confidence"] = min(95, mr_pick["confidence"] + 10)
+                    top_shorts.append(mr_pick)
+                    existing_short_syms.add(sym)
 
             logger.info(f"🏛️ RenTech analysis complete: {len(rentech_data.get('pairs_trades', []))} pairs, "
                         f"{len(mr_setups)} MR setups, risk={rentech_data.get('portfolio_risk', {}).get('risk_level', 'N/A')}")
