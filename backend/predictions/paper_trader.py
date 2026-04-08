@@ -21,6 +21,7 @@ import time
 import json
 import logging
 from datetime import datetime, timedelta
+from analysis.quant_engine import _throttle
 
 logger = logging.getLogger(__name__)
 
@@ -372,18 +373,6 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
         logger.debug(f"Correlation check failed for {new_symbol}: {e}")
 
     return result
-
-# Throttle for Yahoo Finance
-_last_call = [0.0]
-_DELAY = 3.0
-
-
-def _throttle():
-    now = time.time()
-    elapsed = now - _last_call[0]
-    if elapsed < _DELAY:
-        time.sleep(_DELAY - elapsed)
-    _last_call[0] = time.time()
 
 
 # ============================================================

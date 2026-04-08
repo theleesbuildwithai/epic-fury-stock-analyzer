@@ -728,7 +728,7 @@ scheduler.add_job(
 
 def _geopolitical_scanner():
     """Scan for geo-political risk events every 15 minutes.
-    If risk is HIGH/CRITICAL, tighten stop losses on all positions."""
+    If risk is ELEVATED/CRITICAL, tighten stop losses on all positions."""
     global _geo_risk_state
     try:
         geo = assess_geopolitical_risk()
@@ -743,8 +743,8 @@ def _geopolitical_scanner():
             "events": events[:10],
         }
 
-        # If risk is HIGH or CRITICAL, tighten all stops immediately
-        if level in ("HIGH", "CRITICAL") and score >= 7:
+        # If risk is ELEVATED or CRITICAL, tighten all stops immediately
+        if level in ("ELEVATED", "CRITICAL") and score >= 7:
             logger.warning(f"GEO-RISK {level} (score {score}) — tightening all stops")
             try:
                 from predictions.models import get_open_trades, get_db

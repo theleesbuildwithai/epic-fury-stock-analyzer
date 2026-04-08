@@ -56,9 +56,10 @@ def analyze_factor_performance() -> dict:
     factor_perf = {f: {"wins": 0, "losses": 0, "returns": [], "contributions": []}
                    for f in factor_names}
 
-    for trade in closed:
+    for i, trade in enumerate(closed):
         pnl_pct = trade.get("pnl_pct", 0) or 0
         is_win = pnl_pct > 0
+        w = recency_weights[i]
 
         # Parse factors_used JSON
         try:
@@ -77,9 +78,9 @@ def analyze_factor_performance() -> dict:
             factor_perf[factor_name]["returns"].append(pnl_pct)
 
             if is_win:
-                factor_perf[factor_name]["wins"] += 1
+                factor_perf[factor_name]["wins"] += w
             else:
-                factor_perf[factor_name]["losses"] += 1
+                factor_perf[factor_name]["losses"] += w
 
     # Calculate metrics
     results = {}

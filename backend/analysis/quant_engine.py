@@ -1173,13 +1173,13 @@ def scan_overnight_intelligence() -> dict:
             if btc_change > 3:
                 bullish_signals += 1
                 intel["signals"].append(f"Bitcoin +{btc_change:.1f}% — risk-on weekend sentiment")
-            elif btc_change < -3:
-                bearish_signals += 2
-                intel["signals"].append(f"Bitcoin {btc_change:.1f}% — risk-off weekend sentiment")
-                intel["weekend_shift_detected"] = True
             elif btc_change < -5:
                 bearish_signals += 3
                 intel["signals"].append(f"Bitcoin CRASH {btc_change:.1f}% — extreme risk-off, reduce exposure")
+                intel["weekend_shift_detected"] = True
+            elif btc_change < -3:
+                bearish_signals += 2
+                intel["signals"].append(f"Bitcoin {btc_change:.1f}% — risk-off weekend sentiment")
                 intel["weekend_shift_detected"] = True
     except Exception as e:
         logger.debug(f"Bitcoin overnight scan failed: {e}")
@@ -1326,8 +1326,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             if df is None or len(df) < 60:
                 continue
 
-            closes = df["Close"].values.astype(float)
-            volumes = df["Volume"].values.astype(float).flatten()
+            closes = _safe_close(df).values.astype(float)
+            volumes = df["Volume"].iloc[:, 0].values.astype(float) if hasattr(df["Volume"], "columns") else df["Volume"].values.astype(float)
             current_price = float(closes[-1])
 
             if current_price <= 0 or np.isnan(current_price):

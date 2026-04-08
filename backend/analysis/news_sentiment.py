@@ -270,7 +270,8 @@ def _fetch_rss(url, timeout=10):
             if title:
                 items.append({"title": title, "link": link, "pub_date": pub_date})
         return items
-    except Exception:
+    except Exception as e:
+        logger.warning(f"RSS fetch failed for {url}: {e}")
         return []
 
 
