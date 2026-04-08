@@ -25,7 +25,8 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 # Portfolio configuration
-INITIAL_CAPITAL = 109_000.0
+ORIGINAL_CAPITAL = 100_000.0  # What we ACTUALLY started with — used for total return calculation
+INITIAL_CAPITAL = 109_000.0   # Current capital level — used for cash init if no S3 restore
 MAX_POSITIONS = 999  # No limit — only constrained by cash
 POSITION_SIZE_PCT = 0.02  # 2% per position — allows 40+ positions for massive diversification
 STOP_LOSS_PCT = 0.04  # 4% stop loss (tightened for ceasefire rally — protect gains)
@@ -229,7 +230,7 @@ def get_portfolio_state() -> dict:
 
     # Calculate performance metrics
     total_current = cash + positions_value
-    total_return = ((total_current / INITIAL_CAPITAL) - 1) * 100
+    total_return = ((total_current / ORIGINAL_CAPITAL) - 1) * 100
 
     # Win/loss stats from closed trades
     wins = [t for t in closed_trades if (t.get("pnl_pct") or 0) > 0]
@@ -244,7 +245,7 @@ def get_portfolio_state() -> dict:
         "cash": round(cash, 2),
         "positions_value": round(positions_value, 2),
         "total_return_pct": round(total_return, 2),
-        "initial_capital": INITIAL_CAPITAL,
+        "initial_capital": ORIGINAL_CAPITAL,
         "num_positions": len(positions),
         "max_positions": MAX_POSITIONS,
         "positions": positions,
@@ -531,7 +532,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         for t in get_open_trades()
     )
     total_current_value = cash + positions_value_now
-    total_return_now = ((total_current_value / INITIAL_CAPITAL) - 1) * 100
+    total_return_now = ((total_current_value / ORIGINAL_CAPITAL) - 1) * 100
 
     # Compare to yesterday's snapshot to get TODAY's gain
     daily_gain = 0
@@ -899,7 +900,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
         prev_value = snapshots[-1]["total_value"] if snapshots else INITIAL_CAPITAL
         daily_return = ((total_value / prev_value) - 1) * 100 if prev_value > 0 else 0
-        cum_return = ((total_value / INITIAL_CAPITAL) - 1) * 100
+        cum_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
 
         save_portfolio_snapshot(
             total_value=round(total_value, 2),
@@ -1429,7 +1430,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         # Save snapshot after closing all
         cash = get_cash()
         total_value = cash  # No positions left
-        cum_ret = ((total_value / INITIAL_CAPITAL) - 1) * 100
+        cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
         save_portfolio_snapshot(total_value, cash, 0, daily_gain, cum_ret, 0, 0, 0)
         return {"closed": closed, "checked": len(open_trades), "win_lock": True}
 
@@ -1581,7 +1582,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 for t in get_open_trades()
             )
             total_value = cash + positions_value
-            cum_ret = ((total_value / INITIAL_CAPITAL) - 1) * 100
+            cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
             save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
         except Exception:
             pass
