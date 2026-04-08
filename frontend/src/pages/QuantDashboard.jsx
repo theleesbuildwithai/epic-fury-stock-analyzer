@@ -59,7 +59,7 @@ export default function QuantDashboard() {
     setLoading(p => ({ ...p, intel: true }))
     try {
       const res = await fetch('/api/system-intelligence')
-      setIntelligence(await res.json())
+      if (res.ok) setIntelligence(await res.json())
     } catch { }
     setLoading(p => ({ ...p, intel: false }))
   }
@@ -67,14 +67,14 @@ export default function QuantDashboard() {
   const fetchAutoStatus = async () => {
     try {
       const res = await fetch('/api/auto-trading-status')
-      setAutoStatus(await res.json())
+      if (res.ok) setAutoStatus(await res.json())
     } catch { }
   }
 
   const fetchQueuedTrades = async () => {
     try {
       const res = await fetch('/api/queued-trades')
-      setQueuedTrades(await res.json())
+      if (res.ok) setQueuedTrades(await res.json())
     } catch { }
   }
 
@@ -174,10 +174,10 @@ function QuantPicksTab({ picks, loading, RegimeBadge }) {
         <div className="flex flex-wrap items-center gap-4 mb-4">
           <RegimeBadge regime={regime.regime || 'SIDEWAYS'} />
           <span className="text-neutral-500 text-sm">
-            Confidence: {regime.confidence}% | VIX: {regime.vix_level}
+            Confidence: {regime.confidence ?? 'N/A'}% | VIX: {regime.vix_level ?? 'N/A'}
           </span>
           <span className="text-neutral-600 text-xs">
-            {picks.total_analyzed} stocks analyzed in {picks.computation_time_seconds}s
+            {picks.total_analyzed ?? 0} stocks analyzed in {picks.computation_time_seconds ?? 0}s
           </span>
         </div>
 
@@ -192,13 +192,13 @@ function QuantPicksTab({ picks, loading, RegimeBadge }) {
         {/* Macro indicators */}
         {macro.treasury_10y && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
-            <MacroCard label="10Y Treasury" value={`${macro.treasury_10y?.value}%`}
+            <MacroCard label="10Y Treasury" value={`${macro.treasury_10y?.value ?? 'N/A'}%`}
               signal={macro.treasury_10y?.signal} />
-            <MacroCard label="Crude Oil" value={`$${macro.crude_oil?.value}`}
+            <MacroCard label="Crude Oil" value={`$${macro.crude_oil?.value ?? 'N/A'}`}
               signal={macro.crude_oil?.signal} />
-            <MacroCard label="Gold" value={`$${macro.gold?.value}`}
+            <MacroCard label="Gold" value={`$${macro.gold?.value ?? 'N/A'}`}
               signal={macro.gold?.signal} />
-            <MacroCard label="VIX" value={macro.vix?.value}
+            <MacroCard label="VIX" value={macro.vix?.value ?? 'N/A'}
               signal={macro.vix?.signal} />
           </div>
         )}
@@ -271,23 +271,23 @@ function PicksTable({ picks, direction }) {
           <tr key={p.symbol} className="border-b border-neutral-800/50 hover:bg-neutral-900/50">
             <td className="py-2 px-2 text-neutral-600">{p.rank || i + 1}</td>
             <td className="py-2 px-2 font-bold text-white">{p.symbol}</td>
-            <td className="py-2 px-2 text-right font-mono text-white">${p.price}</td>
+            <td className="py-2 px-2 text-right font-mono text-white">${p.price ?? 0}</td>
             <td className={`py-2 px-2 text-right font-mono font-bold ${
-              p.composite_score >= 0 ? 'text-green-400' : 'text-red-400'
+              (p.composite_score || 0) >= 0 ? 'text-green-400' : 'text-red-400'
             }`}>
-              {p.composite_score > 0 ? '+' : ''}{p.composite_score}
+              {(p.composite_score || 0) > 0 ? '+' : ''}{(p.composite_score || 0).toFixed(2)}
             </td>
             <td className="py-2 px-2 text-right">
               <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                p.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
-                p.confidence >= 55 ? 'bg-neutral-500/20 text-neutral-400' :
+                (p.confidence || 0) >= 70 ? 'bg-green-500/20 text-green-400' :
+                (p.confidence || 0) >= 55 ? 'bg-neutral-500/20 text-neutral-400' :
                 'bg-neutral-500/20 text-neutral-400'
               }`}>
-                {p.confidence}%
+                {p.confidence ?? 0}%
               </span>
             </td>
-            <td className="py-2 px-2 text-right font-mono text-neutral-400">{p.rsi14}</td>
-            <td className="py-2 px-2 text-right font-mono text-neutral-400">{p.volatility_60d}%</td>
+            <td className="py-2 px-2 text-right font-mono text-neutral-400">{p.rsi14 ?? 'N/A'}</td>
+            <td className="py-2 px-2 text-right font-mono text-neutral-400">{p.volatility_60d ?? 0}%</td>
             <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
             <td className="py-2 px-2 text-neutral-400 text-xs">{p.reasons?.[0] || ''}</td>
           </tr>
@@ -762,19 +762,19 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                     <td className={`py-2 px-2 text-xs font-bold ${
                       p.direction === 'long' ? 'text-green-400' : 'text-red-400'
                     }`}>
-                      {p.direction.toUpperCase()}
+                      {(p.direction || 'long').toUpperCase()}
                     </td>
-                    <td className="py-2 px-2 text-right font-mono text-neutral-400">${p.entry_price}</td>
-                    <td className="py-2 px-2 text-right font-mono text-white">${p.current_price}</td>
+                    <td className="py-2 px-2 text-right font-mono text-neutral-400">${p.entry_price ?? 0}</td>
+                    <td className="py-2 px-2 text-right font-mono text-white">${p.current_price ?? 0}</td>
                     <td className={`py-2 px-2 text-right font-mono font-bold ${
-                      p.unrealized_pct >= 0 ? 'text-green-400' : 'text-red-400'
+                      (p.unrealized_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
                     }`}>
-                      {p.unrealized_pct >= 0 ? '+' : ''}{p.unrealized_pct}%
+                      {(p.unrealized_pct || 0) >= 0 ? '+' : ''}{(p.unrealized_pct || 0).toFixed(2)}%
                     </td>
                     <td className="py-2 px-2 text-right font-mono text-neutral-400">
                       ${(p.position_value || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}
                     </td>
-                    <td className="py-2 px-2 text-right text-neutral-400">{p.days_held}d</td>
+                    <td className="py-2 px-2 text-right text-neutral-400">{p.days_held ?? 0}d</td>
                     <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
                   </tr>
                 ))}
@@ -799,7 +799,7 @@ function IntelligenceTab({ intelligence, loading }) {
   const factorPerf = intelligence.factor_performance || {}
 
   const weightData = Object.entries(weights).map(([name, weight]) => ({
-    name: name.replace('_', ' '),
+    name: name.replaceAll('_', ' '),
     weight: Math.round(weight * 100),
     win_rate: factorPerf[name]?.win_rate || 0,
     sharpe: factorPerf[name]?.sharpe || 0,
@@ -894,9 +894,9 @@ function IntelligenceTab({ intelligence, loading }) {
                 <div className={`text-lg font-bold font-mono ${
                   stats.win_rate > 55 ? 'text-green-400' : stats.win_rate < 45 ? 'text-red-400' : 'text-neutral-400'
                 }`}>
-                  {stats.win_rate}%
+                  {stats.win_rate ?? 0}%
                 </div>
-                <div className="text-neutral-500 text-xs">{stats.total_trades} trades</div>
+                <div className="text-neutral-500 text-xs">{stats.total_trades ?? 0} trades</div>
               </div>
             ))}
           </div>
@@ -915,12 +915,12 @@ function IntelligenceTab({ intelligence, loading }) {
               <div key={bucket} className="bg-neutral-900 rounded-lg p-3 text-center">
                 <div className="text-neutral-400 text-xs">{bucket}% predicted</div>
                 <div className={`text-xl font-bold font-mono ${
-                  data.actual_win_rate > data.avg_predicted_confidence * 0.9
+                  (data.actual_win_rate || 0) > (data.avg_predicted_confidence || 0) * 0.9
                     ? 'text-green-400' : 'text-red-400'
                 }`}>
-                  {data.actual_win_rate}%
+                  {data.actual_win_rate ?? 0}%
                 </div>
-                <div className="text-neutral-600 text-xs">actual ({data.total_trades} trades)</div>
+                <div className="text-neutral-600 text-xs">actual ({data.total_trades ?? 0} trades)</div>
               </div>
             ))}
           </div>
