@@ -2134,6 +2134,17 @@ def generate_quant_picks() -> dict:
                     elif adj <= -1.0:
                         penalized_sectors.add(sector)
 
+            # TACO TRADE PROTECTION — Ceasefire sectors are ALWAYS protected
+            # from mean reversion shorts, regardless of geo risk level.
+            # During ceasefire: Tech rallies, Healthcare rallies, Financials rally,
+            # Consumer Discretionary rallies. Don't let MR overbought signals
+            # short these sectors and fight the ceasefire momentum.
+            TACO_PROTECTED_LONG_SECTORS = {"Technology", "Healthcare", "Financials", "Consumer Discretionary"}
+            TACO_PENALIZED_SECTORS = {"Energy"}  # Energy gets shorted during ceasefire
+            boosted_sectors |= TACO_PROTECTED_LONG_SECTORS
+            penalized_sectors |= TACO_PENALIZED_SECTORS
+            logger.info(f"TACO TRADE: Protected sectors (no MR shorts): {TACO_PROTECTED_LONG_SECTORS}")
+
             for mr in mr_setups:
                 sym = mr["symbol"]
                 mr_pick = next((s for s in all_scored if s["symbol"] == sym), None)
@@ -2190,7 +2201,11 @@ def generate_quant_picks() -> dict:
             # RENTECH DATA
             "rentech": rentech_data,
             "pairs_trades": rentech_data.get("pairs_trades", []),
-            "mean_reversion_setups": rentech_data.get("mean_reversion_setups", []),
+            "mean_reversion_setups": [
+                mr for mr in rentech_data.get("mean_reversion_setups", [])
+                if not (mr.get("direction") == "SHORT" and SECTOR_MAP.get(mr.get("symbol"), "Unknown") in TACO_PROTECTED_LONG_SECTORS)
+                and not (mr.get("direction") == "LONG" and SECTOR_MAP.get(mr.get("symbol"), "Unknown") in TACO_PENALIZED_SECTORS)
+            ],
             "portfolio_risk": rentech_data.get("portfolio_risk", {}),
             "circuit_breaker": rentech_data.get("circuit_breaker", {}),
             "generated_at": datetime.now().isoformat(),
