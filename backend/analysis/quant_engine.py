@@ -601,14 +601,22 @@ def get_macro_overlay() -> dict:
                     five_days_ago = float(closes[-5]) if len(closes) >= 5 else current
                     change_5d = ((current / five_days_ago) - 1) * 100 if five_days_ago > 0 else 0
 
-                    # 20-day trend
+                    # 20-day trend + 5-day momentum (whichever is stronger)
                     if len(closes) >= 20:
                         sma20 = float(np.mean(closes[-20:]))
-                        trend = "rising" if current > sma20 * 1.01 else (
+                        sma_trend = "rising" if current > sma20 * 1.01 else (
                             "falling" if current < sma20 * 0.99 else "flat"
                         )
                     else:
-                        trend = "flat"
+                        sma_trend = "flat"
+
+                    # 5-day momentum override: big moves in 5 days matter MORE than SMA
+                    if change_5d <= -3.0:
+                        trend = "falling"  # -3% in 5 days = falling regardless of SMA
+                    elif change_5d >= 3.0:
+                        trend = "rising"   # +3% in 5 days = rising regardless of SMA
+                    else:
+                        trend = sma_trend
 
                     macro[key] = {
                         "value": round(current, 2),
@@ -833,6 +841,11 @@ def get_macro_overlay() -> dict:
             if geo.get("risk_level") in ("CRITICAL", "ELEVATED"):
                 geo_sector_adj = geo.get("sector_adjustments", {})
                 for sector, adj in geo_sector_adj.items():
+                    # OVERRIDE: If oil is FALLING, do NOT boost Energy from geo risk
+                    # War headlines ≠ oil going up if oil is actually dropping
+                    if sector == "Energy" and oil_trend == "falling" and adj > 0:
+                        logger.info(f"GEO OVERRIDE: Skipping Energy boost ({adj:+.1f}) — oil is falling ({macro['crude_oil']['change_5d']:+.1f}%)")
+                        continue
                     adjustments[sector] = round(adjustments.get(sector, 0) + adj, 1)
                 macro["sector_adjustments"] = adjustments
                 logger.info(f"Geopolitical risk {geo['risk_level']}: adjusted {len(geo_sector_adj)} sectors | Hotspots: {geo.get('active_hotspots', [])}")
