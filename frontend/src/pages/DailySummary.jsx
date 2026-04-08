@@ -117,7 +117,7 @@ export default function DailySummary() {
                 <div className="bg-neutral-900 rounded-lg p-4 text-center">
                   <p className="text-neutral-500 text-xs uppercase mb-1">Mood</p>
                   <p className={`text-xl font-bold ${
-                    data.market_overview.mood.includes('Bullish') ? 'text-green-500' : 'text-red-500'
+                    (data.market_overview.mood || '').includes('Bullish') ? 'text-green-500' : 'text-red-500'
                   }`}>
                     {data.market_overview.mood}
                   </p>

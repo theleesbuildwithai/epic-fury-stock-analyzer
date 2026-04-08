@@ -5,14 +5,15 @@ export default function RiskScore({ risk, signal }) {
     risk.score <= 6 ? 'text-white' :
     'text-red-500'
 
-  const signalColor = signal.direction.includes('Buy') ? 'text-gradient-green' :
-    signal.direction.includes('Sell') ? 'text-gradient-red' : 'text-white'
+  const dir = signal.direction || ''
+  const signalColor = dir.includes('Buy') ? 'text-gradient-green' :
+    dir.includes('Sell') ? 'text-gradient-red' : 'text-white'
 
-  const signalBg = signal.direction.includes('Buy') ? 'bg-green-950/50 border-green-800' :
-    signal.direction.includes('Sell') ? 'bg-red-950/50 border-red-800' : 'bg-neutral-900 border-neutral-700'
+  const signalBg = dir.includes('Buy') ? 'bg-green-950/50 border-green-800' :
+    dir.includes('Sell') ? 'bg-red-950/50 border-red-800' : 'bg-neutral-900 border-neutral-700'
 
-  const signalGlow = signal.direction.includes('Buy') ? 'pulse-glow-green' :
-    signal.direction.includes('Sell') ? 'pulse-glow-red' : ''
+  const signalGlow = dir.includes('Buy') ? 'pulse-glow-green' :
+    dir.includes('Sell') ? 'pulse-glow-red' : ''
 
   return (
     <div className="space-y-4">
@@ -20,7 +21,7 @@ export default function RiskScore({ risk, signal }) {
       <div className={`rounded-xl p-6 border ${signalBg} ${signalGlow}`}>
         <div className="text-center">
           <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-neutral-400 mb-2">Analysis Signal</p>
-          <p className={`text-5xl font-black ${signalColor}`}>{signal.direction}</p>
+          <p className={`text-5xl font-black ${signalColor}`}>{dir || 'Hold'}</p>
           <div className="mt-3 flex items-center justify-center gap-2">
             <span className="text-neutral-500 text-sm">Confidence:</span>
             <span className="text-white font-mono font-bold text-lg">{signal.confidence}%</span>
@@ -31,18 +32,18 @@ export default function RiskScore({ risk, signal }) {
               className="h-full rounded-full transition-all duration-500"
               style={{
                 width: `${signal.confidence}%`,
-                background: signal.direction.includes('Buy') ? 'linear-gradient(90deg, #16a34a, #4ade80)' :
-                  signal.direction.includes('Sell') ? 'linear-gradient(90deg, #dc2626, #f87171)' : '#fff'
+                background: dir.includes('Buy') ? 'linear-gradient(90deg, #16a34a, #4ade80)' :
+                  dir.includes('Sell') ? 'linear-gradient(90deg, #dc2626, #f87171)' : '#fff'
               }}
             />
           </div>
         </div>
         <div className="mt-5 space-y-2">
-          {signal.reasons.map((reason, i) => (
+          {(signal.reasons || []).map((reason, i) => (
             <div key={i} className="flex items-start gap-2.5">
               <span className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${
-                signal.direction.includes('Buy') ? 'bg-green-500/60' :
-                signal.direction.includes('Sell') ? 'bg-red-500/60' : 'bg-neutral-500'
+                dir.includes('Buy') ? 'bg-green-500/60' :
+                dir.includes('Sell') ? 'bg-red-500/60' : 'bg-neutral-500'
               }`} />
               <p className="text-neutral-300 text-sm">{reason}</p>
             </div>

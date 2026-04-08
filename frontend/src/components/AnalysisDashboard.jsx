@@ -298,7 +298,7 @@ export default function AnalysisDashboard({ data }) {
       <TechnicalIndicators chartData={data.chart_data} />
 
       {/* Signal Reasoning */}
-      {data.signal.reasons && data.signal.reasons.length > 0 && (
+      {data.signal?.reasons && data.signal.reasons.length > 0 && (
         <div className={`bg-black rounded-xl p-6 border border-neutral-700 ${
           data.signal?.direction?.includes('Buy') ? 'card-accent-green' :
           data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
@@ -335,26 +335,26 @@ export default function AnalysisDashboard({ data }) {
           <div className="stat-card rounded-lg p-3">
             <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">Direction</p>
             <p className={`text-lg font-bold mt-0.5 ${
-              data.trend.direction.includes('bullish') ? 'text-green-500' :
-              data.trend.direction.includes('bearish') ? 'text-red-500' : 'text-white'
+              data.trend?.direction?.includes('bullish') ? 'text-green-500' :
+              data.trend?.direction?.includes('bearish') ? 'text-red-500' : 'text-white'
             }`}>
-              {data.trend.direction.replace('_', ' ')}
+              {(data.trend?.direction || 'neutral').replace('_', ' ')}
             </p>
           </div>
           <div className="stat-card rounded-lg p-3">
             <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">Strength</p>
-            <p className="text-lg font-bold text-white mt-0.5 font-mono">{data.trend.strength}%</p>
+            <p className="text-lg font-bold text-white mt-0.5 font-mono">{data.trend?.strength ?? 0}%</p>
           </div>
           <div className="stat-card rounded-lg p-3">
             <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">vs 20-day MA</p>
-            <p className={`text-lg font-bold mt-0.5 font-mono ${data.trend.price_vs_sma20 >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-              {data.trend.price_vs_sma20 >= 0 ? '+' : ''}{data.trend.price_vs_sma20}%
+            <p className={`text-lg font-bold mt-0.5 font-mono ${(data.trend?.price_vs_sma20 || 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+              {(data.trend?.price_vs_sma20 || 0) >= 0 ? '+' : ''}{data.trend?.price_vs_sma20 ?? 0}%
             </p>
           </div>
           <div className="stat-card rounded-lg p-3">
             <p className="text-neutral-500 text-[10px] uppercase tracking-wider font-medium">vs 50-day MA</p>
-            <p className={`text-lg font-bold mt-0.5 font-mono ${data.trend.price_vs_sma50 >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-              {data.trend.price_vs_sma50 >= 0 ? '+' : ''}{data.trend.price_vs_sma50}%
+            <p className={`text-lg font-bold mt-0.5 font-mono ${(data.trend?.price_vs_sma50 || 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+              {(data.trend?.price_vs_sma50 || 0) >= 0 ? '+' : ''}{data.trend?.price_vs_sma50 ?? 0}%
             </p>
           </div>
         </div>
