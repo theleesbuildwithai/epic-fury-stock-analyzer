@@ -107,7 +107,7 @@ def init_db():
     # Initialize paper_cash if empty
     existing = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
     if not existing:
-        conn.execute("INSERT INTO paper_cash (id, cash) VALUES (1, 100000.0)")
+        conn.execute("INSERT INTO paper_cash (id, cash) VALUES (1, 109000.0)")
     conn.commit()
     conn.close()
 
@@ -117,7 +117,7 @@ def get_cash() -> float:
     conn = get_db()
     row = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
     conn.close()
-    return row["cash"] if row else 100000.0
+    return row["cash"] if row else 109000.0
 
 
 def set_cash(amount: float):

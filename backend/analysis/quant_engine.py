@@ -835,6 +835,25 @@ def get_macro_overlay() -> dict:
             logger.debug(f"Geopolitical risk check failed: {e}")
             macro["geopolitical_risk"] = {"level": "UNKNOWN", "score": 0}
 
+        # --- CEASEFIRE / DE-ESCALATION OVERLAY ---
+        # When geopolitical tensions ease (ceasefire, peace deals), the market
+        # rotates: risk-on sectors rally (tech, discretionary), war-premium
+        # sectors pull back (energy, defense). This overlay captures that shift.
+        geo_level = macro.get("geopolitical_risk", {}).get("level", "LOW")
+        if geo_level in ("LOW", "MINIMAL", "UNKNOWN"):
+            # Peace dividend: boost risk-on, penalize war-premium
+            adjustments["Technology"] = round(adjustments.get("Technology", 0) + 1.5, 1)
+            adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) + 1.0, 1)
+            adjustments["Communication"] = round(adjustments.get("Communication", 0) + 0.8, 1)
+            adjustments["Financials"] = round(adjustments.get("Financials", 0) + 0.5, 1)
+            # Oil loses war premium
+            adjustments["Energy"] = round(adjustments.get("Energy", 0) - 1.5, 1)
+            # Defense stocks cool off
+            adjustments["Industrials"] = round(adjustments.get("Industrials", 0) - 0.5, 1)
+            macro["sector_adjustments"] = adjustments
+            macro["ceasefire_overlay"] = True
+            logger.info(f"CEASEFIRE OVERLAY: Boosting tech/growth +1.5, penalizing energy -1.5 (geo={geo_level})")
+
         return macro
 
     return _get_cached("macro_overlay", fetch, ttl=600)  # 10 min cache

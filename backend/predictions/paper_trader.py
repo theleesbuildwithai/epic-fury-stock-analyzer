@@ -1,7 +1,7 @@
 """
 Paper Trading System — the execution engine of the Epic Fury hedge fund.
 
-This manages a $100K virtual portfolio that:
+This manages a $109K virtual portfolio that:
   1. Auto-executes trades based on quant signals (LONG/SHORT picks)
   2. Manages position sizing (uncapped — constrained by cash)
   3. Enforces risk management (6% stop-loss, target exits, time exits)
@@ -25,10 +25,10 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 # Portfolio configuration
-INITIAL_CAPITAL = 100_000.0
+INITIAL_CAPITAL = 109_000.0
 MAX_POSITIONS = 999  # No limit — only constrained by cash
 POSITION_SIZE_PCT = 0.02  # 2% per position — allows 40+ positions for massive diversification
-STOP_LOSS_PCT = 0.06  # 6% stop loss (tighter = less downside)
+STOP_LOSS_PCT = 0.04  # 4% stop loss (tightened for ceasefire rally — protect gains)
 DEFAULT_HOLD_DAYS = 30
 MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
 
@@ -539,8 +539,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         yesterday_val = snapshots[-1].get("total_value", INITIAL_CAPITAL)
         daily_gain = ((total_current_value / yesterday_val) - 1) * 100
 
-    # WIN-LOCK: If up 1.5%+ today, sell ALL positions to lock in the gain
-    if daily_gain >= 1.5:
+    # WIN-LOCK: If up 5%+ today, sell ALL positions to lock in the gain
+    # (Raised from 1.5% to let ceasefire rally run — big catalyst days need room)
+    if daily_gain >= 5.0:
         logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today — SELLING ALL to lock gains!")
         # Close ALL open positions to lock in the daily win
         for trade in get_open_trades():
@@ -566,7 +567,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         cash = get_cash()  # Refresh after closing all
         results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% — sold all, locked in gains"})
         available_slots = 0
-    elif daily_gain >= 1.0:
+    elif daily_gain >= 3.0:
         logger.warning(f"WIN-LOCK CAUTION: Up {daily_gain:+.1f}% today — reducing new trade size by 50%")
 
     # --- DRAWDOWN PROTECTION (hedge fund risk management) ---
@@ -1403,7 +1404,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     yesterday_val = snapshots[-1]["total_value"] if snapshots else INITIAL_CAPITAL
     daily_gain = ((total_now / yesterday_val) - 1) * 100
 
-    if daily_gain >= 1.5:
+    if daily_gain >= 5.0:
         logger.warning(f"EXIT CHECKER WIN-LOCK: Up {daily_gain:+.1f}% today — SELLING ALL!")
         for trade in open_trades:
             ticker = trade["ticker"]

@@ -252,7 +252,7 @@ try:
     from predictions.models import get_cash, set_cash, get_portfolio_snapshots, get_open_trades
     current_cash = get_cash()
     snapshots = get_portfolio_snapshots(days=5)
-    if snapshots and abs(current_cash - 100000.0) < 1.0:
+    if snapshots and abs(current_cash - 109000.0) < 1.0:
         # paper_cash was just initialized — sync to latest snapshot
         snap_cash = snapshots[-1]["cash"]
         set_cash(snap_cash)

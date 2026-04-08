@@ -96,22 +96,20 @@ export default function QuantDashboard() {
           14-factor quant engine • Autonomous trading • Self-learning system
         </p>
 
-        {/* Portfolio Value Display */}
+        {/* Portfolio Value — inline with header */}
         {portfolio && (
-          <div className="mt-4 bg-gradient-to-r from-green-500/5 via-black to-red-500/5 border border-neutral-700 rounded-xl p-4">
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div className="flex gap-4 text-xs text-neutral-500">
-                <span>14 Quant Factors</span>
-                <span>270+ Stocks Analyzed</span>
-                <span>Event-Driven Trading</span>
-                <span>Self-Learning Weekly</span>
-              </div>
-              <div className="text-right">
-                <p className="text-2xl font-black text-white">${(portfolio.total_value || 100000).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-                <p className={`text-sm font-bold ${(portfolio.total_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {(portfolio.total_return_pct || 0) >= 0 ? '+' : ''}{(portfolio.total_return_pct || 0).toFixed(2)}% all-time
-                </p>
-              </div>
+          <div className="mt-3 flex items-end justify-between flex-wrap gap-3">
+            <div className="flex gap-4 text-xs text-neutral-500">
+              <span>14 Quant Factors</span>
+              <span>270+ Stocks Analyzed</span>
+              <span>Event-Driven Trading</span>
+              <span>Self-Learning Weekly</span>
+            </div>
+            <div className="text-right">
+              <p className="text-3xl font-black text-white">${(portfolio.total_value || 109000).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+              <p className={`text-sm font-bold ${(portfolio.total_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {(portfolio.total_return_pct || 0) >= 0 ? '▲ ' : '▼ '}{Math.abs(portfolio.total_return_pct || 0).toFixed(2)}% all-time
+              </p>
             </div>
           </div>
         )}
