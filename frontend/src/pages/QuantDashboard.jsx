@@ -30,9 +30,14 @@ export default function QuantDashboard() {
   const fetchQuantPicks = async () => {
     setLoading(p => ({ ...p, picks: true }))
     try {
-      const res = await fetch('/api/quant-picks')
-      const data = await res.json()
-      setQuantPicks(data)
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 120000)
+      const res = await fetch('/api/quant-picks', { signal: controller.signal })
+      clearTimeout(timeout)
+      if (res.ok) {
+        const data = await res.json()
+        setQuantPicks(data)
+      }
     } catch { }
     setLoading(p => ({ ...p, picks: false }))
   }
@@ -155,8 +160,8 @@ export default function QuantDashboard() {
 // TAB 1: QUANT PICKS
 // ============================================================
 function QuantPicksTab({ picks, loading, RegimeBadge }) {
-  if (loading) return <LoadingSpinner text="Analyzing 100+ stocks..." />
-  if (!picks) return <EmptyState text="Failed to load quant picks" />
+  if (loading) return <LoadingSpinner text="Analyzing 270+ stocks across 14 quant factors... this takes ~90 seconds" />
+  if (!picks) return <EmptyState text="Quant picks are being computed. Refresh in 60 seconds." />
 
   const regime = picks.regime || {}
   const macro = picks.macro || {}
@@ -300,8 +305,6 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
   const exp = portfolio?.exposure || {}
   const stats = portfolio?.stats || {}
   const perf = performance?.overall || {}
-  const bench = performance?.benchmark || {}
-
   return (
     <div className="space-y-6">
 
@@ -435,52 +438,6 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
           </div>
         </div>
       </div>
-
-      {/* ====== BENCHMARKING vs S&P 500 ====== */}
-      {bench.sp500_return_pct !== undefined && (
-        <div className={`bg-black border-2 rounded-xl p-5 ${
-          bench.beating_market ? 'border-green-500/40' : 'border-red-500/40'
-        }`}>
-          <div className="flex items-center gap-3 mb-4">
-            <h3 className="text-white font-bold text-lg">Benchmark vs S&P 500</h3>
-            <span className={`px-3 py-1 rounded-full text-xs font-bold border ${
-              bench.beating_market
-                ? 'bg-green-500/20 text-green-400 border-green-500/30'
-                : 'bg-red-500/20 text-red-400 border-red-500/30'
-            }`}>
-              {bench.beating_market ? 'OUTPERFORMING' : 'UNDERPERFORMING'}
-            </span>
-          </div>
-          <div className="grid grid-cols-3 gap-4">
-            <div className="bg-neutral-900 rounded-lg p-4 text-center">
-              <div className="text-neutral-500 text-xs mb-1">Epic Fury Fund</div>
-              <div className={`text-2xl font-black font-mono ${
-                (bench.fund_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-              }`}>
-                {(bench.fund_return_pct || 0) >= 0 ? '+' : ''}{(bench.fund_return_pct || 0).toFixed(2)}%
-              </div>
-            </div>
-            <div className="bg-neutral-900 rounded-lg p-4 text-center">
-              <div className="text-neutral-500 text-xs mb-1">S&P 500</div>
-              <div className={`text-2xl font-black font-mono ${
-                (bench.sp500_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-              }`}>
-                {(bench.sp500_return_pct || 0) >= 0 ? '+' : ''}{(bench.sp500_return_pct || 0).toFixed(2)}%
-              </div>
-            </div>
-            <div className={`rounded-lg p-4 text-center ${
-              bench.beating_market ? 'bg-green-500/10' : 'bg-red-500/10'
-            }`}>
-              <div className="text-neutral-500 text-xs mb-1">Alpha</div>
-              <div className={`text-2xl font-black font-mono ${
-                (bench.alpha_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-              }`}>
-                {(bench.alpha_pct || 0) >= 0 ? '+' : ''}{(bench.alpha_pct || 0).toFixed(2)}%
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ====== TRADE STATISTICS ====== */}
       {stats.total_trades > 0 && (

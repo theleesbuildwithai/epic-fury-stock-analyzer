@@ -1589,39 +1589,6 @@ def get_performance_analytics() -> dict:
         total_losses_abs = abs(sum(losses)) if losses else 0.01
         result["overall"]["profit_factor"] = round(total_gains / total_losses_abs, 2)
 
-        # Alpha vs S&P 500
-        try:
-            portfolio = get_portfolio_state()
-            fund_return = portfolio.get("total_return_pct", 0)
-            # Get S&P 500 return since March 30
-            import yfinance as yf
-            _throttle()
-            spy_data = yf.download("SPY", start="2026-03-28", progress=False)
-            if spy_data is not None and len(spy_data) > 1:
-                close_col = spy_data["Close"]
-                if hasattr(close_col, "columns"):
-                    close_col = close_col.iloc[:, 0]
-                first_price = float(close_col.iloc[0])
-                last_price = float(close_col.iloc[-1])
-                sp500_return = ((last_price / first_price) - 1) * 100
-                alpha = fund_return - sp500_return
-                result["benchmark"] = {
-                    "sp500_return_pct": round(sp500_return, 2),
-                    "fund_return_pct": round(fund_return, 2),
-                    "alpha_pct": round(alpha, 2),
-                    "beating_market": alpha > 0,
-                }
-            else:
-                result["benchmark"] = {
-                    "sp500_return_pct": 0,
-                    "fund_return_pct": round(fund_return, 2),
-                    "alpha_pct": 0,
-                    "beating_market": False,
-                }
-        except Exception as e:
-            logger.warning(f"Benchmark calc failed: {e}")
-            result["benchmark"] = {"sp500_return_pct": 0, "fund_return_pct": 0, "alpha_pct": 0, "beating_market": False}
-
         # --- Win rate by sector ---
         sector_stats = {}
         for trade in closed:

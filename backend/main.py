@@ -1436,7 +1436,7 @@ def trade_history(request: Request):
 
 @app.get("/api/equity-curve")
 def equity_curve(request: Request):
-    """Get equity curve data — fund vs S&P 500 since March 30, 2026."""
+    """Get equity curve data — fund performance since March 30, 2026."""
     check_rate_limit(request.client.host)
     try:
         from predictions.models import get_portfolio_snapshots
@@ -1455,53 +1455,11 @@ def equity_curve(request: Request):
         if not fund_curve:
             fund_curve = [{"date": "2026-03-30", "value": 100000, "return_pct": 0}]
 
-        # S&P 500 comparison — fetch live SPY data from yfinance
-        import yfinance as yf
-        sp500_curve = []
-        try:
-            _throttle()
-            spy_data = yf.download("SPY", start="2026-03-28", progress=False)
-            if spy_data is not None and len(spy_data) > 0:
-                base_price = None
-                for idx in spy_data.index:
-                    d = idx.strftime("%Y-%m-%d")
-                    if d < "2026-03-30":
-                        continue
-                    close_val = spy_data.loc[idx, "Close"]
-                    price = float(close_val.iloc[0]) if hasattr(close_val, "iloc") else float(close_val)
-                    if base_price is None:
-                        base_price = price
-                    ret = ((price / base_price) - 1) * 100
-                    sp500_curve.append({
-                        "date": d,
-                        "value": round(100000 * (1 + ret / 100), 2),
-                        "return_pct": round(ret, 2),
-                    })
-        except Exception as e:
-            logger.warning(f"SPY download for equity curve failed: {e}")
-
-        # Fallback: if no live data, use known prices
-        if not sp500_curve:
-            known_spy = [
-                ("2026-03-30", 587.50), ("2026-03-31", 604.60),
-                ("2026-04-01", 609.10), ("2026-04-02", 609.72),
-                ("2026-04-03", 607.80), ("2026-04-04", 613.28),
-                ("2026-04-07", 615.40),
-            ]
-            base = known_spy[0][1]
-            for d, p in known_spy:
-                ret = ((p / base) - 1) * 100
-                sp500_curve.append({
-                    "date": d, "value": round(100000 * (1 + ret / 100), 2),
-                    "return_pct": round(ret, 2),
-                })
-
         # Get current portfolio state for latest data point
         try:
             portfolio = get_portfolio_state()
             today = dt.now().strftime("%Y-%m-%d")
             current_ret = portfolio.get("total_return_pct", 0)
-            # Add or update today's point
             if fund_curve and fund_curve[-1]["date"] != today:
                 fund_curve.append({
                     "date": today,
@@ -1514,44 +1472,18 @@ def equity_curve(request: Request):
         except Exception:
             pass
 
-        # Filter to only include dates >= March 30 (first real trading day)
+        # Filter to only include dates >= March 30
         fund_curve = [p for p in fund_curve if p["date"] >= "2026-03-30"]
-        sp500_curve = [p for p in sp500_curve if p["date"] >= "2026-03-30"]
 
-        # Rebase both curves so March 30 = 0%
+        # Rebase so March 30 = 0%
         if fund_curve and fund_curve[0]["return_pct"] != 0:
             base = fund_curve[0]["return_pct"]
             for p in fund_curve:
                 p["return_pct"] = round(p["return_pct"] - base, 2)
                 p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
-        if sp500_curve and sp500_curve[0]["return_pct"] != 0:
-            base = sp500_curve[0]["return_pct"]
-            for p in sp500_curve:
-                p["return_pct"] = round(p["return_pct"] - base, 2)
-                p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
-
-        # Carry forward S&P 500 data for any fund dates missing S&P (weekends/holidays)
-        if sp500_curve and fund_curve:
-            sp500_by_date = {p["date"]: p for p in sp500_curve}
-            last_sp500 = sp500_curve[0]
-            filled_sp500 = []
-            for fp in fund_curve:
-                d = fp["date"]
-                if d in sp500_by_date:
-                    last_sp500 = sp500_by_date[d]
-                    filled_sp500.append(sp500_by_date[d])
-                else:
-                    # Carry forward last known S&P value
-                    filled_sp500.append({
-                        "date": d,
-                        "value": last_sp500["value"],
-                        "return_pct": last_sp500["return_pct"],
-                    })
-            sp500_curve = filled_sp500
 
         return {
             "fund": fund_curve,
-            "sp500": sp500_curve,
             "start_date": "2026-03-30",
             "initial_capital": 100000,
         }
