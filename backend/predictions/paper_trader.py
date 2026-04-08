@@ -69,6 +69,63 @@ def _get_vix_scale() -> float:
     return 1.0
 
 
+def _get_dynamic_winlock(regime: str = "SIDEWAYS") -> dict:
+    """
+    Dynamic WIN-LOCK: the system decides its own profit-lock threshold
+    based on VIX level and market regime. No hardcoded values.
+
+    High VIX / BEAR → lock early (take what you can get)
+    Low VIX / BULL  → let winners run (big catalyst days need room)
+    """
+    try:
+        _throttle()
+        vix_df = yf.download("^VIX", period="5d", progress=False)
+        vix = float(vix_df["Close"].dropna().iloc[-1]) if vix_df is not None and not vix_df.empty else 20
+    except Exception:
+        vix = 20
+
+    # Base threshold from VIX
+    if vix >= 35:
+        # Crisis mode — grab any win, market could reverse hard
+        lock_pct = 1.5
+        caution_pct = 1.0
+        reason = f"VIX={vix:.0f} CRISIS — lock gains early"
+    elif vix >= 25:
+        lock_pct = 2.5
+        caution_pct = 1.5
+        reason = f"VIX={vix:.0f} HIGH — moderate lock"
+    elif vix >= 20:
+        lock_pct = 3.5
+        caution_pct = 2.5
+        reason = f"VIX={vix:.0f} ELEVATED — standard lock"
+    elif vix >= 15:
+        lock_pct = 5.0
+        caution_pct = 3.0
+        reason = f"VIX={vix:.0f} NORMAL — let winners run"
+    else:
+        lock_pct = 6.0
+        caution_pct = 4.0
+        reason = f"VIX={vix:.0f} CALM — maximum room to run"
+
+    # Regime adjustment
+    if regime == "BULL":
+        lock_pct *= 1.2   # Let it run more in bull
+        caution_pct *= 1.2
+        reason += " | BULL regime +20%"
+    elif regime == "BEAR":
+        lock_pct *= 0.7   # Take profits faster in bear
+        caution_pct *= 0.7
+        reason += " | BEAR regime -30%"
+
+    return {
+        "lock_pct": round(lock_pct, 1),
+        "caution_pct": round(caution_pct, 1),
+        "vix": round(vix, 1),
+        "regime": regime,
+        "reason": reason,
+    }
+
+
 # ============================================================
 #  ADVANCED: CORRELATION-BASED DIVERSIFICATION
 # ============================================================
@@ -523,9 +580,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     available_slots = MAX_POSITIONS - current_positions
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
-    # --- WIN-LOCK SYSTEM: Stop opening new trades when we're winning big today ---
-    # If up 1.5%+ today, LOCK IN the wins. Don't risk giving them back.
-    # Use atomic cash + current position values for accuracy
+    # --- DYNAMIC WIN-LOCK SYSTEM ---
+    # The system decides its own lock threshold based on VIX + regime.
+    # No hardcoded values — adapts to market conditions in real time.
     current_prices_for_winlock = _get_current_prices(list(open_tickers)) if open_tickers else {}
     positions_value_now = sum(
         current_prices_for_winlock.get(t["ticker"], t["entry_price"]) * t["shares"]
@@ -540,11 +597,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         yesterday_val = snapshots[-1].get("total_value", INITIAL_CAPITAL)
         daily_gain = ((total_current_value / yesterday_val) - 1) * 100
 
-    # WIN-LOCK: If up 5%+ today, sell ALL positions to lock in the gain
-    # (Raised from 1.5% to let ceasefire rally run — big catalyst days need room)
-    if daily_gain >= 5.0:
-        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today — SELLING ALL to lock gains!")
-        # Close ALL open positions to lock in the daily win
+    # Dynamic WIN-LOCK: system decides based on VIX + regime
+    winlock = _get_dynamic_winlock(regime)
+    winlock_threshold = winlock["lock_pct"]
+    winlock_caution = winlock["caution_pct"]
+
+    if daily_gain >= winlock_threshold:
+        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today (threshold: {winlock_threshold}%) — SELLING ALL | {winlock['reason']}")
         for trade in get_open_trades():
             t_ticker = trade["ticker"]
             t_price = current_prices_for_winlock.get(t_ticker)
@@ -560,16 +619,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     results["closed"].append({
                         "ticker": t_ticker, "direction": t_dir,
                         "entry_price": t_entry, "exit_price": round(t_price, 2),
-                        "pnl_pct": round(t_pnl, 2), "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}%",
+                        "pnl_pct": round(t_pnl, 2),
+                        "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}% ≥ {winlock_threshold}% | {winlock['reason']}",
                     })
                     open_tickers.discard(t_ticker)
                 except Exception as e:
                     results["errors"].append(f"WIN-LOCK close {t_ticker}: {e}")
-        cash = get_cash()  # Refresh after closing all
-        results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% — sold all, locked in gains"})
+        cash = get_cash()
+        results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% — sold all (auto-threshold: {winlock_threshold}% | {winlock['reason']})"})
         available_slots = 0
-    elif daily_gain >= 3.0:
-        logger.warning(f"WIN-LOCK CAUTION: Up {daily_gain:+.1f}% today — reducing new trade size by 50%")
+    elif daily_gain >= winlock_caution:
+        logger.warning(f"WIN-LOCK CAUTION: Up {daily_gain:+.1f}% (caution at {winlock_caution}%) — reducing new trade size by 50%")
 
     # --- DRAWDOWN PROTECTION (hedge fund risk management) ---
     drawdown_pct = total_return_now
@@ -1377,7 +1437,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     """
     Check all open positions for exit conditions WITHOUT generating new picks.
     This decouples exit management from entry decisions so stop-losses always fire.
-    Also handles WIN-LOCK: sells everything when up 1.5%+ for the day.
+    Also handles dynamic WIN-LOCK: system decides its own profit-lock threshold based on VIX + regime.
     Returns dict with list of closed positions.
     """
     from predictions.models import get_open_trades, close_paper_trade, get_portfolio_snapshots, save_portfolio_snapshot, get_cash
@@ -1396,7 +1456,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     snapshots = get_portfolio_snapshots(days=5)
     cash = get_cash()  # Atomic cash — always accurate
 
-    # --- WIN-LOCK CHECK: If up 1.5%+ today, sell EVERYTHING ---
+    # --- DYNAMIC WIN-LOCK CHECK: system decides threshold based on VIX + regime ---
     positions_val = sum(
         current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
         for t in open_trades
@@ -1405,8 +1465,12 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     yesterday_val = snapshots[-1]["total_value"] if snapshots else INITIAL_CAPITAL
     daily_gain = ((total_now / yesterday_val) - 1) * 100
 
-    if daily_gain >= 5.0:
-        logger.warning(f"EXIT CHECKER WIN-LOCK: Up {daily_gain:+.1f}% today — SELLING ALL!")
+    # Let the system decide its own WIN-LOCK threshold
+    winlock = _get_dynamic_winlock()
+    winlock_threshold = winlock["lock_pct"]
+
+    if daily_gain >= winlock_threshold:
+        logger.warning(f"EXIT CHECKER WIN-LOCK: Up {daily_gain:+.1f}% (threshold: {winlock_threshold}%) — SELLING ALL! | {winlock['reason']}")
         for trade in open_trades:
             ticker = trade["ticker"]
             price = current_prices.get(ticker)
@@ -1423,16 +1487,15 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                         "ticker": ticker, "direction": direction,
                         "entry_price": entry_price, "exit_price": round(price, 2),
                         "pnl_pct": round(pnl_pct, 2),
-                        "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}% — locking in",
+                        "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}% ≥ {winlock_threshold}% | {winlock['reason']}",
                     })
                 except Exception as e:
                     logger.error(f"WIN-LOCK close {ticker}: {e}")
-        # Save snapshot after closing all
         cash = get_cash()
-        total_value = cash  # No positions left
+        total_value = cash
         cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
         save_portfolio_snapshot(total_value, cash, 0, daily_gain, cum_ret, 0, 0, 0)
-        return {"closed": closed, "checked": len(open_trades), "win_lock": True}
+        return {"closed": closed, "checked": len(open_trades), "win_lock": True, "winlock_info": winlock}
 
     for trade in open_trades:
         ticker = trade["ticker"]
