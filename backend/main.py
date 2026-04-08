@@ -1092,9 +1092,15 @@ def live_prices(request: Request):
                 for t in open_trades:
                     try:
                         if len(tickers) == 1:
-                            price = float(data["Close"].iloc[-1])
+                            close_col = data["Close"]
+                            if hasattr(close_col, "columns"):
+                                close_col = close_col.iloc[:, 0]
+                            price = float(close_col.iloc[-1])
                         else:
-                            price = float(data[t["ticker"]]["Close"].iloc[-1])
+                            ticker_close = data[t["ticker"]]["Close"] if isinstance(data.columns, pd.MultiIndex) else data["Close"]
+                            if hasattr(ticker_close, "columns"):
+                                ticker_close = ticker_close.iloc[:, 0]
+                            price = float(ticker_close.iloc[-1])
                         pv = price * t["shares"]
                         if t["direction"] == "short":
                             pv = (t["entry_price"] * t["shares"] * 2) - pv

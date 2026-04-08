@@ -24,6 +24,17 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_col(df, col_name):
+    """Extract a column from yfinance DataFrame, handling multi-level columns."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    c = df[col_name]
+    if hasattr(c, "columns"):
+        c = c.iloc[:, 0]
+    return c
+
+
 # Portfolio configuration
 ORIGINAL_CAPITAL = 100_000.0  # What we ACTUALLY started with — used for total return calculation
 INITIAL_CAPITAL = 109_000.0   # Current capital level — used for cash init if no S3 restore
@@ -60,9 +71,9 @@ def _calculate_stock_atr(symbol: str, period: int = 14) -> float:
         if df is None or len(df) < period + 1:
             return 0.025  # Default 2.5% if no data
 
-        highs = df["High"].values.astype(float).flatten()
-        lows = df["Low"].values.astype(float).flatten()
-        closes = df["Close"].values.astype(float).flatten()
+        highs = _safe_col(df, "High").values.astype(float)
+        lows = _safe_col(df, "Low").values.astype(float)
+        closes = _safe_col(df, "Close").values.astype(float)
 
         # True Range = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
         tr_values = []
@@ -218,7 +229,7 @@ def _get_vix_scale() -> float:
         _throttle()
         vix_df = yf.download("^VIX", period="5d", progress=False)
         if vix_df is not None and not vix_df.empty:
-            vix = float(vix_df["Close"].dropna().iloc[-1])
+            vix = float(_safe_col(vix_df, "Close").dropna().iloc[-1])
             if vix < 15:
                 return VIX_SIZE_SCALE["low"]
             elif vix < 20:
@@ -245,7 +256,7 @@ def _get_dynamic_winlock(regime: str = "SIDEWAYS") -> dict:
     try:
         _throttle()
         vix_df = yf.download("^VIX", period="5d", progress=False)
-        vix = float(vix_df["Close"].dropna().iloc[-1]) if vix_df is not None and not vix_df.empty else 20
+        vix = float(_safe_col(vix_df, "Close").dropna().iloc[-1]) if vix_df is not None and not vix_df.empty else 20
     except Exception:
         vix = 20
 
@@ -629,7 +640,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     _throttle()
                     hist_df = yf.download(ticker, period="1mo", progress=False)
                     if hist_df is not None and len(hist_df) >= 3:
-                        hist_closes = hist_df["Close"].values.astype(float).flatten()
+                        hist_closes = _safe_col(hist_df, "Close").values.astype(float)
 
                         # Get peak P&L since entry
                         if direction == "long":
@@ -1102,7 +1113,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _throttle()
             sp_df = yf.download("^GSPC", period="1mo", progress=False)
             if sp_df is not None and len(sp_df) >= 2:
-                sp_closes = sp_df["Close"].values.astype(float).flatten()
+                sp_closes = _safe_col(sp_df, "Close").values.astype(float)
                 sp500_daily = ((sp_closes[-1] / sp_closes[-2]) - 1) * 100
                 # Use first available snapshot date or 1 month ago
                 sp500_cum = ((sp_closes[-1] / sp_closes[0]) - 1) * 100
@@ -1208,7 +1219,7 @@ def run_backtest(days_back: int = 180, num_trades_target: int = 500) -> dict:
             if len(sym_df) < 250:
                 continue
 
-            closes = sym_df["Close"].values.astype(float).flatten()
+            closes = _safe_col(sym_df, "Close").values.astype(float)
             dates = sym_df.index
 
             # Scan through history looking for trade setups
@@ -1747,7 +1758,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 _throttle()
                 hist_df = yf.download(ticker, period="1mo", progress=False)
                 if hist_df is not None and len(hist_df) >= 3:
-                    hist_closes = hist_df["Close"].values.astype(float).flatten()
+                    hist_closes = _safe_col(hist_df, "Close").values.astype(float)
                     if direction == "long":
                         peak_price = float(np.max(hist_closes))
                         peak_pnl = ((peak_price / entry_price) - 1) * 100

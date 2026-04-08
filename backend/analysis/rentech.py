@@ -59,6 +59,16 @@ def _throttle_rentech():
     _last_rentech_call[0] = time.time()
 
 
+def _safe_col(df, col_name="Close"):
+    """Extract column from yfinance DataFrame, handling multi-level columns."""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return pd.Series(dtype=float)
+    c = df[col_name]
+    if hasattr(c, "columns"):
+        c = c.iloc[:, 0]
+    return c
+
+
 def _get_rentech_cached(key, fetch_fn, ttl=None):
     """Cache with configurable TTL."""
     if ttl is None:
@@ -180,8 +190,8 @@ def find_pairs_trades(price_data: dict) -> list:
             continue
 
         try:
-            closes_a = price_data[sym_a]["Close"].values.astype(float).flatten()
-            closes_b = price_data[sym_b]["Close"].values.astype(float).flatten()
+            closes_a = price_data[sym_a]["Close"].values.astype(float)
+            closes_b = price_data[sym_b]["Close"].values.astype(float)
 
             # Need both to have same length
             min_len = min(len(closes_a), len(closes_b))
@@ -744,7 +754,7 @@ def get_mean_reversion_signals(price_data: dict) -> list:
 
     for symbol, df in price_data.items():
         try:
-            closes = df["Close"].values.astype(float).flatten()
+            closes = df["Close"].values.astype(float)
             highs = df["High"].values.astype(float).flatten() if "High" in df.columns else closes
             lows = df["Low"].values.astype(float).flatten() if "Low" in df.columns else closes
             volumes = df["Volume"].values.astype(float).flatten() if "Volume" in df.columns else np.ones(len(closes))
@@ -1077,9 +1087,9 @@ def detect_sector_rotation(price_data: dict) -> dict:
         for sector, etf in sector_etfs.items():
             try:
                 if len(etf_symbols) == 1:
-                    closes = data["Close"].values.astype(float).flatten()
+                    closes = data["Close"].values.astype(float)
                 else:
-                    closes = data[etf]["Close"].values.astype(float).flatten()
+                    closes = data[etf]["Close"].values.astype(float)
 
                 if len(closes) < 22:
                     continue
@@ -1128,7 +1138,7 @@ def get_multi_timeframe_signals(price_data: dict) -> dict:
     signals = {}
     for symbol, df in price_data.items():
         try:
-            closes = df["Close"].values.astype(float).flatten()
+            closes = df["Close"].values.astype(float)
             if len(closes) < 60:
                 continue
 
@@ -1188,7 +1198,7 @@ def predict_regime_transition(price_data: dict) -> dict:
         _throttle_rentech()
         vix_data = yf.download("^VIX", period="1mo", progress=False)
         if vix_data is not None and len(vix_data) >= 5:
-            vix_closes = vix_data["Close"].values.astype(float).flatten()
+            vix_closes = _safe_col(vix_data, "Close").values.astype(float)
             vix_now = vix_closes[-1]
             vix_5d_ago = vix_closes[-5]
             vix_trend = ((vix_now / vix_5d_ago) - 1) * 100
@@ -1212,7 +1222,7 @@ def predict_regime_transition(price_data: dict) -> dict:
         total = 0
         for sym in breadth_syms:
             if sym in price_data:
-                c = price_data[sym]["Close"].values.astype(float).flatten()
+                c = price_data[sym]["Close"].values.astype(float)
                 if len(c) >= 50:
                     if c[-1] > float(np.mean(c[-50:])):
                         above += 1
@@ -1229,8 +1239,8 @@ def predict_regime_transition(price_data: dict) -> dict:
         credit = yf.download(["HYG", "TLT"], period="1mo", progress=False, group_by="ticker")
         if credit is not None:
             try:
-                hyg = credit["HYG"]["Close"].values.astype(float).flatten()
-                tlt = credit["TLT"]["Close"].values.astype(float).flatten()
+                hyg = credit["HYG"]["Close"].values.astype(float)
+                tlt = credit["TLT"]["Close"].values.astype(float)
                 if len(hyg) >= 10 and len(tlt) >= 10:
                     ratio_chg = ((hyg[-1] / tlt[-1]) / (hyg[-10] / tlt[-10]) - 1) * 100
                     if ratio_chg < -2:
@@ -1392,7 +1402,7 @@ def get_opening_range_signals(price_data: dict) -> dict:
                 continue
             highs = df["High"].values.astype(float).flatten()
             lows = df["Low"].values.astype(float).flatten()
-            closes = df["Close"].values.astype(float).flatten()
+            closes = df["Close"].values.astype(float)
 
             today_close = closes[-1]
             yesterday_high = highs[-2]
@@ -1434,7 +1444,8 @@ def calculate_portfolio_beta(open_trades: list, price_data: dict) -> dict:
         if spy is None or len(spy) < 30:
             return {"beta": 0, "hedge_needed": False}
 
-        spy_ret = np.diff(spy["Close"].values.astype(float).flatten()) / spy["Close"].values.astype(float).flatten()[:-1]
+        spy_closes = _safe_col(spy, "Close").values.astype(float)
+        spy_ret = np.diff(spy_closes) / spy_closes[:-1]
 
         total_beta = 0
         total_weight = 0
@@ -1442,7 +1453,7 @@ def calculate_portfolio_beta(open_trades: list, price_data: dict) -> dict:
             sym = trade["ticker"]
             if sym not in price_data:
                 continue
-            c = price_data[sym]["Close"].values.astype(float).flatten()
+            c = price_data[sym]["Close"].values.astype(float)
             if len(c) < 30:
                 continue
 

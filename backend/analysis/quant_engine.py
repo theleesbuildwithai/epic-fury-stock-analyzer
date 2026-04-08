@@ -57,6 +57,18 @@ def _throttle():
     elapsed = now - _last_quant_call[0]
     if elapsed < _QUANT_DELAY:
         time.sleep(_QUANT_DELAY - elapsed)
+
+
+def _safe_close(df):
+    """Extract Close column from yfinance DataFrame, handling multi-level columns.
+    Newer yfinance returns multi-level columns even for single tickers.
+    Returns a pandas Series of close prices."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    close = df["Close"]
+    if hasattr(close, "columns"):
+        close = close.iloc[:, 0]
+    return close
     _last_quant_call[0] = time.time()
 
 
@@ -366,7 +378,7 @@ def detect_market_regime() -> dict:
             _throttle()
             sp_df = yf.download("^GSPC", period="1y", progress=False)
             if sp_df is not None and len(sp_df) >= 200:
-                sp_closes = sp_df["Close"].values.astype(float).flatten()
+                sp_closes = _safe_close(sp_df).values.astype(float)
                 sp_current = float(sp_closes[-1])
                 sp_sma200 = float(np.mean(sp_closes[-200:]))
                 sp_sma50 = float(np.mean(sp_closes[-50:]))
@@ -400,7 +412,7 @@ def detect_market_regime() -> dict:
             _throttle()
             vix_df = yf.download("^VIX", period="5d", progress=False)
             if vix_df is not None and not vix_df.empty:
-                vix_val = float(vix_df["Close"].dropna().iloc[-1])
+                vix_val = float(_safe_close(vix_df).dropna().iloc[-1])
                 regime_data["vix_level"] = round(vix_val, 2)
 
                 if vix_val < 15:
@@ -805,7 +817,7 @@ def get_macro_overlay() -> dict:
             _throttle()
             uup_df = yf.download("UUP", period="1mo", progress=False)
             if uup_df is not None and len(uup_df) >= 20:
-                uup_closes = uup_df["Close"].values.astype(float).flatten()
+                uup_closes = _safe_close(uup_df).values.astype(float)
                 uup_sma20 = float(np.mean(uup_closes[-20:]))
                 uup_current = float(uup_closes[-1])
                 dollar_trend = "strengthening" if uup_current > uup_sma20 * 1.005 else (
@@ -1005,7 +1017,7 @@ def scan_overnight_intelligence() -> dict:
         _throttle()
         btc_df = yf.download("BTC-USD", period="5d", progress=False)
         if btc_df is not None and len(btc_df) >= 2:
-            btc_closes = btc_df["Close"].values.astype(float).flatten()
+            btc_closes = _safe_close(btc_df).values.astype(float)
             btc_current = float(btc_closes[-1])
             btc_prev = float(btc_closes[-2])
             btc_change = ((btc_current / btc_prev) - 1) * 100 if btc_prev > 0 else 0
@@ -1172,7 +1184,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             if df is None or len(df) < 60:
                 continue
 
-            closes = df["Close"].values.astype(float).flatten()
+            closes = df["Close"].values.astype(float)
             volumes = df["Volume"].values.astype(float).flatten()
             current_price = float(closes[-1])
 
@@ -1319,7 +1331,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 peer_rets = []
                 for peer in sector_peers:
                     try:
-                        peer_closes = price_data[peer]["Close"].values.astype(float).flatten()
+                        peer_closes = price_data[peer]["Close"].values.astype(float)
                         if len(peer_closes) >= 60:
                             peer_rets.append((peer_closes[-1] / peer_closes[-60]) - 1)
                     except Exception:
@@ -2352,8 +2364,11 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             result["error"] = "Not enough price history (need 60+ days)"
             return result
 
-        closes = stock_df["Close"].values.astype(float).flatten()
-        volumes = stock_df["Volume"].values.astype(float).flatten()
+        closes = _safe_close(stock_df).values.astype(float)
+        vol_col = stock_df["Volume"]
+        if hasattr(vol_col, "columns"):
+            vol_col = vol_col.iloc[:, 0]
+        volumes = vol_col.values.astype(float)
         price = float(closes[-1])
 
         # --- Calculate all factors ---
