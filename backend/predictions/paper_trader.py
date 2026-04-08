@@ -40,11 +40,61 @@ def _safe_col(df, col_name):
 ORIGINAL_CAPITAL = 100_000.0  # What we ACTUALLY started with — used for total return calculation
 INITIAL_CAPITAL = 109_000.0   # Current capital level — used for cash init if no S3 restore
 MAX_POSITIONS = 999  # No limit — only constrained by cash
-POSITION_SIZE_PCT = 0.06  # 6% per position — conviction sizing like real hedge funds
 STOP_LOSS_PCT = 0.05  # Default fallback — overridden by per-stock ATR calculation
 DEFAULT_HOLD_DAYS = 30
-MIN_CONFIDENCE = 40  # Raised from 30 — filter out low-quality signals
-MIN_COMPOSITE_SCORE = 2.0  # Minimum absolute composite score to enter a trade
+
+# ============================================================
+#  CAPITAL PRESERVATION MODE — activated when portfolio is up big
+# ============================================================
+# The system checks total return and automatically shifts to
+# conservative trading when gains exceed expectations.
+# This prevents giving back hard-won profits.
+#
+# When total return >= PRESERVATION_THRESHOLD:
+#   - Position sizes shrink to 3% (from 6%)
+#   - Entry filters tighten (confidence 55+, score 3.0+)
+#   - New trade activity reduced by 75%
+#   - Profits locked earlier (10% instead of 15%)
+#   - Flat trades cut faster (40% hold time instead of 50%)
+#
+# The machine earned 11%+ in a week — now protect it.
+PRESERVATION_THRESHOLD = 8.0  # Activate when total return >= 8%
+
+def _is_preservation_mode() -> bool:
+    """Check if we should be in capital preservation mode based on total return."""
+    try:
+        from predictions.models import get_cash, get_open_trades
+        cash = get_cash()
+        open_trades = get_open_trades()
+        # Quick estimate of portfolio value
+        positions_val = sum(t.get("entry_price", 0) * t.get("shares", 0) for t in open_trades)
+        total_val = cash + positions_val
+        total_return = ((total_val / ORIGINAL_CAPITAL) - 1) * 100
+        return total_return >= PRESERVATION_THRESHOLD
+    except Exception:
+        return True  # Default to cautious if we can't check
+
+def _get_position_size_pct() -> float:
+    """Dynamic position sizing: smaller when preserving capital."""
+    if _is_preservation_mode():
+        return 0.03  # 3% per position — half size in preservation mode
+    return 0.06  # 6% per position — normal conviction sizing
+
+def _get_min_confidence() -> int:
+    """Dynamic confidence filter: stricter when preserving capital."""
+    if _is_preservation_mode():
+        return 55  # Only high-quality signals in preservation mode
+    return 40  # Normal filter
+
+def _get_min_composite_score() -> float:
+    """Dynamic score filter: stricter when preserving capital."""
+    if _is_preservation_mode():
+        return 3.0  # Higher bar in preservation mode
+    return 2.0  # Normal filter
+
+POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
+MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
+MIN_COMPOSITE_SCORE = 2.0  # Default — overridden by _get_min_composite_score() at trade time
 
 
 # ============================================================
@@ -714,9 +764,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # The target was already calculated by _autonomous_stop_and_target()
             # at entry time and stored in trade["target_price"]. We check it above.
             # But if somehow the stock is up 20%+ and target wasn't hit, lock it.
-            if not should_close and pnl_pct >= 15:
+            # Lower profit lock in preservation mode (10% vs 15%)
+            profit_lock_threshold = 10.0 if _is_preservation_mode() else 15.0
+            if not should_close and pnl_pct >= profit_lock_threshold:
                 should_close = True
-                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — exceptional gain secured (threshold: 15%)"
+                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — gain secured (threshold: {profit_lock_threshold}%{'  [PRESERVATION MODE]' if profit_lock_threshold == 10 else ''})"
 
             # TIME DECAY EXIT: If trade hasn't moved in our favor after 50% of hold time, cut it
             # This prevents dead-weight trades from sitting and eventually hitting stop loss
@@ -725,7 +777,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     entry_date = datetime.fromisoformat(trade["entry_date"])
                     days_held = (datetime.now() - entry_date).days
                     max_hold = trade.get("hold_duration_days", DEFAULT_HOLD_DAYS)
-                    half_hold = max(2, max_hold // 2)
+                    # Cut flat trades faster in preservation mode (40% vs 50% of hold time)
+                    decay_frac = 0.4 if _is_preservation_mode() else 0.5
+                    half_hold = max(2, int(max_hold * decay_frac))
                     if days_held >= half_hold and pnl_pct <= 0.5:
                         # Held for half the expected time and still flat or losing
                         should_close = True
@@ -881,13 +935,20 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # In BULL: prioritize longs heavily, limit shorts
         all_picks = []
 
+        # Use dynamic filters — tighter in preservation mode
+        min_conf = _get_min_confidence()
+        min_score = _get_min_composite_score()
+        preservation = _is_preservation_mode()
+        if preservation:
+            logger.warning(f"CAPITAL PRESERVATION MODE: confidence >= {min_conf}, score >= {min_score}, position size 3%")
+
         long_candidates = [p for p in quant_picks.get("long_picks", [])
-                          if p["confidence"] >= MIN_CONFIDENCE
-                          and abs(p.get("composite_score", 0)) >= MIN_COMPOSITE_SCORE
+                          if p["confidence"] >= min_conf
+                          and abs(p.get("composite_score", 0)) >= min_score
                           and p["symbol"] not in open_tickers]
         short_candidates = [p for p in quant_picks.get("short_picks", [])
-                           if p["confidence"] >= MIN_CONFIDENCE
-                           and abs(p.get("composite_score", 0)) >= MIN_COMPOSITE_SCORE
+                           if p["confidence"] >= min_conf
+                           and abs(p.get("composite_score", 0)) >= min_score
                            and p["symbol"] not in open_tickers]
 
         # Defensive sectors — safe for long positions even in bear markets
@@ -950,6 +1011,12 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
 
+        # CAPITAL PRESERVATION: Limit new trades to top 25% when protecting gains
+        if preservation and len(all_picks) > 3:
+            orig_count = len(all_picks)
+            all_picks = all_picks[:max(3, len(all_picks) // 4)]  # Keep top 25%, min 3
+            logger.warning(f"PRESERVATION MODE: Reduced new trades from {orig_count} to {len(all_picks)} (top 25% only)")
+
         # SECTOR CONCENTRATION LIMIT: max 3 positions per sector per direction
         # Diversification is what separates hedge funds from retail gamblers
         sector_counts = {}
@@ -969,7 +1036,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 t.get("shares", 0) * t.get("entry_price", 0)
                 for t in get_open_trades() if t["ticker"] in open_tickers
             )
-            max_exposure = total_current_value * 0.92  # 92% max gross exposure — deploy more capital
+            max_exposure_pct = 0.75 if preservation else 0.92  # 75% in preservation, 92% normal
+            max_exposure = total_current_value * max_exposure_pct
             if gross_exposure >= max_exposure:
                 results["skipped"].append({
                     "symbol": symbol,
@@ -1086,13 +1154,14 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # Regime-aware sizing — 6% base, conviction direction gets 8%
+            # Regime-aware sizing — dynamic base from preservation mode
+            base_size = _get_position_size_pct()  # 3% in preservation, 6% normal
             if regime == "BEAR":
-                size_pct = 0.08 if direction == "short" else 0.05
+                size_pct = min(0.08, base_size * 1.33) if direction == "short" else min(0.05, base_size * 0.83)
             elif regime == "BULL":
-                size_pct = 0.08 if direction == "long" else 0.04
+                size_pct = min(0.08, base_size * 1.33) if direction == "long" else min(0.04, base_size * 0.67)
             else:
-                size_pct = POSITION_SIZE_PCT  # 6%
+                size_pct = base_size
             position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod * cb_multiplier * dd_multiplier
             shares = round(position_value / price, 4)
 
