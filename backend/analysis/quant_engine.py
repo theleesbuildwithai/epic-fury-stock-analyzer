@@ -1567,7 +1567,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "ema_50": round(ema_50, 2),
                 "momentum_pct": round(momentum_raw, 2),
                 "closes": closes.tolist() if hasattr(closes, 'tolist') else list(closes),
-                "vol_ratio": float(vol_20d_avg / (vol_60d_avg + 1)),
+                "vol_ratio": float(np.mean(volumes[-20:]) / (np.mean(volumes[-60:]) + 1)) if len(volumes) >= 60 else (float(np.mean(volumes[-20:]) / (np.mean(volumes[-20:]) + 1)) if len(volumes) >= 20 else 1.0),
             })
 
         except Exception as e:

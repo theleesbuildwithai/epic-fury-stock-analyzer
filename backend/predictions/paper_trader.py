@@ -231,7 +231,7 @@ def get_portfolio_state() -> dict:
     from predictions.models import get_open_trades, get_closed_trades, get_cash
 
     open_trades = get_open_trades()
-    closed_trades = get_closed_trades(limit=50)
+    closed_trades = get_closed_trades(limit=500)
 
     # Cash from atomic paper_cash table — ALWAYS accurate
     cash = get_cash()
@@ -309,10 +309,10 @@ def get_portfolio_state() -> dict:
         "recent_closed": [{
             "ticker": t["ticker"],
             "direction": t["direction"],
-            "pnl_pct": t.get("pnl_pct", 0),
-            "pnl_dollars": t.get("pnl_dollars", 0),
-            "entry_price": t["entry_price"],
-            "exit_price": t.get("exit_price"),
+            "pnl_pct": round(t.get("pnl_pct", 0) or 0, 2),
+            "pnl_dollars": round(t.get("pnl_dollars", 0) or 0, 2),
+            "entry_price": round(t["entry_price"], 2),
+            "exit_price": round(t.get("exit_price") or 0, 2),
         } for t in closed_trades[:10]],
         "stats": {
             "total_trades": len(closed_trades),

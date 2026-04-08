@@ -562,13 +562,14 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
 
           {/* Win/Loss Stats */}
           {portfolio.stats && portfolio.stats.total_trades > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6">
               <StatCard label="Total Trades" value={portfolio.stats.total_trades} />
               <StatCard label="Win Rate" value={`${portfolio.stats.win_rate}%`}
                 color={portfolio.stats.win_rate > 50 ? 'green' : 'red'} />
               <StatCard label="Profit Factor" value={portfolio.stats.profit_factor}
                 color={portfolio.stats.profit_factor > 1 ? 'green' : 'red'} />
               <StatCard label="Avg Win" value={`${portfolio.stats.avg_win_pct}%`} color="green" />
+              <StatCard label="Avg Loss" value={`${portfolio.stats.avg_loss_pct}%`} color="red" />
             </div>
           )}
 
