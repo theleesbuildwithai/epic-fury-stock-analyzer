@@ -1494,10 +1494,27 @@ def ai_analyst(request: Request, q: str = ""):
 
 @app.get("/api/quant-picks")
 def quant_picks(request: Request):
-    """Get quantitative LONG/SHORT picks with regime, macro, and factor breakdown."""
+    """Get quantitative LONG/SHORT picks with regime, macro, and factor breakdown.
+    Returns cached data instantly. If cache is cold, returns empty picks and triggers background generation."""
     check_rate_limit(request.client.host)
     try:
-        return generate_quant_picks()
+        from analysis.quant_engine import _quant_cache
+        # If cache exists, return it instantly
+        if "quant_picks" in _quant_cache:
+            import time as _time
+            cache_entry = _quant_cache["quant_picks"]
+            cache_age = _time.time() - cache_entry["time"]
+            result = cache_entry["data"]
+            result["cache_age_seconds"] = round(cache_age)
+            return result
+        # No cache — return empty picks (the scheduler will populate it soon)
+        return {
+            "regime": {"regime": "LOADING", "description": "Analyzing 500+ stocks..."},
+            "long_picks": [],
+            "short_picks": [],
+            "cache_status": "cold",
+            "message": "Quant engine is analyzing 500+ stocks. Data will be available after the next trade cycle (runs every few minutes).",
+        }
     except Exception as e:
         logger.error(f"Quant picks error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate quant picks")
@@ -1694,10 +1711,19 @@ def auto_trading_status(request: Request):
 
 @app.get("/api/queued-trades")
 def queued_trades(request: Request):
-    """Show what the AI is planning to trade next — the trades it's waiting to execute."""
+    """Show what the AI is planning to trade next — the trades it's waiting to execute.
+    Uses cached picks only — never blocks on fresh generation."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
+        from analysis.quant_engine import _quant_cache
+        import time as _time
+        # Use cached picks only — never block on fresh generation
+        if "quant_picks" in _quant_cache:
+            picks = _quant_cache["quant_picks"]["data"]
+        else:
+            return {"queued_longs": [], "queued_shorts": [], "total_queued": 0,
+                    "already_held": 0, "regime": "LOADING",
+                    "message": "Waiting for quant engine to complete first analysis cycle."}
         portfolio = get_portfolio_state()
         open_tickers = set(p["ticker"] for p in portfolio.get("positions", []))
 
