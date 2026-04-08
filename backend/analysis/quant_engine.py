@@ -1589,7 +1589,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     kurtosis_z = _safe_zscore([s["kurtosis_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
-    regime_multiplier = 1.0  # default
+    # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
+    # The old regime_multiplier (0.7 BEAR, 0.85 SIDEWAYS) was crushing confidence
+    # and stacking with trend filter + VIX scaling = zero trades
+    # Now: regime adjusts WHAT we look for, not HOW MUCH we believe in it
+    regime_multiplier = 1.0  # ALWAYS 1.0 — confidence is set by the score, not regime
     if regime:
         if regime.get("regime") == "BEAR":
             # In bear markets: reduce momentum weight (momentum crashes),
@@ -1598,12 +1602,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             weights["momentum"] = weights.get("momentum", 0.25) * 0.5
             weights["low_vol"] = weights.get("low_vol", 0.15) * 1.5
             weights["value"] = weights.get("value", 0.20) * 1.3
-            regime_multiplier = 0.7  # lower confidence in bear markets
+            # NO regime_multiplier — the score itself handles direction
         elif regime.get("regime") == "SIDEWAYS":
             # In sideways: boost mean-reversion (RSI2)
             weights = dict(weights)
             weights["rsi2"] = weights.get("rsi2", 0.15) * 1.4
-            regime_multiplier = 0.85
+            # NO regime_multiplier
 
     # Normalize weights to sum to 1
     # Add new factors with fixed weights (not yet in learning system)
@@ -1715,9 +1719,9 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             direction = "NEUTRAL"
             confidence = max(30, 50 - int(abs(final_score) * 5))
 
-        # MOMENTUM CRASH FILTER: avoid stocks where momentum is unwinding
+        # MOMENTUM CRASH FILTER: penalize stocks where momentum is unwinding (gently)
         if stock.get("momentum_crash") and direction == "LONG":
-            confidence = int(confidence * 0.4)  # massive penalty — momentum crashing
+            confidence = int(confidence * 0.75)  # moderate penalty (was 0.4 — too aggressive)
 
         # GAP SIGNAL: institutional overnight order flow
         gap = stock.get("gap_signal", 0)
@@ -1726,38 +1730,34 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         elif gap <= -2 and direction == "SHORT":
             confidence = min(95, int(confidence * 1.15))  # big gap down confirms short
         elif gap >= 1.5 and direction == "SHORT":
-            confidence = int(confidence * 0.7)  # don't short into gap up
+            confidence = int(confidence * 0.85)  # slight penalty for shorting gap up (was 0.7)
         elif gap <= -1.5 and direction == "LONG":
-            confidence = int(confidence * 0.7)  # don't buy into gap down
+            confidence = int(confidence * 0.85)  # slight penalty for buying gap down (was 0.7)
 
-        # TREND FILTER: Don't fight the trend — this is what separates pros from amateurs
-        # In BEAR: penalize longs that are below 50-EMA (trend is down, don't buy falling knives)
-        # In BEAR: boost shorts that are below 50-EMA (trend confirms short thesis)
-        # In BULL: penalize shorts above 50-EMA, boost longs above 50-EMA
+        # TREND FILTER: Gentle adjustment, NOT a kill shot
+        # OVERHAUL: Old filter cut confidence by 50% (0.5x) — combined with regime_multiplier (0.7x)
+        # that meant 0.35x total = killed every trade. Now: ±15% max adjustment.
         ema50 = stock["ema_50"]
-        price_vs_ema50 = (stock["price"] - ema50) / ema50 * 100  # % above/below 50-EMA
+        price_vs_ema50 = (stock["price"] - ema50) / ema50 * 100
 
-        # Defensive sectors are safer for longs even in bear markets
         _defensive = {"Consumer Staples", "Healthcare", "Utilities"}
         _is_defensive = stock.get("sector") in _defensive
 
         if current_regime == "BEAR":
-            if direction == "LONG" and price_vs_ema50 < -3 and not _is_defensive:
-                # Non-defensive stock 3%+ below 50-EMA in bear = bad idea
-                confidence = int(confidence * 0.5)  # cut confidence in half
-            elif direction == "LONG" and price_vs_ema50 < -8 and _is_defensive:
-                # Even defensive stocks 8%+ below EMA are risky
-                confidence = int(confidence * 0.6)
+            if direction == "LONG" and price_vs_ema50 < -5 and not _is_defensive:
+                # Non-defensive stock 5%+ below 50-EMA in bear — slight penalty
+                confidence = int(confidence * 0.85)  # -15% (was -50%)
+            elif direction == "LONG" and price_vs_ema50 < -10 and _is_defensive:
+                confidence = int(confidence * 0.85)
             elif direction == "SHORT" and price_vs_ema50 < -5:
-                # Shorting a stock already 5%+ below 50-EMA in bear = confirmed trend
-                confidence = min(95, int(confidence * 1.2))  # boost confidence
+                confidence = min(95, int(confidence * 1.15))  # trend confirms short
         elif current_regime == "BULL":
-            if direction == "SHORT" and price_vs_ema50 > 3:
-                confidence = int(confidence * 0.5)
+            if direction == "SHORT" and price_vs_ema50 > 5:
+                confidence = int(confidence * 0.85)  # -15% (was -50%)
             elif direction == "LONG" and price_vs_ema50 > 5:
-                confidence = min(95, int(confidence * 1.2))
+                confidence = min(95, int(confidence * 1.15))
 
-        # Apply regime multiplier to confidence
+        # regime_multiplier is always 1.0 now — no more stacking penalties
         confidence = int(confidence * regime_multiplier)
 
         # Build factor breakdown for transparency
@@ -2267,18 +2267,19 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             direction = "NEUTRAL"
             confidence = 40
 
-        # Regime adjustment
+        # Regime adjustment — GENTLE, not a kill shot
+        # OVERHAUL: was 0.7x (30% penalty) — now ±10% max
         current_regime = regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS"
         if current_regime == "BEAR":
             if direction == "LONG":
-                confidence = int(confidence * 0.7)
+                confidence = int(confidence * 0.90)  # -10% (was -30%)
             elif direction == "SHORT":
                 confidence = min(95, int(confidence * 1.1))
         elif current_regime == "BULL":
             if direction == "LONG":
                 confidence = min(95, int(confidence * 1.1))
             elif direction == "SHORT":
-                confidence = int(confidence * 0.7)
+                confidence = int(confidence * 0.90)  # -10% (was -30%)
 
         # Apply learned confidence cap
         conf_cap = mistake_adj.get("confidence_cap", 95) if mistake_adj else 95

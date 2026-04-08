@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 ORIGINAL_CAPITAL = 100_000.0  # What we ACTUALLY started with — used for total return calculation
 INITIAL_CAPITAL = 109_000.0   # Current capital level — used for cash init if no S3 restore
 MAX_POSITIONS = 999  # No limit — only constrained by cash
-POSITION_SIZE_PCT = 0.02  # 2% per position — allows 40+ positions for massive diversification
-STOP_LOSS_PCT = 0.04  # 4% stop loss (tightened for ceasefire rally — protect gains)
+POSITION_SIZE_PCT = 0.06  # 6% per position — conviction sizing like real hedge funds
+STOP_LOSS_PCT = 0.05  # 5% stop loss — tight enough to protect, wide enough to breathe
 DEFAULT_HOLD_DAYS = 30
-MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
+MIN_CONFIDENCE = 30  # Low bar — the QUANT SCORE is the real gatekeeper, not confidence
 
 # ============================================================
 #  ADVANCED: VIX-SCALED POSITION SIZING
@@ -42,9 +42,9 @@ MIN_CONFIDENCE = 35  # Lowered to allow trades in BEAR regime (0.7x multiplier)
 VIX_SIZE_SCALE = {
     "low": 1.3,      # VIX < 15: calm markets, slightly bigger positions
     "normal": 1.0,    # VIX 15-20: standard sizing
-    "elevated": 0.7,  # VIX 20-25: reduce size
-    "high": 0.5,      # VIX 25-35: half-size positions
-    "crisis": 0.25,   # VIX > 35: quarter-size (capital preservation)
+    "elevated": 0.85,  # VIX 20-25: slight reduction (was 0.7 — too timid)
+    "high": 0.65,      # VIX 25-35: moderate reduction (was 0.5 — crushed trades)
+    "crisis": 0.45,    # VIX > 35: reduced but still trading (was 0.25 — froze us)
 }
 
 def _get_vix_scale() -> float:
@@ -450,15 +450,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             except Exception:
                 pass
 
-            # PROFIT PROTECTION — THE COIN FIX
-            # We lost 6% profit on COIN because we didn't sell when we were up.
-            # New aggressive trailing stop system:
-            #   +2% profit → trail at 40% of peak (close if drops to +0.8%)
-            #   +3% profit → trail at 50% of peak (close if drops to +1.5%)
-            #   +5% profit → trail at 60% of peak (close if drops to +3%)
-            #   +8% profit → trail at 70% of peak (close if drops to +5.6%)
-            # This locks in gains and NEVER gives back more than half the profit.
-            if not should_close and pnl_pct > 2:
+            # TRAILING PROFIT PROTECTION — LET WINNERS RUN, BUT DON'T GIVE IT ALL BACK
+            # Only start trailing at +6% (was +2% — sold winners way too early)
+            # Trail at 50% of peak profit — keeps half, lets half ride
+            # This means a stock that peaked at +12% closes at +6% worst case
+            if not should_close and pnl_pct > 6:
                 try:
                     _throttle()
                     hist_df = yf.download(ticker, period="1mo", progress=False)
@@ -473,19 +469,19 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                             trough_price = float(np.min(hist_closes))
                             peak_pnl = ((entry_price / trough_price) - 1) * 100
 
-                        # Adaptive trail percentage based on how much profit we've made
-                        if peak_pnl >= 8:
-                            trail_pct = 0.70  # Keep 70% of gains
-                        elif peak_pnl >= 5:
-                            trail_pct = 0.60  # Keep 60%
-                        elif peak_pnl >= 3:
+                        # Adaptive trail — wider than before to let winners run
+                        if peak_pnl >= 15:
+                            trail_pct = 0.60  # Keep 60% of gains (e.g., +15% → close at +9%)
+                        elif peak_pnl >= 10:
+                            trail_pct = 0.55  # Keep 55%
+                        elif peak_pnl >= 6:
                             trail_pct = 0.50  # Keep 50%
                         else:
-                            trail_pct = 0.40  # Keep 40%
+                            trail_pct = 0.40
 
                         trail_level = peak_pnl * trail_pct
 
-                        if peak_pnl >= 2 and pnl_pct < trail_level:
+                        if peak_pnl >= 6 and pnl_pct < trail_level:
                             should_close = True
                             close_reason = (
                                 f"PROFIT LOCK: peaked at {peak_pnl:+.1f}%, "
@@ -494,38 +490,18 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 except Exception:
                     pass
 
-            # TAKE PROFIT: If we're up 5%+, just take it (tighter = more consistent)
-            if not should_close and pnl_pct >= 5:
+            # TAKE PROFIT: Only at 15%+ — let winners run (was 5% — way too tight)
+            if not should_close and pnl_pct >= 15:
                 should_close = True
-                close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
+                close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — big win locked"
 
-            # SELL AT HIGHS: If near intraday high and starting to reverse, sell
-            # This prevents giving back gains by waiting too long
-            if not should_close and pnl_pct >= 3:
-                try:
-                    _throttle()
-                    intra_df = yf.download(ticker, period="1d", interval="5m", progress=False)
-                    if intra_df is not None and len(intra_df) >= 5:
-                        intra_highs = intra_df["Close"].values.astype(float).flatten()
-                        intra_peak = float(np.max(intra_highs))
-                        intra_now = float(intra_highs[-1])
-                        # If price dropped 1%+ from intraday peak and we're in profit, sell
-                        drop_from_peak = ((intra_peak - intra_now) / intra_peak) * 100
-                        if direction == "long" and drop_from_peak >= 1.0:
-                            should_close = True
-                            close_reason = f"SELL AT HIGH: peaked at ${intra_peak:.2f}, now ${intra_now:.2f} ({drop_from_peak:.1f}% off peak), locking {pnl_pct:+.1f}%"
-                        elif direction == "short":
-                            # For shorts, check if price bounced up from intraday low
-                            intra_low = float(np.min(intra_highs))
-                            bounce = ((intra_now - intra_low) / intra_low) * 100
-                            if bounce >= 1.0:
-                                should_close = True
-                                close_reason = f"SELL AT HIGH: short bounced {bounce:.1f}% from low, locking {pnl_pct:+.1f}%"
-                except Exception:
-                    pass
+            # REMOVED: "SELL AT HIGHS" intraday trigger
+            # This was selling at +3% on tiny intraday dips — killed our best trades
+            # The trailing stop above handles profit protection properly
 
-            # AGGRESSIVE BEAR PROTECTION: close losing longs faster in BEAR
-            if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
+            # BEAR PROTECTION: close losing longs at stop level, not at -2%
+            # Was -2% = too tight, gets stopped out on normal volatility
+            if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -4:
                 should_close = True
                 close_reason = f"BEAR regime protection — closing losing long ({pnl_pct:+.1f}%)"
 
@@ -798,29 +774,26 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             conf_cap = mistake_adj.get("confidence_cap", 95)
             pick["confidence"] = min(pick["confidence"], conf_cap)
 
-            # Check sector concentration
+            # Check sector concentration — raised from 5 to 8 to allow more trades
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
-            if sector_counts.get(sector_key, 0) >= 5:
+            if sector_counts.get(sector_key, 0) >= 8:
                 results["skipped"].append({
                     "symbol": symbol,
                     "reason": f"Sector concentration limit ({pick.get('sector')} {direction})",
                 })
                 continue
 
-            # Position sizing: REGIME-AWARE % of total portfolio value
-            # Use atomic cash for accuracy
+            # Position sizing: CONVICTION-BASED like a real hedge fund
+            # Renaissance uses 5-10% per position, not 2%
             cash = get_cash()  # Always fresh
             total_value = cash + positions_value_now
-            # Regime-aware position sizing — 2% base for massive diversification
-            # In BEAR: 3% shorts (conviction), 1.5% longs (careful long-term plays)
-            # In BULL: 3% longs (conviction), 1.5% shorts (hedges)
-            # SIDEWAYS: 2% equal
+            # Regime-aware sizing — 6% base, conviction direction gets 8%
             if regime == "BEAR":
-                size_pct = 0.03 if direction == "short" else 0.015
+                size_pct = 0.08 if direction == "short" else 0.05
             elif regime == "BULL":
-                size_pct = 0.03 if direction == "long" else 0.015
+                size_pct = 0.08 if direction == "long" else 0.04
             else:
-                size_pct = POSITION_SIZE_PCT
+                size_pct = POSITION_SIZE_PCT  # 6%
             position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod
             shares = round(position_value / price, 4)
 
@@ -837,20 +810,20 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # NEVER give shorts more than 5% room. Cut them fast.
             if regime == "BEAR":
                 is_defensive_long = direction == "long" and pick.get("sector") in DEFENSIVE_SECTORS
-                long_stop = 0.08 if is_defensive_long else 0.04
-                short_stop = 0.05  # MAX 5% stop for shorts — they can gap up
-                long_target = 1.06 if is_defensive_long else 1.08
-                short_target = 0.85  # 15% target (realistic, not 20%)
+                long_stop = 0.08 if is_defensive_long else 0.05
+                short_stop = 0.06  # Shorts need room — gaps happen
+                long_target = 1.10 if is_defensive_long else 1.12
+                short_target = 0.82  # 18% target for shorts in bear (was 15% — too tight)
             elif regime == "BULL":
-                long_stop = 0.10
-                short_stop = 0.04  # Tight stop for shorts in bull market
-                long_target = 1.20
-                short_target = 0.92
+                long_stop = 0.08
+                short_stop = 0.05
+                long_target = 1.25  # 25% target for longs in bull (was 20%)
+                short_target = 0.90
             else:
                 long_stop = STOP_LOSS_PCT
-                short_stop = 0.05  # MAX 5% for shorts
-                long_target = 1.15
-                short_target = 0.88
+                short_stop = 0.06
+                long_target = 1.18  # 18% target (was 15%)
+                short_target = 0.85
 
             # MISTAKE LEARNING: Tighten stops if we've been holding losers too long
             if mistake_adj.get("tighten_stops"):
@@ -1543,8 +1516,8 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         except Exception:
             pass
 
-        # BEAR regime protection: close losing longs faster
-        if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -2:
+        # BEAR regime protection: close losing longs at -4% (was -2% — too tight)
+        if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -4:
             should_close = True
             close_reason = f"BEAR regime protection — losing long ({pnl_pct:+.1f}%)"
 
@@ -1564,8 +1537,9 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             should_close = True
             close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap"
 
-        # PROFIT PROTECTION — same trailing stop as main engine
-        if not should_close and pnl_pct > 2:
+        # TRAILING PROFIT PROTECTION — matches main engine overhaul
+        # Only start trailing at +6% (was +2%), trail at 50% of peak
+        if not should_close and pnl_pct > 6:
             try:
                 _throttle()
                 hist_df = yf.download(ticker, period="1mo", progress=False)
@@ -1578,47 +1552,27 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                         trough_price = float(np.min(hist_closes))
                         peak_pnl = ((entry_price / trough_price) - 1) * 100
 
-                    if peak_pnl >= 8:
-                        trail_pct = 0.70
-                    elif peak_pnl >= 5:
+                    if peak_pnl >= 15:
                         trail_pct = 0.60
-                    elif peak_pnl >= 3:
+                    elif peak_pnl >= 10:
+                        trail_pct = 0.55
+                    elif peak_pnl >= 6:
                         trail_pct = 0.50
                     else:
                         trail_pct = 0.40
                     trail_level = peak_pnl * trail_pct
-                    if peak_pnl >= 2 and pnl_pct < trail_level:
+                    if peak_pnl >= 6 and pnl_pct < trail_level:
                         should_close = True
                         close_reason = f"PROFIT LOCK: peaked at {peak_pnl:+.1f}%, trail at {trail_level:+.1f}%, now {pnl_pct:+.1f}%"
             except Exception:
                 pass
 
-        # TAKE PROFIT at 8%+
-        if not should_close and pnl_pct >= 8:
+        # TAKE PROFIT at 15%+ (was 8% — too tight, sold winners early)
+        if not should_close and pnl_pct >= 15:
             should_close = True
-            close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — locking in gains"
+            close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — big win locked"
 
-        # SELL AT HIGHS: If near intraday peak and reversing, sell to lock profit
-        if not should_close and pnl_pct >= 3:
-            try:
-                _throttle()
-                intra_df = yf.download(ticker, period="1d", interval="5m", progress=False)
-                if intra_df is not None and len(intra_df) >= 5:
-                    intra_highs = intra_df["Close"].values.astype(float).flatten()
-                    intra_peak = float(np.max(intra_highs))
-                    intra_now = float(intra_highs[-1])
-                    drop_from_peak = ((intra_peak - intra_now) / intra_peak) * 100
-                    if direction == "long" and drop_from_peak >= 1.0:
-                        should_close = True
-                        close_reason = f"SELL AT HIGH: {drop_from_peak:.1f}% off peak, locking {pnl_pct:+.1f}%"
-                    elif direction == "short":
-                        intra_low = float(np.min(intra_highs))
-                        bounce = ((intra_now - intra_low) / intra_low) * 100
-                        if bounce >= 1.0:
-                            should_close = True
-                            close_reason = f"SELL AT HIGH: short bounced {bounce:.1f}% from low, locking {pnl_pct:+.1f}%"
-            except Exception:
-                pass
+        # REMOVED: "SELL AT HIGHS" intraday trigger — killed best trades at +3%
 
         if should_close:
             try:
