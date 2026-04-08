@@ -2179,6 +2179,89 @@ def generate_quant_picks() -> dict:
             logger.info(f"🏛️ RenTech analysis complete: {len(rentech_data.get('pairs_trades', []))} pairs, "
                         f"{len(mr_setups)} MR setups, risk={rentech_data.get('portfolio_risk', {}).get('risk_level', 'N/A')}")
 
+            # ============================================================
+            # WIRE IN SMART FEATURES — apply to ALL picks (longs + shorts)
+            # ============================================================
+
+            # --- EARNINGS SHIELD: Remove stocks with earnings in next 1-2 days ---
+            earnings_shield = rentech_data.get("earnings_shield", {})
+            earnings_blocked = {s["symbol"] for s in earnings_shield.get("blocked", [])}
+            if earnings_blocked:
+                pre_long = len(top_longs)
+                pre_short = len(top_shorts)
+                top_longs = [p for p in top_longs if p["symbol"] not in earnings_blocked]
+                top_shorts = [p for p in top_shorts if p["symbol"] not in earnings_blocked]
+                blocked_count = (pre_long - len(top_longs)) + (pre_short - len(top_shorts))
+                logger.info(f"EARNINGS SHIELD: Blocked {blocked_count} picks with imminent earnings: {earnings_blocked}")
+
+            # --- MULTI-TIMEFRAME CONFIRMATION: Boost/penalize based on trend alignment ---
+            mtf = rentech_data.get("mtf_signals", {})
+            for pick in top_longs:
+                sym = pick["symbol"]
+                if sym in mtf:
+                    conf = mtf[sym]["confirmation"]
+                    if conf == "CONFIRMED_BULL":
+                        pick["confidence"] = min(95, pick["confidence"] + 8)
+                        pick["reasons"].append("Multi-TF: daily+weekly+monthly ALL bullish")
+                    elif conf in ("CONFIRMED_BEAR", "LEAN_BEAR"):
+                        pick["confidence"] = max(20, pick["confidence"] - 12)
+                        pick["reasons"].append(f"Multi-TF WARNING: trend is {conf}")
+
+            for pick in top_shorts:
+                sym = pick["symbol"]
+                if sym in mtf:
+                    conf = mtf[sym]["confirmation"]
+                    if conf == "CONFIRMED_BEAR":
+                        pick["confidence"] = min(95, pick["confidence"] + 8)
+                        pick["reasons"].append("Multi-TF: daily+weekly+monthly ALL bearish")
+                    elif conf in ("CONFIRMED_BULL", "LEAN_BULL"):
+                        pick["confidence"] = max(20, pick["confidence"] - 12)
+                        pick["reasons"].append(f"Multi-TF WARNING: trend is {conf}")
+
+            # --- SECTOR ROTATION: Boost inflow sectors, penalize outflow ---
+            rotation = rentech_data.get("sector_rotation", {})
+            inflow_sectors = set(rotation.get("top_inflow", []))
+            outflow_sectors = set(rotation.get("top_outflow", []))
+            for pick in top_longs:
+                sector = pick.get("sector", "")
+                if sector in inflow_sectors:
+                    pick["confidence"] = min(95, pick["confidence"] + 5)
+                    pick["reasons"].append(f"Sector rotation: {sector} has institutional INFLOW")
+                elif sector in outflow_sectors:
+                    pick["confidence"] = max(20, pick["confidence"] - 8)
+                    pick["reasons"].append(f"Sector rotation: {sector} has institutional OUTFLOW")
+            for pick in top_shorts:
+                sector = pick.get("sector", "")
+                if sector in outflow_sectors:
+                    pick["confidence"] = min(95, pick["confidence"] + 5)
+                    pick["reasons"].append(f"Sector rotation: {sector} has institutional OUTFLOW (good for short)")
+                elif sector in inflow_sectors:
+                    pick["confidence"] = max(20, pick["confidence"] - 8)
+
+            # --- REGIME TRANSITION: Warn if regime change is predicted ---
+            regime_pred = rentech_data.get("regime_transition", {})
+            if regime_pred.get("prediction") == "BEAR_TRANSITION_LIKELY" and regime != "BEAR":
+                # Reduce all long confidence if bear transition is likely
+                for pick in top_longs:
+                    pick["confidence"] = max(20, pick["confidence"] - 10)
+                    pick["reasons"].append("REGIME WARNING: bear transition likely")
+                logger.warning(f"REGIME TRANSITION: Bear likely — reducing long confidence by 10")
+            elif regime_pred.get("prediction") == "BULL_TRANSITION_LIKELY" and regime != "BULL":
+                for pick in top_shorts:
+                    pick["confidence"] = max(20, pick["confidence"] - 10)
+                    pick["reasons"].append("REGIME WARNING: bull transition likely")
+                logger.info(f"REGIME TRANSITION: Bull likely — reducing short confidence by 10")
+
+            # --- Sort picks by confidence after all adjustments ---
+            top_longs.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+            top_shorts.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+
+            # --- Remove picks that dropped below minimum confidence ---
+            top_longs = [p for p in top_longs if p.get("confidence", 0) >= 30]
+            top_shorts = [p for p in top_shorts if p.get("confidence", 0) >= 30]
+
+            logger.info(f"POST-FILTER: {len(top_longs)} longs, {len(top_shorts)} shorts after smart filters")
+
         except Exception as e:
             logger.warning(f"RenTech analysis failed (non-fatal): {e}")
 
@@ -2208,6 +2291,10 @@ def generate_quant_picks() -> dict:
             ],
             "portfolio_risk": rentech_data.get("portfolio_risk", {}),
             "circuit_breaker": rentech_data.get("circuit_breaker", {}),
+            "earnings_shield": rentech_data.get("earnings_shield", {}),
+            "sector_rotation": rentech_data.get("sector_rotation", {}),
+            "regime_transition": rentech_data.get("regime_transition", {}),
+            "drawdown_mode": rentech_data.get("drawdown_mode", {}),
             "generated_at": datetime.now().isoformat(),
             "computation_time_seconds": elapsed,
             "disclaimer": (

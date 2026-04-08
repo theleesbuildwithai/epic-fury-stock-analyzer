@@ -925,5 +925,618 @@ def run_rentech_analysis(price_data: dict, open_trades: list = None,
     except Exception as e:
         logger.warning(f"Circuit breaker check failed: {e}")
 
+    try:
+        # 5. Earnings Calendar Shield
+        result["earnings_shield"] = get_earnings_shield(price_data)
+        logger.info(f"  Earnings shield: {len(result['earnings_shield'].get('blocked', []))} stocks blocked")
+    except Exception as e:
+        logger.warning(f"Earnings shield failed: {e}")
+        result["earnings_shield"] = {"blocked": [], "warning": []}
+
+    try:
+        # 6. Sector Rotation Detection
+        result["sector_rotation"] = detect_sector_rotation(price_data)
+        logger.info(f"  Sector rotation: inflow={result['sector_rotation'].get('top_inflow', [])}")
+    except Exception as e:
+        logger.warning(f"Sector rotation failed: {e}")
+        result["sector_rotation"] = {}
+
+    try:
+        # 7. Multi-Timeframe Confirmation
+        result["mtf_signals"] = get_multi_timeframe_signals(price_data)
+        logger.info(f"  Multi-timeframe: {len(result['mtf_signals'])} signals")
+    except Exception as e:
+        logger.warning(f"Multi-timeframe failed: {e}")
+        result["mtf_signals"] = {}
+
+    try:
+        # 8. Regime Transition Prediction
+        result["regime_transition"] = predict_regime_transition(price_data)
+        logger.info(f"  Regime prediction: {result['regime_transition'].get('prediction', 'N/A')}")
+    except Exception as e:
+        logger.warning(f"Regime transition failed: {e}")
+        result["regime_transition"] = {}
+
+    try:
+        # 9. Portfolio Beta
+        if open_trades:
+            result["portfolio_beta"] = calculate_portfolio_beta(open_trades, price_data)
+    except Exception as e:
+        logger.warning(f"Portfolio beta failed: {e}")
+
+    try:
+        # 10. Drawdown Recovery Mode
+        result["drawdown_mode"] = get_drawdown_recovery_mode(portfolio_value, peak_value)
+        logger.info(f"  Drawdown mode: {result['drawdown_mode'].get('mode', 'NORMAL')}")
+    except Exception as e:
+        logger.warning(f"Drawdown recovery failed: {e}")
+        result["drawdown_mode"] = {"mode": "NORMAL"}
+
     _rentech_cache[cache_key] = {"data": result, "time": time.time()}
     return result
+
+
+# ============================================================
+#  6. EARNINGS CALENDAR SHIELD
+#  Don't hold through earnings — one surprise can wipe a week
+# ============================================================
+
+def get_earnings_shield(price_data: dict) -> dict:
+    """
+    Check which stocks have earnings coming up in the next 3 days.
+    Returns list of stocks to block from new entries and warn for existing positions.
+    """
+    cache_key = "earnings_shield"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 3600:
+        return cached["data"]
+
+    blocked = []
+    warning = []
+
+    symbols = list(price_data.keys())[:50]
+
+    for symbol in symbols:
+        try:
+            ticker = yf.Ticker(symbol)
+            cal = ticker.calendar
+            if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
+                next_earnings = None
+                if isinstance(cal, dict):
+                    earnings_date = cal.get("Earnings Date")
+                    if earnings_date:
+                        if isinstance(earnings_date, list) and len(earnings_date) > 0:
+                            next_earnings = pd.Timestamp(earnings_date[0])
+                        else:
+                            next_earnings = pd.Timestamp(earnings_date)
+                elif isinstance(cal, pd.DataFrame):
+                    if "Earnings Date" in cal.columns:
+                        next_earnings = pd.Timestamp(cal["Earnings Date"].iloc[0])
+                    elif len(cal.columns) > 0:
+                        next_earnings = pd.Timestamp(cal.iloc[0, 0])
+
+                if next_earnings is None:
+                    continue
+
+                now = pd.Timestamp.now()
+                days_until = (next_earnings - now).days
+
+                if 0 <= days_until <= 1:
+                    blocked.append({
+                        "symbol": symbol,
+                        "earnings_date": str(next_earnings.date()),
+                        "days_until": days_until,
+                        "action": "BLOCK — earnings imminent, do not enter",
+                    })
+                elif 2 <= days_until <= 3:
+                    warning.append({
+                        "symbol": symbol,
+                        "earnings_date": str(next_earnings.date()),
+                        "days_until": days_until,
+                        "action": "WARNING — earnings soon, reduce position or exit",
+                    })
+        except Exception:
+            continue
+        time.sleep(0.3)
+
+    result = {"blocked": blocked, "warning": warning}
+    _rentech_cache[cache_key] = {"data": result, "time": time.time()}
+    return result
+
+
+# ============================================================
+#  7. SECTOR ROTATION DETECTION
+# ============================================================
+
+def detect_sector_rotation(price_data: dict) -> dict:
+    """
+    Detect sector rotation by comparing 1-week vs 1-month returns of sector ETFs.
+    """
+    cache_key = "sector_rotation"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 1800:
+        return cached["data"]
+
+    sector_etfs = {
+        "Technology": "XLK", "Healthcare": "XLV", "Financials": "XLF",
+        "Energy": "XLE", "Consumer Discretionary": "XLY", "Consumer Staples": "XLP",
+        "Industrials": "XLI", "Materials": "XLB", "Utilities": "XLU",
+        "Real Estate": "XLRE", "Communication": "XLC",
+    }
+
+    rotations = {}
+    try:
+        _throttle_rentech()
+        etf_symbols = list(sector_etfs.values())
+        data = yf.download(etf_symbols, period="2mo", progress=False, group_by="ticker")
+
+        for sector, etf in sector_etfs.items():
+            try:
+                if len(etf_symbols) == 1:
+                    closes = data["Close"].values.astype(float).flatten()
+                else:
+                    closes = data[etf]["Close"].values.astype(float).flatten()
+
+                if len(closes) < 22:
+                    continue
+
+                ret_1w = (closes[-1] / closes[-5] - 1) * 100
+                ret_1m = (closes[-1] / closes[-22] - 1) * 100
+                acceleration = ret_1w - (ret_1m / 4)
+
+                rotations[sector] = {
+                    "etf": etf,
+                    "return_1w": round(ret_1w, 2),
+                    "return_1m": round(ret_1m, 2),
+                    "acceleration": round(acceleration, 2),
+                    "flow": "INFLOW" if acceleration > 1.5 else ("OUTFLOW" if acceleration < -1.5 else "NEUTRAL"),
+                }
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"Sector rotation download failed: {e}")
+
+    sorted_sectors = sorted(rotations.items(), key=lambda x: x[1]["acceleration"], reverse=True)
+    top_inflow = [s[0] for s in sorted_sectors[:3] if s[1]["flow"] == "INFLOW"]
+    top_outflow = [s[0] for s in sorted_sectors[-3:] if s[1]["flow"] == "OUTFLOW"]
+
+    result = {
+        "sectors": rotations, "top_inflow": top_inflow,
+        "top_outflow": top_outflow, "timestamp": datetime.now().isoformat(),
+    }
+    _rentech_cache[cache_key] = {"data": result, "time": time.time()}
+    return result
+
+
+# ============================================================
+#  8. MULTI-TIMEFRAME CONFIRMATION
+# ============================================================
+
+def get_multi_timeframe_signals(price_data: dict) -> dict:
+    """Daily + Weekly + Monthly trend must agree for high conviction."""
+    cache_key = "mtf_signals"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 600:
+        return cached["data"]
+
+    signals = {}
+    for symbol, df in price_data.items():
+        try:
+            closes = df["Close"].values.astype(float).flatten()
+            if len(closes) < 60:
+                continue
+
+            price = closes[-1]
+            sma_20 = float(np.mean(closes[-20:]))
+            daily_bull = price > sma_20
+
+            sma_50 = float(np.mean(closes[-50:])) if len(closes) >= 50 else sma_20
+            weekly_bull = price > sma_50
+
+            if len(closes) >= 40:
+                monthly_bull = float(np.mean(closes[-20:])) > float(np.mean(closes[-40:-20]))
+            else:
+                monthly_bull = daily_bull
+
+            score = sum([1 if b else -1 for b in [daily_bull, weekly_bull, monthly_bull]])
+
+            if score == 3:
+                confirmation = "CONFIRMED_BULL"
+            elif score == -3:
+                confirmation = "CONFIRMED_BEAR"
+            elif score >= 1:
+                confirmation = "LEAN_BULL"
+            elif score <= -1:
+                confirmation = "LEAN_BEAR"
+            else:
+                confirmation = "MIXED"
+
+            signals[symbol] = {
+                "confirmation": confirmation, "score": score,
+                "daily": "bull" if daily_bull else "bear",
+                "weekly": "bull" if weekly_bull else "bear",
+                "monthly": "bull" if monthly_bull else "bear",
+            }
+        except Exception:
+            continue
+
+    _rentech_cache[cache_key] = {"data": signals, "time": time.time()}
+    return signals
+
+
+# ============================================================
+#  9. REGIME TRANSITION PREDICTION
+# ============================================================
+
+def predict_regime_transition(price_data: dict) -> dict:
+    """Use VIX, breadth, and credit spreads to predict regime changes."""
+    cache_key = "regime_transition"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 1800:
+        return cached["data"]
+
+    warning_signs = []
+    bullish_signs = []
+
+    try:
+        _throttle_rentech()
+        vix_data = yf.download("^VIX", period="1mo", progress=False)
+        if vix_data is not None and len(vix_data) >= 5:
+            vix_closes = vix_data["Close"].values.astype(float).flatten()
+            vix_now = vix_closes[-1]
+            vix_5d_ago = vix_closes[-5]
+            vix_trend = ((vix_now / vix_5d_ago) - 1) * 100
+
+            if vix_trend > 20:
+                warning_signs.append(f"VIX surging +{vix_trend:.0f}% in 5 days")
+            elif vix_trend < -20:
+                bullish_signs.append(f"VIX collapsing {vix_trend:.0f}% in 5 days")
+            if vix_now > 30:
+                warning_signs.append(f"VIX at {vix_now:.1f} — crisis territory")
+            elif vix_now < 15:
+                bullish_signs.append(f"VIX at {vix_now:.1f} — extreme calm")
+
+        # Breadth check
+        breadth_syms = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META",
+                        "TSLA", "JPM", "JNJ", "V", "PG", "UNH", "HD",
+                        "MA", "DIS", "CSCO", "INTC", "VZ", "KO", "PEP",
+                        "MRK", "ABBV", "CVX", "XOM", "LLY", "AVGO", "COST",
+                        "WMT", "CRM", "ORCL"]
+        above = 0
+        total = 0
+        for sym in breadth_syms:
+            if sym in price_data:
+                c = price_data[sym]["Close"].values.astype(float).flatten()
+                if len(c) >= 50:
+                    if c[-1] > float(np.mean(c[-50:])):
+                        above += 1
+                    total += 1
+        if total > 0:
+            bpct = (above / total) * 100
+            if bpct < 30:
+                warning_signs.append(f"Breadth collapsed: only {bpct:.0f}% above 50-SMA")
+            elif bpct > 70:
+                bullish_signs.append(f"Breadth strong: {bpct:.0f}% above 50-SMA")
+
+        # Credit spreads
+        _throttle_rentech()
+        credit = yf.download(["HYG", "TLT"], period="1mo", progress=False, group_by="ticker")
+        if credit is not None:
+            try:
+                hyg = credit["HYG"]["Close"].values.astype(float).flatten()
+                tlt = credit["TLT"]["Close"].values.astype(float).flatten()
+                if len(hyg) >= 10 and len(tlt) >= 10:
+                    ratio_chg = ((hyg[-1] / tlt[-1]) / (hyg[-10] / tlt[-10]) - 1) * 100
+                    if ratio_chg < -2:
+                        warning_signs.append(f"Credit spreads widening ({ratio_chg:+.1f}%)")
+                    elif ratio_chg > 2:
+                        bullish_signs.append(f"Credit spreads tightening ({ratio_chg:+.1f}%)")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Regime transition analysis failed: {e}")
+
+    bear_score = len(warning_signs)
+    bull_score = len(bullish_signs)
+    if bear_score >= 3:
+        prediction = "BEAR_TRANSITION_LIKELY"
+    elif bear_score >= 2:
+        prediction = "BEAR_RISK_ELEVATED"
+    elif bull_score >= 3:
+        prediction = "BULL_TRANSITION_LIKELY"
+    elif bull_score >= 2:
+        prediction = "BULL_MOMENTUM_BUILDING"
+    else:
+        prediction = "REGIME_STABLE"
+
+    result = {
+        "prediction": prediction, "warning_signs": warning_signs,
+        "bullish_signs": bullish_signs, "bear_score": bear_score,
+        "bull_score": bull_score, "timestamp": datetime.now().isoformat(),
+    }
+    _rentech_cache[cache_key] = {"data": result, "time": time.time()}
+    return result
+
+
+# ============================================================
+#  10. NEWS SENTIMENT PER STOCK
+# ============================================================
+
+def get_stock_news_sentiment(symbols: list) -> dict:
+    """Analyze headlines for positive/negative keywords per stock."""
+    cache_key = f"news_sentiment_{'_'.join(sorted(symbols[:5]))}"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 1800:
+        return cached["data"]
+
+    POSITIVE = {"beat", "beats", "surge", "rally", "upgrade", "outperform", "buy",
+                "growth", "profit", "record", "strong", "bullish", "breakout", "soar",
+                "boost", "positive", "exceeds", "optimistic", "gain", "gains"}
+    NEGATIVE = {"miss", "misses", "crash", "plunge", "downgrade", "underperform", "sell",
+                "loss", "losses", "weak", "bearish", "decline", "cut", "warning",
+                "negative", "disappoints", "fell", "falls", "risk", "layoff", "layoffs"}
+
+    sentiments = {}
+    for symbol in symbols[:20]:
+        try:
+            ticker = yf.Ticker(symbol)
+            news = ticker.news
+            if not news:
+                sentiments[symbol] = {"sentiment": "NEUTRAL", "score": 0, "headlines": 0}
+                continue
+
+            pos = neg = 0
+            for article in news[:10]:
+                title = article.get("title", "").lower()
+                pos += sum(1 for w in POSITIVE if w in title)
+                neg += sum(1 for w in NEGATIVE if w in title)
+
+            net = pos - neg
+            if net >= 3: sent = "VERY_POSITIVE"
+            elif net >= 1: sent = "POSITIVE"
+            elif net <= -3: sent = "VERY_NEGATIVE"
+            elif net <= -1: sent = "NEGATIVE"
+            else: sent = "NEUTRAL"
+
+            sentiments[symbol] = {
+                "sentiment": sent, "score": net,
+                "positive_signals": pos, "negative_signals": neg,
+                "headlines_analyzed": len(news[:10]),
+            }
+            time.sleep(0.2)
+        except Exception:
+            sentiments[symbol] = {"sentiment": "NEUTRAL", "score": 0, "headlines": 0}
+
+    _rentech_cache[cache_key] = {"data": sentiments, "time": time.time()}
+    return sentiments
+
+
+# ============================================================
+#  11. OPTIONS UNUSUAL ACTIVITY
+# ============================================================
+
+def detect_unusual_options(symbols: list) -> dict:
+    """Detect unusual options volume and put/call ratio spikes."""
+    cache_key = "unusual_options"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 1800:
+        return cached["data"]
+
+    signals = {}
+    for symbol in symbols[:15]:
+        try:
+            ticker = yf.Ticker(symbol)
+            expirations = ticker.options
+            if not expirations:
+                continue
+
+            chain = ticker.option_chain(expirations[0])
+            call_vol = int(chain.calls["volume"].sum()) if "volume" in chain.calls.columns else 0
+            put_vol = int(chain.puts["volume"].sum()) if "volume" in chain.puts.columns else 0
+            call_oi = int(chain.calls["openInterest"].sum()) if "openInterest" in chain.calls.columns else 0
+            put_oi = int(chain.puts["openInterest"].sum()) if "openInterest" in chain.puts.columns else 0
+
+            total_vol = call_vol + put_vol
+            total_oi = call_oi + put_oi
+            if total_vol == 0:
+                continue
+
+            pc_ratio = put_vol / call_vol if call_vol > 0 else 999
+            vol_oi_ratio = total_vol / total_oi if total_oi > 0 else 0
+
+            signal = "NEUTRAL"
+            if pc_ratio > 2.0: signal = "BEARISH_UNUSUAL"
+            elif pc_ratio < 0.4: signal = "BULLISH_UNUSUAL"
+            elif vol_oi_ratio > 3.0: signal = "HIGH_ACTIVITY"
+
+            if signal != "NEUTRAL":
+                signals[symbol] = {
+                    "signal": signal, "put_call_ratio": round(pc_ratio, 2),
+                    "call_volume": call_vol, "put_volume": put_vol,
+                    "vol_oi_ratio": round(vol_oi_ratio, 2), "expiration": expirations[0],
+                }
+            time.sleep(0.3)
+        except Exception:
+            continue
+
+    _rentech_cache[cache_key] = {"data": signals, "time": time.time()}
+    return signals
+
+
+# ============================================================
+#  12. OPENING RANGE BREAKOUT
+# ============================================================
+
+def get_opening_range_signals(price_data: dict) -> dict:
+    """Detect breakouts above yesterday's high or breakdowns below yesterday's low."""
+    cache_key = "opening_range"
+    cached = _rentech_cache.get(cache_key)
+    if cached and time.time() - cached["time"] < 300:
+        return cached["data"]
+
+    signals = {}
+    for symbol, df in price_data.items():
+        try:
+            if len(df) < 3:
+                continue
+            highs = df["High"].values.astype(float).flatten()
+            lows = df["Low"].values.astype(float).flatten()
+            closes = df["Close"].values.astype(float).flatten()
+
+            today_close = closes[-1]
+            yesterday_high = highs[-2]
+            yesterday_low = lows[-2]
+            avg_range = float(np.mean(highs[-10:] - lows[-10:]))
+
+            if today_close > yesterday_high and avg_range > 0:
+                strength = (today_close - yesterday_high) / avg_range
+                if strength > 0.5:
+                    signals[symbol] = {
+                        "signal": "BREAKOUT", "direction": "LONG",
+                        "strength": round(strength, 2), "price": today_close,
+                        "level": round(yesterday_high, 2),
+                    }
+            elif today_close < yesterday_low and avg_range > 0:
+                strength = (yesterday_low - today_close) / avg_range
+                if strength > 0.5:
+                    signals[symbol] = {
+                        "signal": "BREAKDOWN", "direction": "SHORT",
+                        "strength": round(strength, 2), "price": today_close,
+                        "level": round(yesterday_low, 2),
+                    }
+        except Exception:
+            continue
+
+    _rentech_cache[cache_key] = {"data": signals, "time": time.time()}
+    return signals
+
+
+# ============================================================
+#  13. PORTFOLIO BETA HEDGING
+# ============================================================
+
+def calculate_portfolio_beta(open_trades: list, price_data: dict) -> dict:
+    """Calculate portfolio beta to S&P 500 and suggest hedging."""
+    try:
+        _throttle_rentech()
+        spy = yf.download("SPY", period="3mo", progress=False)
+        if spy is None or len(spy) < 30:
+            return {"beta": 0, "hedge_needed": False}
+
+        spy_ret = np.diff(spy["Close"].values.astype(float).flatten()) / spy["Close"].values.astype(float).flatten()[:-1]
+
+        total_beta = 0
+        total_weight = 0
+        for trade in open_trades:
+            sym = trade["ticker"]
+            if sym not in price_data:
+                continue
+            c = price_data[sym]["Close"].values.astype(float).flatten()
+            if len(c) < 30:
+                continue
+
+            s_ret = np.diff(c[-len(spy_ret)-1:]) / c[-len(spy_ret)-1:-1]
+            ml = min(len(s_ret), len(spy_ret))
+            cov = np.cov(s_ret[-ml:], spy_ret[-ml:])[0][1]
+            var = np.var(spy_ret[-ml:])
+            beta = cov / var if var > 0 else 1.0
+
+            pv = trade["shares"] * trade["entry_price"]
+            dm = 1 if trade["direction"] == "long" else -1
+            total_beta += beta * pv * dm
+            total_weight += abs(pv)
+
+        pb = total_beta / total_weight if total_weight > 0 else 0
+        return {
+            "beta": round(pb, 3), "hedge_needed": abs(pb) > 0.3,
+            "hedge_direction": "SHORT SPY" if pb > 0.3 else ("LONG SPY" if pb < -0.3 else "NONE"),
+            "total_exposure": round(total_weight, 2),
+        }
+    except Exception as e:
+        logger.warning(f"Portfolio beta failed: {e}")
+        return {"beta": 0, "hedge_needed": False}
+
+
+# ============================================================
+#  14. DRAWDOWN RECOVERY MODE
+# ============================================================
+
+def get_drawdown_recovery_mode(portfolio_value: float, peak_value: float) -> dict:
+    """Shift to defensive when portfolio draws down from peak."""
+    dd = ((portfolio_value / peak_value) - 1) * 100 if peak_value > 0 else 0
+
+    if dd <= -10:
+        return {"mode": "HALT", "drawdown_pct": round(dd, 2), "size_multiplier": 0.0,
+                "message": f"CRITICAL ({dd:+.1f}%): ALL TRADING HALTED", "allowed_sectors": []}
+    elif dd <= -8:
+        return {"mode": "EMERGENCY", "drawdown_pct": round(dd, 2), "size_multiplier": 0.25,
+                "message": f"Emergency ({dd:+.1f}%): 75% size reduction",
+                "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities"]}
+    elif dd <= -5:
+        return {"mode": "DEFENSIVE", "drawdown_pct": round(dd, 2), "size_multiplier": 0.5,
+                "message": f"Defensive ({dd:+.1f}%): 50% size reduction",
+                "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities", "Financials"]}
+    elif dd <= -3:
+        return {"mode": "CAUTIOUS", "drawdown_pct": round(dd, 2), "size_multiplier": 0.7,
+                "message": f"Cautious ({dd:+.1f}%): 30% size reduction", "allowed_sectors": None}
+    else:
+        return {"mode": "NORMAL", "drawdown_pct": round(dd, 2), "size_multiplier": 1.0,
+                "message": "Portfolio within normal range", "allowed_sectors": None}
+
+
+# ============================================================
+#  15. ADAPTIVE WEIGHT LEARNING
+# ============================================================
+
+def learn_factor_weights(closed_trades: list) -> dict:
+    """Analyze which factors predicted winners and adjust weights."""
+    if not closed_trades or len(closed_trades) < 20:
+        return {"status": "INSUFFICIENT_DATA", "trades_needed": 20 - len(closed_trades or [])}
+
+    base_weights = {
+        "momentum": 0.15, "rsi2": 0.15, "value": 0.10, "quality": 0.10,
+        "volume": 0.10, "volatility": 0.05, "gap": 0.05, "sector_rs": 0.05,
+        "trend": 0.10, "mean_rev": 0.05, "earnings": 0.05, "inst_flow": 0.03, "short_int": 0.02,
+    }
+
+    factor_perf = {k: {"wins": 0, "losses": 0, "total_return": 0} for k in base_weights}
+
+    for trade in closed_trades:
+        pnl = trade.get("pnl_pct", 0) or 0
+        factors = trade.get("factors", {})
+        if not factors:
+            continue
+        won = pnl > 0
+        for fn, fv in factors.items():
+            cn = fn.replace("_score", "").replace("_adj", "")
+            if cn not in factor_perf:
+                continue
+            if (fv > 0 and trade.get("direction") == "long") or \
+               (fv < 0 and trade.get("direction") == "short"):
+                factor_perf[cn]["wins" if won else "losses"] += 1
+                factor_perf[cn]["total_return"] += pnl
+
+    adjusted = {}
+    for f, bw in base_weights.items():
+        p = factor_perf.get(f, {"wins": 0, "losses": 0})
+        t = p["wins"] + p["losses"]
+        if t >= 5:
+            wr = p["wins"] / t
+            adj = 1.0 + (wr - 0.55) * 2 if wr > 0.55 else (max(0.3, 1.0 - (0.45 - wr) * 2) if wr < 0.45 else 1.0)
+            adjusted[f] = round(bw * adj, 4)
+        else:
+            adjusted[f] = bw
+
+    tw = sum(adjusted.values())
+    if tw > 0:
+        adjusted = {k: round(v / tw, 4) for k, v in adjusted.items()}
+
+    return {
+        "status": "LEARNED", "adjusted_weights": adjusted, "base_weights": base_weights,
+        "factor_performance": {
+            k: {"win_rate": round(v["wins"] / max(v["wins"] + v["losses"], 1) * 100, 1),
+                "sample_size": v["wins"] + v["losses"]}
+            for k, v in factor_perf.items()
+        },
+        "trades_analyzed": len(closed_trades),
+    }

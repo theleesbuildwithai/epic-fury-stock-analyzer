@@ -1956,6 +1956,70 @@ def rentech_alt_data(request: Request, ticker: str):
         raise HTTPException(status_code=500, detail="Failed to get alt data")
 
 
+@app.get("/api/rentech/earnings-shield")
+def rentech_earnings_shield(request: Request):
+    """Get stocks blocked/warned due to imminent earnings."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        return picks.get("earnings_shield", {"blocked": [], "warning": []})
+    except Exception as e:
+        logger.error(f"Earnings shield error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get earnings data")
+
+
+@app.get("/api/rentech/sector-rotation")
+def rentech_sector_rotation(request: Request):
+    """Get sector rotation flow data (inflow/outflow detection)."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        return picks.get("sector_rotation", {})
+    except Exception as e:
+        logger.error(f"Sector rotation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get sector rotation")
+
+
+@app.get("/api/rentech/regime-prediction")
+def rentech_regime_prediction(request: Request):
+    """Get regime transition prediction (early warning system)."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        return picks.get("regime_transition", {})
+    except Exception as e:
+        logger.error(f"Regime prediction error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get regime prediction")
+
+
+@app.get("/api/rentech/news-sentiment/{ticker}")
+def rentech_news_sentiment(request: Request, ticker: str):
+    """Get news sentiment for a specific stock."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    try:
+        from analysis.rentech import get_stock_news_sentiment
+        result = get_stock_news_sentiment([clean_ticker])
+        return result.get(clean_ticker, {"sentiment": "NEUTRAL", "score": 0})
+    except Exception as e:
+        logger.error(f"News sentiment error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get news sentiment")
+
+
+@app.get("/api/rentech/options-flow/{ticker}")
+def rentech_options_flow(request: Request, ticker: str):
+    """Get unusual options activity for a specific stock."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    try:
+        from analysis.rentech import detect_unusual_options
+        result = detect_unusual_options([clean_ticker])
+        return result.get(clean_ticker, {"signal": "NEUTRAL"})
+    except Exception as e:
+        logger.error(f"Options flow error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get options flow")
+
+
 @app.get("/api/rentech/dashboard")
 def rentech_dashboard(request: Request):
     """Full RenTech dashboard — all data in one call."""

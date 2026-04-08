@@ -975,6 +975,33 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
+            # DRAWDOWN RECOVERY MODE — reduce size when portfolio is losing
+            dd_mode = quant_picks.get("drawdown_mode", {})
+            dd_multiplier = dd_mode.get("size_multiplier", 1.0)
+            dd_allowed = dd_mode.get("allowed_sectors")
+            if dd_multiplier == 0:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"DRAWDOWN HALT: {dd_mode.get('message', 'trading suspended')}",
+                })
+                continue
+            if dd_allowed is not None and pick.get("sector", "") not in dd_allowed:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Drawdown mode: only {dd_allowed} sectors allowed",
+                })
+                continue
+
+            # EARNINGS SHIELD — Block stocks with earnings in next 1-2 days
+            earnings_shield = quant_picks.get("earnings_shield", {})
+            earnings_blocked_syms = {s["symbol"] for s in earnings_shield.get("blocked", [])}
+            if symbol in earnings_blocked_syms:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": "EARNINGS SHIELD: earnings imminent, trade blocked",
+                })
+                continue
+
             # Regime-aware sizing — 6% base, conviction direction gets 8%
             if regime == "BEAR":
                 size_pct = 0.08 if direction == "short" else 0.05
@@ -982,7 +1009,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 size_pct = 0.08 if direction == "long" else 0.04
             else:
                 size_pct = POSITION_SIZE_PCT  # 6%
-            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod * cb_multiplier
+            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod * cb_multiplier * dd_multiplier
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
@@ -1666,6 +1693,26 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 close_reason = f"Hold duration expired ({days_held}/{max_hold} days)"
         except Exception:
             pass
+
+        # EARNINGS SHIELD: Close positions if earnings are imminent (next 1 day)
+        if not should_close:
+            try:
+                t = yf.Ticker(ticker)
+                cal = t.calendar
+                if cal is not None:
+                    next_earn = None
+                    if isinstance(cal, dict) and cal.get("Earnings Date"):
+                        ed = cal["Earnings Date"]
+                        next_earn = pd.Timestamp(ed[0] if isinstance(ed, list) else ed)
+                    elif isinstance(cal, pd.DataFrame) and not cal.empty:
+                        next_earn = pd.Timestamp(cal.iloc[0, 0]) if len(cal.columns) > 0 else None
+                    if next_earn:
+                        days_to_earn = (next_earn - pd.Timestamp.now()).days
+                        if 0 <= days_to_earn <= 1:
+                            should_close = True
+                            close_reason = f"EARNINGS SHIELD: earnings in {days_to_earn} day(s) — closing to avoid gap risk"
+            except Exception:
+                pass
 
         # BEAR regime protection: close losing longs at -4% (was -2% — too tight)
         if not should_close and regime == "BEAR" and direction == "long" and pnl_pct < -4:
