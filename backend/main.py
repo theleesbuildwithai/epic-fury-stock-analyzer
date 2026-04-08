@@ -775,11 +775,11 @@ def _geopolitical_scanner():
 scheduler.add_job(
     _geopolitical_scanner,
     "interval",
-    minutes=15,
+    minutes=5,
     id="geo_risk_scanner",
-    name="Geo-Political Risk Scanner (constant monitoring)",
+    name="Geo-Political Risk Scanner (constant 5-min monitoring)",
     max_instances=1,
-    misfire_grace_time=600,
+    misfire_grace_time=300,
 )
 
 # --- DAILY 2.5% TAKE-PROFIT RULE ---
@@ -855,6 +855,123 @@ scheduler.add_job(
     minutes=5,
     id="daily_profit_check",
     name="Daily 2.5% Profit Limit Check",
+    max_instances=1,
+    misfire_grace_time=300,
+)
+
+# --- ADAPTIVE TOTAL RETURN PROTECTION ---
+# When the fund is up significantly (>10% total return), become ADAPTIVE:
+# 1. Scale back position sizes as returns increase
+# 2. At end of day (3:30pm+), aggressively sell winners to lock in gains
+# 3. If total return drops from peak by 1.5%, sell everything to protect
+# This prevents giving back big gains by being greedy
+
+_peak_total_return = {"value": 0, "date": None}
+
+def _adaptive_profit_protection():
+    """Adaptive profit protection — scales with total return level."""
+    global _peak_total_return
+    import pytz
+    et = pytz.timezone("US/Eastern")
+    now_et = dt.now(et)
+
+    try:
+        portfolio = get_portfolio_state()
+        total_value = portfolio.get("total_value", 100000)
+        total_return = ((total_value / 100000) - 1) * 100  # vs ORIGINAL_CAPITAL
+
+        # Track peak return
+        if total_return > _peak_total_return["value"]:
+            _peak_total_return["value"] = total_return
+            _peak_total_return["date"] = now_et.strftime("%Y-%m-%d %H:%M")
+
+        peak = _peak_total_return["value"]
+        drawdown_from_peak = peak - total_return
+
+        # --- ADAPTIVE POSITION TRIMMING ---
+        # If up >10% total and at end of day (after 3:30pm ET), trim winning positions
+        hour = now_et.hour
+        minute = now_et.minute
+        is_end_of_day = (hour == 15 and minute >= 30) or hour >= 16
+
+        if total_return >= 10.0 and is_end_of_day:
+            # End of day with big total return — sell positions that are profitable
+            from predictions.models import get_open_trades, close_paper_trade
+            from predictions.paper_trader import _get_current_prices
+            open_trades = get_open_trades()
+            if not open_trades:
+                return
+
+            symbols = list(set(t["ticker"] for t in open_trades))
+            prices = _get_current_prices(symbols)
+
+            sold_count = 0
+            for trade in open_trades:
+                price = prices.get(trade["ticker"], trade["entry_price"])
+                entry = trade["entry_price"]
+                direction = trade["direction"]
+
+                if direction == "long":
+                    pnl_pct = ((price / entry) - 1) * 100
+                else:
+                    pnl_pct = ((entry / price) - 1) * 100
+
+                # Sell profitable trades at end of day to lock in portfolio gains
+                if pnl_pct > 0.5:
+                    try:
+                        close_paper_trade(trade["id"], price)
+                        sold_count += 1
+                    except Exception:
+                        pass
+
+            if sold_count > 0:
+                logger.warning(
+                    f"ADAPTIVE PROFIT PROTECTION: EOD sell — closed {sold_count} profitable trades "
+                    f"(total return: +{total_return:.1f}%, peak: +{peak:.1f}%)"
+                )
+                try:
+                    backup_db_to_s3()
+                except Exception:
+                    pass
+
+        # --- PEAK DRAWDOWN PROTECTION ---
+        # If we've been at 10%+ return and now it's dropping, protect the gains
+        if peak >= 10.0 and drawdown_from_peak >= 1.5:
+            # We've lost 1.5% from our peak — sell everything to protect
+            from predictions.models import get_open_trades, close_paper_trade
+            from predictions.paper_trader import _get_current_prices
+            open_trades = get_open_trades()
+            if not open_trades:
+                return
+
+            symbols = list(set(t["ticker"] for t in open_trades))
+            prices = _get_current_prices(symbols)
+
+            for trade in open_trades:
+                price = prices.get(trade["ticker"], trade["entry_price"])
+                try:
+                    close_paper_trade(trade["id"], price)
+                except Exception:
+                    pass
+
+            logger.warning(
+                f"PEAK DRAWDOWN PROTECTION: Peak was +{peak:.1f}%, now +{total_return:.1f}% "
+                f"(dropped {drawdown_from_peak:.1f}%) — sold all to protect gains"
+            )
+            try:
+                backup_db_to_s3()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"ADAPTIVE PROFIT PROTECTION ERROR: {e}")
+
+scheduler.add_job(
+    _adaptive_profit_protection,
+    "interval",
+    minutes=5,
+    id="adaptive_profit_protection",
+    name="Adaptive Total Return Protection",
     max_instances=1,
     misfire_grace_time=300,
 )

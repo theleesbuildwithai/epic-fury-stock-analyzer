@@ -49,9 +49,9 @@ export default function QuantDashboard() {
         fetch('/api/paper-portfolio'),
         fetch('/api/paper-performance'),
       ])
-      setPortfolio(await pRes.json())
-      setPerformance(await perfRes.json())
-    } catch { }
+      if (pRes.ok) setPortfolio(await pRes.json())
+      if (perfRes.ok) setPerformance(await perfRes.json())
+    } catch (e) { console.debug('Portfolio fetch error:', e) }
     setLoading(p => ({ ...p, portfolio: false }))
   }
 
@@ -106,7 +106,7 @@ export default function QuantDashboard() {
           <div className="mt-3 flex items-end justify-between flex-wrap gap-3">
             <div className="flex gap-4 text-xs text-neutral-500">
               <span>14 Quant Factors</span>
-              <span>270+ Stocks Analyzed</span>
+              <span>500+ Stocks Analyzed</span>
               <span>Event-Driven Trading</span>
               <span>Self-Learning Weekly</span>
             </div>
@@ -160,7 +160,7 @@ export default function QuantDashboard() {
 // TAB 1: QUANT PICKS
 // ============================================================
 function QuantPicksTab({ picks, loading, RegimeBadge }) {
-  if (loading) return <LoadingSpinner text="Analyzing 270+ stocks across 14 quant factors... this takes ~90 seconds" />
+  if (loading) return <LoadingSpinner text="Analyzing 500+ stocks across 14 quant factors... this takes ~90 seconds" />
   if (!picks) return <EmptyState text="Quant picks are being computed. Refresh in 60 seconds." />
 
   const regime = picks.regime || {}
@@ -360,7 +360,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
       {/* ====== ADVANCED ANALYTICS PANEL ====== */}
       <div className="bg-black border border-neutral-700 rounded-xl p-6">
         <h3 className="text-white font-bold text-lg mb-4">Advanced Analytics</h3>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
           {/* Sharpe Ratio */}
           <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
             <div className="text-neutral-500 text-xs">Sharpe Ratio</div>
@@ -436,8 +436,93 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               {stats.total_trades || 0} closed, {stats.total_open || 0} open
             </div>
           </div>
+
+          {/* Avg Hold Days */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Avg Hold</div>
+            <div className="text-white font-black font-mono text-xl">
+              {perf.avg_hold_days || 0}d
+            </div>
+            <div className="text-neutral-600 text-xs">Per trade</div>
+          </div>
+
+          {/* Max Drawdown */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Max Drawdown</div>
+            <div className="text-red-400 font-black font-mono text-xl">
+              {performance?.max_drawdown_pct != null ? `${performance.max_drawdown_pct}%` : 'N/A'}
+            </div>
+            <div className="text-neutral-600 text-xs">Peak to trough</div>
+          </div>
         </div>
       </div>
+
+      {/* ====== BENCHMARKING vs S&P 500 ====== */}
+      {performance?.benchmark && (
+        <div className="bg-black border border-neutral-700 rounded-xl p-6">
+          <h3 className="text-white font-bold text-lg mb-4">Benchmarking vs S&P 500</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="bg-neutral-900 rounded-lg p-3 border border-green-500/20">
+              <div className="text-neutral-500 text-xs">Fund Return</div>
+              <div className={`text-xl font-black font-mono ${
+                (performance.benchmark.fund_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(performance.benchmark.fund_return_pct || 0) >= 0 ? '+' : ''}{(performance.benchmark.fund_return_pct || 0).toFixed(2)}%
+              </div>
+              <div className="text-neutral-600 text-xs">Since inception</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">S&P 500 Return</div>
+              <div className={`text-xl font-black font-mono ${
+                (performance.benchmark.sp500_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(performance.benchmark.sp500_return_pct || 0) >= 0 ? '+' : ''}{(performance.benchmark.sp500_return_pct || 0).toFixed(2)}%
+              </div>
+              <div className="text-neutral-600 text-xs">Same period</div>
+            </div>
+            <div className={`bg-neutral-900 rounded-lg p-3 border ${
+              (performance.benchmark.alpha_pct || 0) > 0 ? 'border-green-500/30' : 'border-red-500/30'
+            }`}>
+              <div className="text-neutral-500 text-xs">Alpha</div>
+              <div className={`text-xl font-black font-mono ${
+                (performance.benchmark.alpha_pct || 0) > 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(performance.benchmark.alpha_pct || 0) > 0 ? '+' : ''}{(performance.benchmark.alpha_pct || 0).toFixed(2)}%
+              </div>
+              <div className="text-neutral-600 text-xs">
+                {(performance.benchmark.alpha_pct || 0) > 0 ? 'Beating market' : 'Trailing market'}
+              </div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">Fund Sharpe</div>
+              <div className={`text-xl font-black font-mono ${
+                (performance.benchmark.fund_sharpe || 0) >= 1 ? 'text-green-400' : 'text-neutral-300'
+              }`}>
+                {(performance.benchmark.fund_sharpe || 0).toFixed(2)}
+              </div>
+              <div className="text-neutral-600 text-xs">Risk-adjusted</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">S&P Sharpe</div>
+              <div className="text-neutral-300 font-black font-mono text-xl">
+                {(performance.benchmark.sp500_sharpe || 0).toFixed(2)}
+              </div>
+              <div className="text-neutral-600 text-xs">Benchmark</div>
+            </div>
+            <div className={`bg-neutral-900 rounded-lg p-3 border ${
+              (performance.benchmark.sharpe_edge || 0) > 0 ? 'border-green-500/30' : 'border-red-500/30'
+            }`}>
+              <div className="text-neutral-500 text-xs">Sharpe Edge</div>
+              <div className={`text-xl font-black font-mono ${
+                (performance.benchmark.sharpe_edge || 0) > 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(performance.benchmark.sharpe_edge || 0) > 0 ? '+' : ''}{(performance.benchmark.sharpe_edge || 0).toFixed(2)}
+              </div>
+              <div className="text-neutral-600 text-xs">vs S&P 500</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ====== TRADE STATISTICS ====== */}
       {stats.total_trades > 0 && (
@@ -578,7 +663,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </div>
           )}
           <p className="text-neutral-600 text-xs mt-2 italic">
-            The computer autonomously analyzes 270+ stocks and executes trades event-driven during market hours. No human intervention required.
+            The computer autonomously analyzes 500+ stocks and executes trades event-driven during market hours. No human intervention required.
           </p>
         </div>
       )}

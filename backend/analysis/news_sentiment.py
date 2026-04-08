@@ -143,6 +143,7 @@ TARIFF_DEESCALATION_WORDS = [
 #  GEOPOLITICAL Risk Intelligence
 # ============================================================
 GEO_MILITARY_KEYWORDS = [
+    # Direct military actions
     "invasion", "ground invasion", "air strike", "airstrike", "missile",
     "bombing", "troops deployed", "military operation", "martial law",
     "declaration of war", "nuclear", "mobilization", "offensive",
@@ -151,9 +152,24 @@ GEO_MILITARY_KEYWORDS = [
     "artillery", "casualties", "combat", "warzone", "occupied",
     "military strike", "retaliation strike", "carpet bombing",
     "ground offensive", "siege", "shelling", "ammunition",
+    # Expanded military terms
+    "ballistic missile", "cruise missile", "intercontinental",
+    "chemical weapon", "biological weapon", "weapons of mass",
+    "military incursion", "border clash", "armed conflict",
+    "war crime", "genocide", "ethnic cleansing", "mass atrocity",
+    "aircraft carrier", "naval fleet", "submarine", "warship",
+    "fighter jet", "stealth bomber", "military convoy",
+    "special forces", "commando raid", "covert operation",
+    "rocket attack", "mortar", "landmine", "IED", "ambush",
+    "hostage", "kidnapped", "prisoner of war", "POW",
+    "coup attempt", "military junta", "state of emergency",
+    "martial law declared", "conscription", "draft",
+    "nuclear test", "uranium enrichment", "plutonium",
+    "dirty bomb", "radiological", "EMP", "electromagnetic pulse",
 ]
 
 GEO_TENSION_KEYWORDS = [
+    # Diplomatic/political
     "sanctions", "embargo", "trade ban", "diplomatic crisis", "expel diplomat",
     "recall ambassador", "border tension", "territorial dispute",
     "cyberattack", "cyber warfare", "hack", "espionage",
@@ -163,15 +179,48 @@ GEO_TENSION_KEYWORDS = [
     "negotiations collapse",
     "troop buildup", "military exercise", "show of force",
     "diplomatic expulsion", "asset freeze", "travel ban",
+    # Expanded tension terms
+    "trade war", "economic warfare", "currency war", "devaluation",
+    "debt crisis", "default", "sovereign debt", "credit downgrade",
+    "capital flight", "bank run", "financial contagion",
+    "election crisis", "contested election", "political instability",
+    "protest", "riot", "civil unrest", "revolution", "uprising",
+    "assassination", "political assassination", "regime collapse",
+    "diplomatic breakdown", "ultimatum", "threat of force",
+    "naval provocation", "airspace violation", "territorial incursion",
+    "intelligence leak", "spy scandal", "disinformation campaign",
+    "oil embargo", "energy crisis", "gas pipeline", "pipeline attack",
+    "supply chain disruption", "port closure", "shipping lane",
+    "food crisis", "famine", "water conflict", "resource war",
+    "pandemic", "outbreak", "quarantine", "lockdown",
+    "terrorist attack", "terrorism", "extremist", "radicalization",
+    "cyber espionage", "ransomware", "infrastructure attack",
+    "election interference", "propaganda", "information warfare",
 ]
 
 GEO_HOTSPOTS = [
+    # Middle East
     "iran", "iraq", "israel", "gaza", "palestine", "lebanon", "hezbollah",
-    "russia", "ukraine", "crimea", "donbas", "nato",
-    "china", "taiwan", "south china sea", "north korea", "pyongyang",
     "yemen", "houthi", "red sea", "strait of hormuz",
-    "syria", "libya", "sudan", "ethiopia", "somalia",
-    "persian gulf", "west bank", "tehran", "moscow", "beijing",
+    "syria", "persian gulf", "west bank", "tehran", "riyadh",
+    "saudi arabia", "qatar", "bahrain", "oman", "kuwait",
+    "jordan", "egypt", "suez canal",
+    # Europe/Russia
+    "russia", "ukraine", "crimea", "donbas", "nato", "moscow",
+    "belarus", "moldova", "transnistria", "baltic", "kaliningrad",
+    "finland", "sweden", "arctic",
+    # Asia/Pacific
+    "china", "taiwan", "south china sea", "north korea", "pyongyang",
+    "beijing", "hong kong", "xinjiang", "tibet",
+    "kashmir", "india", "pakistan", "afghanistan",
+    "myanmar", "philippines", "vietnam", "indonesia",
+    "korean peninsula", "demilitarized zone", "dmz",
+    # Africa
+    "libya", "sudan", "ethiopia", "somalia", "niger", "mali",
+    "congo", "mozambique", "sahel", "boko haram",
+    # Americas
+    "venezuela", "cuba", "colombia", "mexico cartel",
+    "panama canal", "haiti",
 ]
 
 GEO_SECTOR_IMPACTS = {

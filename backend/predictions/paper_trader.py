@@ -42,7 +42,8 @@ MAX_POSITIONS = 999  # No limit — only constrained by cash
 POSITION_SIZE_PCT = 0.06  # 6% per position — conviction sizing like real hedge funds
 STOP_LOSS_PCT = 0.05  # Default fallback — overridden by per-stock ATR calculation
 DEFAULT_HOLD_DAYS = 30
-MIN_CONFIDENCE = 30  # Low bar — the QUANT SCORE is the real gatekeeper, not confidence
+MIN_CONFIDENCE = 40  # Raised from 30 — filter out low-quality signals
+MIN_COMPOSITE_SCORE = 2.0  # Minimum absolute composite score to enter a trade
 
 
 # ============================================================
@@ -120,11 +121,11 @@ def _autonomous_stop_and_target(
     # High conviction: 2.5x ATR (more room)
     # Low conviction: 1.5x ATR (tighter, less risk)
     if confidence >= 80 and abs(composite_score) >= 5:
-        atr_mult_stop = 2.5  # High conviction = more breathing room
+        atr_mult_stop = 2.0  # High conviction = reasonable room (was 2.5 — too wide)
     elif confidence >= 60:
-        atr_mult_stop = 2.0  # Standard
+        atr_mult_stop = 1.5  # Standard (was 2.0 — tightened to cut losses faster)
     else:
-        atr_mult_stop = 1.5  # Low conviction = tight stop, less risk
+        atr_mult_stop = 1.2  # Low conviction = tight stop (was 1.5 — less risk)
 
     # Regime adjustment
     if regime == "BEAR":
@@ -144,27 +145,27 @@ def _autonomous_stop_and_target(
 
     stop_pct = atr_pct * atr_mult_stop
 
-    # Hard clamp: never risk more than 10% or less than 2%
-    stop_pct = max(0.02, min(stop_pct, 0.10))
+    # Hard clamp: never risk more than 7% or less than 1.5% (was 2-10% — too wide)
+    stop_pct = max(0.015, min(stop_pct, 0.07))
 
     # --- TAKE PROFIT: Risk-Reward Ratio ---
     # Target at least 2:1 reward-to-risk (RenTech standard)
     # High conviction: 3:1, Low conviction: 2:1
     if confidence >= 80 and abs(composite_score) >= 5:
-        rr_ratio = 3.0  # High conviction = aim for 3x the risk
+        rr_ratio = 2.5  # High conviction (was 3.0 — targets were unreachable)
     elif confidence >= 60:
-        rr_ratio = 2.5
+        rr_ratio = 2.0  # Standard (was 2.5)
     else:
-        rr_ratio = 2.0
+        rr_ratio = 1.5  # Low conviction (was 2.0 — more realistic targets)
 
     # Mean reversion: quick profits, lower ratio
     if is_mean_reversion:
-        rr_ratio = 1.5  # MR trades are high win-rate, lower payoff
+        rr_ratio = 1.3  # MR trades are high win-rate, lower payoff (was 1.5)
 
     target_pct = stop_pct * rr_ratio
 
-    # Hard clamp: target between 3% and 30%
-    target_pct = max(0.03, min(target_pct, 0.30))
+    # Hard clamp: target between 2% and 20% (was 3-30% — unrealistic)
+    target_pct = max(0.02, min(target_pct, 0.20))
 
     # --- HOLD DURATION: Based on ATR and signal ---
     # High volatility stocks resolve faster (shorter hold)
@@ -482,7 +483,7 @@ def get_portfolio_state() -> dict:
     win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
     avg_win = np.mean([t["pnl_pct"] for t in wins]) if wins else 0
     avg_loss = np.mean([t["pnl_pct"] for t in losses]) if losses else 0
-    profit_factor = abs(avg_win * len(wins)) / (abs(avg_loss * len(losses)) + 0.01) if losses else 0
+    profit_factor = abs(avg_win * len(wins)) / (abs(avg_loss * len(losses)) + 0.01) if losses else (99.0 if wins else 0)
 
     # --- Trades per day ---
     trades_per_day = 0
@@ -683,8 +684,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # A stable stock (ATR 1%) can start trailing at 3%.
             # Trail width = 1x ATR below peak — gives exactly one day of noise room.
             stock_atr = _calculate_stock_atr(ticker)
-            trail_start_pct = stock_atr * 100 * 2  # Start trailing at 2x daily ATR
-            trail_start_pct = max(3.0, min(trail_start_pct, 12.0))  # Clamp 3-12%
+            trail_start_pct = stock_atr * 100 * 1.5  # Start trailing at 1.5x daily ATR (was 2x — too late)
+            trail_start_pct = max(2.0, min(trail_start_pct, 8.0))  # Clamp 2-8% (was 3-12% — waited too long)
 
             if not should_close and pnl_pct > trail_start_pct:
                 try:
@@ -701,13 +702,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                             trough_price = float(np.min(hist_closes))
                             peak_pnl = ((entry_price / trough_price) - 1) * 100
 
-                        # Smart trail: keep more of big winners, protect small ones
-                        if peak_pnl >= 20:
-                            trail_pct = 0.65  # Keep 65% of huge gains
-                        elif peak_pnl >= 12:
-                            trail_pct = 0.55  # Keep 55%
+                        # Smart trail: keep more gains, protect profits aggressively
+                        if peak_pnl >= 15:
+                            trail_pct = 0.70  # Keep 70% of big gains (was 65%)
+                        elif peak_pnl >= 8:
+                            trail_pct = 0.60  # Keep 60% (was 55%)
                         else:
-                            trail_pct = 0.45  # Keep 45% of smaller gains
+                            trail_pct = 0.50  # Keep 50% of smaller gains (was 45%)
 
                         trail_level = peak_pnl * trail_pct
 
@@ -724,13 +725,27 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # The target was already calculated by _autonomous_stop_and_target()
             # at entry time and stored in trade["target_price"]. We check it above.
             # But if somehow the stock is up 20%+ and target wasn't hit, lock it.
-            if not should_close and pnl_pct >= 20:
+            if not should_close and pnl_pct >= 15:
                 should_close = True
-                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — exceptional gain secured"
+                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — exceptional gain secured (threshold: 15%)"
 
-            # REMOVED: "SELL AT HIGHS" intraday trigger
-            # This was selling at +3% on tiny intraday dips — killed our best trades
-            # The trailing stop above handles profit protection properly
+            # TIME DECAY EXIT: If trade hasn't moved in our favor after 50% of hold time, cut it
+            # This prevents dead-weight trades from sitting and eventually hitting stop loss
+            if not should_close:
+                try:
+                    entry_date = datetime.fromisoformat(trade["entry_date"])
+                    days_held = (datetime.now() - entry_date).days
+                    max_hold = trade.get("hold_duration_days", DEFAULT_HOLD_DAYS)
+                    half_hold = max(2, max_hold // 2)
+                    if days_held >= half_hold and pnl_pct <= 0.5:
+                        # Held for half the expected time and still flat or losing
+                        should_close = True
+                        close_reason = (
+                            f"TIME DECAY: {days_held}d held (half of {max_hold}d), "
+                            f"only {pnl_pct:+.1f}% — cutting dead weight"
+                        )
+                except Exception:
+                    pass
 
             # BEAR PROTECTION: close losing longs at stop level, not at -2%
             # Was -2% = too tight, gets stopped out on normal volatility
@@ -878,9 +893,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         all_picks = []
 
         long_candidates = [p for p in quant_picks.get("long_picks", [])
-                          if p["confidence"] >= MIN_CONFIDENCE and p["symbol"] not in open_tickers]
+                          if p["confidence"] >= MIN_CONFIDENCE
+                          and abs(p.get("composite_score", 0)) >= MIN_COMPOSITE_SCORE
+                          and p["symbol"] not in open_tickers]
         short_candidates = [p for p in quant_picks.get("short_picks", [])
-                           if p["confidence"] >= MIN_CONFIDENCE and p["symbol"] not in open_tickers]
+                           if p["confidence"] >= MIN_CONFIDENCE
+                           and abs(p.get("composite_score", 0)) >= MIN_COMPOSITE_SCORE
+                           and p["symbol"] not in open_tickers]
 
         # Defensive sectors — safe for long positions even in bear markets
         # These are stable, dividend-paying, recession-resistant sectors
@@ -908,14 +927,28 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             logger.info(f"BEAR regime: {len(short_candidates)} shorts, {len(bear_longs)} safe longs "
                         f"({len(safe_longs)} defensive + {len(high_conviction_longs)} high-conviction)")
         elif regime == "BULL":
-            # BULL: Take ALL qualifying longs first, then only top 2 shorts
+            # BULL + TACO TRADE: Minimize shorts — everything is going up during ceasefire
+            # Check if ceasefire is active
+            ceasefire_active = quant_picks.get("macro", {}).get("ceasefire_overlay", {}).get("ceasefire_active", False)
+
             for p in long_candidates:
                 p["_adj_confidence"] = p["confidence"] + 15
                 all_picks.append(p)
-            for p in short_candidates[:2]:  # max 2 shorts in bull
-                p["_adj_confidence"] = p["confidence"] - 10
-                all_picks.append(p)
-            logger.info(f"BULL regime: {len(long_candidates)} longs, {min(2, len(short_candidates))} shorts selected")
+
+            if ceasefire_active:
+                # TACO TRADE: NO new shorts during ceasefire — everything is up
+                logger.warning("TACO TRADE ACTIVE: Ceasefire detected — blocking ALL new short entries")
+                # Only allow 1 short max, and only if extremely high conviction
+                top_shorts = [p for p in short_candidates if p["confidence"] >= 75 and abs(p.get("composite_score", 0)) >= 6]
+                for p in top_shorts[:1]:
+                    p["_adj_confidence"] = p["confidence"] - 20
+                    all_picks.append(p)
+                logger.info(f"TACO BULL: {len(long_candidates)} longs, {min(1, len(top_shorts))} extreme-conviction shorts only")
+            else:
+                for p in short_candidates[:2]:  # max 2 shorts in normal bull
+                    p["_adj_confidence"] = p["confidence"] - 10
+                    all_picks.append(p)
+                logger.info(f"BULL regime: {len(long_candidates)} longs, {min(2, len(short_candidates))} shorts selected")
         else:
             # SIDEWAYS: balanced
             for p in long_candidates:
@@ -951,7 +984,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if gross_exposure >= max_exposure:
                 results["skipped"].append({
                     "symbol": symbol,
-                    "reason": f"Gross exposure limit (85% of portfolio)",
+                    "reason": f"Gross exposure limit (92% of portfolio)",
                 })
                 break  # Stop opening more positions
 
@@ -1537,25 +1570,46 @@ def get_performance_analytics() -> dict:
             "total_pnl": round(sum(t.get("pnl_dollars", 0) or 0 for t in closed), 2),
         }
 
-        # Sharpe ratio
+        # Sharpe ratio — using ACTUAL average holding period, not hardcoded
         if len(returns) >= 5 and np.std(returns) > 0:
-            avg_hold = 15  # approximate
-            trades_per_year = 252 / max(1, avg_hold)
-            sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(trades_per_year)
+            # Calculate actual average holding period from closed trades
+            hold_days_list = []
+            for t in closed:
+                try:
+                    entry_d = datetime.fromisoformat(t.get("entry_date", ""))
+                    exit_d = datetime.fromisoformat(t.get("exit_date", ""))
+                    hd = max(1, (exit_d - entry_d).days)
+                    hold_days_list.append(hd)
+                except Exception:
+                    pass
+            avg_hold = float(np.mean(hold_days_list)) if hold_days_list else 10
+            avg_hold = max(1, avg_hold)  # Safety floor
+
+            trades_per_year = 252 / avg_hold
+            # Risk-free rate adjustment (annualized ~5% / trades_per_year)
+            rf_per_trade = 0.05 / trades_per_year
+            excess_returns = [r / 100 - rf_per_trade for r in returns]  # Convert % to decimal
+            sharpe = (np.mean(excess_returns) / np.std(excess_returns)) * np.sqrt(trades_per_year)
             result["overall"]["sharpe_ratio"] = round(float(sharpe), 2)
+            result["overall"]["avg_hold_days"] = round(avg_hold, 1)
         else:
             result["overall"]["sharpe_ratio"] = 0
+            result["overall"]["avg_hold_days"] = 0
 
-        # Sortino ratio — only penalizes downside volatility
+        # Sortino ratio — proper downside deviation (uses 0 for positive returns)
         if len(returns) >= 5:
-            downside_returns = [r for r in returns if r < 0]
-            if downside_returns and np.std(downside_returns) > 0:
-                avg_hold = 15
-                trades_per_year = 252 / max(1, avg_hold)
-                sortino = (np.mean(returns) / np.std(downside_returns)) * np.sqrt(trades_per_year)
+            avg_hold = result["overall"].get("avg_hold_days", 10) or 10
+            trades_per_year = 252 / max(1, avg_hold)
+            rf_per_trade = 0.05 / trades_per_year
+            all_excess = [r / 100 - rf_per_trade for r in returns]
+            # Proper downside deviation: min(0, excess_return)^2 for ALL trades
+            downside_diff = [min(0, r) for r in all_excess]
+            downside_dev = float(np.sqrt(np.mean([d**2 for d in downside_diff])))
+            if downside_dev > 0:
+                sortino = (np.mean(all_excess) / downside_dev) * np.sqrt(trades_per_year)
                 result["overall"]["sortino_ratio"] = round(float(sortino), 2)
             else:
-                # No losing trades = infinite sortino, cap at 99
+                # No downside = infinite sortino, cap at 99
                 result["overall"]["sortino_ratio"] = 99.0 if np.mean(returns) > 0 else 0
         else:
             result["overall"]["sortino_ratio"] = 0
@@ -1673,6 +1727,43 @@ def get_performance_analytics() -> dict:
                 dd = ((v / peak) - 1) * 100
                 max_dd = min(max_dd, dd)
             result["max_drawdown_pct"] = round(max_dd, 2)
+
+    # --- Benchmarking vs S&P 500 ---
+    try:
+        _throttle()
+        sp_df = yf.download("^GSPC", period="3mo", progress=False)
+        if sp_df is not None and len(sp_df) >= 5:
+            sp_closes = _safe_col(sp_df, "Close").values.astype(float)
+            sp_returns = np.diff(sp_closes) / sp_closes[:-1]  # Daily returns
+            sp_total_return = ((sp_closes[-1] / sp_closes[0]) - 1) * 100
+
+            sp_sharpe = 0
+            if len(sp_returns) >= 5 and np.std(sp_returns) > 0:
+                sp_sharpe = (np.mean(sp_returns) / np.std(sp_returns)) * np.sqrt(252)
+
+            fund_total_return = result.get("overall", {}).get("avg_return", 0) or 0
+            fund_sharpe = result.get("overall", {}).get("sharpe_ratio", 0) or 0
+
+            # Alpha = our return - benchmark return (simplified)
+            portfolio_state = get_portfolio_state()
+            our_total = ((portfolio_state.get("total_value", 100000) / ORIGINAL_CAPITAL) - 1) * 100
+
+            result["benchmark"] = {
+                "sp500_return_pct": round(float(sp_total_return), 2),
+                "sp500_sharpe": round(float(sp_sharpe), 2),
+                "fund_return_pct": round(our_total, 2),
+                "fund_sharpe": round(float(fund_sharpe), 2),
+                "alpha_pct": round(our_total - float(sp_total_return), 2),
+                "sharpe_edge": round(float(fund_sharpe) - float(sp_sharpe), 2),
+                "period": "Since Inception",
+            }
+    except Exception as e:
+        logger.debug(f"Benchmark calculation error: {e}")
+        result["benchmark"] = {
+            "sp500_return_pct": 0, "sp500_sharpe": 0,
+            "fund_return_pct": 0, "fund_sharpe": 0,
+            "alpha_pct": 0, "sharpe_edge": 0, "period": "N/A",
+        }
 
     result["timestamp"] = datetime.now().isoformat()
     return result

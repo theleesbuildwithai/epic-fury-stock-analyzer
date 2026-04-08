@@ -57,6 +57,7 @@ def _throttle():
     elapsed = now - _last_quant_call[0]
     if elapsed < _QUANT_DELAY:
         time.sleep(_QUANT_DELAY - elapsed)
+    _last_quant_call[0] = time.time()  # FIXED: was dead code in _safe_close
 
 
 def _safe_close(df):
@@ -69,7 +70,6 @@ def _safe_close(df):
     if hasattr(close, "columns"):
         close = close.iloc[:, 0]
     return close
-    _last_quant_call[0] = time.time()
 
 
 def _get_cached(key, fetch_fn, ttl=None):
@@ -228,6 +228,51 @@ QUANT_UNIVERSE = [
     "XBI",   # Biotech ETF — pharma tariff impact
     "ARKK",  # ARK Innovation — high-beta growth, biggest loser in selloffs
     "VXX",   # VIX Short-Term Futures — volatility play
+    # ============================================================
+    # EXPANDED S&P 500 COVERAGE (~260 additional stocks)
+    # ============================================================
+    # Technology additions
+    "ORCL", "IBM", "HPQ", "HPE", "CSCO", "AKAM", "FFIV", "JNPR", "KEYS", "ANSS",
+    "PTC", "MPWR", "SWKS", "QRVO", "TER", "ENPH", "SEDG", "FSLR", "GDDY", "GEN",
+    "CTSH", "EPAM", "IT", "LDOS", "DXC", "VRSN",
+    # Communication additions
+    "LYV", "WBD", "PARA", "FOX", "FOXA", "NWS", "NWSA", "IPG", "OMC",
+    # Consumer Discretionary additions
+    "YUM", "DPZ", "WYNN", "LVS", "MGM", "CZR", "HLT", "MAR", "RCL", "CCL",
+    "NCLH", "BBY", "KMX", "GRMN", "HAS", "MAT", "LULU", "BBWI", "TPR", "CPRI",
+    "PVH", "RL", "VFC", "APTV", "BWA", "LEA",
+    # Consumer Staples additions
+    "MNST", "TAP", "BG", "CPB", "HRL", "MKC", "CAG", "K", "LW",
+    "CHD", "CLX", "WBA",
+    # Healthcare additions
+    "A", "TECH", "WAT", "MTD", "PKI", "TFX", "BAX", "BSX", "ZBH", "PODD",
+    "XRAY", "RMD", "COO", "HSIC", "INCY", "EXAS", "ALNY", "SRPT",
+    "CNC", "MOH", "DGX", "LH",
+    # Financials additions
+    "TFC", "USB", "PNC", "MTB", "FITB", "HBAN", "KEY", "CFG", "RF", "ZION",
+    "NTRS", "STT", "BK", "TROW", "IVZ", "BEN", "NDAQ", "CBOE",
+    "AIG", "MET", "PRU", "ALL", "TRV", "AON", "WRB", "GL", "CINF", "L",
+    "RE", "RJF", "LPLA", "MKTX",
+    # Industrials additions
+    "CARR", "OTIS", "SWK", "IR", "DOV", "AME", "CTAS", "FAST", "GWW",
+    "MSM", "NDSN", "RHI", "MAN", "PAYC", "PAYX",
+    "WAB", "TDY", "HEI", "AXON", "BAH", "CACI", "KBR",
+    "DAL", "UAL", "LUV", "ALK", "JBLU", "CHRW", "EXPD", "LSTR",
+    "AOS", "LII", "WSO", "JCI",
+    # Energy additions
+    "PXD", "TRGP", "WMB", "KMI", "OKE", "DINO", "MRO", "APA", "SM",
+    # Materials additions
+    "PPG", "IFF", "ALB", "EMN", "CE", "AVTR", "FMC", "MOS", "CF",
+    "RPM", "SEE", "PKG", "IP", "WRK", "SON",
+    # Real Estate additions
+    "VICI", "IRM", "KIM", "REG", "FRT", "CPT", "ESS", "UDR", "MAA",
+    "ARE", "BXP", "SLG", "HIW", "PEAK", "HST", "RLJ",
+    # Utilities additions
+    "ES", "AES", "PNW", "NRG", "CMS", "DTE", "OGE", "PEG",
+    "ED", "FE", "PPL", "EVRG", "ATO", "NI", "LNT",
+    # Additional ETFs
+    "DIA", "MTUM", "VLUE", "QUAL", "SIZE", "XLY", "XLC", "XLB", "XLRE",
+    "KWEB", "EEM", "FXI", "EWZ", "EWJ",
 ]
 
 # Sector mapping for macro overlay adjustments — auto-generated for all 200+ stocks
@@ -338,6 +383,103 @@ SECTOR_MAP = {
     "XLE": "ETF", "XLV": "ETF", "XLK": "ETF", "XLI": "ETF",
     "XLP": "ETF", "XLU": "ETF", "GLD": "ETF", "TLT": "ETF",
     "USO": "ETF", "XBI": "ETF", "ARKK": "ETF", "VXX": "ETF",
+    # Expanded Technology
+    "ORCL": "Technology", "IBM": "Technology", "HPQ": "Technology",
+    "HPE": "Technology", "CSCO": "Technology", "AKAM": "Technology",
+    "FFIV": "Technology", "JNPR": "Technology", "KEYS": "Technology",
+    "ANSS": "Technology", "PTC": "Technology", "MPWR": "Technology",
+    "SWKS": "Technology", "QRVO": "Technology", "TER": "Technology",
+    "ENPH": "Technology", "SEDG": "Technology", "FSLR": "Technology",
+    "GDDY": "Technology", "GEN": "Technology", "CTSH": "Technology",
+    "EPAM": "Technology", "IT": "Technology", "LDOS": "Technology",
+    "DXC": "Technology", "VRSN": "Technology",
+    # Expanded Communication
+    "LYV": "Communication", "WBD": "Communication", "PARA": "Communication",
+    "FOX": "Communication", "FOXA": "Communication", "NWS": "Communication",
+    "NWSA": "Communication", "IPG": "Communication", "OMC": "Communication",
+    # Expanded Consumer Discretionary
+    "YUM": "Consumer Discretionary", "DPZ": "Consumer Discretionary",
+    "WYNN": "Consumer Discretionary", "LVS": "Consumer Discretionary",
+    "MGM": "Consumer Discretionary", "CZR": "Consumer Discretionary",
+    "HLT": "Consumer Discretionary", "MAR": "Consumer Discretionary",
+    "RCL": "Consumer Discretionary", "CCL": "Consumer Discretionary",
+    "NCLH": "Consumer Discretionary", "BBY": "Consumer Discretionary",
+    "KMX": "Consumer Discretionary", "GRMN": "Consumer Discretionary",
+    "HAS": "Consumer Discretionary", "MAT": "Consumer Discretionary",
+    "LULU": "Consumer Discretionary", "BBWI": "Consumer Discretionary",
+    "TPR": "Consumer Discretionary", "CPRI": "Consumer Discretionary",
+    "PVH": "Consumer Discretionary", "RL": "Consumer Discretionary",
+    "VFC": "Consumer Discretionary", "APTV": "Consumer Discretionary",
+    "BWA": "Consumer Discretionary", "LEA": "Consumer Discretionary",
+    # Expanded Consumer Staples
+    "MNST": "Consumer Staples", "TAP": "Consumer Staples",
+    "BG": "Consumer Staples", "CPB": "Consumer Staples",
+    "HRL": "Consumer Staples", "MKC": "Consumer Staples",
+    "CAG": "Consumer Staples", "K": "Consumer Staples",
+    "LW": "Consumer Staples", "CHD": "Consumer Staples",
+    "CLX": "Consumer Staples", "WBA": "Consumer Staples",
+    # Expanded Healthcare
+    "A": "Healthcare", "TECH": "Healthcare", "WAT": "Healthcare",
+    "MTD": "Healthcare", "PKI": "Healthcare", "TFX": "Healthcare",
+    "BAX": "Healthcare", "BSX": "Healthcare", "ZBH": "Healthcare",
+    "PODD": "Healthcare", "XRAY": "Healthcare", "RMD": "Healthcare",
+    "COO": "Healthcare", "HSIC": "Healthcare", "INCY": "Healthcare",
+    "EXAS": "Healthcare", "ALNY": "Healthcare", "SRPT": "Healthcare",
+    "CNC": "Healthcare", "MOH": "Healthcare", "DGX": "Healthcare",
+    "LH": "Healthcare",
+    # Expanded Financials
+    "TFC": "Financials", "USB": "Financials", "PNC": "Financials",
+    "MTB": "Financials", "FITB": "Financials", "HBAN": "Financials",
+    "KEY": "Financials", "CFG": "Financials", "RF": "Financials",
+    "ZION": "Financials", "NTRS": "Financials", "STT": "Financials",
+    "BK": "Financials", "TROW": "Financials", "IVZ": "Financials",
+    "BEN": "Financials", "NDAQ": "Financials", "CBOE": "Financials",
+    "AIG": "Financials", "MET": "Financials", "PRU": "Financials",
+    "ALL": "Financials", "TRV": "Financials", "AON": "Financials",
+    "WRB": "Financials", "GL": "Financials", "CINF": "Financials",
+    "L": "Financials", "RE": "Financials", "RJF": "Financials",
+    "LPLA": "Financials", "MKTX": "Financials",
+    # Expanded Industrials
+    "CARR": "Industrials", "OTIS": "Industrials", "SWK": "Industrials",
+    "IR": "Industrials", "DOV": "Industrials", "AME": "Industrials",
+    "CTAS": "Industrials", "FAST": "Industrials", "GWW": "Industrials",
+    "MSM": "Industrials", "NDSN": "Industrials", "RHI": "Industrials",
+    "MAN": "Industrials", "PAYC": "Industrials", "PAYX": "Industrials",
+    "WAB": "Industrials", "TDY": "Industrials", "HEI": "Industrials",
+    "AXON": "Industrials", "BAH": "Industrials", "CACI": "Industrials",
+    "KBR": "Industrials", "DAL": "Industrials", "UAL": "Industrials",
+    "LUV": "Industrials", "ALK": "Industrials", "JBLU": "Industrials",
+    "CHRW": "Industrials", "EXPD": "Industrials", "LSTR": "Industrials",
+    "AOS": "Industrials", "LII": "Industrials", "WSO": "Industrials",
+    "JCI": "Industrials",
+    # Expanded Energy
+    "PXD": "Energy", "TRGP": "Energy", "WMB": "Energy",
+    "KMI": "Energy", "OKE": "Energy", "DINO": "Energy",
+    "MRO": "Energy", "APA": "Energy", "SM": "Energy",
+    # Expanded Materials
+    "PPG": "Materials", "IFF": "Materials", "ALB": "Materials",
+    "EMN": "Materials", "CE": "Materials", "AVTR": "Materials",
+    "FMC": "Materials", "MOS": "Materials", "CF": "Materials",
+    "RPM": "Materials", "SEE": "Materials", "PKG": "Materials",
+    "IP": "Materials", "WRK": "Materials", "SON": "Materials",
+    # Expanded Real Estate
+    "VICI": "Real Estate", "IRM": "Real Estate", "KIM": "Real Estate",
+    "REG": "Real Estate", "FRT": "Real Estate", "CPT": "Real Estate",
+    "ESS": "Real Estate", "UDR": "Real Estate", "MAA": "Real Estate",
+    "ARE": "Real Estate", "BXP": "Real Estate", "SLG": "Real Estate",
+    "HIW": "Real Estate", "PEAK": "Real Estate", "HST": "Real Estate",
+    "RLJ": "Real Estate",
+    # Expanded Utilities
+    "ES": "Utilities", "AES": "Utilities", "PNW": "Utilities",
+    "NRG": "Utilities", "CMS": "Utilities", "DTE": "Utilities",
+    "OGE": "Utilities", "PEG": "Utilities",  "ED": "Utilities",
+    "FE": "Utilities", "PPL": "Utilities", "EVRG": "Utilities",
+    "ATO": "Utilities", "NI": "Utilities", "LNT": "Utilities",
+    # Additional ETFs
+    "DIA": "ETF", "MTUM": "ETF", "VLUE": "ETF", "QUAL": "ETF",
+    "SIZE": "ETF", "XLY": "ETF", "XLC": "ETF", "XLB": "ETF",
+    "XLRE": "ETF", "KWEB": "ETF", "EEM": "ETF", "FXI": "ETF",
+    "EWZ": "ETF", "EWJ": "ETF",
 }
 
 
