@@ -1890,6 +1890,107 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         raise HTTPException(status_code=500, detail="Backtest failed")
 
 
+# ============================================================
+#  RENTECH API ENDPOINTS
+# ============================================================
+
+@app.get("/api/rentech/pairs")
+def rentech_pairs(request: Request):
+    """Get current pairs trading opportunities (stat arb)."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        return {
+            "pairs_trades": picks.get("pairs_trades", []),
+            "regime": picks.get("regime", {}),
+            "timestamp": picks.get("generated_at", ""),
+        }
+    except Exception as e:
+        logger.error(f"RenTech pairs error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get pairs data")
+
+
+@app.get("/api/rentech/risk")
+def rentech_risk(request: Request):
+    """Get portfolio risk assessment (sector concentration, beta, correlation)."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        return {
+            "portfolio_risk": picks.get("portfolio_risk", {}),
+            "circuit_breaker": picks.get("circuit_breaker", {}),
+            "regime": picks.get("regime", {}),
+        }
+    except Exception as e:
+        logger.error(f"RenTech risk error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get risk data")
+
+
+@app.get("/api/rentech/mean-reversion")
+def rentech_mean_reversion(request: Request):
+    """Get mean reversion trade setups (RSI2 Connors, VWAP, Bollinger)."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        return {
+            "mean_reversion_setups": picks.get("mean_reversion_setups", []),
+            "regime": picks.get("regime", {}),
+            "timestamp": picks.get("generated_at", ""),
+        }
+    except Exception as e:
+        logger.error(f"RenTech mean reversion error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get mean reversion data")
+
+
+@app.get("/api/rentech/alt-data/{ticker}")
+def rentech_alt_data(request: Request, ticker: str):
+    """Get alternative data signals for a stock (short interest, insider, institutional)."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    try:
+        from analysis.rentech import get_alt_data_signals
+        signals = get_alt_data_signals([clean_ticker])
+        return signals.get(clean_ticker, {"symbol": clean_ticker, "error": "No data"})
+    except Exception as e:
+        logger.error(f"RenTech alt data error for {clean_ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get alt data")
+
+
+@app.get("/api/rentech/dashboard")
+def rentech_dashboard(request: Request):
+    """Full RenTech dashboard — all data in one call."""
+    check_rate_limit(request.client.host)
+    try:
+        picks = generate_quant_picks()
+        perf = get_performance_analytics()
+        portfolio = get_portfolio_state()
+
+        return {
+            "regime": picks.get("regime", {}),
+            "pairs_trades": picks.get("pairs_trades", []),
+            "mean_reversion_setups": picks.get("mean_reversion_setups", []),
+            "portfolio_risk": picks.get("portfolio_risk", {}),
+            "circuit_breaker": picks.get("circuit_breaker", {}),
+            "performance": {
+                "total_return": perf.get("total_return_pct", 0),
+                "sharpe": perf.get("sharpe_ratio", 0),
+                "win_rate": perf.get("win_rate_pct", 0),
+                "total_trades": perf.get("total_trades", 0),
+            },
+            "portfolio": {
+                "cash": portfolio.get("cash", 0),
+                "total_value": portfolio.get("total_value", 0),
+                "open_positions": len(portfolio.get("positions", [])),
+            },
+            "top_longs": picks.get("long_picks", [])[:5],
+            "top_shorts": picks.get("short_picks", [])[:5],
+            "timestamp": picks.get("generated_at", ""),
+        }
+    except Exception as e:
+        logger.error(f"RenTech dashboard error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load RenTech dashboard")
+
+
 # --- Serve Frontend (in production, the built React app is here) ---
 
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")

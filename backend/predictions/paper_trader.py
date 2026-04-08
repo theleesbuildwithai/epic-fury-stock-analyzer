@@ -787,6 +787,23 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # Renaissance uses 5-10% per position, not 2%
             cash = get_cash()  # Always fresh
             total_value = cash + positions_value_now
+
+            # RENTECH: Apply circuit breaker from portfolio risk module
+            circuit_breaker = quant_picks.get("circuit_breaker", {})
+            cb_multiplier = circuit_breaker.get("position_size_multiplier", 1.0)
+            if not circuit_breaker.get("allow_new_longs", True) and direction == "long":
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Circuit breaker HALT: {circuit_breaker.get('message', 'drawdown too large')}",
+                })
+                continue
+            if not circuit_breaker.get("allow_new_shorts", True) and direction == "short":
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Circuit breaker: no new shorts — {circuit_breaker.get('message', '')}",
+                })
+                continue
+
             # Regime-aware sizing — 6% base, conviction direction gets 8%
             if regime == "BEAR":
                 size_pct = 0.08 if direction == "short" else 0.05
@@ -794,7 +811,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 size_pct = 0.08 if direction == "long" else 0.04
             else:
                 size_pct = POSITION_SIZE_PCT  # 6%
-            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod
+            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod * cb_multiplier
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
