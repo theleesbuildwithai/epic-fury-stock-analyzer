@@ -465,6 +465,17 @@ def get_portfolio_state() -> dict:
     total_current = cash + positions_value
     total_return = ((total_current / ORIGINAL_CAPITAL) - 1) * 100
 
+    # --- Exposure calculations ---
+    long_value = sum(p["position_value"] for p in positions if p["direction"] == "long")
+    short_value = sum(p["position_value"] for p in positions if p["direction"] == "short")
+    gross_exposure = long_value + short_value
+    net_exposure = long_value - short_value
+    gross_exposure_pct = round((gross_exposure / total_current) * 100, 1) if total_current > 0 else 0
+    net_exposure_pct = round((net_exposure / total_current) * 100, 1) if total_current > 0 else 0
+    long_pct = round((long_value / total_current) * 100, 1) if total_current > 0 else 0
+    short_pct = round((short_value / total_current) * 100, 1) if total_current > 0 else 0
+    cash_pct = round((cash / total_current) * 100, 1) if total_current > 0 else 0
+
     # Win/loss stats from closed trades
     wins = [t for t in closed_trades if (t.get("pnl_pct") or 0) > 0]
     losses = [t for t in closed_trades if (t.get("pnl_pct") or 0) <= 0]
@@ -473,6 +484,31 @@ def get_portfolio_state() -> dict:
     avg_loss = np.mean([t["pnl_pct"] for t in losses]) if losses else 0
     profit_factor = abs(avg_win * len(wins)) / (abs(avg_loss * len(losses)) + 0.01) if losses else 0
 
+    # --- Trades per day ---
+    trades_per_day = 0
+    first_trade_date = None
+    if closed_trades:
+        dates_with_trades = set()
+        for t in closed_trades:
+            entry_d = t.get("entry_date", "")
+            if entry_d:
+                try:
+                    d = datetime.fromisoformat(entry_d).strftime("%Y-%m-%d")
+                    dates_with_trades.add(d)
+                    if first_trade_date is None or d < first_trade_date:
+                        first_trade_date = d
+                except Exception:
+                    pass
+        if first_trade_date:
+            try:
+                start = datetime.strptime(first_trade_date, "%Y-%m-%d")
+                trading_days = max(1, np.busday_count(
+                    start.date(), datetime.now().date()
+                ))
+                trades_per_day = round(len(closed_trades) / trading_days, 1)
+            except Exception:
+                trades_per_day = round(len(closed_trades) / max(1, len(dates_with_trades)), 1)
+
     result = {
         "total_value": round(total_current, 2),
         "cash": round(cash, 2),
@@ -480,7 +516,20 @@ def get_portfolio_state() -> dict:
         "total_return_pct": round(total_return, 2),
         "initial_capital": ORIGINAL_CAPITAL,
         "num_positions": len(positions),
+        "num_longs": sum(1 for p in positions if p["direction"] == "long"),
+        "num_shorts": sum(1 for p in positions if p["direction"] == "short"),
         "max_positions": MAX_POSITIONS,
+        "exposure": {
+            "long_value": round(long_value, 2),
+            "short_value": round(short_value, 2),
+            "gross_exposure": round(gross_exposure, 2),
+            "net_exposure": round(net_exposure, 2),
+            "gross_exposure_pct": gross_exposure_pct,
+            "net_exposure_pct": net_exposure_pct,
+            "long_pct": long_pct,
+            "short_pct": short_pct,
+            "cash_pct": cash_pct,
+        },
         "positions": positions,
         "recent_closed": [{
             "ticker": t["ticker"],
@@ -492,6 +541,8 @@ def get_portfolio_state() -> dict:
         } for t in closed_trades[:10]],
         "stats": {
             "total_trades": len(closed_trades),
+            "total_open": len(positions),
+            "trades_per_day": trades_per_day,
             "win_rate": round(win_rate, 1),
             "avg_win_pct": round(float(avg_win), 2),
             "avg_loss_pct": round(float(avg_loss), 2),
@@ -1495,10 +1546,81 @@ def get_performance_analytics() -> dict:
         else:
             result["overall"]["sharpe_ratio"] = 0
 
+        # Sortino ratio — only penalizes downside volatility
+        if len(returns) >= 5:
+            downside_returns = [r for r in returns if r < 0]
+            if downside_returns and np.std(downside_returns) > 0:
+                avg_hold = 15
+                trades_per_year = 252 / max(1, avg_hold)
+                sortino = (np.mean(returns) / np.std(downside_returns)) * np.sqrt(trades_per_year)
+                result["overall"]["sortino_ratio"] = round(float(sortino), 2)
+            else:
+                # No losing trades = infinite sortino, cap at 99
+                result["overall"]["sortino_ratio"] = 99.0 if np.mean(returns) > 0 else 0
+        else:
+            result["overall"]["sortino_ratio"] = 0
+
+        # Trades per day
+        first_date = None
+        for t in closed:
+            ed = t.get("entry_date", "")
+            if ed:
+                try:
+                    d = datetime.fromisoformat(ed).strftime("%Y-%m-%d")
+                    if first_date is None or d < first_date:
+                        first_date = d
+                except Exception:
+                    pass
+        if first_date:
+            try:
+                start = datetime.strptime(first_date, "%Y-%m-%d")
+                trading_days = max(1, int(np.busday_count(start.date(), datetime.now().date())))
+                result["overall"]["trades_per_day"] = round(len(closed) / trading_days, 1)
+                result["overall"]["trading_days_active"] = trading_days
+            except Exception:
+                result["overall"]["trades_per_day"] = 0
+                result["overall"]["trading_days_active"] = 0
+        else:
+            result["overall"]["trades_per_day"] = 0
+            result["overall"]["trading_days_active"] = 0
+
         # Profit factor
         total_gains = sum(wins) if wins else 0
         total_losses_abs = abs(sum(losses)) if losses else 0.01
         result["overall"]["profit_factor"] = round(total_gains / total_losses_abs, 2)
+
+        # Alpha vs S&P 500
+        try:
+            portfolio = get_portfolio_state()
+            fund_return = portfolio.get("total_return_pct", 0)
+            # Get S&P 500 return since March 30
+            import yfinance as yf
+            _throttle()
+            spy_data = yf.download("SPY", start="2026-03-28", progress=False)
+            if spy_data is not None and len(spy_data) > 1:
+                close_col = spy_data["Close"]
+                if hasattr(close_col, "columns"):
+                    close_col = close_col.iloc[:, 0]
+                first_price = float(close_col.iloc[0])
+                last_price = float(close_col.iloc[-1])
+                sp500_return = ((last_price / first_price) - 1) * 100
+                alpha = fund_return - sp500_return
+                result["benchmark"] = {
+                    "sp500_return_pct": round(sp500_return, 2),
+                    "fund_return_pct": round(fund_return, 2),
+                    "alpha_pct": round(alpha, 2),
+                    "beating_market": alpha > 0,
+                }
+            else:
+                result["benchmark"] = {
+                    "sp500_return_pct": 0,
+                    "fund_return_pct": round(fund_return, 2),
+                    "alpha_pct": 0,
+                    "beating_market": False,
+                }
+        except Exception as e:
+            logger.warning(f"Benchmark calc failed: {e}")
+            result["benchmark"] = {"sp500_return_pct": 0, "fund_return_pct": 0, "alpha_pct": 0, "beating_market": False}
 
         # --- Win rate by sector ---
         sector_stats = {}

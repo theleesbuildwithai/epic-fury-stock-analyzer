@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, Cell
 } from 'recharts'
 
@@ -294,124 +294,280 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 // TAB 2: PAPER PORTFOLIO
 // ============================================================
-function EquityCurveChart({ portfolioReturn }) {
-  const [curveData, setCurveData] = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    const fetchCurve = async () => {
-      try {
-        const res = await fetch('/api/equity-curve')
-        const data = await res.json()
-        setCurveData(data)
-      } catch { }
-      setLoading(false)
-    }
-    fetchCurve()
-  }, [])
-
-  if (loading) return <div className="bg-black border border-green-500/30 rounded-xl p-6 animate-pulse h-80" />
-  if (!curveData) return null
-
-  // Merge fund + S&P 500 data by date
-  const dateMap = {}
-  curveData.fund?.forEach(d => {
-    dateMap[d.date] = { date: d.date, fund: d.return_pct, fundValue: d.value }
-  })
-  curveData.sp500?.forEach(d => {
-    if (!dateMap[d.date]) dateMap[d.date] = { date: d.date }
-    dateMap[d.date].sp500 = d.return_pct
-    dateMap[d.date].sp500Value = d.value
-  })
-  const chartData = Object.values(dateMap)
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map(d => ({
-      ...d,
-      label: new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-    }))
-
-  // Use the SAME portfolio return value as the top banner so numbers always match
-  const fundReturn = portfolioReturn != null ? portfolioReturn : (chartData.length > 0 ? (chartData[chartData.length - 1].fund || 0) : 0)
-  // Update the last chart point to match the portfolio value exactly
-  if (chartData.length > 0 && portfolioReturn != null) {
-    chartData[chartData.length - 1].fund = portfolioReturn
-  }
-  const sp500Return = chartData.length > 0 ? (chartData[chartData.length - 1].sp500 || 0) : 0
-  const beating = fundReturn > sp500Return
-
-  return (
-    <div className="bg-black border-2 border-green-500/40 rounded-xl p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-white font-black text-xl">Performance vs S&P 500</h3>
-          <p className="text-neutral-500 text-xs mt-1">Since March 30, 2026 • Started with $100,000</p>
-        </div>
-        <div className="flex gap-4 text-right">
-          <div>
-            <p className="text-neutral-500 text-xs">Epic Fury Fund</p>
-            <p className={`text-lg font-black ${fundReturn >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {fundReturn >= 0 ? '+' : ''}{fundReturn.toFixed(2)}%
-            </p>
-          </div>
-          <div>
-            <p className="text-neutral-500 text-xs">S&P 500</p>
-            <p className={`text-lg font-black ${sp500Return >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {sp500Return >= 0 ? '+' : ''}{sp500Return.toFixed(2)}%
-            </p>
-          </div>
-          <div className={`flex items-center px-3 py-1 rounded-full text-sm font-bold ${
-            beating ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
-          }`}>
-            {beating ? 'BEATING' : 'TRAILING'} S&P
-          </div>
-        </div>
-      </div>
-      <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={chartData}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-          <XAxis dataKey="label" tick={{ fill: '#888', fontSize: 11 }} />
-          <YAxis tick={{ fill: '#888', fontSize: 11 }} tickFormatter={v => `${v}%`} />
-          <Tooltip
-            contentStyle={{ backgroundColor: '#111', border: '1px solid #444', borderRadius: '8px' }}
-            labelStyle={{ color: '#fff', fontWeight: 'bold' }}
-            formatter={(value, name) => [
-              `${value?.toFixed(2)}%`,
-              name === 'fund' ? 'Epic Fury Fund' : 'S&P 500'
-            ]}
-          />
-          <Line
-            type="monotone" dataKey="fund" name="fund"
-            stroke="#22c55e" strokeWidth={3} dot={{ r: 5, fill: '#22c55e', stroke: '#000', strokeWidth: 2 }}
-            activeDot={{ r: 7 }}
-          />
-          <Line
-            type="monotone" dataKey="sp500" name="sp500"
-            stroke="#666" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 3, fill: '#666' }}
-          />
-        </LineChart>
-      </ResponsiveContainer>
-      <div className="flex items-center gap-6 mt-3 justify-center text-xs">
-        <div className="flex items-center gap-2">
-          <div className="w-4 h-1 bg-green-500 rounded"></div>
-          <span className="text-neutral-400">Epic Fury Fund</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-4 h-1 bg-neutral-500 rounded" style={{ borderBottom: '2px dashed #666' }}></div>
-          <span className="text-neutral-400">S&P 500</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-
 function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queuedTrades }) {
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
 
+  const exp = portfolio?.exposure || {}
+  const stats = portfolio?.stats || {}
+  const perf = performance?.overall || {}
+  const bench = performance?.benchmark || {}
+
   return (
     <div className="space-y-6">
-      {/* EQUITY CURVE — Fund vs S&P 500 */}
-      <EquityCurveChart portfolioReturn={portfolio?.total_return_pct} />
+
+      {/* ====== FUND PERFORMANCE HEADER ====== */}
+      {portfolio && (
+        <div className="bg-black border-2 border-green-500/40 rounded-xl p-6 relative overflow-hidden">
+          <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-green-500 via-green-400 to-green-600"></div>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="text-2xl font-black text-white">Epic Fury Fund</h2>
+              <p className="text-neutral-500 text-xs mt-1">Since March 30, 2026 | Initial Capital: $100,000</p>
+            </div>
+            <div className="text-right">
+              <p className="text-4xl font-black text-white tracking-tight">
+                ${(portfolio.total_value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+              </p>
+              <p className={`text-lg font-bold ${(portfolio.total_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {(portfolio.total_return_pct || 0) >= 0 ? '+' : ''}{(portfolio.total_return_pct || 0).toFixed(2)}% all-time return
+              </p>
+            </div>
+          </div>
+
+          {/* Key metrics row */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">Cash</div>
+              <div className="text-white font-bold font-mono text-lg">
+                ${(portfolio.cash || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+              </div>
+              <div className="text-neutral-600 text-xs">{exp.cash_pct || 0}% of portfolio</div>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">Positions Value</div>
+              <div className="text-white font-bold font-mono text-lg">
+                ${(portfolio.positions_value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+              </div>
+              <div className="text-neutral-600 text-xs">{portfolio.num_positions || 0} open positions</div>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-green-500/20">
+              <div className="text-neutral-500 text-xs">Long Positions</div>
+              <div className="text-green-400 font-bold font-mono text-lg">{portfolio.num_longs || 0}</div>
+              <div className="text-neutral-600 text-xs">{exp.long_pct || 0}% exposure</div>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-red-500/20">
+              <div className="text-neutral-500 text-xs">Short Positions</div>
+              <div className="text-red-400 font-bold font-mono text-lg">{portfolio.num_shorts || 0}</div>
+              <div className="text-neutral-600 text-xs">{exp.short_pct || 0}% exposure</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====== ADVANCED ANALYTICS PANEL ====== */}
+      <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <h3 className="text-white font-bold text-lg mb-4">Advanced Analytics</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {/* Sharpe Ratio */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Sharpe Ratio</div>
+            <div className={`text-xl font-black font-mono ${
+              (perf.sharpe_ratio || 0) >= 1 ? 'text-green-400' :
+              (perf.sharpe_ratio || 0) >= 0 ? 'text-neutral-300' : 'text-red-400'
+            }`}>
+              {(perf.sharpe_ratio || 0).toFixed(2)}
+            </div>
+            <div className="text-neutral-600 text-xs">
+              {(perf.sharpe_ratio || 0) >= 2 ? 'Excellent' :
+               (perf.sharpe_ratio || 0) >= 1 ? 'Good' :
+               (perf.sharpe_ratio || 0) >= 0 ? 'Fair' : 'Poor'}
+            </div>
+          </div>
+
+          {/* Sortino Ratio */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Sortino Ratio</div>
+            <div className={`text-xl font-black font-mono ${
+              (perf.sortino_ratio || 0) >= 1.5 ? 'text-green-400' :
+              (perf.sortino_ratio || 0) >= 0 ? 'text-neutral-300' : 'text-red-400'
+            }`}>
+              {(perf.sortino_ratio || 0) >= 99 ? '99+' : (perf.sortino_ratio || 0).toFixed(2)}
+            </div>
+            <div className="text-neutral-600 text-xs">Downside risk-adjusted</div>
+          </div>
+
+          {/* Gross Exposure */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Gross Exposure</div>
+            <div className="text-white font-black font-mono text-xl">
+              {exp.gross_exposure_pct || 0}%
+            </div>
+            <div className="text-neutral-600 text-xs">
+              ${((exp.gross_exposure || 0) / 1000).toFixed(1)}K deployed
+            </div>
+          </div>
+
+          {/* Net Exposure */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Net Exposure</div>
+            <div className={`text-xl font-black font-mono ${
+              (exp.net_exposure_pct || 0) > 0 ? 'text-green-400' :
+              (exp.net_exposure_pct || 0) < 0 ? 'text-red-400' : 'text-neutral-300'
+            }`}>
+              {(exp.net_exposure_pct || 0) > 0 ? '+' : ''}{exp.net_exposure_pct || 0}%
+            </div>
+            <div className="text-neutral-600 text-xs">
+              {(exp.net_exposure_pct || 0) > 50 ? 'Net Long' :
+               (exp.net_exposure_pct || 0) < -10 ? 'Net Short' : 'Balanced'}
+            </div>
+          </div>
+
+          {/* Trades Per Day */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Trades / Day</div>
+            <div className="text-white font-black font-mono text-xl">
+              {stats.trades_per_day || perf.trades_per_day || 0}
+            </div>
+            <div className="text-neutral-600 text-xs">
+              {perf.trading_days_active || 0} trading days
+            </div>
+          </div>
+
+          {/* Total Trades */}
+          <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+            <div className="text-neutral-500 text-xs">Total Trades</div>
+            <div className="text-white font-black font-mono text-xl">
+              {(stats.total_trades || 0) + (stats.total_open || 0)}
+            </div>
+            <div className="text-neutral-600 text-xs">
+              {stats.total_trades || 0} closed, {stats.total_open || 0} open
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ====== BENCHMARKING vs S&P 500 ====== */}
+      {bench.sp500_return_pct !== undefined && (
+        <div className={`bg-black border-2 rounded-xl p-5 ${
+          bench.beating_market ? 'border-green-500/40' : 'border-red-500/40'
+        }`}>
+          <div className="flex items-center gap-3 mb-4">
+            <h3 className="text-white font-bold text-lg">Benchmark vs S&P 500</h3>
+            <span className={`px-3 py-1 rounded-full text-xs font-bold border ${
+              bench.beating_market
+                ? 'bg-green-500/20 text-green-400 border-green-500/30'
+                : 'bg-red-500/20 text-red-400 border-red-500/30'
+            }`}>
+              {bench.beating_market ? 'OUTPERFORMING' : 'UNDERPERFORMING'}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-neutral-900 rounded-lg p-4 text-center">
+              <div className="text-neutral-500 text-xs mb-1">Epic Fury Fund</div>
+              <div className={`text-2xl font-black font-mono ${
+                (bench.fund_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(bench.fund_return_pct || 0) >= 0 ? '+' : ''}{(bench.fund_return_pct || 0).toFixed(2)}%
+              </div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-4 text-center">
+              <div className="text-neutral-500 text-xs mb-1">S&P 500</div>
+              <div className={`text-2xl font-black font-mono ${
+                (bench.sp500_return_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(bench.sp500_return_pct || 0) >= 0 ? '+' : ''}{(bench.sp500_return_pct || 0).toFixed(2)}%
+              </div>
+            </div>
+            <div className={`rounded-lg p-4 text-center ${
+              bench.beating_market ? 'bg-green-500/10' : 'bg-red-500/10'
+            }`}>
+              <div className="text-neutral-500 text-xs mb-1">Alpha</div>
+              <div className={`text-2xl font-black font-mono ${
+                (bench.alpha_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(bench.alpha_pct || 0) >= 0 ? '+' : ''}{(bench.alpha_pct || 0).toFixed(2)}%
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====== TRADE STATISTICS ====== */}
+      {stats.total_trades > 0 && (
+        <div className="bg-black border border-neutral-700 rounded-xl p-6">
+          <h3 className="text-white font-bold text-lg mb-4">Trade Statistics</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Win Rate</div>
+              <div className={`text-xl font-black font-mono ${
+                (stats.win_rate || 0) > 50 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {stats.win_rate || 0}%
+              </div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Profit Factor</div>
+              <div className={`text-xl font-black font-mono ${
+                (stats.profit_factor || 0) > 1 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {stats.profit_factor || 0}
+              </div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Avg Win</div>
+              <div className="text-green-400 font-bold font-mono text-xl">+{stats.avg_win_pct || 0}%</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Avg Loss</div>
+              <div className="text-red-400 font-bold font-mono text-xl">{stats.avg_loss_pct || 0}%</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Max Drawdown</div>
+              <div className="text-red-400 font-bold font-mono text-xl">
+                {performance?.max_drawdown_pct != null ? `${performance.max_drawdown_pct}%` : 'N/A'}
+              </div>
+            </div>
+          </div>
+
+          {/* Long vs Short breakdown */}
+          {(performance?.long_stats || performance?.short_stats) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+              {performance.long_stats && (
+                <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-4">
+                  <div className="text-green-400 font-bold text-sm mb-2">Long Performance</div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-400">Trades</span>
+                    <span className="text-white font-mono">{performance.long_stats.total}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-400">Win Rate</span>
+                    <span className={`font-mono font-bold ${performance.long_stats.win_rate > 50 ? 'text-green-400' : 'text-red-400'}`}>
+                      {performance.long_stats.win_rate}%
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-400">Avg Return</span>
+                    <span className={`font-mono font-bold ${performance.long_stats.avg_return >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {performance.long_stats.avg_return >= 0 ? '+' : ''}{performance.long_stats.avg_return}%
+                    </span>
+                  </div>
+                </div>
+              )}
+              {performance.short_stats && (
+                <div className="bg-red-500/5 border border-red-500/20 rounded-lg p-4">
+                  <div className="text-red-400 font-bold text-sm mb-2">Short Performance</div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-400">Trades</span>
+                    <span className="text-white font-mono">{performance.short_stats.total}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-400">Win Rate</span>
+                    <span className={`font-mono font-bold ${performance.short_stats.win_rate > 50 ? 'text-green-400' : 'text-red-400'}`}>
+                      {performance.short_stats.win_rate}%
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-400">Avg Return</span>
+                    <span className={`font-mono font-bold ${performance.short_stats.avg_return >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {performance.short_stats.avg_return >= 0 ? '+' : ''}{performance.short_stats.avg_return}%
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Autonomous Trading Status */}
       {autoStatus && (
@@ -484,10 +640,9 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </span>
           </div>
           <p className="text-neutral-500 text-xs mb-3">
-            The AI is waiting to execute these trades on the next cycle. These are signals the computer has identified but hasn't traded yet.
+            The AI is waiting to execute these trades on the next cycle.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Queued Longs */}
             {queuedTrades.queued_longs?.filter(t => t.status === 'queued').length > 0 && (
               <div>
                 <h4 className="text-green-400 text-sm font-bold mb-2">
@@ -503,19 +658,14 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                       <div className="flex items-center gap-3">
                         <span className="text-neutral-400 font-mono text-xs">${t.price}</span>
                         <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                          t.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
-                          t.confidence >= 50 ? 'bg-neutral-500/20 text-neutral-400' :
-                          'bg-neutral-500/20 text-neutral-400'
-                        }`}>
-                          {t.confidence}%
-                        </span>
+                          t.confidence >= 70 ? 'bg-green-500/20 text-green-400' : 'bg-neutral-500/20 text-neutral-400'
+                        }`}>{t.confidence}%</span>
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
             )}
-            {/* Queued Shorts */}
             {queuedTrades.queued_shorts?.filter(t => t.status === 'queued').length > 0 && (
               <div>
                 <h4 className="text-red-400 text-sm font-bold mb-2">
@@ -531,12 +681,8 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                       <div className="flex items-center gap-3">
                         <span className="text-neutral-400 font-mono text-xs">${t.price}</span>
                         <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                          t.confidence >= 70 ? 'bg-green-500/20 text-green-400' :
-                          t.confidence >= 50 ? 'bg-neutral-500/20 text-neutral-400' :
-                          'bg-neutral-500/20 text-neutral-400'
-                        }`}>
-                          {t.confidence}%
-                        </span>
+                          t.confidence >= 70 ? 'bg-green-500/20 text-green-400' : 'bg-neutral-500/20 text-neutral-400'
+                        }`}>{t.confidence}%</span>
                       </div>
                     </div>
                   ))}
@@ -547,74 +693,51 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
         </div>
       )}
 
-      {/* Portfolio Overview */}
-      {portfolio && (
+      {/* ====== OPEN POSITIONS TABLE ====== */}
+      {portfolio?.positions?.length > 0 && (
         <div className="bg-black border border-neutral-700 rounded-xl p-6 relative overflow-hidden">
           <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-green-500/50 via-green-500/20 to-red-500/50"></div>
-          <h2 className="text-xl font-bold text-white mb-4">Portfolio Overview</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-            <StatCard label="Total Value" value={`$${(portfolio.total_value || 0).toLocaleString()}`} />
-            <StatCard label="Cash" value={`$${(portfolio.cash || 0).toLocaleString()}`} />
-            <StatCard label="Return" value={`${portfolio.total_return_pct || 0}%`}
-              color={(portfolio.total_return_pct || 0) >= 0 ? 'green' : 'red'} />
-            <StatCard label="Positions" value={portfolio.num_positions || 0} />
+          <h3 className="text-white font-bold text-lg mb-3">Open Positions ({portfolio.positions.length})</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-neutral-500 text-xs border-b border-neutral-800">
+                  <th className="text-left py-2 px-2">Ticker</th>
+                  <th className="text-left py-2 px-2">Dir</th>
+                  <th className="text-right py-2 px-2">Entry</th>
+                  <th className="text-right py-2 px-2">Current</th>
+                  <th className="text-right py-2 px-2">P&L</th>
+                  <th className="text-right py-2 px-2">Value</th>
+                  <th className="text-right py-2 px-2">Days</th>
+                  <th className="text-left py-2 px-2">Sector</th>
+                </tr>
+              </thead>
+              <tbody>
+                {portfolio.positions.map(p => (
+                  <tr key={p.trade_id} className={`border-b border-neutral-800/50 ${(p.unrealized_pct || 0) >= 0 ? 'bg-green-500/[0.02]' : 'bg-red-500/[0.02]'}`}>
+                    <td className="py-2 px-2 font-bold text-white">{p.ticker}</td>
+                    <td className={`py-2 px-2 text-xs font-bold ${
+                      p.direction === 'long' ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {p.direction.toUpperCase()}
+                    </td>
+                    <td className="py-2 px-2 text-right font-mono text-neutral-400">${p.entry_price}</td>
+                    <td className="py-2 px-2 text-right font-mono text-white">${p.current_price}</td>
+                    <td className={`py-2 px-2 text-right font-mono font-bold ${
+                      p.unrealized_pct >= 0 ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {p.unrealized_pct >= 0 ? '+' : ''}{p.unrealized_pct}%
+                    </td>
+                    <td className="py-2 px-2 text-right font-mono text-neutral-400">
+                      ${(p.position_value || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}
+                    </td>
+                    <td className="py-2 px-2 text-right text-neutral-400">{p.days_held}d</td>
+                    <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-
-          {/* Win/Loss Stats */}
-          {portfolio.stats && portfolio.stats.total_trades > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-6">
-              <StatCard label="Total Trades" value={portfolio.stats.total_trades} />
-              <StatCard label="Win Rate" value={`${portfolio.stats.win_rate}%`}
-                color={portfolio.stats.win_rate > 50 ? 'green' : 'red'} />
-              <StatCard label="Profit Factor" value={portfolio.stats.profit_factor}
-                color={portfolio.stats.profit_factor > 1 ? 'green' : 'red'} />
-              <StatCard label="Avg Win" value={`${portfolio.stats.avg_win_pct}%`} color="green" />
-              <StatCard label="Avg Loss" value={`${portfolio.stats.avg_loss_pct}%`} color="red" />
-            </div>
-          )}
-
-          {/* Open Positions */}
-          {portfolio.positions?.length > 0 && (
-            <div className="mt-4">
-              <h3 className="text-neutral-400 text-xs font-bold uppercase mb-2">Open Positions</h3>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-neutral-500 text-xs border-b border-neutral-800">
-                      <th className="text-left py-2 px-2">Ticker</th>
-                      <th className="text-left py-2 px-2">Dir</th>
-                      <th className="text-right py-2 px-2">Entry</th>
-                      <th className="text-right py-2 px-2">Current</th>
-                      <th className="text-right py-2 px-2">P&L</th>
-                      <th className="text-right py-2 px-2">Days</th>
-                      <th className="text-left py-2 px-2">Sector</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {portfolio.positions.map(p => (
-                      <tr key={p.trade_id} className={`border-b border-neutral-800/50 ${(p.unrealized_pct || 0) >= 0 ? 'bg-green-500/[0.02]' : 'bg-red-500/[0.02]'}`}>
-                        <td className="py-2 px-2 font-bold text-white">{p.ticker}</td>
-                        <td className={`py-2 px-2 text-xs font-bold ${
-                          p.direction === 'long' ? 'text-green-400' : 'text-red-400'
-                        }`}>
-                          {p.direction.toUpperCase()}
-                        </td>
-                        <td className="py-2 px-2 text-right font-mono text-neutral-400">${p.entry_price}</td>
-                        <td className="py-2 px-2 text-right font-mono text-white">${p.current_price}</td>
-                        <td className={`py-2 px-2 text-right font-mono font-bold ${
-                          p.unrealized_pct >= 0 ? 'text-green-400' : 'text-red-400'
-                        }`}>
-                          {p.unrealized_pct >= 0 ? '+' : ''}{p.unrealized_pct}%
-                        </td>
-                        <td className="py-2 px-2 text-right text-neutral-400">{p.days_held}d</td>
-                        <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
