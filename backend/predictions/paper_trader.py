@@ -29,9 +29,174 @@ ORIGINAL_CAPITAL = 100_000.0  # What we ACTUALLY started with — used for total
 INITIAL_CAPITAL = 109_000.0   # Current capital level — used for cash init if no S3 restore
 MAX_POSITIONS = 999  # No limit — only constrained by cash
 POSITION_SIZE_PCT = 0.06  # 6% per position — conviction sizing like real hedge funds
-STOP_LOSS_PCT = 0.05  # 5% stop loss — tight enough to protect, wide enough to breathe
+STOP_LOSS_PCT = 0.05  # Default fallback — overridden by per-stock ATR calculation
 DEFAULT_HOLD_DAYS = 30
 MIN_CONFIDENCE = 30  # Low bar — the QUANT SCORE is the real gatekeeper, not confidence
+
+
+# ============================================================
+#  AUTONOMOUS DECISION ENGINE — Per-Stock Stop Loss & Profit Targets
+# ============================================================
+# Instead of fixed 5% stop loss for every stock, the machine calculates
+# the right stop loss for each stock based on:
+#   1. ATR (Average True Range) — how much it ACTUALLY moves day-to-day
+#   2. Signal strength — high confidence = wider stops (more room to breathe)
+#   3. Regime — BEAR = tighter stops, BULL = wider stops
+#   4. Stock type — volatile growth stock vs stable dividend stock
+#
+# This is how real quant funds do it. A 5% stop on TSLA (which moves 5%
+# in a single day) is meaningless. But 5% on KO (which barely moves 1%)
+# is way too wide. The machine must decide per-stock.
+
+def _calculate_stock_atr(symbol: str, period: int = 14) -> float:
+    """
+    Calculate Average True Range as a percentage of price.
+    ATR measures how much a stock typically moves per day.
+    Returns ATR as a decimal (e.g., 0.03 = 3% daily movement).
+    """
+    try:
+        _throttle()
+        df = yf.download(symbol, period="2mo", progress=False)
+        if df is None or len(df) < period + 1:
+            return 0.025  # Default 2.5% if no data
+
+        highs = df["High"].values.astype(float).flatten()
+        lows = df["Low"].values.astype(float).flatten()
+        closes = df["Close"].values.astype(float).flatten()
+
+        # True Range = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
+        tr_values = []
+        for i in range(1, len(closes)):
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+            tr_values.append(tr)
+
+        # ATR = rolling average of True Range
+        atr = float(np.mean(tr_values[-period:]))
+        atr_pct = atr / closes[-1]  # Convert to percentage of current price
+
+        return max(0.005, min(atr_pct, 0.15))  # Clamp between 0.5% and 15%
+    except Exception as e:
+        logger.debug(f"ATR calculation failed for {symbol}: {e}")
+        return 0.025  # Default fallback
+
+
+def _autonomous_stop_and_target(
+    symbol: str,
+    direction: str,
+    price: float,
+    regime: str,
+    confidence: int,
+    composite_score: float,
+    sector: str = "",
+    is_mean_reversion: bool = False,
+) -> dict:
+    """
+    THE MACHINE DECIDES — Per-stock stop loss and profit target.
+
+    Uses ATR (volatility), signal strength, regime, and trade type to
+    calculate the optimal stop loss and take-profit for each individual stock.
+
+    Returns dict with: stop_loss, target_price, hold_days, reasoning
+    """
+    atr_pct = _calculate_stock_atr(symbol)
+
+    # --- STOP LOSS: Based on ATR ---
+    # Standard: 2x ATR gives ~95% chance of NOT being stopped by noise
+    # High conviction: 2.5x ATR (more room)
+    # Low conviction: 1.5x ATR (tighter, less risk)
+    if confidence >= 80 and abs(composite_score) >= 5:
+        atr_mult_stop = 2.5  # High conviction = more breathing room
+    elif confidence >= 60:
+        atr_mult_stop = 2.0  # Standard
+    else:
+        atr_mult_stop = 1.5  # Low conviction = tight stop, less risk
+
+    # Regime adjustment
+    if regime == "BEAR":
+        if direction == "long":
+            atr_mult_stop *= 0.8  # Tighter stops on longs in bear
+        else:
+            atr_mult_stop *= 1.1  # Shorts get a bit more room in bear
+    elif regime == "BULL":
+        if direction == "long":
+            atr_mult_stop *= 1.2  # More room for longs in bull
+        else:
+            atr_mult_stop *= 0.8  # Tighter on shorts in bull
+
+    # Mean reversion trades are quick — tighter stops
+    if is_mean_reversion:
+        atr_mult_stop *= 0.7
+
+    stop_pct = atr_pct * atr_mult_stop
+
+    # Hard clamp: never risk more than 10% or less than 2%
+    stop_pct = max(0.02, min(stop_pct, 0.10))
+
+    # --- TAKE PROFIT: Risk-Reward Ratio ---
+    # Target at least 2:1 reward-to-risk (RenTech standard)
+    # High conviction: 3:1, Low conviction: 2:1
+    if confidence >= 80 and abs(composite_score) >= 5:
+        rr_ratio = 3.0  # High conviction = aim for 3x the risk
+    elif confidence >= 60:
+        rr_ratio = 2.5
+    else:
+        rr_ratio = 2.0
+
+    # Mean reversion: quick profits, lower ratio
+    if is_mean_reversion:
+        rr_ratio = 1.5  # MR trades are high win-rate, lower payoff
+
+    target_pct = stop_pct * rr_ratio
+
+    # Hard clamp: target between 3% and 30%
+    target_pct = max(0.03, min(target_pct, 0.30))
+
+    # --- HOLD DURATION: Based on ATR and signal ---
+    # High volatility stocks resolve faster (shorter hold)
+    # Low volatility stocks need more time (longer hold)
+    if is_mean_reversion:
+        hold_days = max(1, min(5, int(5 / (atr_pct * 40 + 0.5))))  # 1-5 days
+    elif regime == "BEAR":
+        base_hold = 7 if confidence >= 70 else 3
+        hold_days = max(2, min(14, base_hold))
+    elif regime == "BULL":
+        base_hold = 30 if confidence >= 70 else 14
+        hold_days = max(7, min(60, base_hold))
+    else:
+        base_hold = 14 if confidence >= 70 else 7
+        hold_days = max(5, min(30, base_hold))
+
+    # --- CALCULATE ACTUAL PRICES ---
+    if direction == "long":
+        stop_loss = round(price * (1 - stop_pct), 2)
+        target_price = round(price * (1 + target_pct), 2)
+    else:  # short
+        stop_loss = round(price * (1 + stop_pct), 2)
+        target_price = round(price * (1 - target_pct), 2)
+
+    reasoning = (
+        f"ATR={atr_pct*100:.1f}%/day | "
+        f"Stop={stop_pct*100:.1f}% ({atr_mult_stop:.1f}x ATR) | "
+        f"Target={target_pct*100:.1f}% ({rr_ratio:.1f}:1 R:R) | "
+        f"Hold={hold_days}d"
+    )
+
+    logger.info(f"AUTONOMOUS DECISION {symbol} {direction}: {reasoning}")
+
+    return {
+        "stop_loss": stop_loss,
+        "target_price": target_price,
+        "hold_days": hold_days,
+        "stop_pct": round(stop_pct * 100, 1),
+        "target_pct": round(target_pct * 100, 1),
+        "atr_pct": round(atr_pct * 100, 1),
+        "rr_ratio": rr_ratio,
+        "reasoning": reasoning,
+    }
 
 # ============================================================
 #  ADVANCED: VIX-SCALED POSITION SIZING
@@ -450,11 +615,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             except Exception:
                 pass
 
-            # TRAILING PROFIT PROTECTION — LET WINNERS RUN, BUT DON'T GIVE IT ALL BACK
-            # Only start trailing at +6% (was +2% — sold winners way too early)
-            # Trail at 50% of peak profit — keeps half, lets half ride
-            # This means a stock that peaked at +12% closes at +6% worst case
-            if not should_close and pnl_pct > 6:
+            # AUTONOMOUS TRAILING PROFIT PROTECTION
+            # The machine decides when to lock profits based on each stock's volatility.
+            # A volatile stock (ATR 5%) needs to be up 10%+ before trailing makes sense.
+            # A stable stock (ATR 1%) can start trailing at 3%.
+            # Trail width = 1x ATR below peak — gives exactly one day of noise room.
+            stock_atr = _calculate_stock_atr(ticker)
+            trail_start_pct = stock_atr * 100 * 2  # Start trailing at 2x daily ATR
+            trail_start_pct = max(3.0, min(trail_start_pct, 12.0))  # Clamp 3-12%
+
+            if not should_close and pnl_pct > trail_start_pct:
                 try:
                     _throttle()
                     hist_df = yf.download(ticker, period="1mo", progress=False)
@@ -469,31 +639,32 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                             trough_price = float(np.min(hist_closes))
                             peak_pnl = ((entry_price / trough_price) - 1) * 100
 
-                        # Adaptive trail — wider than before to let winners run
-                        if peak_pnl >= 15:
-                            trail_pct = 0.60  # Keep 60% of gains (e.g., +15% → close at +9%)
-                        elif peak_pnl >= 10:
+                        # Smart trail: keep more of big winners, protect small ones
+                        if peak_pnl >= 20:
+                            trail_pct = 0.65  # Keep 65% of huge gains
+                        elif peak_pnl >= 12:
                             trail_pct = 0.55  # Keep 55%
-                        elif peak_pnl >= 6:
-                            trail_pct = 0.50  # Keep 50%
                         else:
-                            trail_pct = 0.40
+                            trail_pct = 0.45  # Keep 45% of smaller gains
 
                         trail_level = peak_pnl * trail_pct
 
-                        if peak_pnl >= 6 and pnl_pct < trail_level:
+                        if peak_pnl >= trail_start_pct and pnl_pct < trail_level:
                             should_close = True
                             close_reason = (
-                                f"PROFIT LOCK: peaked at {peak_pnl:+.1f}%, "
+                                f"SMART TRAIL: ATR={stock_atr*100:.1f}%, peaked at {peak_pnl:+.1f}%, "
                                 f"trail at {trail_level:+.1f}%, now {pnl_pct:+.1f}%"
                             )
                 except Exception:
                     pass
 
-            # TAKE PROFIT: Only at 15%+ — let winners run (was 5% — way too tight)
-            if not should_close and pnl_pct >= 15:
+            # AUTONOMOUS TAKE PROFIT — based on stock's target (set at entry)
+            # The target was already calculated by _autonomous_stop_and_target()
+            # at entry time and stored in trade["target_price"]. We check it above.
+            # But if somehow the stock is up 20%+ and target wasn't hit, lock it.
+            if not should_close and pnl_pct >= 20:
                 should_close = True
-                close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — big win locked"
+                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — exceptional gain secured"
 
             # REMOVED: "SELL AT HIGHS" intraday trigger
             # This was selling at +3% on tiny intraday dips — killed our best trades
@@ -822,73 +993,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # Calculate stop loss and target — REGIME AWARE
-            # KEY LESSON: Shorts are RISKIER than longs (unlimited upside risk).
-            # NEVER give shorts more than 5% room. Cut them fast.
-            if regime == "BEAR":
-                is_defensive_long = direction == "long" and pick.get("sector") in DEFENSIVE_SECTORS
-                long_stop = 0.08 if is_defensive_long else 0.05
-                short_stop = 0.06  # Shorts need room — gaps happen
-                long_target = 1.10 if is_defensive_long else 1.12
-                short_target = 0.82  # 18% target for shorts in bear (was 15% — too tight)
-            elif regime == "BULL":
-                long_stop = 0.08
-                short_stop = 0.05
-                long_target = 1.25  # 25% target for longs in bull (was 20%)
-                short_target = 0.90
-            else:
-                long_stop = STOP_LOSS_PCT
-                short_stop = 0.06
-                long_target = 1.18  # 18% target (was 15%)
-                short_target = 0.85
+            # AUTONOMOUS DECISION ENGINE — Machine decides per-stock
+            # No more fixed percentages. Each stock gets its own stop loss
+            # and profit target based on its actual volatility (ATR),
+            # signal strength, regime, and trade type.
+            is_mr = pick.get("mean_reversion", False) or pick.get("signal_type") == "MEAN_REVERSION"
+            auto_decision = _autonomous_stop_and_target(
+                symbol=symbol,
+                direction=direction,
+                price=price,
+                regime=regime,
+                confidence=pick.get("confidence", 50),
+                composite_score=pick.get("composite_score", 0),
+                sector=pick.get("sector", ""),
+                is_mean_reversion=is_mr,
+            )
+            stop_loss = auto_decision["stop_loss"]
+            target = auto_decision["target_price"]
 
             # MISTAKE LEARNING: Tighten stops if we've been holding losers too long
             if mistake_adj.get("tighten_stops"):
-                long_stop = max(0.03, long_stop * 0.7)   # 30% tighter
-                short_stop = max(0.03, short_stop * 0.7)
-
-            # ALWAYS calculate stop/target from regime-aware formulas
-            # NEVER use quant pick values — they were producing insane numbers
-            # (e.g., COIN short: stop at $419, target at -$214)
-            if direction == "long":
-                stop_loss = round(price * (1 - long_stop), 2)
-                target = round(price * long_target, 2)
-            else:  # short
-                stop_loss = round(price * (1 + short_stop), 2)
-                target = round(price * short_target, 2)
+                stop_pct_adj = auto_decision["stop_pct"] / 100 * 0.7  # 30% tighter
+                if direction == "long":
+                    stop_loss = round(price * (1 - stop_pct_adj), 2)
+                else:
+                    stop_loss = round(price * (1 + stop_pct_adj), 2)
 
             try:
-                # ADAPTIVE HOLD DURATION — like a real day trader / swing trader
-                # High confidence + strong trend = hold longer (up to 60 days)
-                # Low confidence + weak signal = quick scalp (1-5 days)
-                # Regime also matters: BEAR = shorter holds (faster exits)
-                confidence = pick.get("confidence", 50)
-                score_strength = abs(pick.get("composite_score", 0))
-
-                if regime == "BEAR":
-                    # Bear market: quick trades, don't overstay
-                    if confidence >= 80 and score_strength >= 6:
-                        adaptive_hold = 14  # 2 weeks max even for strong signals
-                    elif confidence >= 60:
-                        adaptive_hold = 7   # 1 week
-                    else:
-                        adaptive_hold = 3   # 3 days — scalp trade
-                elif regime == "BULL":
-                    # Bull market: let winners run longer
-                    if confidence >= 80 and score_strength >= 6:
-                        adaptive_hold = 60  # 2 months for high-conviction
-                    elif confidence >= 60:
-                        adaptive_hold = 30  # 1 month
-                    else:
-                        adaptive_hold = 10  # ~2 weeks
-                else:
-                    # Sideways: moderate holds
-                    if confidence >= 80:
-                        adaptive_hold = 21
-                    elif confidence >= 60:
-                        adaptive_hold = 14
-                    else:
-                        adaptive_hold = 5
+                # AUTONOMOUS HOLD DURATION — decided by the machine per-stock
+                adaptive_hold = auto_decision["hold_days"]
 
                 trade_id = save_paper_trade(
                     ticker=symbol,
@@ -922,6 +1055,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     "confidence": pick["confidence"],
                     "score": pick["composite_score"],
                     "sector": pick.get("sector"),
+                    "auto_decision": auto_decision["reasoning"],
                 })
             except Exception as e:
                 results["errors"].append(f"Failed to open {symbol}: {str(e)}")
@@ -1554,9 +1688,12 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             should_close = True
             close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap"
 
-        # TRAILING PROFIT PROTECTION — matches main engine overhaul
-        # Only start trailing at +6% (was +2%), trail at 50% of peak
-        if not should_close and pnl_pct > 6:
+        # AUTONOMOUS TRAILING PROFIT PROTECTION (ATR-based, per-stock)
+        stock_atr = _calculate_stock_atr(ticker)
+        trail_start_pct = stock_atr * 100 * 2  # Start trailing at 2x daily ATR
+        trail_start_pct = max(3.0, min(trail_start_pct, 12.0))  # Clamp 3-12%
+
+        if not should_close and pnl_pct > trail_start_pct:
             try:
                 _throttle()
                 hist_df = yf.download(ticker, period="1mo", progress=False)
@@ -1569,25 +1706,26 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                         trough_price = float(np.min(hist_closes))
                         peak_pnl = ((entry_price / trough_price) - 1) * 100
 
-                    if peak_pnl >= 15:
-                        trail_pct = 0.60
-                    elif peak_pnl >= 10:
+                    if peak_pnl >= 20:
+                        trail_pct = 0.65
+                    elif peak_pnl >= 12:
                         trail_pct = 0.55
-                    elif peak_pnl >= 6:
-                        trail_pct = 0.50
                     else:
-                        trail_pct = 0.40
+                        trail_pct = 0.45
                     trail_level = peak_pnl * trail_pct
-                    if peak_pnl >= 6 and pnl_pct < trail_level:
+                    if peak_pnl >= trail_start_pct and pnl_pct < trail_level:
                         should_close = True
-                        close_reason = f"PROFIT LOCK: peaked at {peak_pnl:+.1f}%, trail at {trail_level:+.1f}%, now {pnl_pct:+.1f}%"
+                        close_reason = (
+                            f"SMART TRAIL: ATR={stock_atr*100:.1f}%, peaked at {peak_pnl:+.1f}%, "
+                            f"trail at {trail_level:+.1f}%, now {pnl_pct:+.1f}%"
+                        )
             except Exception:
                 pass
 
-        # TAKE PROFIT at 15%+ (was 8% — too tight, sold winners early)
-        if not should_close and pnl_pct >= 15:
+        # AUTONOMOUS TAKE PROFIT — 20%+ is exceptional, lock it
+        if not should_close and pnl_pct >= 20:
             should_close = True
-            close_reason = f"TAKE PROFIT: up {pnl_pct:+.1f}% — big win locked"
+            close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — exceptional gain secured"
 
         # REMOVED: "SELL AT HIGHS" intraday trigger — killed best trades at +3%
 
