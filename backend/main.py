@@ -1449,22 +1449,46 @@ def equity_curve(request: Request):
         if not fund_curve:
             fund_curve = [{"date": "2026-03-30", "value": 100000, "return_pct": 0}]
 
-        # S&P 500 comparison — use known SPY closing prices (yfinance is unreliable in container)
-        # These are real SPY daily closes from March 30 onward
-        known_spy = [
-            ("2026-03-30", 587.50), ("2026-03-31", 604.60),
-            ("2026-04-01", 609.10), ("2026-04-02", 609.72),
-            ("2026-04-03", 607.80), ("2026-04-04", 613.28),
-            ("2026-04-07", 615.40),
-        ]
+        # S&P 500 comparison — fetch live SPY data from yfinance
+        import yfinance as yf
         sp500_curve = []
-        base = known_spy[0][1]
-        for d, p in known_spy:
-            ret = ((p / base) - 1) * 100
-            sp500_curve.append({
-                "date": d, "value": round(100000 * (1 + ret / 100), 2),
-                "return_pct": round(ret, 2),
-            })
+        try:
+            _throttle()
+            spy_data = yf.download("SPY", start="2026-03-28", progress=False)
+            if spy_data is not None and len(spy_data) > 0:
+                base_price = None
+                for idx in spy_data.index:
+                    d = idx.strftime("%Y-%m-%d")
+                    if d < "2026-03-30":
+                        continue
+                    close_val = spy_data.loc[idx, "Close"]
+                    price = float(close_val.iloc[0]) if hasattr(close_val, "iloc") else float(close_val)
+                    if base_price is None:
+                        base_price = price
+                    ret = ((price / base_price) - 1) * 100
+                    sp500_curve.append({
+                        "date": d,
+                        "value": round(100000 * (1 + ret / 100), 2),
+                        "return_pct": round(ret, 2),
+                    })
+        except Exception as e:
+            logger.warning(f"SPY download for equity curve failed: {e}")
+
+        # Fallback: if no live data, use known prices
+        if not sp500_curve:
+            known_spy = [
+                ("2026-03-30", 587.50), ("2026-03-31", 604.60),
+                ("2026-04-01", 609.10), ("2026-04-02", 609.72),
+                ("2026-04-03", 607.80), ("2026-04-04", 613.28),
+                ("2026-04-07", 615.40),
+            ]
+            base = known_spy[0][1]
+            for d, p in known_spy:
+                ret = ((p / base) - 1) * 100
+                sp500_curve.append({
+                    "date": d, "value": round(100000 * (1 + ret / 100), 2),
+                    "return_pct": round(ret, 2),
+                })
 
         # Get current portfolio state for latest data point
         try:
@@ -2044,8 +2068,14 @@ def rentech_sector_rotation(request: Request):
     """Get sector rotation flow data (inflow/outflow detection)."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
-        return picks.get("sector_rotation", {})
+        from analysis.rentech import detect_sector_rotation
+        # Call directly — much faster than running full generate_quant_picks()
+        regime = detect_market_regime()
+        price_data = {"regime": regime}
+        result = detect_sector_rotation(price_data)
+        if not result:
+            return {"sectors": {}, "top_inflow": [], "top_outflow": [], "message": "No sector data available — market may be closed"}
+        return result
     except Exception as e:
         logger.error(f"Sector rotation error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get sector rotation")
@@ -2056,8 +2086,14 @@ def rentech_regime_prediction(request: Request):
     """Get regime transition prediction (early warning system)."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
-        return picks.get("regime_transition", {})
+        from analysis.rentech import predict_regime_transition
+        # Call directly — much faster than running full generate_quant_picks()
+        regime = detect_market_regime()
+        price_data = {"regime": regime}
+        result = predict_regime_transition(price_data)
+        if not result:
+            return {"prediction": "UNKNOWN", "warning_signs": [], "bullish_signs": [], "message": "No regime data available"}
+        return result
     except Exception as e:
         logger.error(f"Regime prediction error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get regime prediction")
