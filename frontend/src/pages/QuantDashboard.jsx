@@ -303,8 +303,17 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
 
   const exp = portfolio?.exposure || {}
-  const stats = portfolio?.stats || {}
   const perf = performance?.overall || {}
+  // Stats come from performance.overall, not portfolio.stats
+  const stats = {
+    total_trades: perf.total_trades || 0,
+    total_open: portfolio?.num_positions || 0,
+    win_rate: perf.win_rate || 0,
+    profit_factor: perf.profit_factor || 0,
+    avg_win_pct: perf.avg_win || 0,
+    avg_loss_pct: perf.avg_loss || 0,
+    trades_per_day: perf.trades_per_day || 0,
+  }
   return (
     <div className="space-y-6">
 
