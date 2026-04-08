@@ -1866,7 +1866,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     daily_gain = ((total_now / yesterday_val) - 1) * 100
 
     # Let the system decide its own WIN-LOCK threshold
-    winlock = _get_dynamic_winlock()
+    winlock = _get_dynamic_winlock(regime)
     winlock_threshold = winlock["lock_pct"]
 
     if daily_gain >= winlock_threshold:

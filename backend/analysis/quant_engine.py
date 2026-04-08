@@ -2394,13 +2394,14 @@ def generate_quant_picks() -> dict:
 
             # --- REGIME TRANSITION: Warn if regime change is predicted ---
             regime_pred = rentech_data.get("regime_transition", {})
-            if regime_pred.get("prediction") == "BEAR_TRANSITION_LIKELY" and regime != "BEAR":
+            regime_str = regime.get("regime", "SIDEWAYS") if isinstance(regime, dict) else regime
+            if regime_pred.get("prediction") == "BEAR_TRANSITION_LIKELY" and regime_str != "BEAR":
                 # Reduce all long confidence if bear transition is likely
                 for pick in top_longs:
                     pick["confidence"] = max(20, pick["confidence"] - 10)
                     pick["reasons"].append("REGIME WARNING: bear transition likely")
                 logger.warning(f"REGIME TRANSITION: Bear likely — reducing long confidence by 10")
-            elif regime_pred.get("prediction") == "BULL_TRANSITION_LIKELY" and regime != "BULL":
+            elif regime_pred.get("prediction") == "BULL_TRANSITION_LIKELY" and regime_str != "BULL":
                 for pick in top_shorts:
                     pick["confidence"] = max(20, pick["confidence"] - 10)
                     pick["reasons"].append("REGIME WARNING: bull transition likely")
