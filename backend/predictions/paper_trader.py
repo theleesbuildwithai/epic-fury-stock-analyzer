@@ -1788,16 +1788,25 @@ def get_performance_analytics() -> dict:
 
     # --- Benchmarking vs S&P 500 ---
     try:
+        # Use fund inception date for matching S&P comparison
+        from predictions.models import get_all_paper_trades
+        all_trades = get_all_paper_trades()
+        if all_trades:
+            earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
+            inception_date = earliest[:10]  # "YYYY-MM-DD"
+        else:
+            inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+
         _throttle()
-        sp_df = yf.download("^GSPC", period="6mo", progress=False)
-        if sp_df is not None and len(sp_df) >= 5:
+        sp_df = yf.download("^GSPC", start=inception_date, progress=False)
+        if sp_df is not None and len(sp_df) >= 2:
             sp_closes = _safe_col(sp_df, "Close").values.astype(float).flatten()
             # Remove NaN values that yfinance sometimes returns
             sp_closes = sp_closes[~np.isnan(sp_closes)]
 
             sp_sharpe = 0
             sp_total_return = 0
-            if len(sp_closes) >= 5:
+            if len(sp_closes) >= 2:
                 sp_returns = np.diff(sp_closes) / sp_closes[:-1]  # Daily returns
                 sp_returns = sp_returns[~np.isnan(sp_returns)]  # Remove any NaN returns
                 sp_total_return = ((sp_closes[-1] / sp_closes[0]) - 1) * 100

@@ -1219,7 +1219,10 @@ def live_prices(request: Request):
                                 close_col = close_col.iloc[:, 0]
                             price = float(close_col.iloc[-1])
                         else:
-                            ticker_close = data[t["ticker"]]["Close"] if isinstance(data.columns, pd.MultiIndex) else data["Close"]
+                            if isinstance(data.columns, pd.MultiIndex):
+                                ticker_close = data["Close"][t["ticker"]]
+                            else:
+                                ticker_close = data["Close"]
                             if hasattr(ticker_close, "columns"):
                                 ticker_close = ticker_close.iloc[:, 0]
                             price = float(ticker_close.iloc[-1])
