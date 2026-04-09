@@ -28,7 +28,7 @@ from analysis.ai_analyst import answer_question
 from analysis.quant_engine import generate_quant_picks, detect_market_regime, scan_overnight_intelligence, analyze_watchlist_stock, _throttle
 from predictions.models import init_db, save_prediction, get_all_predictions
 from predictions.tracker import get_performance_stats, check_and_resolve_predictions
-from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics, check_and_exit_positions
+from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics, check_and_exit_positions, ORIGINAL_CAPITAL
 from predictions.learner import generate_intelligence_report, auto_adjust_weights
 
 logger = logging.getLogger("epic-fury")
@@ -59,8 +59,13 @@ def check_rate_limit(client_ip: str):
     """Rate limiter — slows down excessive requests but NEVER bans.
     On App Runner, all users share load balancer IPs, so banning = banning everyone."""
     now = time.time()
-    # Clean old entries
+    # Clean old entries for this IP
     rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if now - t < RATE_WINDOW]
+    # Clean up stale IPs periodically (every 100th request) to prevent memory leak
+    if len(rate_limit_store) > 100 and hash(client_ip) % 100 == 0:
+        stale_ips = [ip for ip, timestamps in rate_limit_store.items() if not timestamps]
+        for ip in stale_ips:
+            del rate_limit_store[ip]
     if len(rate_limit_store[client_ip]) >= RATE_LIMIT:
         raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
     rate_limit_store[client_ip].append(now)
@@ -734,7 +739,7 @@ def _geopolitical_scanner():
         geo = assess_geopolitical_risk()
         level = geo.get("risk_level", "LOW")
         score = geo.get("risk_score", 0)
-        events = geo.get("key_events", [])
+        events = geo.get("military_events", []) + geo.get("tension_events", [])
 
         _geo_risk_state = {
             "level": level,
@@ -878,7 +883,7 @@ def _adaptive_profit_protection():
     try:
         portfolio = get_portfolio_state()
         total_value = portfolio.get("total_value", 100000)
-        total_return = ((total_value / 100000) - 1) * 100  # vs ORIGINAL_CAPITAL
+        total_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
 
         # Track peak return
         if total_return > _peak_total_return["value"]:
@@ -1220,7 +1225,8 @@ def live_prices(request: Request):
                             price = float(ticker_close.iloc[-1])
                         pv = price * t["shares"]
                         if t["direction"] == "short":
-                            pv = (t["entry_price"] * t["shares"] * 2) - pv
+                            # Match paper_trader.py: short value = abs(shares * current_price)
+                            pv = abs(t["shares"] * price)
                         positions_value += pv
                         position_prices[t["ticker"]] = round(price, 2)
                     except Exception:
@@ -1230,7 +1236,7 @@ def live_prices(request: Request):
                     positions_value += t["entry_price"] * t["shares"]
 
         total_value = cash + positions_value
-        total_return = ((total_value / 100_000) - 1) * 100  # vs ORIGINAL_CAPITAL
+        total_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
 
         return {
             "sp500": {

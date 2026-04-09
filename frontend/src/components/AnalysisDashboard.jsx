@@ -45,6 +45,7 @@ export default function AnalysisDashboard({ data }) {
   if (!data) return null
 
   const handleAddToWatchlist = () => {
+    if (!data.info || !data.latest) return
     const stock = {
       ticker: data.info.ticker,
       name: data.info.name || data.info.ticker,

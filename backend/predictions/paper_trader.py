@@ -1560,7 +1560,7 @@ def run_backtest(days_back: int = 180, num_trades_target: int = 500) -> dict:
                 "best_trade": round(float(max(rets)), 2) if rets else 0,
                 "worst_trade": round(float(min(rets)), 2) if rets else 0,
                 "sharpe": round(
-                    float(np.mean(rets) / (np.std(rets) + 1e-10)) * np.sqrt(52), 2
+                    float(np.mean(rets) / (np.std(rets) + 1e-10)) * np.sqrt(trades_per_year), 2
                 ),
             }
 
@@ -1789,7 +1789,7 @@ def get_performance_analytics() -> dict:
     # --- Benchmarking vs S&P 500 ---
     try:
         _throttle()
-        sp_df = yf.download("^GSPC", period="3mo", progress=False)
+        sp_df = yf.download("^GSPC", period="6mo", progress=False)
         if sp_df is not None and len(sp_df) >= 5:
             sp_closes = _safe_col(sp_df, "Close").values.astype(float).flatten()
             # Remove NaN values that yfinance sometimes returns
@@ -1824,11 +1824,19 @@ def get_performance_analytics() -> dict:
                 "period": "Since Inception",
             }
     except Exception as e:
-        logger.warning(f"Benchmark calculation error: {e}")
+        logger.error(f"Benchmark calculation FAILED (S&P Sharpe will be 0): {type(e).__name__}: {e}")
+        # Still compute fund stats even if S&P download fails
+        try:
+            portfolio_state = get_portfolio_state()
+            our_total = ((portfolio_state.get("total_value", ORIGINAL_CAPITAL) / ORIGINAL_CAPITAL) - 1) * 100
+            fund_sharpe = result.get("overall", {}).get("sharpe_ratio", 0) or 0
+        except Exception:
+            our_total = 0
+            fund_sharpe = 0
         result["benchmark"] = {
             "sp500_return_pct": 0, "sp500_sharpe": 0,
-            "fund_return_pct": 0, "fund_sharpe": 0,
-            "alpha_pct": 0, "sharpe_edge": 0, "period": "N/A",
+            "fund_return_pct": round(our_total, 2), "fund_sharpe": round(float(fund_sharpe), 2),
+            "alpha_pct": 0, "sharpe_edge": 0, "period": "N/A (benchmark data unavailable)",
         }
 
     result["timestamp"] = datetime.now().isoformat()

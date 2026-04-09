@@ -87,7 +87,7 @@ export default function RiskScore({ risk, signal }) {
         </div>
 
         <div className="mt-4 space-y-1.5">
-          {risk.factors.map((factor, i) => (
+          {(risk.factors || []).map((factor, i) => (
             <div key={i} className="flex justify-between items-center py-1.5 px-2 rounded-lg hover:bg-neutral-900/50">
               <span className="text-neutral-400 text-sm">{factor.name}</span>
               <div className="flex items-center gap-2">

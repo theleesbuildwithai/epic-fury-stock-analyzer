@@ -369,8 +369,8 @@ def analyze_mistakes() -> dict:
     long_hold_losses = []
     quick_win_avg = []
     for t in losers:
-        entry = t.get("entry_time")
-        exit_t = t.get("exit_time")
+        entry = t.get("entry_date")
+        exit_t = t.get("exit_date")
         if entry and exit_t:
             try:
                 from datetime import datetime as dt_class

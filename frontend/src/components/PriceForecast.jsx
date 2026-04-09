@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 export default function PriceForecast({ forecast }) {
-  if (!forecast || forecast.error) return null
+  if (!forecast || forecast.error || !forecast.forecasts?.length) return null
 
   const { current_price, annualized_volatility, recent_volatility, forecasts, data_points_used } = forecast
 
@@ -14,8 +14,8 @@ export default function PriceForecast({ forecast }) {
   if (!active) return null
 
   // All threshold keys across all timeframes
-  const upKeys = Object.keys(active.prob_up_by)
-  const downKeys = Object.keys(active.prob_down_by)
+  const upKeys = Object.keys(active.prob_up_by || {})
+  const downKeys = Object.keys(active.prob_down_by || {})
 
   return (
     <div className="bg-black border border-neutral-700 rounded-xl p-6 gradient-border">
@@ -111,8 +111,8 @@ export default function PriceForecast({ forecast }) {
                 <span className="text-neutral-600 text-xs ml-2">(75th percentile)</span>
               </div>
               <span className="text-green-500 font-mono font-bold text-lg">
-                ${active.targets.bull.price}
-                <span className="text-sm ml-1">({active.targets.bull.pct > 0 ? '+' : ''}{active.targets.bull.pct}%)</span>
+                ${active.targets?.bull?.price ?? 'N/A'}
+                <span className="text-sm ml-1">({(active.targets?.bull?.pct ?? 0) > 0 ? '+' : ''}{active.targets?.bull?.pct ?? 0}%)</span>
               </span>
             </div>
             <div className="flex justify-between items-center py-2 border-b border-neutral-800">
@@ -121,8 +121,8 @@ export default function PriceForecast({ forecast }) {
                 <span className="text-neutral-600 text-xs ml-2">(median)</span>
               </div>
               <span className="text-white font-mono font-bold text-lg">
-                ${active.targets.base.price}
-                <span className="text-sm ml-1">({active.targets.base.pct > 0 ? '+' : ''}{active.targets.base.pct}%)</span>
+                ${active.targets?.base?.price ?? 'N/A'}
+                <span className="text-sm ml-1">({(active.targets?.base?.pct ?? 0) > 0 ? '+' : ''}{active.targets?.base?.pct ?? 0}%)</span>
               </span>
             </div>
             <div className="flex justify-between items-center py-2">
@@ -131,8 +131,8 @@ export default function PriceForecast({ forecast }) {
                 <span className="text-neutral-600 text-xs ml-2">(25th percentile)</span>
               </div>
               <span className="text-red-500 font-mono font-bold text-lg">
-                ${active.targets.bear.price}
-                <span className="text-sm ml-1">({active.targets.bear.pct > 0 ? '+' : ''}{active.targets.bear.pct}%)</span>
+                ${active.targets?.bear?.price ?? 'N/A'}
+                <span className="text-sm ml-1">({(active.targets?.bear?.pct ?? 0) > 0 ? '+' : ''}{active.targets?.bear?.pct ?? 0}%)</span>
               </span>
             </div>
           </div>

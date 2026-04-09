@@ -19,9 +19,11 @@ _extras_cache = {}
 def _market_ttl():
     """60s cache during market hours, 1hr otherwise (data doesn't change when closed)"""
     from datetime import datetime
-    now = datetime.now()
+    et = pytz.timezone("US/Eastern")
+    now = datetime.now(et)
     t = now.hour * 60 + now.minute
-    return 60 if (390 <= t <= 1050) else 3600
+    # Market hours: 9:30 AM (570 min) to 4:00 PM (960 min) Eastern
+    return 60 if (570 <= t <= 960) else 3600
 
 _extras_cache_ttl = 60  # Default, overridden by _market_ttl()
 _last_api_call = [0.0]

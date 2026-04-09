@@ -535,19 +535,19 @@ export default function Watchlist() {
                     {qd && (
                       <div className="hidden lg:flex items-center gap-3">
                         <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${
-                          qd.factors.momentum.value > 0 ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+                          qd.factors?.momentum?.value > 0 ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
                         }`}>
-                          MTM {qd.factors.momentum.label}
+                          MTM {qd.factors?.momentum?.label ?? 'N/A'}
                         </span>
                         <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${
-                          qd.factors.rsi14.value < 30 ? 'bg-green-500/10 text-green-400' :
-                          qd.factors.rsi14.value > 70 ? 'bg-red-500/10 text-red-400' :
+                          (qd.factors?.rsi14?.value ?? 50) < 30 ? 'bg-green-500/10 text-green-400' :
+                          (qd.factors?.rsi14?.value ?? 50) > 70 ? 'bg-red-500/10 text-red-400' :
                           'bg-neutral-800 text-neutral-400'
                         }`}>
-                          RSI {qd.factors.rsi14.value}
+                          RSI {qd.factors?.rsi14?.value ?? 'N/A'}
                         </span>
                         <span className="text-[10px] font-mono text-neutral-500 px-2 py-0.5 rounded bg-neutral-900">
-                          {qd.factors.volatility.label}
+                          {qd.factors?.volatility?.label ?? 'N/A'}
                         </span>
                       </div>
                     )}
@@ -586,10 +586,10 @@ export default function Watchlist() {
                       <div>
                         <p className="text-neutral-500 text-[10px] uppercase tracking-wider mb-2">Factor Analysis</p>
                         <div className="space-y-1.5">
-                          {Object.entries(qd.factors).map(([key, val]) => (
+                          {Object.entries(qd.factors || {}).map(([key, val]) => (
                             <div key={key} className="flex items-center justify-between">
-                              <span className="text-neutral-400 text-[11px] capitalize">{key.replace('_', ' ')}</span>
-                              <span className="text-white text-[11px] font-mono">{val.label}</span>
+                              <span className="text-neutral-400 text-[11px] capitalize">{key.replace(/_/g, ' ')}</span>
+                              <span className="text-white text-[11px] font-mono">{val?.label ?? 'N/A'}</span>
                             </div>
                           ))}
                         </div>
@@ -602,32 +602,32 @@ export default function Watchlist() {
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">EMA Trend</span>
                             <span className={`text-[11px] font-mono ${
-                              qd.technicals.ema_trend === 'Bullish' ? 'text-green-400' :
-                              qd.technicals.ema_trend === 'Bearish' ? 'text-red-400' : 'text-neutral-400'
-                            }`}>{qd.technicals.ema_trend}</span>
+                              qd.technicals?.ema_trend === 'Bullish' ? 'text-green-400' :
+                              qd.technicals?.ema_trend === 'Bearish' ? 'text-red-400' : 'text-neutral-400'
+                            }`}>{qd.technicals?.ema_trend ?? 'N/A'}</span>
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">Above 200 SMA</span>
-                            <span className={`text-[11px] font-mono ${qd.technicals.above_200sma ? 'text-green-400' : 'text-red-400'}`}>
-                              {qd.technicals.above_200sma ? 'Yes' : 'No'}
+                            <span className={`text-[11px] font-mono ${qd.technicals?.above_200sma ? 'text-green-400' : 'text-red-400'}`}>
+                              {qd.technicals?.above_200sma ? 'Yes' : 'No'}
                             </span>
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">Above 50 EMA</span>
-                            <span className={`text-[11px] font-mono ${qd.technicals.above_50ema ? 'text-green-400' : 'text-red-400'}`}>
-                              {qd.technicals.above_50ema ? 'Yes' : 'No'}
+                            <span className={`text-[11px] font-mono ${qd.technicals?.above_50ema ? 'text-green-400' : 'text-red-400'}`}>
+                              {qd.technicals?.above_50ema ? 'Yes' : 'No'}
                             </span>
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">EMA 9 / 21 / 50</span>
                             <span className="text-neutral-300 text-[11px] font-mono">
-                              {qd.technicals.ema_9} / {qd.technicals.ema_21} / {qd.technicals.ema_50}
+                              {qd.technicals?.ema_9 ?? '-'} / {qd.technicals?.ema_21 ?? '-'} / {qd.technicals?.ema_50 ?? '-'}
                             </span>
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">Bollinger</span>
                             <span className="text-neutral-300 text-[11px] font-mono">
-                              {qd.technicals.bb_lower} - {qd.technicals.bb_upper}
+                              {qd.technicals?.bb_lower ?? '-'} - {qd.technicals?.bb_upper ?? '-'}
                             </span>
                           </div>
                         </div>
@@ -662,17 +662,17 @@ export default function Watchlist() {
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">1M Return</span>
                             <span className={`text-[11px] font-mono ${
-                              qd.returns['1m'] >= 0 ? 'text-green-400' : 'text-red-400'
+                              (qd.returns?.['1m'] ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
                             }`}>
-                              {qd.returns['1m'] >= 0 ? '+' : ''}{qd.returns['1m']}%
+                              {(qd.returns?.['1m'] ?? 0) >= 0 ? '+' : ''}{qd.returns?.['1m'] ?? 'N/A'}%
                             </span>
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-400 text-[11px]">3M Return</span>
                             <span className={`text-[11px] font-mono ${
-                              qd.returns['3m'] >= 0 ? 'text-green-400' : 'text-red-400'
+                              (qd.returns?.['3m'] ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
                             }`}>
-                              {qd.returns['3m'] >= 0 ? '+' : ''}{qd.returns['3m']}%
+                              {(qd.returns?.['3m'] ?? 0) >= 0 ? '+' : ''}{qd.returns?.['3m'] ?? 'N/A'}%
                             </span>
                           </div>
                         </div>

@@ -16,17 +16,19 @@ export default function KeyStats({ info, latest, supportResistance }) {
     return n.toLocaleString()
   }
 
+  const fp = (v) => v != null ? `$${v.toFixed(2)}` : 'N/A'
+
   const priceChange = (info.current_price || 0) - (info.previous_close || 0)
   const priceChangePct = info.previous_close ? ((priceChange / info.previous_close) * 100).toFixed(2) : '0.00'
   const isUp = priceChange >= 0
 
   const stats = [
-    { label: 'Current Price', value: `$${info.current_price?.toFixed(2)}` },
+    { label: 'Current Price', value: fp(info.current_price) },
     { label: 'Change', value: `${isUp ? '+' : ''}$${priceChange.toFixed(2)} (${isUp ? '+' : ''}${priceChangePct}%)`, color: isUp ? 'text-green-500' : 'text-red-500' },
-    { label: 'Open', value: `$${info.open?.toFixed(2)}` },
-    { label: 'Day Range', value: `$${info.day_low?.toFixed(2)} - $${info.day_high?.toFixed(2)}` },
-    { label: '52-Week High', value: `$${info.fifty_two_week_high?.toFixed(2)}` },
-    { label: '52-Week Low', value: `$${info.fifty_two_week_low?.toFixed(2)}` },
+    { label: 'Open', value: fp(info.open) },
+    { label: 'Day Range', value: info.day_low != null && info.day_high != null ? `$${info.day_low.toFixed(2)} - $${info.day_high.toFixed(2)}` : 'N/A' },
+    { label: '52-Week High', value: fp(info.fifty_two_week_high) },
+    { label: '52-Week Low', value: fp(info.fifty_two_week_low) },
     { label: 'Volume', value: formatVol(info.volume) },
     { label: 'Avg Volume', value: formatVol(info.avg_volume) },
     { label: 'Market Cap', value: formatNum(info.market_cap) },
@@ -48,7 +50,7 @@ export default function KeyStats({ info, latest, supportResistance }) {
           <p className="text-neutral-500 text-sm">{info.industry} · {info.sector || ''}</p>
         </div>
         <div className="text-right">
-          <p className="text-3xl font-bold text-white font-mono">${info.current_price?.toFixed(2)}</p>
+          <p className="text-3xl font-bold text-white font-mono">{fp(info.current_price)}</p>
           <p className={`font-mono font-semibold ${isUp ? 'text-green-500' : 'text-red-500'}`}>
             {isUp ? '+' : ''}{priceChange.toFixed(2)} ({isUp ? '+' : ''}{priceChangePct}%)
             <span className={`inline-block ml-1 text-xs ${isUp ? 'text-green-500/60' : 'text-red-500/60'}`}>
@@ -74,7 +76,7 @@ export default function KeyStats({ info, latest, supportResistance }) {
             <div className="flex flex-wrap gap-2">
               {supportResistance.support.length > 0
                 ? supportResistance.support.map((s, i) => (
-                    <span key={i} className="text-green-400 text-sm font-mono font-bold bg-green-500/10 px-2 py-0.5 rounded">${s.toFixed(2)}</span>
+                    <span key={i} className="text-green-400 text-sm font-mono font-bold bg-green-500/10 px-2 py-0.5 rounded">${typeof s === 'number' ? s.toFixed(2) : 'N/A'}</span>
                   ))
                 : <span className="text-neutral-500 text-sm">No clear levels</span>
               }
@@ -85,7 +87,7 @@ export default function KeyStats({ info, latest, supportResistance }) {
             <div className="flex flex-wrap gap-2">
               {supportResistance.resistance.length > 0
                 ? supportResistance.resistance.map((r, i) => (
-                    <span key={i} className="text-red-400 text-sm font-mono font-bold bg-red-500/10 px-2 py-0.5 rounded">${r.toFixed(2)}</span>
+                    <span key={i} className="text-red-400 text-sm font-mono font-bold bg-red-500/10 px-2 py-0.5 rounded">${typeof r === 'number' ? r.toFixed(2) : 'N/A'}</span>
                   ))
                 : <span className="text-neutral-500 text-sm">No clear levels</span>
               }

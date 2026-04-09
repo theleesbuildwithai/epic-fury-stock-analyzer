@@ -125,16 +125,16 @@ export default function DailySummary() {
                 <div className="bg-neutral-900 rounded-lg p-4 text-center">
                   <p className="text-neutral-500 text-xs uppercase mb-1">Avg Change</p>
                   <p className={`text-xl font-bold ${changeColor(data.market_overview.avg_change_pct)}`}>
-                    {data.market_overview.avg_change_pct > 0 ? '+' : ''}{data.market_overview.avg_change_pct}%
+                    {(data.market_overview.avg_change_pct ?? 0) > 0 ? '+' : ''}{data.market_overview.avg_change_pct ?? 0}%
                   </p>
                 </div>
                 <div className="bg-neutral-900 rounded-lg p-4 text-center">
                   <p className="text-neutral-500 text-xs uppercase mb-1">Advancing</p>
-                  <p className="text-xl font-bold text-green-500">{data.market_overview.advancing}</p>
+                  <p className="text-xl font-bold text-green-500">{data.market_overview.advancing ?? 0}</p>
                 </div>
                 <div className="bg-neutral-900 rounded-lg p-4 text-center">
                   <p className="text-neutral-500 text-xs uppercase mb-1">Declining</p>
-                  <p className="text-xl font-bold text-red-500">{data.market_overview.declining}</p>
+                  <p className="text-xl font-bold text-red-500">{data.market_overview.declining ?? 0}</p>
                 </div>
               </div>
             </div>

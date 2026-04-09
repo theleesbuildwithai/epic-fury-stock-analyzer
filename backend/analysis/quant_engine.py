@@ -1473,7 +1473,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 peer_rets = []
                 for peer in sector_peers:
                     try:
-                        peer_closes = price_data[peer]["Close"].values.astype(float)
+                        peer_closes = _safe_close(price_data[peer]).values.astype(float).flatten()
                         if len(peer_closes) >= 60:
                             peer_rets.append((peer_closes[-1] / peer_closes[-60]) - 1)
                     except Exception:
@@ -1506,7 +1506,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             gap_signal = 0.0
             if len(closes) >= 2:
                 try:
-                    opens = df["Open"].values.astype(float).flatten()
+                    opens_col = df["Open"]
+                    if hasattr(opens_col, "columns"):
+                        opens_col = opens_col.iloc[:, 0]
+                    opens = opens_col.values.astype(float).flatten()
                     if len(opens) >= 2:
                         # Today's gap: today's open vs yesterday's close
                         gap_pct = (opens[-1] / closes[-2] - 1) * 100
@@ -1565,8 +1568,14 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             vwap_raw = 0.0
             if len(closes) >= 5 and len(volumes) >= 5:
                 try:
-                    highs = df["High"].values.astype(float).flatten()
-                    lows = df["Low"].values.astype(float).flatten()
+                    highs_col = df["High"]
+                    if hasattr(highs_col, "columns"):
+                        highs_col = highs_col.iloc[:, 0]
+                    highs = highs_col.values.astype(float).flatten()
+                    lows_col = df["Low"]
+                    if hasattr(lows_col, "columns"):
+                        lows_col = lows_col.iloc[:, 0]
+                    lows = lows_col.values.astype(float).flatten()
                     if len(highs) >= 5 and len(lows) >= 5:
                         # Typical price * volume / cumulative volume
                         typical_prices = (highs[-5:] + lows[-5:] + closes[-5:]) / 3

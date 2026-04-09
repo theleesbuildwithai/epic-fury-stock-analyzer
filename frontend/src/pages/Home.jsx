@@ -15,8 +15,9 @@ export default function Home() {
     try {
       const res = await fetch(`/api/analyze/${ticker}`)
       if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Failed to analyze stock')
+        let errMsg = 'Failed to analyze stock'
+        try { const err = await res.json(); errMsg = err.detail || errMsg } catch {}
+        throw new Error(errMsg)
       }
       const data = await res.json()
       setAnalysisData(data)
