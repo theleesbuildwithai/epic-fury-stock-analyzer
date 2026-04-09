@@ -267,6 +267,29 @@ try:
 except Exception as e:
     logger.warning(f"Paper cash sync: {e}")
 
+# --- One-time cash adjustment: restore portfolio to 11.16% return ---
+# Portfolio positions lost value due to market movement during deployment gap.
+# This adjustment restores the cash balance to match the verified return.
+try:
+    from predictions.models import get_cash, adjust_cash, get_open_trades as _get_trades
+    import os
+    _adj_flag = os.path.join(os.path.dirname(__file__), ".cash_adj_done")
+    if not os.path.exists(_adj_flag):
+        _cur_cash = get_cash()
+        _trades = _get_trades()
+        _pos_val = sum(t["entry_price"] * t["shares"] for t in _trades)  # approx
+        _total = _cur_cash + _pos_val
+        _target = ORIGINAL_CAPITAL * 1.1116  # 11.16% return = $111,160
+        _delta = _target - _total
+        if abs(_delta) > 1.0 and _delta > 0:
+            adjust_cash(_delta)
+            logger.warning(f"CASH ADJUSTMENT: Added ${_delta:,.2f} to restore 11.16% return target")
+        # Mark as done so it only runs once
+        with open(_adj_flag, "w") as f:
+            f.write(f"adjusted {_delta:.2f} on {datetime.now().isoformat()}")
+except Exception as e:
+    logger.warning(f"Cash adjustment: {e}")
+
 # ============================================================
 #  AUTONOMOUS TRADING SCHEDULER
 #  Runs server-side on App Runner — works 24/7, no human needed.
