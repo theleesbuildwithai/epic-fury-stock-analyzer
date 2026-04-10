@@ -147,11 +147,15 @@ DEFAULT_HOLD_DAYS = 30
 #   - Profits locked earlier (10% instead of 15%)
 #   - Flat trades cut faster (40% hold time instead of 50%)
 #
-# The machine earned 11%+ in a week — now protect it.
-PRESERVATION_THRESHOLD = 8.0  # Activate when total return >= 8%
+# Week 2: Aggressive mode — no preservation, maximize alpha
+# Set to False to disable capital preservation and trade aggressively
+PRESERVATION_ENABLED = False
+PRESERVATION_THRESHOLD = 8.0  # Only matters when PRESERVATION_ENABLED = True
 
 def _is_preservation_mode() -> bool:
     """Check if we should be in capital preservation mode based on total return."""
+    if not PRESERVATION_ENABLED:
+        return False  # Aggressive mode — preservation disabled
     try:
         from predictions.models import get_cash, get_open_trades
         cash = get_cash()
@@ -165,22 +169,22 @@ def _is_preservation_mode() -> bool:
         return True  # Default to cautious if we can't check
 
 def _get_position_size_pct() -> float:
-    """Dynamic position sizing: smaller when preserving capital."""
+    """Dynamic position sizing: larger when aggressive."""
     if _is_preservation_mode():
         return 0.03  # 3% per position — half size in preservation mode
-    return 0.06  # 6% per position — normal conviction sizing
+    return 0.08  # 8% per position — aggressive conviction sizing
 
 def _get_min_confidence() -> int:
-    """Dynamic confidence filter: stricter when preserving capital."""
+    """Dynamic confidence filter: looser when aggressive."""
     if _is_preservation_mode():
         return 55  # Only high-quality signals in preservation mode
-    return 40  # Normal filter
+    return 35  # Aggressive — take more trades
 
 def _get_min_composite_score() -> float:
-    """Dynamic score filter: stricter when preserving capital."""
+    """Dynamic score filter: looser when aggressive."""
     if _is_preservation_mode():
         return 3.0  # Higher bar in preservation mode
-    return 2.0  # Normal filter
+    return 1.5  # Aggressive — lower bar, more opportunities
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
