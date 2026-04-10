@@ -1082,6 +1082,22 @@ def _fix_broken_stops():
 # Run fix on startup
 _fix_broken_stops()
 
+# --- Pre-warm the S&P 500 benchmark cache so the first request is fast ---
+# Previously the first /api/paper-performance call would return sp500_sharpe=0
+# because yfinance was cold. Now we fetch S&P data in a background thread at
+# startup so it's ready by the time the user hits the page.
+def _prewarm_benchmark_bg():
+    try:
+        import threading
+        from predictions.paper_trader import prewarm_benchmark_cache
+        t = threading.Thread(target=prewarm_benchmark_cache, daemon=True, name="sp-prewarm")
+        t.start()
+        logger.info("S&P 500 benchmark pre-warm thread started")
+    except Exception as e:
+        logger.error(f"Failed to start benchmark pre-warm: {e}")
+
+_prewarm_benchmark_bg()
+
 
 # --- RESET DAY: Close all positions, restore to yesterday's value ---
 # This runs ONCE on this deploy to undo today's damage and restart fresh.
@@ -1699,6 +1715,105 @@ def paper_performance(request: Request):
     except Exception as e:
         logger.error(f"Paper performance error: {e}")
         raise HTTPException(status_code=500, detail="Failed to get performance")
+
+
+# ============================================================
+#  ADVANCED QUANT ENDPOINTS — RenTech-style institutional features
+# ============================================================
+
+def _validate_ticker(ticker: str) -> str:
+    """Sanitize ticker symbol to prevent injection — allow only alphanumerics,
+    dots, and carets (for index symbols like ^GSPC)."""
+    if not ticker or len(ticker) > 15:
+        raise HTTPException(status_code=400, detail="Invalid ticker")
+    import re
+    if not re.match(r'^[A-Za-z0-9.\-\^]+$', ticker):
+        raise HTTPException(status_code=400, detail="Invalid ticker characters")
+    return ticker.upper()
+
+
+@app.get("/api/ann-signal/{ticker}")
+def ann_signal(ticker: str, request: Request):
+    """Artificial Neural Network (MLP) pattern-recognition signal."""
+    check_rate_limit(request.client.host)
+    ticker = _validate_ticker(ticker)
+    try:
+        from analysis.rentech_advanced import ann_predict_direction
+        return ann_predict_direction(ticker)
+    except Exception as e:
+        logger.error(f"ANN signal error for {ticker}: {e}")
+        raise HTTPException(status_code=500, detail="ANN model failed")
+
+
+@app.get("/api/nlp-sentiment/{ticker}")
+def nlp_sentiment_endpoint(ticker: str, request: Request):
+    """Advanced NLP sentiment analysis with financial lexicon."""
+    check_rate_limit(request.client.host)
+    ticker = _validate_ticker(ticker)
+    try:
+        from analysis.rentech_advanced import nlp_ticker_sentiment
+        return nlp_ticker_sentiment(ticker)
+    except Exception as e:
+        logger.error(f"NLP sentiment error for {ticker}: {e}")
+        raise HTTPException(status_code=500, detail="NLP model failed")
+
+
+@app.get("/api/monte-carlo/{ticker}")
+def monte_carlo_endpoint(ticker: str, request: Request, horizon: int = 20):
+    """Monte Carlo GBM simulation for statistical probability distribution."""
+    check_rate_limit(request.client.host)
+    ticker = _validate_ticker(ticker)
+    # Validate horizon range
+    if horizon < 1 or horizon > 252:
+        raise HTTPException(status_code=400, detail="horizon must be 1-252")
+    try:
+        from analysis.rentech_advanced import monte_carlo_price_simulation
+        return monte_carlo_price_simulation(ticker, horizon_days=horizon)
+    except Exception as e:
+        logger.error(f"Monte Carlo error for {ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Monte Carlo failed")
+
+
+@app.get("/api/cointegration/{sym_a}/{sym_b}")
+def cointegration_endpoint(sym_a: str, sym_b: str, request: Request):
+    """Engle-Granger cointegration test for statistical arbitrage pair analysis."""
+    check_rate_limit(request.client.host)
+    sym_a = _validate_ticker(sym_a)
+    sym_b = _validate_ticker(sym_b)
+    if sym_a == sym_b:
+        raise HTTPException(status_code=400, detail="Symbols must differ")
+    try:
+        from analysis.rentech_advanced import cointegration_test
+        return cointegration_test(sym_a, sym_b)
+    except Exception as e:
+        logger.error(f"Cointegration error for {sym_a}/{sym_b}: {e}")
+        raise HTTPException(status_code=500, detail="Cointegration test failed")
+
+
+@app.get("/api/hmm-regime/{ticker}")
+def hmm_regime_endpoint(ticker: str, request: Request):
+    """Baum-Welch HMM regime detection (BULL/SIDEWAYS/BEAR)."""
+    check_rate_limit(request.client.host)
+    ticker = _validate_ticker(ticker)
+    try:
+        from analysis.rentech_advanced import hmm_regime_detect
+        return hmm_regime_detect(ticker)
+    except Exception as e:
+        logger.error(f"HMM regime error for {ticker}: {e}")
+        raise HTTPException(status_code=500, detail="HMM failed")
+
+
+@app.get("/api/ensemble-signal/{ticker}")
+def ensemble_signal_endpoint(ticker: str, request: Request):
+    """Ensemble signal combining ANN + NLP + Monte Carlo + HMM."""
+    check_rate_limit(request.client.host)
+    ticker = _validate_ticker(ticker)
+    try:
+        from analysis.rentech_advanced import ensemble_signal
+        return ensemble_signal(ticker)
+    except Exception as e:
+        logger.error(f"Ensemble signal error for {ticker}: {e}")
+        raise HTTPException(status_code=500, detail="Ensemble failed")
 
 
 @app.get("/api/auto-trading-status")

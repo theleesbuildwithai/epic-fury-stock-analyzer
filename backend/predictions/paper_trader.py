@@ -20,6 +20,7 @@ import pandas as pd
 import time
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 from analysis.quant_engine import _throttle
 
@@ -34,6 +35,95 @@ def _safe_col(df, col_name):
     if hasattr(c, "columns"):
         c = c.iloc[:, 0]
     return c
+
+
+# ============================================================
+#  BENCHMARK CACHE — robust S&P 500 data with last-known-good fallback
+# ============================================================
+# Problem: First call to /api/paper-performance often returned sp500_sharpe=0
+# because yfinance was rate limited / cold. Subsequent calls still failed because
+# there was no cache — every request did fresh yfinance downloads.
+#
+# Fix: Persistent in-memory cache + last-known-good fallback. Even if a fresh
+# download fails, we return the previously-cached good result instead of zeros.
+_benchmark_cache = {
+    "data": None,         # Last successful benchmark dict
+    "time": 0.0,          # When it was last fetched successfully
+    "sp_closes": None,    # Raw S&P closes from inception window
+    "sharpe_closes": None,# Raw S&P closes from 180d window for Sharpe
+    "inception": None,    # Inception date used
+}
+_BENCHMARK_CACHE_TTL = 1800  # 30 minutes — S&P only moves so much intraday
+_benchmark_lock = threading.Lock()
+
+
+def _fetch_sp500_data(inception_date: str, sharpe_start: str):
+    """Download S&P 500 data with retries. Returns (sp_closes, sharpe_closes) or (None, None)."""
+    sp_closes = None
+    sharpe_closes = None
+    try:
+        for attempt in range(3):
+            try:
+                _throttle()
+                sp_df = yf.download("^GSPC", start=inception_date, progress=False, timeout=10)
+                if sp_df is not None and len(sp_df) >= 2:
+                    sp_closes = _safe_col(sp_df, "Close").values.astype(float).flatten()
+                    sp_closes = sp_closes[~np.isnan(sp_closes)]
+                    if len(sp_closes) >= 2:
+                        break
+                time.sleep(1.0 + attempt)  # Backoff
+            except Exception as retry_err:
+                logger.warning(f"S&P inception download attempt {attempt+1} failed: {retry_err}")
+                time.sleep(1.0 + attempt)
+
+        for attempt in range(3):
+            try:
+                _throttle()
+                sharpe_df = yf.download("^GSPC", start=sharpe_start, progress=False, timeout=10)
+                if sharpe_df is not None and len(sharpe_df) >= 30:
+                    sharpe_closes = _safe_col(sharpe_df, "Close").values.astype(float).flatten()
+                    sharpe_closes = sharpe_closes[~np.isnan(sharpe_closes)]
+                    if len(sharpe_closes) >= 30:
+                        break
+                time.sleep(1.0 + attempt)
+            except Exception as retry_err:
+                logger.warning(f"S&P sharpe download attempt {attempt+1} failed: {retry_err}")
+                time.sleep(1.0 + attempt)
+    except Exception as e:
+        logger.error(f"_fetch_sp500_data outer failure: {e}")
+    return sp_closes, sharpe_closes
+
+
+def prewarm_benchmark_cache():
+    """Warm up the benchmark cache on server startup so the first request is fast.
+    Safe to call from a background thread — failures are logged but not raised."""
+    try:
+        logger.info("Pre-warming benchmark cache (S&P 500)...")
+        from predictions.models import get_all_paper_trades
+        try:
+            all_trades = get_all_paper_trades()
+            if all_trades:
+                earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
+                inception_date = earliest[:10]
+            else:
+                inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+        except Exception:
+            inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+
+        sharpe_start = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+        sp_closes, sharpe_closes = _fetch_sp500_data(inception_date, sharpe_start)
+
+        if sp_closes is not None and len(sp_closes) >= 2:
+            with _benchmark_lock:
+                _benchmark_cache["sp_closes"] = sp_closes
+                _benchmark_cache["sharpe_closes"] = sharpe_closes
+                _benchmark_cache["inception"] = inception_date
+                _benchmark_cache["time"] = time.time()
+            logger.info(f"Benchmark cache warmed: {len(sp_closes)} inception pts, {len(sharpe_closes) if sharpe_closes is not None else 0} sharpe pts")
+        else:
+            logger.warning("Benchmark pre-warm got no data — will retry on first request")
+    except Exception as e:
+        logger.error(f"prewarm_benchmark_cache failed: {e}")
 
 
 # Portfolio configuration
@@ -1786,69 +1876,88 @@ def get_performance_analytics() -> dict:
                 max_dd = min(max_dd, dd)
             result["max_drawdown_pct"] = round(max_dd, 2)
 
-    # --- Benchmarking vs S&P 500 ---
+    # --- Benchmarking vs S&P 500 (with robust caching + last-known-good fallback) ---
     try:
-        # Use fund inception date for matching S&P total-return comparison
         from predictions.models import get_all_paper_trades
-        all_trades = get_all_paper_trades()
-        if all_trades:
-            earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
-            inception_date = earliest[:10]  # "YYYY-MM-DD"
-        else:
+        # Determine inception date (matches fund's actual start)
+        try:
+            all_trades = get_all_paper_trades()
+            if all_trades:
+                earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
+                inception_date = earliest[:10]
+            else:
+                inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+        except Exception:
             inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
 
-        # For total return: match the fund inception window
-        _throttle()
-        sp_df = yf.download("^GSPC", start=inception_date, progress=False)
-
-        # For Sharpe ratio: ALWAYS use at least 6 months of data so it's statistically
-        # meaningful. A fund that's only been running 8 days can't produce a reliable
-        # Sharpe from 8 data points — we'd get inflated values like 13+ from noise.
         sharpe_start = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
-        _throttle()
-        sp_sharpe_df = yf.download("^GSPC", start=sharpe_start, progress=False)
 
-        if sp_df is not None and len(sp_df) >= 2:
-            sp_closes = _safe_col(sp_df, "Close").values.astype(float).flatten()
-            # Remove NaN values that yfinance sometimes returns
-            sp_closes = sp_closes[~np.isnan(sp_closes)]
+        # Check cache first — only refresh if stale
+        now_t = time.time()
+        cache_fresh = (
+            _benchmark_cache["sp_closes"] is not None and
+            _benchmark_cache["inception"] == inception_date and
+            (now_t - _benchmark_cache["time"]) < _BENCHMARK_CACHE_TTL
+        )
 
-            sp_sharpe = 0
-            sp_total_return = 0
-            if len(sp_closes) >= 2:
-                sp_total_return = ((sp_closes[-1] / sp_closes[0]) - 1) * 100
+        if not cache_fresh:
+            sp_closes, sharpe_closes = _fetch_sp500_data(inception_date, sharpe_start)
+            if sp_closes is not None and len(sp_closes) >= 2:
+                # Cache the fresh data
+                with _benchmark_lock:
+                    _benchmark_cache["sp_closes"] = sp_closes
+                    _benchmark_cache["sharpe_closes"] = sharpe_closes
+                    _benchmark_cache["inception"] = inception_date
+                    _benchmark_cache["time"] = now_t
+            elif _benchmark_cache["sp_closes"] is not None:
+                # Fetch failed but we have last-known-good — use it
+                sp_closes = _benchmark_cache["sp_closes"]
+                sharpe_closes = _benchmark_cache["sharpe_closes"]
+                logger.warning("Using stale benchmark cache — fresh fetch failed")
+            else:
+                # No cache, fetch failed — will fall through to except
+                raise RuntimeError("S&P 500 download failed and no cached data available")
+        else:
+            sp_closes = _benchmark_cache["sp_closes"]
+            sharpe_closes = _benchmark_cache["sharpe_closes"]
 
-            # Compute Sharpe from the longer window (statistically reliable)
-            if sp_sharpe_df is not None and len(sp_sharpe_df) >= 30:
-                sharpe_closes = _safe_col(sp_sharpe_df, "Close").values.astype(float).flatten()
-                sharpe_closes = sharpe_closes[~np.isnan(sharpe_closes)]
-                if len(sharpe_closes) >= 30:
-                    sharpe_returns = np.diff(sharpe_closes) / sharpe_closes[:-1]
-                    sharpe_returns = sharpe_returns[~np.isnan(sharpe_returns)]
-                    if len(sharpe_returns) >= 30:
-                        std = np.std(sharpe_returns, ddof=1)  # Sample std (unbiased)
-                        if std > 1e-10:
-                            sp_sharpe = (np.mean(sharpe_returns) / std) * np.sqrt(252)
+        # Compute benchmark metrics from cached closes
+        sp_sharpe = 0.0
+        sp_total_return = 0.0
+        if sp_closes is not None and len(sp_closes) >= 2:
+            sp_total_return = ((sp_closes[-1] / sp_closes[0]) - 1) * 100
 
-            fund_total_return = result.get("overall", {}).get("avg_return", 0) or 0
-            fund_sharpe = result.get("overall", {}).get("sharpe_ratio", 0) or 0
+        if sharpe_closes is not None and len(sharpe_closes) >= 30:
+            sharpe_returns = np.diff(sharpe_closes) / sharpe_closes[:-1]
+            sharpe_returns = sharpe_returns[~np.isnan(sharpe_returns)]
+            if len(sharpe_returns) >= 30:
+                std = np.std(sharpe_returns, ddof=1)
+                if std > 1e-10:
+                    sp_sharpe = (np.mean(sharpe_returns) / std) * np.sqrt(252)
 
-            # Alpha = our return - benchmark return (simplified)
-            portfolio_state = get_portfolio_state()
-            our_total = ((portfolio_state.get("total_value", 100000) / ORIGINAL_CAPITAL) - 1) * 100
+        fund_sharpe = result.get("overall", {}).get("sharpe_ratio", 0) or 0
 
-            result["benchmark"] = {
-                "sp500_return_pct": round(float(sp_total_return), 2),
-                "sp500_sharpe": round(float(sp_sharpe), 2),
-                "fund_return_pct": round(our_total, 2),
-                "fund_sharpe": round(float(fund_sharpe), 2),
-                "alpha_pct": round(our_total - float(sp_total_return), 2),
-                "sharpe_edge": round(float(fund_sharpe) - float(sp_sharpe), 2),
-                "period": "Since Inception",
-            }
+        # Alpha = our return - benchmark return
+        portfolio_state = get_portfolio_state()
+        our_total = ((portfolio_state.get("total_value", ORIGINAL_CAPITAL) / ORIGINAL_CAPITAL) - 1) * 100
+
+        benchmark_result = {
+            "sp500_return_pct": round(float(sp_total_return), 2),
+            "sp500_sharpe": round(float(sp_sharpe), 2),
+            "fund_return_pct": round(our_total, 2),
+            "fund_sharpe": round(float(fund_sharpe), 2),
+            "alpha_pct": round(our_total - float(sp_total_return), 2),
+            "sharpe_edge": round(float(fund_sharpe) - float(sp_sharpe), 2),
+            "period": "Since Inception",
+        }
+        result["benchmark"] = benchmark_result
+        # Save last successful benchmark dict
+        with _benchmark_lock:
+            _benchmark_cache["data"] = benchmark_result
+
     except Exception as e:
-        logger.error(f"Benchmark calculation FAILED (S&P Sharpe will be 0): {type(e).__name__}: {e}")
-        # Still compute fund stats even if S&P download fails
+        logger.error(f"Benchmark calculation FAILED: {type(e).__name__}: {e}")
+        # Last-resort fallback: use previously cached benchmark dict if available
         try:
             portfolio_state = get_portfolio_state()
             our_total = ((portfolio_state.get("total_value", ORIGINAL_CAPITAL) / ORIGINAL_CAPITAL) - 1) * 100
@@ -1856,11 +1965,22 @@ def get_performance_analytics() -> dict:
         except Exception:
             our_total = 0
             fund_sharpe = 0
-        result["benchmark"] = {
-            "sp500_return_pct": 0, "sp500_sharpe": 0,
-            "fund_return_pct": round(our_total, 2), "fund_sharpe": round(float(fund_sharpe), 2),
-            "alpha_pct": 0, "sharpe_edge": 0, "period": "N/A (benchmark data unavailable)",
-        }
+
+        if _benchmark_cache.get("data"):
+            # Use last known good values but update fund numbers to current
+            cached = dict(_benchmark_cache["data"])
+            cached["fund_return_pct"] = round(our_total, 2)
+            cached["fund_sharpe"] = round(float(fund_sharpe), 2)
+            cached["alpha_pct"] = round(our_total - cached.get("sp500_return_pct", 0), 2)
+            cached["sharpe_edge"] = round(float(fund_sharpe) - cached.get("sp500_sharpe", 0), 2)
+            cached["period"] = "Since Inception (cached)"
+            result["benchmark"] = cached
+        else:
+            result["benchmark"] = {
+                "sp500_return_pct": 0, "sp500_sharpe": 0,
+                "fund_return_pct": round(our_total, 2), "fund_sharpe": round(float(fund_sharpe), 2),
+                "alpha_pct": 0, "sharpe_edge": 0, "period": "Loading…",
+            }
 
     result["timestamp"] = datetime.now().isoformat()
     return result
