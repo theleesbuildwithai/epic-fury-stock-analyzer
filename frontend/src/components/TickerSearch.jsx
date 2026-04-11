@@ -123,9 +123,12 @@ export default function TickerSearch({ onAnalyze, loading }) {
           <span className="text-[10px] font-bold tracking-[0.3em] uppercase text-neutral-500">Institutional-Grade Analytics</span>
           <div className="h-px w-12 bg-gradient-to-l from-transparent to-red-500/40" />
         </div>
-        <h1 className="text-6xl sm:text-7xl font-black text-white mb-3 tracking-tight">
-          Epic <span className="text-gradient">Fury</span>
-        </h1>
+        <div className="flex items-center justify-center gap-4 mb-3">
+          <img src="/logo.png" alt="Sentinel Quant" className="w-16 h-16 sm:w-20 sm:h-20 object-contain" />
+          <h1 className="text-6xl sm:text-7xl font-black text-white tracking-tight">
+            Sentinel <span className="text-gradient">Quant</span>
+          </h1>
+        </div>
         <p className="text-xl text-neutral-500 font-light tracking-wide">
           Stock Analyzer
         </p>
