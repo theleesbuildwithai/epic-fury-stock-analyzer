@@ -72,6 +72,217 @@ def _safe_close(df):
     return close
 
 
+# ============================================================
+#  GARCH(1,1) VOLATILITY FORECASTING
+# ============================================================
+# Predicts tomorrow's volatility using GARCH(1,1):
+#   sigma_t^2 = omega + alpha * epsilon_{t-1}^2 + beta * sigma_{t-1}^2
+# Better than backward-looking realized vol for 1-5 day horizons.
+# Fitted via MLE with scipy.optimize.minimize (no extra dependencies).
+
+_garch_cache = {}
+_GARCH_CACHE_TTL = 600  # 10 minutes
+
+
+def garch_forecast(closes, horizon=1):
+    """
+    Fit GARCH(1,1) to daily returns and forecast volatility.
+
+    Returns:
+        dict with predicted_vol (annualized), vol_ratio (predicted/realized),
+        is_vol_compressed (bool), realized_vol (annualized)
+    """
+    from scipy.optimize import minimize
+
+    if len(closes) < 60:
+        return {"predicted_vol": 0, "vol_ratio": 1.0, "is_vol_compressed": False, "realized_vol": 0}
+
+    try:
+        returns = np.diff(np.log(closes[-252:])) if len(closes) >= 252 else np.diff(np.log(closes[-60:]))
+        T = len(returns)
+        if T < 30:
+            return {"predicted_vol": 0, "vol_ratio": 1.0, "is_vol_compressed": False, "realized_vol": 0}
+
+        # Realized vol (60-day annualized)
+        realized_vol = float(np.std(returns[-60:]) * np.sqrt(252))
+
+        # GARCH(1,1) log-likelihood
+        def neg_log_likelihood(params):
+            omega, alpha, beta = params
+            sig2 = np.zeros(T)
+            sig2[0] = np.var(returns)
+            for t in range(1, T):
+                sig2[t] = omega + alpha * returns[t-1]**2 + beta * sig2[t-1]
+                if sig2[t] <= 0:
+                    sig2[t] = 1e-8
+            # Log-likelihood of normal distribution
+            ll = -0.5 * np.sum(np.log(sig2) + returns**2 / sig2)
+            return -ll  # negative because we minimize
+
+        # Initial params and bounds
+        var0 = np.var(returns)
+        x0 = [var0 * 0.05, 0.08, 0.88]  # omega, alpha, beta
+        bounds = [(1e-10, var0 * 10), (0.01, 0.5), (0.3, 0.99)]
+
+        # Constraint: alpha + beta < 1 (stationarity)
+        constraints = [{"type": "ineq", "fun": lambda p: 0.999 - p[1] - p[2]}]
+
+        result = minimize(neg_log_likelihood, x0, bounds=bounds, constraints=constraints,
+                         method="SLSQP", options={"maxiter": 200, "ftol": 1e-8})
+
+        if not result.success:
+            return {"predicted_vol": realized_vol, "vol_ratio": 1.0,
+                    "is_vol_compressed": False, "realized_vol": realized_vol}
+
+        omega, alpha, beta = result.x
+
+        # Forecast: sigma_{T+h}^2
+        last_sig2 = omega + alpha * returns[-1]**2 + beta * np.var(returns[-5:])
+        forecast_sig2 = last_sig2
+        for _ in range(horizon):
+            forecast_sig2 = omega + (alpha + beta) * forecast_sig2
+
+        predicted_vol = float(np.sqrt(forecast_sig2) * np.sqrt(252))  # annualized
+        vol_ratio = predicted_vol / realized_vol if realized_vol > 0 else 1.0
+
+        # Vol compression: GARCH predicted < 60% of realized = breakout setup
+        is_compressed = vol_ratio < 0.6
+
+        return {
+            "predicted_vol": round(predicted_vol, 4),
+            "vol_ratio": round(vol_ratio, 3),
+            "is_vol_compressed": is_compressed,
+            "realized_vol": round(realized_vol, 4),
+        }
+
+    except Exception:
+        realized = float(np.std(np.diff(np.log(closes[-60:]))) * np.sqrt(252)) if len(closes) >= 60 else 0
+        return {"predicted_vol": realized, "vol_ratio": 1.0,
+                "is_vol_compressed": False, "realized_vol": realized}
+
+
+# ============================================================
+#  CROSS-ASSET MOMENTUM SIGNALS
+# ============================================================
+# Dollar (UUP), Bitcoin (BTC-USD), Copper (CPER), Bonds (TLT)
+# move hours ahead of equities. Continuous scoring, not just overnight.
+
+_cross_asset_cache = {"data": None, "time": 0}
+_CROSS_ASSET_TTL = 600  # 10 min
+
+
+def get_cross_asset_signals() -> dict:
+    """
+    Download cross-asset data and generate sector-level adjustments.
+
+    Returns dict with:
+        - signals: per-asset momentum data
+        - sector_adjustments: sector-level score adjustments (-2 to +2)
+        - risk_appetite: overall risk-on/risk-off reading
+    """
+    now = time.time()
+    if _cross_asset_cache["data"] and now - _cross_asset_cache["time"] < _CROSS_ASSET_TTL:
+        return _cross_asset_cache["data"]
+
+    result = {"signals": {}, "sector_adjustments": {}, "risk_appetite": "NEUTRAL"}
+
+    try:
+        _throttle()
+        tickers = ["UUP", "BTC-USD", "CPER", "TLT"]
+        df = yf.download(tickers, period="1mo", progress=False, group_by="ticker")
+
+        if df is None or df.empty:
+            return result
+
+        assets = {}
+        for sym in tickers:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if sym in df.columns.get_level_values(0):
+                        c = df[sym]["Close"].dropna().values.astype(float)
+                        if len(c) >= 10:
+                            assets[sym] = c
+                elif len(tickers) == 1:
+                    c = _safe_close(df).values.astype(float)
+                    if len(c) >= 10:
+                        assets[sym] = c
+            except Exception:
+                continue
+
+        if not assets:
+            return result
+
+        # Calculate momentum for each asset
+        for sym, closes in assets.items():
+            mom_5d = (closes[-1] / closes[-5] - 1) * 100 if len(closes) >= 5 else 0
+            mom_20d = (closes[-1] / closes[-20] - 1) * 100 if len(closes) >= 20 else 0
+            result["signals"][sym] = {
+                "momentum_5d": round(mom_5d, 2),
+                "momentum_20d": round(mom_20d, 2),
+                "price": round(float(closes[-1]), 2),
+            }
+
+        # --- Sector adjustments based on cross-asset momentum ---
+        sector_adj = {}
+
+        # DOLLAR (UUP): falling dollar = bullish for multinationals
+        uup = result["signals"].get("UUP", {})
+        uup_5d = uup.get("momentum_5d", 0)
+        if uup_5d < -1.0:  # Dollar falling
+            sector_adj["Technology"] = sector_adj.get("Technology", 0) + 0.8
+            sector_adj["Healthcare"] = sector_adj.get("Healthcare", 0) + 0.5
+            sector_adj["Materials"] = sector_adj.get("Materials", 0) + 0.7
+        elif uup_5d > 1.0:  # Dollar rising
+            sector_adj["Technology"] = sector_adj.get("Technology", 0) - 0.5
+            sector_adj["Materials"] = sector_adj.get("Materials", 0) - 0.7
+            sector_adj["Industrials"] = sector_adj.get("Industrials", 0) - 0.3
+
+        # BITCOIN (BTC-USD): risk appetite proxy (24/7 market)
+        btc = result["signals"].get("BTC-USD", {})
+        btc_5d = btc.get("momentum_5d", 0)
+        if btc_5d > 5.0:  # Strong risk-on
+            sector_adj["Technology"] = sector_adj.get("Technology", 0) + 0.6
+            sector_adj["Consumer Discretionary"] = sector_adj.get("Consumer Discretionary", 0) + 0.5
+            result["risk_appetite"] = "RISK_ON"
+        elif btc_5d < -5.0:  # Risk-off
+            sector_adj["Utilities"] = sector_adj.get("Utilities", 0) + 0.5
+            sector_adj["Consumer Staples"] = sector_adj.get("Consumer Staples", 0) + 0.4
+            result["risk_appetite"] = "RISK_OFF"
+
+        # COPPER (CPER): global growth proxy
+        cper = result["signals"].get("CPER", {})
+        cper_5d = cper.get("momentum_5d", 0)
+        if cper_5d > 2.0:  # Rising copper = growth
+            sector_adj["Industrials"] = sector_adj.get("Industrials", 0) + 0.8
+            sector_adj["Materials"] = sector_adj.get("Materials", 0) + 0.7
+            sector_adj["Energy"] = sector_adj.get("Energy", 0) + 0.4
+        elif cper_5d < -2.0:  # Falling copper = slowdown
+            sector_adj["Industrials"] = sector_adj.get("Industrials", 0) - 0.6
+            sector_adj["Materials"] = sector_adj.get("Materials", 0) - 0.5
+
+        # BONDS (TLT): falling TLT = rising yields = bearish for rate-sensitives
+        tlt = result["signals"].get("TLT", {})
+        tlt_5d = tlt.get("momentum_5d", 0)
+        if tlt_5d < -1.5:  # Yields rising (TLT falling)
+            sector_adj["Utilities"] = sector_adj.get("Utilities", 0) - 0.8
+            sector_adj["Real Estate"] = sector_adj.get("Real Estate", 0) - 0.9
+            sector_adj["Financials"] = sector_adj.get("Financials", 0) + 0.6
+        elif tlt_5d > 1.5:  # Yields falling (TLT rising)
+            sector_adj["Utilities"] = sector_adj.get("Utilities", 0) + 0.5
+            sector_adj["Real Estate"] = sector_adj.get("Real Estate", 0) + 0.6
+            sector_adj["Financials"] = sector_adj.get("Financials", 0) - 0.3
+
+        # Clamp adjustments to [-2, +2]
+        result["sector_adjustments"] = {k: round(max(-2, min(2, v)), 1) for k, v in sector_adj.items()}
+
+    except Exception as e:
+        logger.debug(f"Cross-asset signals error: {e}")
+
+    _cross_asset_cache["data"] = result
+    _cross_asset_cache["time"] = time.time()
+    return result
+
+
 def _get_cached(key, fetch_fn, ttl=None):
     """Cache with configurable TTL."""
     if ttl is None:
@@ -1366,14 +1577,39 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 daily_rets = np.diff(closes) / closes[:-1]
                 quality_raw = float(np.mean(daily_rets) / (np.std(daily_rets) + 1e-10)) * np.sqrt(252)
 
-            # --- Factor 4: LOW VOLATILITY (inverse of 60-day vol) ---
+            # --- Factor 4: LOW VOLATILITY (GARCH-enhanced) ---
+            # Use GARCH predicted vol instead of raw realized vol when available
             if len(closes) >= 60:
                 window_60 = closes[-60:]
                 daily_rets_60 = np.diff(window_60) / window_60[:-1]
                 vol_60d = float(np.std(daily_rets_60)) * np.sqrt(252) * 100
             else:
                 vol_60d = float(np.std(np.diff(closes) / closes[:-1])) * np.sqrt(252) * 100
-            low_vol_raw = -vol_60d  # negative vol = lower vol = better
+
+            # GARCH forecast — forward-looking vol prediction
+            garch = garch_forecast(closes)
+            garch_vol = garch["predicted_vol"] * 100 if garch["predicted_vol"] > 0 else vol_60d
+            vol_ratio = garch["vol_ratio"]
+            is_vol_compressed = garch["is_vol_compressed"]
+
+            # Use GARCH predicted vol for scoring (forward-looking > backward-looking)
+            effective_vol = garch_vol if garch_vol > 0 else vol_60d
+            low_vol_raw = -effective_vol  # lower predicted vol = better
+
+            # --- Factor NEW: VOL COMPRESSION (GARCH breakout detector) ---
+            # When GARCH predicted vol < 60% of realized = volatility compression
+            # Big move incoming — score based on price position vs SMA
+            vol_compression_raw = 0.0
+            if is_vol_compressed:
+                sma_20_vc = float(np.mean(closes[-20:])) if len(closes) >= 20 else closes[-1]
+                if current_price > sma_20_vc:
+                    vol_compression_raw = 3.0  # Compressed + above SMA = bullish breakout
+                else:
+                    vol_compression_raw = -3.0  # Compressed + below SMA = bearish breakdown
+            elif vol_ratio < 0.8:
+                # Mild compression
+                sma_20_vc = float(np.mean(closes[-20:])) if len(closes) >= 20 else closes[-1]
+                vol_compression_raw = 1.5 if current_price > sma_20_vc else -1.5
 
             # --- Factor 5: RSI(2) MEAN REVERSION (Connors strategy) ---
             # RSI with 2-day lookback — extremely sensitive to short-term oversold
@@ -1733,11 +1969,13 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "autocorr_raw": autocorr_raw,
                 "stat_arb_raw": stat_arb_raw,
                 "kurtosis_raw": kurtosis_raw,
+                "vol_compression_raw": vol_compression_raw,
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
                 "rsi2": round(rsi2, 1),
                 "rsi14": round(rsi14, 1),
                 "vol_60d": round(vol_60d, 1),
+                "garch_vol_ratio": round(vol_ratio, 3),
                 "ema_9": round(ema_9, 2),
                 "ema_21": round(ema_21, 2),
                 "ema_50": round(ema_50, 2),
@@ -1770,6 +2008,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     autocorr_z = _safe_zscore([s["autocorr_raw"] for s in raw_factors])
     stat_arb_z = _safe_zscore([s["stat_arb_raw"] for s in raw_factors])
     kurtosis_z = _safe_zscore([s["kurtosis_raw"] for s in raw_factors])
+    # GARCH VOL COMPRESSION — breakout predictor
+    vol_compression_z = _safe_zscore([s["vol_compression_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
@@ -1803,11 +2043,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     W_AUTOCORR = 0.04       # Autocorrelation (serial return patterns)
     W_STAT_ARB = 0.06       # Statistical arbitrage z-score (distance from fair value)
     W_KURTOSIS = 0.03       # Fat tail risk detection
+    W_VOL_COMPRESSION = 0.04  # GARCH vol compression breakout predictor
 
     # Scale existing weights down to make room for new factors (14 total now)
     existing_total = sum(weights.values())
     new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
-                        W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS)
+                        W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -1824,6 +2065,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_autocorr = W_AUTOCORR
     w_stat_arb = W_STAT_ARB
     w_kurtosis = W_KURTOSIS
+    w_vol_comp = W_VOL_COMPRESSION
 
     # --- Calculate composite scores ---
     scored = []
@@ -1843,7 +2085,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             hurst_z[i] * w_hurst +
             autocorr_z[i] * w_autocorr +
             stat_arb_z[i] * w_stat_arb +
-            kurtosis_z[i] * w_kurtosis
+            kurtosis_z[i] * w_kurtosis +
+            vol_compression_z[i] * w_vol_comp
         )
 
         # Apply macro overlay sector adjustment
@@ -2166,6 +2409,17 @@ def generate_quant_picks() -> dict:
             else:
                 macro["sector_adjustments"][sector] = adj
 
+        # Step 2C: Cross-Asset Momentum (Dollar, Bitcoin, Copper, Bonds)
+        # Leading indicators that move hours ahead of equities
+        cross_asset = get_cross_asset_signals()
+        for sector, adj in cross_asset.get("sector_adjustments", {}).items():
+            if sector in macro.get("sector_adjustments", {}):
+                macro["sector_adjustments"][sector] = round(
+                    macro["sector_adjustments"][sector] + adj, 1
+                )
+            else:
+                macro["sector_adjustments"][sector] = adj
+
         # Step 3: Batch download price data
         # Split universe into 4 batches to avoid Yahoo Finance limits (200+ stocks)
         batch_size = len(QUANT_UNIVERSE) // 4 + 1
@@ -2435,6 +2689,7 @@ def generate_quant_picks() -> dict:
             "regime": regime,
             "macro": macro,
             "overnight": overnight,
+            "cross_asset": cross_asset,
             "long_picks": top_longs,
             "short_picks": top_shorts,
             "neutral_count": len(neutral),

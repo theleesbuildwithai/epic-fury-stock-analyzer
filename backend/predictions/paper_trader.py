@@ -192,6 +192,197 @@ MIN_COMPOSITE_SCORE = 2.0  # Default — overridden by _get_min_composite_score(
 
 
 # ============================================================
+#  KELLY CRITERION POSITION SIZING
+# ============================================================
+# Optimal bet sizing: f* = (p * b - q) / b
+# where p = win probability, b = avg_win / avg_loss, q = 1 - p
+# Uses half-Kelly (0.5x) for safety. Clamps 2%-12%.
+# This replaces fixed 6-8% sizing — allocates more to high-edge trades.
+
+def _kelly_position_size(confidence, composite_score, sector, regime, direction):
+    """
+    Calculate Kelly Criterion position size based on historical edge.
+
+    Returns float: fraction of portfolio to allocate (0.02 to 0.12)
+    """
+    try:
+        from predictions.models import get_closed_trades
+        closed = get_closed_trades(limit=200)
+    except Exception:
+        closed = []
+
+    # Need at least 20 trades to calculate meaningful statistics
+    if len(closed) < 20:
+        return _get_position_size_pct()  # Fall back to fixed sizing
+
+    # Filter trades by direction for directional edge
+    dir_trades = [t for t in closed if t.get("direction") == direction]
+    if len(dir_trades) < 10:
+        dir_trades = closed  # Use all trades if not enough directional data
+
+    wins = [t for t in dir_trades if (t.get("pnl_pct") or 0) > 0]
+    losses = [t for t in dir_trades if (t.get("pnl_pct") or 0) <= 0]
+
+    if not wins or not losses:
+        return _get_position_size_pct()
+
+    # Win probability (p) and loss probability (q)
+    p = len(wins) / len(dir_trades)
+    q = 1 - p
+
+    # Average win and average loss magnitudes
+    avg_win = np.mean([abs(t.get("pnl_pct", 0) or 0) for t in wins])
+    avg_loss = np.mean([abs(t.get("pnl_pct", 0) or 0) for t in losses])
+
+    if avg_loss == 0:
+        avg_loss = 1.0  # Prevent division by zero
+
+    # Payoff ratio (b)
+    b = avg_win / avg_loss
+
+    # Kelly fraction: f* = (p * b - q) / b
+    kelly_full = (p * b - q) / b
+
+    # If Kelly is negative, the edge is negative — use minimum size
+    if kelly_full <= 0:
+        return 0.02
+
+    # Half-Kelly for safety (institutional standard)
+    kelly_half = kelly_full * 0.5
+
+    # Adjust by confidence — higher confidence = closer to Kelly
+    # Low confidence (35%) -> 60% of Kelly, high confidence (90%) -> 120% of Kelly
+    conf_multiplier = 0.4 + (confidence / 100) * 0.8
+    kelly_adjusted = kelly_half * conf_multiplier
+
+    # Adjust by composite score magnitude
+    score_boost = min(0.02, abs(composite_score) * 0.003)  # up to 2% boost for strong scores
+    kelly_adjusted += score_boost
+
+    # Regime adjustment
+    if regime == "BEAR" and direction == "long":
+        kelly_adjusted *= 0.7  # Less sizing for longs in bear
+    elif regime == "BULL" and direction == "long":
+        kelly_adjusted *= 1.1  # Slight boost for longs in bull
+
+    # Hard clamps: 2% minimum, 12% maximum
+    kelly_adjusted = max(0.02, min(0.12, kelly_adjusted))
+
+    logger.debug(f"KELLY: p={p:.2f} b={b:.2f} full={kelly_full:.3f} half={kelly_half:.3f} "
+                 f"adj={kelly_adjusted:.3f} conf={confidence}")
+
+    return round(kelly_adjusted, 4)
+
+
+# ============================================================
+#  SMART ORDER TIMING
+# ============================================================
+# First 15 min = noise. Power hour (3-4 PM) = institutional flow.
+# Avoid bad entry timing, prefer high-quality windows.
+
+def _is_good_entry_time():
+    """
+    Check current ET time and classify the trading window.
+
+    Returns dict with:
+        can_trade (bool): whether to allow new entries
+        window (str): current window classification
+        size_modifier (float): position size multiplier
+        confidence_shift (int): adjustment to confidence threshold
+    """
+    try:
+        import pytz
+        et = datetime.now(pytz.timezone("US/Eastern"))
+        hour, minute = et.hour, et.minute
+        t = hour * 60 + minute  # minutes since midnight
+
+        market_open = 9 * 60 + 30   # 9:30 AM
+        avoid_end = 9 * 60 + 45     # 9:45 AM
+        caution_end = 10 * 60 + 30  # 10:30 AM
+        power_start = 15 * 60       # 3:00 PM
+        market_close = 16 * 60      # 4:00 PM
+
+        if t < market_open or t >= market_close:
+            # Outside market hours — still allow (scheduler might run off-hours)
+            return {"can_trade": True, "window": "off_hours", "size_modifier": 1.0, "confidence_shift": 0}
+        elif t < avoid_end:
+            # First 15 minutes — avoid new entries (noise, spread is wide)
+            return {"can_trade": False, "window": "avoid", "size_modifier": 0.0, "confidence_shift": 0}
+        elif t < caution_end:
+            # 9:45-10:30 — caution zone, reduce size
+            return {"can_trade": True, "window": "caution", "size_modifier": 0.7, "confidence_shift": 5}
+        elif t >= power_start:
+            # 3:00-4:00 PM — power hour, best institutional flow
+            return {"can_trade": True, "window": "power_hour", "size_modifier": 1.1, "confidence_shift": -5}
+        else:
+            # 10:30-3:00 PM — normal trading window
+            return {"can_trade": True, "window": "normal", "size_modifier": 1.0, "confidence_shift": 0}
+    except Exception:
+        return {"can_trade": True, "window": "unknown", "size_modifier": 1.0, "confidence_shift": 0}
+
+
+# ============================================================
+#  ADAPTIVE STREAK CALIBRATION
+# ============================================================
+# When on a winning streak, press harder. Losing streak, tighten up.
+# Acts within 3-5 trades — faster than the weekly learner cycle.
+
+def _get_streak_calibration():
+    """
+    Analyze recent trade streak and return sizing/confidence adjustments.
+
+    Returns dict with:
+        streak_type (str): 'win', 'loss', or 'mixed'
+        streak_length (int): consecutive wins or losses
+        size_multiplier (float): position size multiplier
+        confidence_shift (int): adjustment to min confidence threshold
+    """
+    try:
+        from predictions.models import get_closed_trades
+        recent = get_closed_trades(limit=10)
+    except Exception:
+        return {"streak_type": "mixed", "streak_length": 0, "size_multiplier": 1.0, "confidence_shift": 0}
+
+    if len(recent) < 3:
+        return {"streak_type": "mixed", "streak_length": 0, "size_multiplier": 1.0, "confidence_shift": 0}
+
+    # Count consecutive wins/losses from most recent
+    streak = 0
+    streak_type = "win" if (recent[0].get("pnl_pct", 0) or 0) > 0 else "loss"
+
+    for t in recent:
+        pnl = t.get("pnl_pct", 0) or 0
+        if streak_type == "win" and pnl > 0:
+            streak += 1
+        elif streak_type == "loss" and pnl <= 0:
+            streak += 1
+        else:
+            break
+
+    # Calibration based on streak
+    if streak_type == "win":
+        if streak >= 8:
+            return {"streak_type": "win", "streak_length": streak,
+                    "size_multiplier": 1.25, "confidence_shift": -8}
+        elif streak >= 5:
+            return {"streak_type": "win", "streak_length": streak,
+                    "size_multiplier": 1.15, "confidence_shift": -5}
+        else:
+            return {"streak_type": "win", "streak_length": streak,
+                    "size_multiplier": 1.0, "confidence_shift": 0}
+    else:  # loss
+        if streak >= 5:
+            return {"streak_type": "loss", "streak_length": streak,
+                    "size_multiplier": 0.50, "confidence_shift": 15}
+        elif streak >= 3:
+            return {"streak_type": "loss", "streak_length": streak,
+                    "size_multiplier": 0.75, "confidence_shift": 10}
+        else:
+            return {"streak_type": "loss", "streak_length": streak,
+                    "size_multiplier": 1.0, "confidence_shift": 0}
+
+
+# ============================================================
 #  AUTONOMOUS DECISION ENGINE — Per-Stock Stop Loss & Profit Targets
 # ============================================================
 # Instead of fixed 5% stop loss for every stock, the machine calculates
@@ -1023,14 +1214,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     overnight = quant_picks.get("overnight", {})
     overnight_size_mod = overnight.get("position_size_modifier", 1.0) if overnight else 1.0
 
-    if available_slots > 0 and cash > 1000:
+    # --- SMART ORDER TIMING: Check if this is a good entry window ---
+    timing = _is_good_entry_time()
+    timing_size_mod = timing["size_modifier"]
+    timing_conf_shift = timing["confidence_shift"]
+    if timing["window"] == "avoid":
+        logger.info(f"SMART TIMING: Skipping new entries — first 15 min window (9:30-9:45 ET)")
+    elif timing["window"] == "power_hour":
+        logger.info(f"SMART TIMING: Power hour active — institutional flow window")
+    elif timing["window"] == "caution":
+        logger.info(f"SMART TIMING: Caution window (9:45-10:30) — reduced sizing")
+
+    # --- ADAPTIVE STREAK CALIBRATION ---
+    streak = _get_streak_calibration()
+    streak_size_mod = streak["size_multiplier"]
+    streak_conf_shift = streak["confidence_shift"]
+    if streak["streak_length"] >= 3:
+        logger.info(f"STREAK CALIBRATION: {streak['streak_type']} streak x{streak['streak_length']} — "
+                    f"size {streak_size_mod:.2f}x, confidence shift {streak_conf_shift:+d}")
+
+    if available_slots > 0 and cash > 1000 and timing.get("can_trade", True):
         # REGIME-AWARE PICK SELECTION
         # In BEAR: prioritize shorts heavily, limit longs
         # In BULL: prioritize longs heavily, limit shorts
         all_picks = []
 
         # Use dynamic filters — tighter in preservation mode
-        min_conf = _get_min_confidence()
+        # Apply streak calibration to confidence threshold
+        min_conf = _get_min_confidence() + streak_conf_shift + timing_conf_shift
+        min_conf = max(20, min(80, min_conf))  # Clamp to sane range
         min_score = _get_min_composite_score()
         preservation = _is_preservation_mode()
         if preservation:
@@ -1221,10 +1433,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # DRAWDOWN RECOVERY MODE — reduce size when portfolio is losing
+            # DRAWDOWN RECOVERY ENGINE — enhanced strategy shift during drawdowns
             dd_mode = quant_picks.get("drawdown_mode", {})
             dd_multiplier = dd_mode.get("size_multiplier", 1.0)
             dd_allowed = dd_mode.get("allowed_sectors")
+            dd_min_conf = dd_mode.get("min_confidence", 0)
+            dd_strategy = dd_mode.get("strategy_shift", "none")
+
             if dd_multiplier == 0:
                 results["skipped"].append({
                     "symbol": symbol,
@@ -1237,6 +1452,22 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     "reason": f"Drawdown mode: only {dd_allowed} sectors allowed",
                 })
                 continue
+            # Enhanced: enforce minimum confidence during drawdown
+            if dd_min_conf > 0 and pick.get("confidence", 0) < dd_min_conf:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Drawdown recovery: need {dd_min_conf}%+ confidence, got {pick.get('confidence', 0)}%",
+                })
+                continue
+            # Enhanced: strategy shift — only allow mean reversion in emergency mode
+            if dd_strategy == "mean_reversion":
+                is_mr = pick.get("mean_reversion", False) or pick.get("signal_type") == "MEAN_REVERSION"
+                if not is_mr and pick.get("confidence", 0) < 80:
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": "Drawdown EMERGENCY: only mean reversion trades or 80%+ conviction allowed",
+                    })
+                    continue
 
             # EARNINGS SHIELD — Block stocks with earnings in next 1-2 days
             earnings_shield = quant_picks.get("earnings_shield", {})
@@ -1248,15 +1479,28 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # Regime-aware sizing — dynamic base from preservation mode
-            base_size = _get_position_size_pct()  # 3% in preservation, 6% normal
+            # KELLY CRITERION POSITION SIZING — allocate based on actual edge
+            # Falls back to fixed sizing if insufficient trade history
+            kelly_size = _kelly_position_size(
+                confidence=pick.get("confidence", 50),
+                composite_score=pick.get("composite_score", 0),
+                sector=pick.get("sector", ""),
+                regime=regime,
+                direction=direction,
+            )
+
+            # Regime adjustment on top of Kelly
             if regime == "BEAR":
-                size_pct = min(0.08, base_size * 1.33) if direction == "short" else min(0.05, base_size * 0.83)
+                size_pct = min(0.12, kelly_size * 1.2) if direction == "short" else min(0.08, kelly_size * 0.8)
             elif regime == "BULL":
-                size_pct = min(0.08, base_size * 1.33) if direction == "long" else min(0.04, base_size * 0.67)
+                size_pct = min(0.12, kelly_size * 1.2) if direction == "long" else min(0.06, kelly_size * 0.7)
             else:
-                size_pct = base_size
-            position_value = total_value * size_pct * drawdown_multiplier * vix_multiplier * overnight_size_mod * cb_multiplier * dd_multiplier
+                size_pct = kelly_size
+
+            # Apply all multipliers: VIX, drawdown, overnight, circuit breaker, streak, timing
+            position_value = (total_value * size_pct * drawdown_multiplier * vix_multiplier *
+                            overnight_size_mod * cb_multiplier * dd_multiplier *
+                            streak_size_mod * timing_size_mod)
             shares = round(position_value / price, 4)
 
             if shares * price > cash:

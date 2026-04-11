@@ -625,4 +625,39 @@ def generate_intelligence_report() -> dict:
 
         report["confidence_calibration"] = calibration
 
+    # --- STREAK ANALYSIS ---
+    # Show current win/loss streak and its impact on sizing
+    try:
+        if len(closed_trades) >= 3:
+            streak = 0
+            streak_type = "win" if (closed_trades[0].get("pnl_pct", 0) or 0) > 0 else "loss"
+            for t in closed_trades:
+                pnl = t.get("pnl_pct", 0) or 0
+                if streak_type == "win" and pnl > 0:
+                    streak += 1
+                elif streak_type == "loss" and pnl <= 0:
+                    streak += 1
+                else:
+                    break
+
+            # Calculate impact
+            if streak_type == "win" and streak >= 5:
+                impact = f"+{min(25, (streak - 4) * 10)}% position size, -{min(8, (streak - 4) * 3)} confidence threshold"
+            elif streak_type == "loss" and streak >= 3:
+                impact = f"-{min(50, (streak - 2) * 15)}% position size, +{min(15, (streak - 2) * 5)} confidence threshold"
+            else:
+                impact = "No adjustment (streak too short)"
+
+            report["streak_analysis"] = {
+                "current_streak_type": streak_type,
+                "streak_length": streak,
+                "impact": impact,
+                "last_10_results": [
+                    {"ticker": t.get("ticker", "?"), "pnl_pct": round(t.get("pnl_pct", 0) or 0, 2)}
+                    for t in closed_trades[:10]
+                ],
+            }
+    except Exception:
+        pass
+
     return report

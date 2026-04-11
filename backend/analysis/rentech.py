@@ -732,6 +732,165 @@ def get_alt_data_signals(symbols: list) -> dict:
 #  5. INTRADAY MEAN REVERSION SIGNALS
 # ============================================================
 
+
+def enhanced_mean_reversion_score(closes, volumes):
+    """
+    Multi-confirmation mean reversion timer. Requires 2 of 3 confirmations
+    before triggering a mean reversion entry:
+
+    1. RSI Divergence — price makes lower low but RSI makes higher low (bullish)
+       or price makes higher high but RSI makes lower high (bearish)
+    2. Volume Dry-Up — selling volume declining on successive down legs
+    3. Bollinger Band Re-Entry — price was below lower band, now crossing back in
+
+    Returns dict with mr_score, confirmations count, and individual signals.
+    """
+    result = {
+        "mr_score": 0, "confirmations": 0,
+        "divergence": False, "volume_dryup": False, "bb_reentry": False,
+        "timing_quality": "POOR", "direction": "NEUTRAL"
+    }
+
+    if len(closes) < 20 or len(volumes) < 20:
+        return result
+
+    price = float(closes[-1])
+    confirmations = 0
+    direction_votes = []  # +1 = bullish, -1 = bearish
+
+    # --- Confirmation 1: RSI Divergence ---
+    try:
+        # Calculate RSI(14) for two windows: days -14 to -7 and days -7 to 0
+        def _rsi(data):
+            deltas = np.diff(data)
+            gains = np.mean(np.maximum(deltas, 0))
+            losses_v = np.mean(np.maximum(-deltas, 0))
+            if losses_v == 0:
+                return 100.0
+            return 100 - (100 / (1 + gains / losses_v))
+
+        if len(closes) >= 28:
+            rsi_old = _rsi(closes[-28:-14])
+            rsi_new = _rsi(closes[-14:])
+            price_old_low = float(np.min(closes[-28:-14]))
+            price_new_low = float(np.min(closes[-14:]))
+            price_old_high = float(np.max(closes[-28:-14]))
+            price_new_high = float(np.max(closes[-14:]))
+
+            # Bullish divergence: price lower low, RSI higher low
+            if price_new_low < price_old_low and rsi_new > rsi_old:
+                result["divergence"] = True
+                confirmations += 1
+                direction_votes.append(1)
+
+            # Bearish divergence: price higher high, RSI lower high
+            elif price_new_high > price_old_high and rsi_new < rsi_old:
+                result["divergence"] = True
+                confirmations += 1
+                direction_votes.append(-1)
+    except Exception:
+        pass
+
+    # --- Confirmation 2: Volume Dry-Up ---
+    try:
+        if len(closes) >= 15 and len(volumes) >= 15:
+            # Check if selling volume is declining over last 3 legs
+            daily_rets = np.diff(closes[-15:])
+            # Split into 3 windows of 5 days each
+            vol_windows = [volumes[-15:-10], volumes[-10:-5], volumes[-5:]]
+            ret_windows = [daily_rets[:4], daily_rets[4:9], daily_rets[9:]]
+
+            # Calculate sell-side volume for each window
+            sell_vols = []
+            for rv, vv in zip(ret_windows, vol_windows[:3]):
+                min_len = min(len(rv), len(vv))
+                if min_len > 0:
+                    sell_vol = float(np.sum(vv[:min_len][rv[:min_len] < 0]))
+                    sell_vols.append(sell_vol)
+
+            # Volume dry-up: sell volume declining across windows
+            if len(sell_vols) >= 3 and sell_vols[2] < sell_vols[1] < sell_vols[0]:
+                result["volume_dryup"] = True
+                confirmations += 1
+                # If price is below average, this is bullish (sellers exhausted)
+                sma_20 = float(np.mean(closes[-20:]))
+                direction_votes.append(1 if price < sma_20 else -1)
+
+            # Buy-side volume increasing while price is rising = bearish exhaustion
+            buy_vols = []
+            for rv, vv in zip(ret_windows, vol_windows[:3]):
+                min_len = min(len(rv), len(vv))
+                if min_len > 0:
+                    buy_vol = float(np.sum(vv[:min_len][rv[:min_len] > 0]))
+                    buy_vols.append(buy_vol)
+
+            if len(buy_vols) >= 3 and buy_vols[2] < buy_vols[1] < buy_vols[0]:
+                if not result["volume_dryup"]:  # Don't double count
+                    result["volume_dryup"] = True
+                    confirmations += 1
+                    sma_20 = float(np.mean(closes[-20:]))
+                    direction_votes.append(-1 if price > sma_20 else 1)
+    except Exception:
+        pass
+
+    # --- Confirmation 3: Bollinger Band Re-Entry ---
+    try:
+        if len(closes) >= 21:
+            sma_20 = float(np.mean(closes[-20:]))
+            std_20 = float(np.std(closes[-20:]))
+            bb_lower = sma_20 - 2 * std_20
+            bb_upper = sma_20 + 2 * std_20
+
+            prev_price = float(closes[-2])
+
+            # Was below lower band, now crossing back in (bullish re-entry)
+            if prev_price < bb_lower and price >= bb_lower:
+                result["bb_reentry"] = True
+                confirmations += 1
+                direction_votes.append(1)
+
+            # Was above upper band, now crossing back in (bearish re-entry)
+            elif prev_price > bb_upper and price <= bb_upper:
+                result["bb_reentry"] = True
+                confirmations += 1
+                direction_votes.append(-1)
+
+            # Close to re-entry (within 0.5% of band)
+            elif price < bb_lower * 1.005 and price > bb_lower:
+                result["bb_reentry"] = True
+                confirmations += 1
+                direction_votes.append(1)
+            elif price > bb_upper * 0.995 and price < bb_upper:
+                result["bb_reentry"] = True
+                confirmations += 1
+                direction_votes.append(-1)
+    except Exception:
+        pass
+
+    # --- Score and quality ---
+    result["confirmations"] = confirmations
+
+    if confirmations >= 3:
+        result["mr_score"] = 5
+        result["timing_quality"] = "EXCELLENT"
+    elif confirmations >= 2:
+        result["mr_score"] = 3
+        result["timing_quality"] = "GOOD"
+    elif confirmations == 1:
+        result["mr_score"] = 1
+        result["timing_quality"] = "FAIR"
+
+    # Direction from vote consensus
+    if direction_votes:
+        vote_sum = sum(direction_votes)
+        if vote_sum > 0:
+            result["direction"] = "LONG"
+        elif vote_sum < 0:
+            result["direction"] = "SHORT"
+
+    return result
+
+
 def get_mean_reversion_signals(price_data: dict) -> list:
     """
     Identify stocks with strong mean reversion setups.
@@ -831,10 +990,30 @@ def get_mean_reversion_signals(price_data: dict) -> list:
                 mr_score -= 1
                 reasons.append(f"{consecutive_up} consecutive up days — pullback expected")
 
-            # Only generate signal if strong enough
-            if abs(mr_score) >= 3:
+            # ENHANCED TIMING: Require multi-confirmation before entry
+            # RSI divergence + volume dry-up + Bollinger re-entry
+            enhanced = enhanced_mean_reversion_score(closes, volumes)
+            enhanced_confirmations = enhanced["confirmations"]
+
+            # Boost mr_score if enhanced timing confirms
+            if enhanced_confirmations >= 2:
+                mr_score += 2 if enhanced["direction"] == ("LONG" if mr_score > 0 else "SHORT") else 0
+                # Even boost opposing direction if strong enough
+                if enhanced_confirmations >= 3:
+                    mr_score += 1
+
+            # Only generate signal if strong enough AND has timing confirmation
+            # Require either: (a) strong base score (>=4) OR (b) moderate score (>=3) + 2 confirmations
+            has_timing = enhanced_confirmations >= 2
+            has_strong_base = abs(mr_score) >= 4
+            has_moderate_plus_timing = abs(mr_score) >= 3 and has_timing
+
+            if has_strong_base or has_moderate_plus_timing:
                 direction = "LONG" if mr_score > 0 else "SHORT"
                 confidence = min(90, 50 + abs(mr_score) * 10)
+                # Boost confidence for confirmed setups
+                if has_timing:
+                    confidence = min(95, confidence + enhanced_confirmations * 5)
 
                 setups.append({
                     "symbol": symbol,
@@ -849,7 +1028,12 @@ def get_mean_reversion_signals(price_data: dict) -> list:
                     "consecutive_up": consecutive_up,
                     "price": price,
                     "reasons": reasons,
-                    "expected_hold_days": 2 if abs(mr_score) >= 4 else 5,  # Quick trades
+                    "timing_quality": enhanced["timing_quality"],
+                    "timing_confirmations": enhanced_confirmations,
+                    "rsi_divergence": enhanced["divergence"],
+                    "volume_dryup": enhanced["volume_dryup"],
+                    "bb_reentry": enhanced["bb_reentry"],
+                    "expected_hold_days": 2 if abs(mr_score) >= 4 else 5,
                     "expected_return_pct": round(abs(mr_score) * 1.5, 1),
                 })
 
@@ -1483,27 +1667,96 @@ def calculate_portfolio_beta(open_trades: list, price_data: dict) -> dict:
 #  14. DRAWDOWN RECOVERY MODE
 # ============================================================
 
-def get_drawdown_recovery_mode(portfolio_value: float, peak_value: float) -> dict:
-    """Shift to defensive when portfolio draws down from peak."""
+def get_drawdown_recovery_mode(portfolio_value: float, peak_value: float, recent_trades=None) -> dict:
+    """
+    Enhanced Drawdown Recovery Engine.
+
+    Instead of just reducing position size, this changes the entire strategy:
+    - High-conviction only (70%+ confidence)
+    - Shorter hold periods (10 days max)
+    - Defensive sectors prioritized
+    - Require 2+ factor confirmation
+    - Auto-exit recovery when 50% of drawdown is regained
+    - Strategy shift: favor mean_reversion over momentum
+
+    Args:
+        portfolio_value: current portfolio value
+        peak_value: all-time high portfolio value
+        recent_trades: list of recent closed trades (for recovery tracking)
+    """
     dd = ((portfolio_value / peak_value) - 1) * 100 if peak_value > 0 else 0
 
+    # Calculate recovery progress (if we were in drawdown and are recovering)
+    recovery_target = peak_value * 0.95  # Exit recovery when within 5% of peak
+    recovery_progress = 0.0
+    if dd < -3 and peak_value > 0:
+        # How much of the drawdown have we recovered?
+        max_dd_amount = peak_value - (peak_value * (1 + dd / 100))
+        current_dd_amount = peak_value - portfolio_value
+        if max_dd_amount > 0:
+            recovery_progress = max(0, (1 - current_dd_amount / max_dd_amount)) * 100
+
+    # Check recent trade performance during recovery
+    recovery_win_rate = 0.5
+    if recent_trades and len(recent_trades) >= 5:
+        recent_wins = sum(1 for t in recent_trades[:10] if (t.get("pnl_pct", 0) or 0) > 0)
+        recovery_win_rate = recent_wins / min(10, len(recent_trades))
+
     if dd <= -10:
-        return {"mode": "HALT", "drawdown_pct": round(dd, 2), "size_multiplier": 0.0,
-                "message": f"CRITICAL ({dd:+.1f}%): ALL TRADING HALTED", "allowed_sectors": []}
+        return {
+            "mode": "HALT", "drawdown_pct": round(dd, 2), "size_multiplier": 0.0,
+            "message": f"CRITICAL ({dd:+.1f}%): ALL TRADING HALTED",
+            "allowed_sectors": [],
+            "strategy_shift": "none",
+            "min_confidence": 95,
+            "max_hold_days": 0,
+            "min_confirmations": 3,
+            "recovery_progress": round(recovery_progress, 1),
+        }
     elif dd <= -8:
-        return {"mode": "EMERGENCY", "drawdown_pct": round(dd, 2), "size_multiplier": 0.25,
-                "message": f"Emergency ({dd:+.1f}%): 75% size reduction",
-                "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities"]}
+        return {
+            "mode": "EMERGENCY", "drawdown_pct": round(dd, 2), "size_multiplier": 0.25,
+            "message": f"Emergency ({dd:+.1f}%): 75% size reduction — mean reversion only",
+            "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities"],
+            "strategy_shift": "mean_reversion",  # Only take mean reversion setups
+            "min_confidence": 75,
+            "max_hold_days": 5,
+            "min_confirmations": 2,
+            "recovery_progress": round(recovery_progress, 1),
+        }
     elif dd <= -5:
-        return {"mode": "DEFENSIVE", "drawdown_pct": round(dd, 2), "size_multiplier": 0.5,
-                "message": f"Defensive ({dd:+.1f}%): 50% size reduction",
-                "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities", "Financials"]}
+        return {
+            "mode": "DEFENSIVE", "drawdown_pct": round(dd, 2), "size_multiplier": 0.5,
+            "message": f"Defensive ({dd:+.1f}%): 50% size, high-conviction only",
+            "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities", "Financials"],
+            "strategy_shift": "defensive",  # Favor value + mean reversion
+            "min_confidence": 70,
+            "max_hold_days": 10,
+            "min_confirmations": 2,
+            "recovery_progress": round(recovery_progress, 1),
+        }
     elif dd <= -3:
-        return {"mode": "CAUTIOUS", "drawdown_pct": round(dd, 2), "size_multiplier": 0.7,
-                "message": f"Cautious ({dd:+.1f}%): 30% size reduction", "allowed_sectors": None}
+        return {
+            "mode": "CAUTIOUS", "drawdown_pct": round(dd, 2), "size_multiplier": 0.7,
+            "message": f"Cautious ({dd:+.1f}%): 30% size reduction",
+            "allowed_sectors": None,
+            "strategy_shift": "cautious",  # Slight bias to defensive
+            "min_confidence": 55,
+            "max_hold_days": 20,
+            "min_confirmations": 1,
+            "recovery_progress": round(recovery_progress, 1),
+        }
     else:
-        return {"mode": "NORMAL", "drawdown_pct": round(dd, 2), "size_multiplier": 1.0,
-                "message": "Portfolio within normal range", "allowed_sectors": None}
+        return {
+            "mode": "NORMAL", "drawdown_pct": round(dd, 2), "size_multiplier": 1.0,
+            "message": "Portfolio within normal range",
+            "allowed_sectors": None,
+            "strategy_shift": "none",
+            "min_confidence": 0,
+            "max_hold_days": 60,
+            "min_confirmations": 0,
+            "recovery_progress": 100.0,
+        }
 
 
 # ============================================================
