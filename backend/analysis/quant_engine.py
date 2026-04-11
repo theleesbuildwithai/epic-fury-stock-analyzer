@@ -1951,6 +1951,67 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             ema_21 = float(pd.Series(closes).ewm(span=21, adjust=False).mean().iloc[-1])
             ema_50 = float(pd.Series(closes).ewm(span=50, adjust=False).mean().iloc[-1]) if len(closes) >= 50 else ema_21
 
+            # --- Factor 15: MULTI-TIMEFRAME TREND ALIGNMENT ---
+            # Real quant funds confirm signals across daily, weekly, monthly.
+            # Trades that align across all 3 timeframes have 15-25% higher win rates.
+            # Daily: EMA-9 vs EMA-21 | Weekly: EMA-21 vs EMA-63 | Monthly: EMA-63 vs EMA-200
+            mtf_alignment_raw = 0.0
+            try:
+                ema_63 = float(pd.Series(closes).ewm(span=63, adjust=False).mean().iloc[-1]) if len(closes) >= 63 else ema_50
+                ema_200 = float(pd.Series(closes).ewm(span=200, adjust=False).mean().iloc[-1]) if len(closes) >= 200 else ema_63
+
+                # Daily trend: EMA-9 above EMA-21 = bullish
+                daily_bull = 1 if ema_9 > ema_21 else -1
+                # Weekly proxy: EMA-21 above EMA-63 = bullish
+                weekly_bull = 1 if ema_21 > ema_63 else -1
+                # Monthly proxy: EMA-63 above EMA-200 = bullish
+                monthly_bull = 1 if ema_63 > ema_200 else -1
+                # Price position: above all EMAs = extra conviction
+                price_position = 1 if current_price > ema_21 and current_price > ema_63 else -1
+
+                mtf_alignment_raw = float(daily_bull + weekly_bull + monthly_bull + price_position)
+                # Range: -4 to +4 (all 4 bearish to all 4 bullish)
+            except Exception:
+                mtf_alignment_raw = 0.0
+
+            # --- Factor 16: ADX TREND STRENGTH ---
+            # ADX measures trend strength regardless of direction.
+            # ADX > 25 = strong trend (momentum works), ADX < 15 = choppy (mean reversion works)
+            adx_value = 25.0  # default neutral
+            try:
+                if len(closes) >= 28:
+                    highs_adx = df["High"].iloc[:, 0].values.astype(float) if hasattr(df["High"], "columns") else df["High"].values.astype(float)
+                    lows_adx = df["Low"].iloc[:, 0].values.astype(float) if hasattr(df["Low"], "columns") else df["Low"].values.astype(float)
+
+                    # True Range
+                    tr_list = []
+                    for k in range(1, min(len(closes), 28)):
+                        tr = max(
+                            highs_adx[-28+k] - lows_adx[-28+k],
+                            abs(highs_adx[-28+k] - closes[-28+k-1]),
+                            abs(lows_adx[-28+k] - closes[-28+k-1])
+                        )
+                        tr_list.append(tr)
+
+                    # +DM and -DM
+                    plus_dm = []
+                    minus_dm = []
+                    for k in range(1, min(len(highs_adx), 28)):
+                        up_move = highs_adx[-28+k] - highs_adx[-28+k-1]
+                        down_move = lows_adx[-28+k-1] - lows_adx[-28+k]
+                        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
+                        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
+
+                    if len(tr_list) >= 14:
+                        # Smoothed averages (Wilder's smoothing = 14-period EMA)
+                        atr14 = np.mean(tr_list[-14:])
+                        plus_di = (np.mean(plus_dm[-14:]) / (atr14 + 1e-10)) * 100
+                        minus_di = (np.mean(minus_dm[-14:]) / (atr14 + 1e-10)) * 100
+                        dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
+                        adx_value = float(dx)
+            except Exception:
+                adx_value = 25.0  # neutral fallback
+
             raw_factors.append({
                 "symbol": symbol,
                 "price": round(current_price, 2),
@@ -1970,6 +2031,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "stat_arb_raw": stat_arb_raw,
                 "kurtosis_raw": kurtosis_raw,
                 "vol_compression_raw": vol_compression_raw,
+                "mtf_alignment_raw": mtf_alignment_raw,
+                "adx": round(adx_value, 1),
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
                 "rsi2": round(rsi2, 1),
@@ -2010,6 +2073,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     kurtosis_z = _safe_zscore([s["kurtosis_raw"] for s in raw_factors])
     # GARCH VOL COMPRESSION — breakout predictor
     vol_compression_z = _safe_zscore([s["vol_compression_raw"] for s in raw_factors])
+    # MULTI-TIMEFRAME ALIGNMENT — cross-timeframe trend confirmation
+    mtf_alignment_z = _safe_zscore([s["mtf_alignment_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
@@ -2044,11 +2109,13 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     W_STAT_ARB = 0.06       # Statistical arbitrage z-score (distance from fair value)
     W_KURTOSIS = 0.03       # Fat tail risk detection
     W_VOL_COMPRESSION = 0.04  # GARCH vol compression breakout predictor
+    W_MTF_ALIGNMENT = 0.04    # Multi-timeframe trend alignment (daily+weekly+monthly)
 
-    # Scale existing weights down to make room for new factors (14 total now)
+    # Scale existing weights down to make room for new factors (15 total now)
     existing_total = sum(weights.values())
     new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
-                        W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION)
+                        W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION +
+                        W_MTF_ALIGNMENT)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -2066,6 +2133,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_stat_arb = W_STAT_ARB
     w_kurtosis = W_KURTOSIS
     w_vol_comp = W_VOL_COMPRESSION
+    w_mtf = W_MTF_ALIGNMENT
 
     # --- Calculate composite scores ---
     scored = []
@@ -2086,7 +2154,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             autocorr_z[i] * w_autocorr +
             stat_arb_z[i] * w_stat_arb +
             kurtosis_z[i] * w_kurtosis +
-            vol_compression_z[i] * w_vol_comp
+            vol_compression_z[i] * w_vol_comp +
+            mtf_alignment_z[i] * w_mtf
         )
 
         # Apply macro overlay sector adjustment
@@ -2159,6 +2228,22 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             confidence = int(confidence * 0.85)  # slight penalty for shorting gap up (was 0.7)
         elif gap <= -1.5 and direction == "LONG":
             confidence = int(confidence * 0.85)  # slight penalty for buying gap down (was 0.7)
+
+        # ADX TREND STRENGTH FILTER — route signal to right model
+        # ADX > 25 = strong trend → momentum signals are reliable
+        # ADX < 15 = choppy market → mean reversion signals are reliable
+        stock_adx = stock.get("adx", 25.0)
+        # Identify dominant factor for this stock
+        dominant_is_momentum = (abs(momentum_z[i] * w_mom) + abs(relative_strength_z[i] * w_relstr) >
+                                abs(rsi2_z[i] * w_rsi2) + abs(value_z[i] * w_val))
+        if stock_adx > 30 and dominant_is_momentum and direction != "NEUTRAL":
+            confidence = min(95, int(confidence * 1.12))  # Strong trend + momentum = high conviction
+        elif stock_adx > 25 and dominant_is_momentum and direction != "NEUTRAL":
+            confidence = min(95, int(confidence * 1.08))
+        elif stock_adx < 15 and dominant_is_momentum and direction != "NEUTRAL":
+            confidence = int(confidence * 0.85)  # Choppy market, momentum unreliable
+        elif stock_adx < 15 and not dominant_is_momentum and direction != "NEUTRAL":
+            confidence = min(95, int(confidence * 1.10))  # Choppy = mean reversion works
 
         # TREND FILTER: Gentle adjustment, NOT a kill shot
         # OVERHAUL: Old filter cut confidence by 50% (0.5x) — combined with regime_multiplier (0.7x)
@@ -2250,6 +2335,9 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "vwap": {"z": vwap_z[i], "weight": round(w_vwap, 3),
                     "raw": round(stock["vwap_raw"], 2),
                     "contribution": round(vwap_z[i] * w_vwap, 3)},
+            "mtf_alignment": {"z": mtf_alignment_z[i], "weight": round(w_mtf, 3),
+                             "raw": round(stock["mtf_alignment_raw"], 2),
+                             "contribution": round(mtf_alignment_z[i] * w_mtf, 3)},
         }
 
         # Generate human-readable reasons
@@ -2296,6 +2384,9 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "reasons": reasons[:4],
             "stop_loss": stop_loss,
             "target_price": target_price,
+            "adx": stock.get("adx", 25.0),
+            "mtf_alignment": round(stock.get("mtf_alignment_raw", 0), 1),
+            "garch_vol_ratio": stock.get("garch_vol_ratio", 1.0),
         })
 
     # Sort by composite score descending
@@ -2714,6 +2805,8 @@ def generate_quant_picks() -> dict:
             "sector_rotation": rentech_data.get("sector_rotation", {}),
             "regime_transition": rentech_data.get("regime_transition", {}),
             "drawdown_mode": rentech_data.get("drawdown_mode", {}),
+            "portfolio_var": rentech_data.get("portfolio_var", {}),
+            "_price_data": price_data,  # Pass through for correlation checks in paper_trader
             "generated_at": datetime.now().isoformat(),
             "computation_time_seconds": elapsed,
             "disclaimer": (

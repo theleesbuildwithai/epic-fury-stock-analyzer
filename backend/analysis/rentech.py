@@ -404,6 +404,225 @@ def assess_portfolio_risk(open_trades: list, price_data: dict = None) -> dict:
     }
 
 
+# ============================================================
+#  PORTFOLIO VALUE-AT-RISK (VaR) BUDGET
+#  Parametric VaR using actual position covariance matrix
+#  Blocks new trades when portfolio risk budget is exhausted
+# ============================================================
+
+def calculate_portfolio_var(open_trades: list, price_data: dict,
+                            portfolio_value: float) -> dict:
+    """
+    Calculate 95% parametric Value-at-Risk for the current portfolio.
+
+    Uses actual return correlations between positions (not sector proxies).
+    Returns VaR as % of portfolio and a position-size multiplier.
+
+    VaR > 2% → half-size new positions
+    VaR > 3% → block all new positions
+    """
+    if not open_trades or portfolio_value <= 0:
+        return {"var_pct": 0, "cvar_pct": 0, "var_multiplier": 1.0, "status": "NO_POSITIONS"}
+
+    # Get symbols and weights
+    symbols = []
+    weights = []
+    total_notional = 0
+
+    for trade in open_trades:
+        ticker = trade.get("ticker", "")
+        notional = abs(trade.get("entry_price", 0) * trade.get("shares", 0))
+        direction_sign = 1.0 if trade.get("direction", "long") == "long" else -1.0
+        if ticker in price_data and notional > 0:
+            symbols.append(ticker)
+            weights.append(notional * direction_sign)
+            total_notional += notional
+
+    if len(symbols) < 1 or total_notional == 0:
+        return {"var_pct": 0, "cvar_pct": 0, "var_multiplier": 1.0, "status": "INSUFFICIENT_DATA"}
+
+    # Build returns matrix (60-day lookback)
+    returns_matrix = []
+    valid_symbols = []
+    valid_weights = []
+
+    for idx, sym in enumerate(symbols):
+        df = price_data.get(sym)
+        if df is None:
+            continue
+        try:
+            closes = df["Close"].iloc[:, 0].values.astype(float) if hasattr(df["Close"], "columns") else df["Close"].values.astype(float)
+            if len(closes) < 30:
+                continue
+            rets = np.diff(closes[-61:]) / closes[-61:-1]  # 60-day returns
+            if len(rets) >= 20:
+                returns_matrix.append(rets[-min(len(rets), 60):])
+                valid_symbols.append(sym)
+                valid_weights.append(weights[idx])
+        except Exception:
+            continue
+
+    if len(valid_symbols) < 1:
+        return {"var_pct": 0, "cvar_pct": 0, "var_multiplier": 1.0, "status": "NO_VALID_DATA"}
+
+    # Align return lengths
+    min_len = min(len(r) for r in returns_matrix)
+    returns_matrix = np.array([r[-min_len:] for r in returns_matrix])
+
+    # Portfolio weights as fractions of portfolio
+    w = np.array(valid_weights) / portfolio_value
+
+    # Covariance matrix
+    try:
+        if len(valid_symbols) == 1:
+            port_var = float(np.var(returns_matrix[0]) * w[0]**2)
+        else:
+            cov_matrix = np.cov(returns_matrix)
+            port_var = float(w @ cov_matrix @ w)
+    except Exception:
+        # Fallback: assume zero correlation
+        port_var = float(np.sum((w**2) * np.var(returns_matrix, axis=1)))
+
+    port_vol = np.sqrt(max(port_var, 0))
+
+    # Parametric VaR (95%) = z_0.95 * portfolio_vol
+    z_95 = 1.645
+    var_pct = round(port_vol * z_95 * 100, 4)
+
+    # CVaR (Expected Shortfall) — analytical under normality
+    z_cvar = 2.063  # E[X | X > z_0.95] for standard normal
+    cvar_pct = round(port_vol * z_cvar * 100, 4)
+
+    # VaR budget enforcement
+    if var_pct > 3.0:
+        var_multiplier = 0.0  # BLOCK new positions
+        status = "VAR_EXCEEDED"
+    elif var_pct > 2.0:
+        var_multiplier = 0.5  # Half-size
+        status = "VAR_WARNING"
+    elif var_pct > 1.5:
+        var_multiplier = 0.75
+        status = "VAR_ELEVATED"
+    else:
+        var_multiplier = 1.0
+        status = "VAR_OK"
+
+    # Correlation info
+    avg_corr = 0.0
+    if len(valid_symbols) > 1:
+        try:
+            corr_matrix = np.corrcoef(returns_matrix)
+            # Average off-diagonal correlation
+            n = len(valid_symbols)
+            off_diag = corr_matrix[np.triu_indices(n, k=1)]
+            avg_corr = float(np.mean(off_diag))
+        except Exception:
+            avg_corr = 0.0
+
+    return {
+        "var_pct": var_pct,
+        "cvar_pct": cvar_pct,
+        "var_multiplier": var_multiplier,
+        "portfolio_vol_daily": round(port_vol * 100, 4),
+        "avg_correlation": round(avg_corr, 3),
+        "num_positions_analyzed": len(valid_symbols),
+        "status": status,
+    }
+
+
+# ============================================================
+#  CORRELATION-AWARE POSITION LIMITS
+#  Blocks new trades that would create hidden concentration risk
+# ============================================================
+
+def check_correlation_limit(candidate_symbol: str, open_trades: list,
+                            price_data: dict) -> dict:
+    """
+    Check if a candidate trade would create excessive correlation risk.
+
+    Returns:
+        allow (bool): whether the trade should proceed
+        correlation_multiplier (float): size multiplier (0.5-1.0)
+        reason (str): explanation if blocked
+        high_corr_positions (list): symbols with >0.75 correlation
+    """
+    if not open_trades or candidate_symbol not in price_data:
+        return {"allow": True, "correlation_multiplier": 1.0, "reason": "", "high_corr_positions": []}
+
+    # Get candidate returns
+    cand_df = price_data.get(candidate_symbol)
+    if cand_df is None:
+        return {"allow": True, "correlation_multiplier": 1.0, "reason": "", "high_corr_positions": []}
+
+    try:
+        cand_closes = cand_df["Close"].iloc[:, 0].values.astype(float) if hasattr(cand_df["Close"], "columns") else cand_df["Close"].values.astype(float)
+        if len(cand_closes) < 30:
+            return {"allow": True, "correlation_multiplier": 1.0, "reason": "", "high_corr_positions": []}
+        cand_rets = np.diff(cand_closes[-61:]) / cand_closes[-61:-1]
+    except Exception:
+        return {"allow": True, "correlation_multiplier": 1.0, "reason": "", "high_corr_positions": []}
+
+    # Check correlation with each open position
+    high_corr = []
+    all_corrs = []
+
+    for trade in open_trades:
+        ticker = trade.get("ticker", "")
+        if ticker == candidate_symbol or ticker not in price_data:
+            continue
+
+        try:
+            df = price_data[ticker]
+            closes = df["Close"].iloc[:, 0].values.astype(float) if hasattr(df["Close"], "columns") else df["Close"].values.astype(float)
+            if len(closes) < 30:
+                continue
+            pos_rets = np.diff(closes[-61:]) / closes[-61:-1]
+
+            # Align lengths
+            min_len = min(len(cand_rets), len(pos_rets))
+            if min_len < 20:
+                continue
+
+            corr = float(np.corrcoef(cand_rets[-min_len:], pos_rets[-min_len:])[0, 1])
+            if not np.isnan(corr):
+                all_corrs.append(corr)
+                if abs(corr) > 0.75:
+                    high_corr.append({"symbol": ticker, "correlation": round(corr, 3)})
+        except Exception:
+            continue
+
+    # Decision: block if too many highly correlated positions
+    if len(high_corr) >= 3:
+        return {
+            "allow": False,
+            "correlation_multiplier": 0.0,
+            "reason": f"High correlation (>0.75) with {len(high_corr)} existing positions: {[h['symbol'] for h in high_corr[:3]]}",
+            "high_corr_positions": high_corr,
+        }
+
+    # Compute size multiplier based on average correlation
+    avg_corr = float(np.mean(all_corrs)) if all_corrs else 0.0
+
+    if avg_corr > 0.60:
+        corr_mult = 0.50
+    elif avg_corr > 0.45:
+        corr_mult = 0.75
+    else:
+        corr_mult = 1.0
+
+    # Penalize if 2 highly correlated
+    if len(high_corr) >= 2:
+        corr_mult = min(corr_mult, 0.60)
+
+    return {
+        "allow": True,
+        "correlation_multiplier": round(corr_mult, 2),
+        "reason": f"Avg correlation: {avg_corr:.2f}" if avg_corr > 0.3 else "",
+        "high_corr_positions": high_corr,
+        "avg_correlation": round(avg_corr, 3),
+    }
+
+
 def calculate_drawdown_circuit_breaker(portfolio_value: float, peak_value: float,
                                         original_capital: float = 100_000) -> dict:
     """
@@ -1158,6 +1377,17 @@ def run_rentech_analysis(price_data: dict, open_trades: list = None,
             result["portfolio_beta"] = calculate_portfolio_beta(open_trades, price_data)
     except Exception as e:
         logger.warning(f"Portfolio beta failed: {e}")
+
+    try:
+        # 11. Portfolio VaR Budget — block new trades when risk is full
+        if open_trades and price_data:
+            result["portfolio_var"] = calculate_portfolio_var(open_trades, price_data, portfolio_value)
+            logger.info(f"  Portfolio VaR: {result['portfolio_var'].get('var_pct', 0):.2f}% | multiplier={result['portfolio_var'].get('var_multiplier', 1.0)}")
+        else:
+            result["portfolio_var"] = {"var_pct": 0, "cvar_pct": 0, "var_multiplier": 1.0, "status": "NO_POSITIONS"}
+    except Exception as e:
+        logger.warning(f"Portfolio VaR failed: {e}")
+        result["portfolio_var"] = {"var_pct": 0, "cvar_pct": 0, "var_multiplier": 1.0, "status": "ERROR"}
 
     try:
         # 10. Drawdown Recovery Mode

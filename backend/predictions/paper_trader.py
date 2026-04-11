@@ -373,13 +373,47 @@ def _get_streak_calibration():
     else:  # loss
         if streak >= 5:
             return {"streak_type": "loss", "streak_length": streak,
-                    "size_multiplier": 0.50, "confidence_shift": 15}
+                    "size_multiplier": 0.50, "confidence_shift": 15,
+                    "sector_penalties": _get_sector_streak_penalties(recent)}
         elif streak >= 3:
             return {"streak_type": "loss", "streak_length": streak,
-                    "size_multiplier": 0.75, "confidence_shift": 10}
+                    "size_multiplier": 0.75, "confidence_shift": 10,
+                    "sector_penalties": _get_sector_streak_penalties(recent)}
         else:
             return {"streak_type": "loss", "streak_length": streak,
-                    "size_multiplier": 1.0, "confidence_shift": 0}
+                    "size_multiplier": 1.0, "confidence_shift": 0,
+                    "sector_penalties": _get_sector_streak_penalties(recent)}
+
+
+def _get_sector_streak_penalties(recent_trades: list) -> dict:
+    """
+    Track per-sector loss streaks.
+    If 3+ consecutive losses in a sector, penalize that sector's positions by 50%.
+    Returns dict of {sector: multiplier}.
+    """
+    sector_results = {}
+    for t in recent_trades:
+        sector = t.get("sector", "Unknown")
+        pnl = t.get("pnl_pct", 0) or 0
+        if sector not in sector_results:
+            sector_results[sector] = []
+        sector_results[sector].append(pnl)
+
+    penalties = {}
+    for sector, pnls in sector_results.items():
+        # Count consecutive losses from most recent
+        consecutive_losses = 0
+        for p in pnls:
+            if p <= 0:
+                consecutive_losses += 1
+            else:
+                break
+        if consecutive_losses >= 3:
+            penalties[sector] = 0.50  # Half-size for losing sectors
+        elif consecutive_losses >= 2:
+            penalties[sector] = 0.75
+
+    return penalties
 
 
 # ============================================================
@@ -1225,10 +1259,21 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     elif timing["window"] == "caution":
         logger.info(f"SMART TIMING: Caution window (9:45-10:30) — reduced sizing")
 
+    # --- PORTFOLIO VaR BUDGET ---
+    var_data = quant_picks.get("portfolio_var", {})
+    var_multiplier = var_data.get("var_multiplier", 1.0)
+    if var_multiplier < 1.0:
+        logger.warning(f"VAR BUDGET: VaR={var_data.get('var_pct', 0):.2f}% | "
+                       f"status={var_data.get('status', 'UNKNOWN')} | "
+                       f"size multiplier={var_multiplier}x")
+
     # --- ADAPTIVE STREAK CALIBRATION ---
     streak = _get_streak_calibration()
     streak_size_mod = streak["size_multiplier"]
     streak_conf_shift = streak["confidence_shift"]
+    sector_streak_penalties = streak.get("sector_penalties", {})
+    if sector_streak_penalties:
+        logger.warning(f"SECTOR STREAK PENALTIES: {sector_streak_penalties}")
     if streak["streak_length"] >= 3:
         logger.info(f"STREAK CALIBRATION: {streak['streak_type']} streak x{streak['streak_length']} — "
                     f"size {streak_size_mod:.2f}x, confidence shift {streak_conf_shift:+d}")
@@ -1497,10 +1542,40 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             else:
                 size_pct = kelly_size
 
-            # Apply all multipliers: VIX, drawdown, overnight, circuit breaker, streak, timing
+            # CORRELATION-AWARE POSITION LIMIT (from rentech VaR module)
+            # Uses real return correlations, not just sector proxies
+            corr_multiplier = 1.0
+            try:
+                price_data = quant_picks.get("_price_data", {})
+                if price_data and len(open_tickers) >= 2:
+                    from analysis.rentech import check_correlation_limit
+                    corr_result = check_correlation_limit(symbol, get_open_trades(), price_data)
+                    if not corr_result["allow"]:
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": f"CORRELATION BLOCK: {corr_result['reason']}",
+                        })
+                        continue
+                    corr_multiplier = corr_result["correlation_multiplier"]
+            except Exception as e:
+                logger.debug(f"Correlation check failed for {symbol}: {e}")
+
+            # VaR budget block
+            if var_multiplier <= 0:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"VAR BUDGET EXCEEDED: Portfolio VaR at {var_data.get('var_pct', 0):.2f}% (max 3%)",
+                })
+                continue
+
+            # Per-sector streak penalty (reduces size for sectors on losing streaks)
+            sector_streak_mod = sector_streak_penalties.get(pick.get("sector", ""), 1.0)
+
+            # Apply all multipliers: VIX, drawdown, overnight, circuit breaker, streak, timing, VaR, correlation, sector streak
             position_value = (total_value * size_pct * drawdown_multiplier * vix_multiplier *
                             overnight_size_mod * cb_multiplier * dd_multiplier *
-                            streak_size_mod * timing_size_mod)
+                            streak_size_mod * timing_size_mod *
+                            var_multiplier * corr_multiplier * sector_streak_mod)
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
@@ -2341,14 +2416,56 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         else:
             pnl_pct = ((entry_price / current_price) - 1) * 100
 
-        # Check stop loss
+        # ADAPTIVE ATR TRAILING STOP — dynamic stop that ratchets with price
+        # Replaces static stop with volatility-scaled trailing stop
         stop_loss = trade.get("stop_loss_price", 0)
+        try:
+            atr = _calculate_stock_atr(ticker, period=14)
+            if atr > 0:
+                # Base stop distance: 2.5 × ATR (standard chandelier exit)
+                base_multiplier = 2.5
+
+                # Vol scaling based on ATR relative to typical range
+                # High ATR (>5%) = volatile → tighter multiplier to protect faster
+                # Low ATR (<2%) = stable → wider multiplier, let it breathe
+                vol_scale = 1.0
+                if atr > 0.05:
+                    vol_scale = 0.75   # Volatile stock → tighter stop
+                elif atr < 0.015:
+                    vol_scale = 1.25   # Stable stock → wider stop
+
+                stop_distance = current_price * atr * base_multiplier * vol_scale
+
+                if direction == "long":
+                    # Trailing stop ratchets UP — never moves down
+                    new_trail = current_price - stop_distance
+                    if stop_loss:
+                        stop_loss = max(stop_loss, new_trail)
+                    else:
+                        stop_loss = new_trail
+                else:
+                    # Short: trailing stop ratchets DOWN — never moves up
+                    new_trail = current_price + stop_distance
+                    if stop_loss:
+                        stop_loss = min(stop_loss, new_trail)
+                    else:
+                        stop_loss = new_trail
+
+                # Update the stored stop loss for next cycle
+                try:
+                    from predictions.models import update_trade_stop
+                    update_trade_stop(trade["id"], round(stop_loss, 2))
+                except Exception:
+                    pass  # update_trade_stop may not exist yet — graceful fallback
+        except Exception:
+            pass  # Fall back to original static stop
+
         if stop_loss and direction == "long" and current_price <= stop_loss:
             should_close = True
-            close_reason = f"Stop loss hit (${stop_loss:.2f})"
+            close_reason = f"Trailing stop hit (${stop_loss:.2f})"
         elif stop_loss and direction == "short" and current_price >= stop_loss:
             should_close = True
-            close_reason = f"Stop loss hit (${stop_loss:.2f})"
+            close_reason = f"Trailing stop hit (${stop_loss:.2f})"
 
         # Check target
         target = trade.get("target_price", 0)

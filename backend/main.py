@@ -1554,7 +1554,8 @@ def quant_picks(request: Request):
             cache_age = _time.time() - cache_entry["time"]
             result = cache_entry["data"]
             result["cache_age_seconds"] = round(cache_age)
-            return result
+            # Strip internal data that can't be JSON serialized
+            return {k: v for k, v in result.items() if not k.startswith("_")}
         # No cache — return empty picks (the scheduler will populate it soon)
         return {
             "regime": {"regime": "LOADING", "description": "Analyzing 500+ stocks..."},

@@ -262,6 +262,7 @@ function PicksTable({ picks, direction }) {
           <th className="text-right py-2 px-2">Confidence</th>
           <th className="text-right py-2 px-2">RSI(14)</th>
           <th className="text-right py-2 px-2">Vol</th>
+          <th className="text-right py-2 px-2">ADX</th>
           <th className="text-left py-2 px-2">Sector</th>
           <th className="text-left py-2 px-2">Top Reason</th>
         </tr>
@@ -288,6 +289,11 @@ function PicksTable({ picks, direction }) {
             </td>
             <td className="py-2 px-2 text-right font-mono text-neutral-400">{p.rsi14 ?? 'N/A'}</td>
             <td className="py-2 px-2 text-right font-mono text-neutral-400">{p.volatility_60d ?? 0}%</td>
+            <td className={`py-2 px-2 text-right font-mono text-xs font-bold ${
+              (p.adx || 25) > 30 ? 'text-green-400' :
+              (p.adx || 25) > 20 ? 'text-neutral-400' :
+              'text-yellow-400'
+            }`}>{(p.adx || 25).toFixed(0)}</td>
             <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
             <td className="py-2 px-2 text-neutral-400 text-xs">{p.reasons?.[0] || ''}</td>
           </tr>
@@ -457,6 +463,95 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
           </div>
         </div>
       </div>
+
+      {/* ====== RISK INTELLIGENCE ====== */}
+      {quantPicks && (
+        <div className="bg-black border border-neutral-700 rounded-xl p-6">
+          <h3 className="text-white font-bold text-lg mb-4">🛡️ Risk Intelligence</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {/* Portfolio VaR */}
+            <div className={`bg-neutral-900 rounded-lg p-3 border ${
+              (quantPicks.portfolio_var?.var_pct || 0) > 2 ? 'border-red-500/40' :
+              (quantPicks.portfolio_var?.var_pct || 0) > 1.5 ? 'border-yellow-500/40' :
+              'border-green-500/20'
+            }`}>
+              <div className="text-neutral-500 text-xs">Daily VaR (95%)</div>
+              <div className={`text-xl font-black font-mono ${
+                (quantPicks.portfolio_var?.var_pct || 0) > 2 ? 'text-red-400' :
+                (quantPicks.portfolio_var?.var_pct || 0) > 1.5 ? 'text-yellow-400' :
+                'text-green-400'
+              }`}>
+                {(quantPicks.portfolio_var?.var_pct || 0).toFixed(2)}%
+              </div>
+              <div className="text-neutral-600 text-xs">
+                {quantPicks.portfolio_var?.status === 'VAR_EXCEEDED' ? '🚫 BLOCKED' :
+                 quantPicks.portfolio_var?.status === 'VAR_WARNING' ? '⚠️ Half-size' :
+                 quantPicks.portfolio_var?.status === 'VAR_ELEVATED' ? '⚡ Elevated' : '✅ OK'}
+              </div>
+            </div>
+
+            {/* CVaR */}
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">CVaR (Tail Risk)</div>
+              <div className="text-xl font-black font-mono text-neutral-300">
+                {(quantPicks.portfolio_var?.cvar_pct || 0).toFixed(2)}%
+              </div>
+              <div className="text-neutral-600 text-xs">Expected shortfall</div>
+            </div>
+
+            {/* Portfolio Correlation */}
+            <div className={`bg-neutral-900 rounded-lg p-3 border ${
+              (quantPicks.portfolio_var?.avg_correlation || 0) > 0.6 ? 'border-red-500/40' :
+              (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'border-yellow-500/40' :
+              'border-neutral-800'
+            }`}>
+              <div className="text-neutral-500 text-xs">Avg Correlation</div>
+              <div className={`text-xl font-black font-mono ${
+                (quantPicks.portfolio_var?.avg_correlation || 0) > 0.6 ? 'text-red-400' :
+                (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'text-yellow-400' :
+                'text-green-400'
+              }`}>
+                {(quantPicks.portfolio_var?.avg_correlation || 0).toFixed(2)}
+              </div>
+              <div className="text-neutral-600 text-xs">
+                {(quantPicks.portfolio_var?.avg_correlation || 0) > 0.6 ? 'High risk' :
+                 (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'Moderate' : 'Diversified'}
+              </div>
+            </div>
+
+            {/* VaR Multiplier */}
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">Size Multiplier</div>
+              <div className={`text-xl font-black font-mono ${
+                (quantPicks.portfolio_var?.var_multiplier || 1) < 0.5 ? 'text-red-400' :
+                (quantPicks.portfolio_var?.var_multiplier || 1) < 1 ? 'text-yellow-400' :
+                'text-green-400'
+              }`}>
+                {(quantPicks.portfolio_var?.var_multiplier || 1).toFixed(1)}x
+              </div>
+              <div className="text-neutral-600 text-xs">VaR budget</div>
+            </div>
+
+            {/* Daily Vol */}
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">Portfolio Vol</div>
+              <div className="text-xl font-black font-mono text-neutral-300">
+                {(quantPicks.portfolio_var?.portfolio_vol_daily || 0).toFixed(2)}%
+              </div>
+              <div className="text-neutral-600 text-xs">Daily volatility</div>
+            </div>
+
+            {/* Positions Analyzed */}
+            <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-neutral-500 text-xs">Scoring Engine</div>
+              <div className="text-xl font-black font-mono text-blue-400">
+                15
+              </div>
+              <div className="text-neutral-600 text-xs">Active factors</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ====== BENCHMARKING vs S&P 500 ====== */}
       {performance?.benchmark && (

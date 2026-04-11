@@ -280,6 +280,19 @@ def get_all_paper_trades() -> list:
     return [dict(row) for row in rows]
 
 
+def update_trade_stop(trade_id: int, new_stop: float):
+    """Update the trailing stop loss price for an open trade."""
+    try:
+        conn = get_db()
+        conn.execute(
+            "UPDATE paper_trades SET stop_loss_price = ? WHERE id = ? AND status = 'open'",
+            (new_stop, trade_id)
+        )
+        conn.commit()
+    except Exception:
+        pass  # Non-critical — will recalculate next cycle
+
+
 def close_paper_trade(trade_id: int, exit_price: float):
     """Close a paper trade, calculate P&L, and atomically return cash."""
     conn = get_db()
