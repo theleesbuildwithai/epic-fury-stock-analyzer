@@ -1230,8 +1230,8 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
       <div className="bg-black border border-purple-500/20 rounded-xl p-6">
         <h3 className="text-white font-bold mb-4">Trading Philosophy</h3>
         <div className="space-y-3 text-neutral-400 text-sm">
-          <p><span className="text-white font-semibold">Universe:</span> 260+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>
-          <p><span className="text-white font-semibold">Scoring:</span> 20-factor composite with z-score normalization + adaptive regime-aware weights</p>
+          <p><span className="text-white font-semibold">Universe:</span> 500+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>
+          <p><span className="text-white font-semibold">Scoring:</span> 21-factor composite with z-score normalization + adaptive regime-aware weights</p>
           <p><span className="text-white font-semibold">Edge Sources:</span> Momentum + mean-reversion hybrid, statistical arbitrage, post-earnings drift, Ichimoku trends, volume profile, sector rotation</p>
           <p><span className="text-white font-semibold">Risk First:</span> Never risk more than Kelly half-fraction. VIX scales all sizes. ATR-based stops per stock. Portfolio VaR budget caps total risk.</p>
           <p><span className="text-white font-semibold">Regime Adaptive:</span> BEAR → favor defensives + shorts, reduce momentum weight. BULL → favor longs, reduce short exposure. SIDEWAYS → boost mean-reversion.</p>
