@@ -412,24 +412,190 @@ export default function IBKRDashboard() {
           )}
         </div>
 
-        {/* Setup Instructions */}
-        {!isConnected && (
-          <div className="mt-8 bg-gray-900 rounded-xl border border-gray-800 p-6">
-            <h2 className="text-xl font-semibold mb-4">Setup Instructions</h2>
-            <ol className="list-decimal list-inside space-y-3 text-gray-300">
-              <li>Download <span className="text-blue-400">Trader Workstation (TWS)</span> or <span className="text-blue-400">IB Gateway</span> from IBKR</li>
-              <li>Log in to your IBKR account (use Paper Trading account first)</li>
-              <li>Go to <span className="font-mono text-yellow-400">Edit → Global Configuration → API → Settings</span></li>
-              <li>Check <span className="text-green-400">"Enable ActiveX and Socket Clients"</span></li>
-              <li>Set socket port to <span className="font-mono text-yellow-400">7497</span> (paper) or <span className="font-mono text-red-400">7496</span> (live)</li>
-              <li>Add <span className="font-mono text-yellow-400">127.0.0.1</span> to trusted IPs</li>
-              <li>Click the <span className="text-green-400">IBKR Execution</span> toggle above to connect</li>
-            </ol>
-            <div className="mt-4 p-4 bg-yellow-900/20 border border-yellow-800 rounded-lg text-yellow-300 text-sm">
-              Always start with IBKR Paper Trading (port 7497) to verify everything works before using real money.
+
+        {/* Execution Analytics */}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-8">
+          <h2 className="text-xl font-semibold mb-4">Execution Analytics</h2>
+          {(() => {
+            const log = status?.recent_orders || []
+            const fills = log.filter(e => e.action === 'FILLED' || e.action === 'EXIT_FILLED')
+            const blocked = log.filter(e => e.action === 'BLOCKED')
+            const errors = log.filter(e => e.action === 'ERROR' || e.action === 'TIMEOUT')
+            const entries = log.filter(e => e.action === 'FILLED')
+            const exits = log.filter(e => e.action === 'EXIT_FILLED')
+            const longs = entries.filter(e => e.direction === 'long')
+            const shorts = entries.filter(e => e.direction === 'short')
+            const totalVolume = fills.reduce((s, e) => s + (Math.abs(e.shares || 0) * (e.fill_price || e.price || 0)), 0)
+            const avgFillTime = fills.length > 0 ? 'instant' : '—'
+            const fillRate = (fills.length + blocked.length + errors.length) > 0
+              ? ((fills.length / (fills.length + blocked.length + errors.length)) * 100).toFixed(1)
+              : '—'
+
+            return (
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                <div className="bg-gray-800/50 rounded-lg p-4">
+                  <div className="text-sm text-gray-400">Total Fills</div>
+                  <div className="text-2xl font-bold text-green-400">{fills.length}</div>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-4">
+                  <div className="text-sm text-gray-400">Fill Rate</div>
+                  <div className="text-2xl font-bold text-blue-400">{fillRate}%</div>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-4">
+                  <div className="text-sm text-gray-400">Entries / Exits</div>
+                  <div className="text-2xl font-bold text-white">{entries.length} / {exits.length}</div>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-4">
+                  <div className="text-sm text-gray-400">Long / Short</div>
+                  <div className="text-2xl font-bold">
+                    <span className="text-green-400">{longs.length}</span>
+                    <span className="text-gray-600"> / </span>
+                    <span className="text-red-400">{shorts.length}</span>
+                  </div>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-4">
+                  <div className="text-sm text-gray-400">Volume Traded</div>
+                  <div className="text-2xl font-bold text-white">${totalVolume.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-4">
+                  <div className="text-sm text-gray-400">Blocked / Errors</div>
+                  <div className="text-2xl font-bold">
+                    <span className="text-yellow-400">{blocked.length}</span>
+                    <span className="text-gray-600"> / </span>
+                    <span className="text-red-400">{errors.length}</span>
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+        </div>
+
+        {/* Risk Monitor */}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-8">
+          <h2 className="text-xl font-semibold mb-4">Risk Monitor</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Exposure Bar */}
+            <div>
+              <div className="flex justify-between text-sm mb-2">
+                <span className="text-gray-400">Total Exposure</span>
+                <span className="text-white">
+                  ${(acc.gross_position_value || 0).toLocaleString()} / ${(s.safety?.max_total_exposure || 25000).toLocaleString()}
+                </span>
+              </div>
+              <div className="w-full bg-gray-800 rounded-full h-3">
+                <div
+                  className={`h-3 rounded-full transition-all ${
+                    ((acc.gross_position_value || 0) / (s.safety?.max_total_exposure || 25000)) > 0.8
+                      ? 'bg-red-500' : ((acc.gross_position_value || 0) / (s.safety?.max_total_exposure || 25000)) > 0.5
+                      ? 'bg-yellow-500' : 'bg-green-500'
+                  }`}
+                  style={{ width: `${Math.min(100, ((acc.gross_position_value || 0) / (s.safety?.max_total_exposure || 25000)) * 100)}%` }}
+                ></div>
+              </div>
+            </div>
+
+            {/* Daily Loss Bar */}
+            <div>
+              <div className="flex justify-between text-sm mb-2">
+                <span className="text-gray-400">Daily Loss Used</span>
+                <span className={`${(acc.daily_pnl || 0) < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  ${Math.abs(acc.daily_pnl || 0).toFixed(2)} / ${(s.safety?.daily_loss_limit || 500).toLocaleString()}
+                </span>
+              </div>
+              <div className="w-full bg-gray-800 rounded-full h-3">
+                <div
+                  className={`h-3 rounded-full transition-all ${
+                    (Math.abs(acc.daily_pnl || 0) / (s.safety?.daily_loss_limit || 500)) > 0.8
+                      ? 'bg-red-500 animate-pulse' : 'bg-green-500'
+                  }`}
+                  style={{ width: `${Math.min(100, (Math.abs(Math.min(0, acc.daily_pnl || 0)) / (s.safety?.daily_loss_limit || 500)) * 100)}%` }}
+                ></div>
+              </div>
+            </div>
+
+            {/* Position Count */}
+            <div>
+              <div className="flex justify-between text-sm mb-2">
+                <span className="text-gray-400">Open Positions</span>
+                <span className="text-white">{positions.length}</span>
+              </div>
+              <div className="w-full bg-gray-800 rounded-full h-3">
+                <div
+                  className="h-3 rounded-full bg-blue-500 transition-all"
+                  style={{ width: `${Math.min(100, (positions.length / 10) * 100)}%` }}
+                ></div>
+              </div>
             </div>
           </div>
-        )}
+
+          {/* Risk Metrics Row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+            <div className="bg-gray-800/30 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500">Unrealized P&L</div>
+              <div className={`text-lg font-bold ${(acc.unrealized_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                ${(acc.unrealized_pnl || 0).toFixed(2)}
+              </div>
+            </div>
+            <div className="bg-gray-800/30 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500">Realized P&L</div>
+              <div className={`text-lg font-bold ${(acc.realized_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                ${(acc.realized_pnl || 0).toFixed(2)}
+              </div>
+            </div>
+            <div className="bg-gray-800/30 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500">Buying Power</div>
+              <div className="text-lg font-bold text-white">
+                ${(acc.buying_power || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+              </div>
+            </div>
+            <div className="bg-gray-800/30 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500">Net Liquidation</div>
+              <div className="text-lg font-bold text-white">
+                ${(acc.net_liquidation || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* System Health */}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6">
+          <h2 className="text-xl font-semibold mb-4">System Health</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="flex items-center gap-3 bg-gray-800/30 rounded-lg p-4">
+              <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
+              <div>
+                <div className="text-sm text-gray-400">Connection</div>
+                <div className="text-sm font-medium text-white">{isConnected ? 'Healthy' : 'Disconnected'}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 bg-gray-800/30 rounded-lg p-4">
+              <div className={`w-3 h-3 rounded-full ${!isHalted ? 'bg-green-400' : 'bg-red-400 animate-pulse'}`}></div>
+              <div>
+                <div className="text-sm text-gray-400">Trading Engine</div>
+                <div className="text-sm font-medium text-white">{isHalted ? 'HALTED' : 'Running'}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 bg-gray-800/30 rounded-lg p-4">
+              <div className={`w-3 h-3 rounded-full ${mode === 'PAPER' ? 'bg-blue-400' : 'bg-orange-400 animate-pulse'}`}></div>
+              <div>
+                <div className="text-sm text-gray-400">Trading Mode</div>
+                <div className="text-sm font-medium text-white">{mode} (Port {s.port || '7497'})</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 bg-gray-800/30 rounded-lg p-4">
+              <div className="w-3 h-3 rounded-full bg-green-400"></div>
+              <div>
+                <div className="text-sm text-gray-400">Paper Trader</div>
+                <div className="text-sm font-medium text-white">Always Active</div>
+              </div>
+            </div>
+          </div>
+          {s.last_error && (
+            <div className="mt-4 p-3 bg-red-900/20 border border-red-800 rounded-lg text-red-300 text-sm font-mono">
+              Last Error: {s.last_error}
+            </div>
+          )}
+        </div>
 
       </div>
     </div>

@@ -44,7 +44,7 @@ TRADING_HALTED = False          # Emergency brake — blocks all new orders
 MAX_POSITION_DOLLARS = 5000    # Max $ per single position
 MAX_TOTAL_EXPOSURE = 25000     # Max $ total across all positions
 DAILY_LOSS_LIMIT = 500         # Auto-halt if daily loss exceeds this
-MAX_ORDERS_PER_DAY = 50        # Circuit breaker on order count
+MAX_ORDERS_PER_DAY = 999999     # No limit on daily order count
 
 # Timing
 RECONNECT_DELAY_BASE = 5       # Seconds, doubles each retry
