@@ -551,11 +551,6 @@ export default function IBKRDashboard() {
               </div>
             </div>
           </div>
-          {s.last_error && (
-            <div className="mt-4 p-3 bg-red-900/20 border border-red-800 rounded-lg text-red-300 text-sm font-mono">
-              Last Error: {s.last_error}
-            </div>
-          )}
         </div>
 
       </div>
