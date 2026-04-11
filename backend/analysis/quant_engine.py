@@ -1975,15 +1975,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 mtf_alignment_raw = 0.0
 
             # --- Factor 16: ADX TREND STRENGTH ---
-            # ADX measures trend strength regardless of direction.
-            # ADX > 25 = strong trend (momentum works), ADX < 15 = choppy (mean reversion works)
-            adx_value = 25.0  # default neutral
+            adx_value = 25.0
             try:
                 if len(closes) >= 28:
                     highs_adx = df["High"].iloc[:, 0].values.astype(float) if hasattr(df["High"], "columns") else df["High"].values.astype(float)
                     lows_adx = df["Low"].iloc[:, 0].values.astype(float) if hasattr(df["Low"], "columns") else df["Low"].values.astype(float)
-
-                    # True Range
                     tr_list = []
                     for k in range(1, min(len(closes), 28)):
                         tr = max(
@@ -1992,8 +1988,6 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                             abs(lows_adx[-28+k] - closes[-28+k-1])
                         )
                         tr_list.append(tr)
-
-                    # +DM and -DM
                     plus_dm = []
                     minus_dm = []
                     for k in range(1, min(len(highs_adx), 28)):
@@ -2001,16 +1995,144 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                         down_move = lows_adx[-28+k-1] - lows_adx[-28+k]
                         plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
                         minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
-
                     if len(tr_list) >= 14:
-                        # Smoothed averages (Wilder's smoothing = 14-period EMA)
                         atr14 = np.mean(tr_list[-14:])
                         plus_di = (np.mean(plus_dm[-14:]) / (atr14 + 1e-10)) * 100
                         minus_di = (np.mean(minus_dm[-14:]) / (atr14 + 1e-10)) * 100
                         dx = abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
                         adx_value = float(dx)
             except Exception:
-                adx_value = 25.0  # neutral fallback
+                adx_value = 25.0
+
+            # ============================================================
+            # NEW FACTOR 17: POST-EARNINGS DRIFT
+            # One of the most documented anomalies in finance.
+            # Stocks that gap up on earnings keep drifting up for 60 days.
+            # Stocks that gap down keep falling. Academic alpha: 2-4%/quarter.
+            # ============================================================
+            earnings_drift_raw = 0.0
+            try:
+                if len(closes) >= 10:
+                    # Check for earnings gap in last 10 trading days
+                    # Large volume spike (>2x avg) + price gap = likely earnings
+                    avg_vol_60 = float(np.mean(volumes[-60:])) if len(volumes) >= 60 else float(np.mean(volumes[-20:]))
+                    for ed_idx in range(min(10, len(closes) - 1)):
+                        day_vol = float(volumes[-(ed_idx + 1)])
+                        if day_vol > avg_vol_60 * 2.5:  # Volume spike = earnings event
+                            pre_price = float(closes[-(ed_idx + 2)])
+                            post_price = float(closes[-(ed_idx + 1)])
+                            earnings_gap_pct = (post_price / pre_price - 1) * 100
+                            if earnings_gap_pct > 5:
+                                earnings_drift_raw = 4.0   # Strong beat → drift continues up
+                            elif earnings_gap_pct > 3:
+                                earnings_drift_raw = 2.5
+                            elif earnings_gap_pct > 1.5:
+                                earnings_drift_raw = 1.0
+                            elif earnings_gap_pct < -5:
+                                earnings_drift_raw = -4.0  # Strong miss → drift continues down
+                            elif earnings_gap_pct < -3:
+                                earnings_drift_raw = -2.5
+                            elif earnings_gap_pct < -1.5:
+                                earnings_drift_raw = -1.0
+                            break  # Only use most recent earnings event
+            except Exception:
+                earnings_drift_raw = 0.0
+
+            # ============================================================
+            # NEW FACTOR 18: VOLUME PROFILE / VPOC (Point of Control)
+            # Identifies price levels where most volume traded.
+            # Price near VPOC = strong support. Breakout above = trend confirmation.
+            # Used by institutional traders for key support/resistance levels.
+            # ============================================================
+            vpoc_raw = 0.0
+            try:
+                if len(closes) >= 20 and len(volumes) >= 20:
+                    # Build volume profile: histogram of price vs volume
+                    price_window = closes[-20:]
+                    vol_window_vp = volumes[-20:]
+                    price_min = float(np.min(price_window))
+                    price_max = float(np.max(price_window))
+                    price_range = price_max - price_min
+                    if price_range > 0:
+                        # 10 bins for volume profile
+                        n_bins = 10
+                        bin_size = price_range / n_bins
+                        vol_profile = [0.0] * n_bins
+                        for bp in range(len(price_window)):
+                            bin_idx = min(int((float(price_window[bp]) - price_min) / bin_size), n_bins - 1)
+                            vol_profile[bin_idx] += float(vol_window_vp[bp])
+                        # VPOC = price level with highest volume
+                        vpoc_bin = int(np.argmax(vol_profile))
+                        vpoc_price = price_min + (vpoc_bin + 0.5) * bin_size
+                        vpoc_dist_pct = (current_price - vpoc_price) / vpoc_price * 100
+
+                        if abs(vpoc_dist_pct) < 1.0:
+                            vpoc_raw = 1.5   # Near VPOC = support level, bullish for longs
+                        elif vpoc_dist_pct > 2.0:
+                            vpoc_raw = 2.0   # Broke above VPOC = breakout, bullish
+                        elif vpoc_dist_pct < -2.0:
+                            vpoc_raw = -2.0  # Broke below VPOC = breakdown, bearish
+                        elif vpoc_dist_pct > 1.0:
+                            vpoc_raw = 1.0
+                        elif vpoc_dist_pct < -1.0:
+                            vpoc_raw = -1.0
+            except Exception:
+                vpoc_raw = 0.0
+
+            # ============================================================
+            # NEW FACTOR 19: ICHIMOKU CLOUD SIGNALS
+            # 5-component Japanese trend system used by institutional traders.
+            # Captures trend, momentum, and support/resistance in one indicator.
+            # Price above cloud + bullish cross = strong trend confirmation.
+            # ============================================================
+            ichimoku_raw = 0.0
+            try:
+                if len(closes) >= 52:
+                    highs_ichi = df["High"].iloc[:, 0].values.astype(float) if hasattr(df["High"], "columns") else df["High"].values.astype(float)
+                    lows_ichi = df["Low"].iloc[:, 0].values.astype(float) if hasattr(df["Low"], "columns") else df["Low"].values.astype(float)
+                    # Tenkan-sen (9-period high-low midpoint)
+                    tenkan = (float(np.max(highs_ichi[-9:])) + float(np.min(lows_ichi[-9:]))) / 2
+                    # Kijun-sen (26-period high-low midpoint)
+                    kijun = (float(np.max(highs_ichi[-26:])) + float(np.min(lows_ichi[-26:]))) / 2
+                    # Senkou Span A (midpoint of Tenkan and Kijun)
+                    senkou_a = (tenkan + kijun) / 2
+                    # Senkou Span B (52-period high-low midpoint)
+                    senkou_b = (float(np.max(highs_ichi[-52:])) + float(np.min(lows_ichi[-52:]))) / 2
+                    # Cloud top and bottom
+                    cloud_top = max(senkou_a, senkou_b)
+                    cloud_bottom = min(senkou_a, senkou_b)
+
+                    # Signal scoring
+                    above_cloud = current_price > cloud_top
+                    below_cloud = current_price < cloud_bottom
+                    bullish_cross = tenkan > kijun  # Tenkan above Kijun = bullish
+                    cloud_bullish = senkou_a > senkou_b  # Cloud twist = trend change
+
+                    if above_cloud and bullish_cross and cloud_bullish:
+                        ichimoku_raw = 3.0   # All 3 bullish = strong trend
+                    elif above_cloud and bullish_cross:
+                        ichimoku_raw = 2.0   # Above cloud + bullish cross
+                    elif above_cloud:
+                        ichimoku_raw = 1.0   # Just above cloud
+                    elif below_cloud and not bullish_cross and not cloud_bullish:
+                        ichimoku_raw = -3.0  # All 3 bearish = strong downtrend
+                    elif below_cloud and not bullish_cross:
+                        ichimoku_raw = -2.0  # Below cloud + bearish cross
+                    elif below_cloud:
+                        ichimoku_raw = -1.0  # Just below cloud
+                    # Inside cloud = neutral (choppy, no clear trend)
+            except Exception:
+                ichimoku_raw = 0.0
+
+            # ============================================================
+            # NEW FACTOR 20: SECTOR ROTATION MOMENTUM
+            # Professional hedge funds rotate into strongest sectors.
+            # Stocks in top-performing sectors get a boost.
+            # Stocks in worst-performing sectors get penalized.
+            # 1-month sector momentum predicts next month's sector returns.
+            # ============================================================
+            sector_rotation_raw = 0.0
+            # (Computed after all stocks processed — see below)
 
             raw_factors.append({
                 "symbol": symbol,
@@ -2032,6 +2154,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "kurtosis_raw": kurtosis_raw,
                 "vol_compression_raw": vol_compression_raw,
                 "mtf_alignment_raw": mtf_alignment_raw,
+                "earnings_drift_raw": earnings_drift_raw,
+                "vpoc_raw": vpoc_raw,
+                "ichimoku_raw": ichimoku_raw,
+                "sector_rotation_raw": 0.0,  # computed post-loop
                 "adx": round(adx_value, 1),
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
@@ -2054,6 +2180,30 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     if not raw_factors:
         return []
 
+    # --- SECTOR ROTATION COMPUTATION (post-loop) ---
+    # Calculate average 20-day momentum per sector, then rank sectors
+    sector_momenta = {}
+    for stock in raw_factors:
+        sector = stock["sector"]
+        if sector not in sector_momenta:
+            sector_momenta[sector] = []
+        sector_momenta[sector].append(stock["momentum_raw"])
+    # Average momentum per sector
+    sector_avg_mom = {s: float(np.mean(v)) for s, v in sector_momenta.items() if v}
+    if sector_avg_mom:
+        # Rank sectors by average momentum
+        sorted_sectors = sorted(sector_avg_mom.items(), key=lambda x: x[1], reverse=True)
+        n_sectors = len(sorted_sectors)
+        top_sectors = {s for s, _ in sorted_sectors[:max(1, n_sectors // 3)]}
+        bottom_sectors = {s for s, _ in sorted_sectors[-max(1, n_sectors // 3):]}
+        for stock in raw_factors:
+            if stock["sector"] in top_sectors:
+                stock["sector_rotation_raw"] = 2.0   # Top-performing sector boost
+            elif stock["sector"] in bottom_sectors:
+                stock["sector_rotation_raw"] = -2.0  # Worst-performing sector penalty
+            else:
+                stock["sector_rotation_raw"] = 0.0   # Middle sectors neutral
+
     # --- Z-Score Normalization ---
     # Each factor is z-scored across the universe so they're comparable
     momentum_z = _safe_zscore([s["momentum_raw"] for s in raw_factors])
@@ -2075,6 +2225,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     vol_compression_z = _safe_zscore([s["vol_compression_raw"] for s in raw_factors])
     # MULTI-TIMEFRAME ALIGNMENT — cross-timeframe trend confirmation
     mtf_alignment_z = _safe_zscore([s["mtf_alignment_raw"] for s in raw_factors])
+    # NEW FACTORS — Week 2 alpha generators
+    earnings_drift_z = _safe_zscore([s["earnings_drift_raw"] for s in raw_factors])
+    vpoc_z = _safe_zscore([s["vpoc_raw"] for s in raw_factors])
+    ichimoku_z = _safe_zscore([s["ichimoku_raw"] for s in raw_factors])
+    sector_rotation_z = _safe_zscore([s["sector_rotation_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
@@ -2110,12 +2265,18 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     W_KURTOSIS = 0.03       # Fat tail risk detection
     W_VOL_COMPRESSION = 0.04  # GARCH vol compression breakout predictor
     W_MTF_ALIGNMENT = 0.04    # Multi-timeframe trend alignment (daily+weekly+monthly)
+    # WEEK 2 NEW FACTORS
+    W_EARNINGS_DRIFT = 0.05   # Post-earnings drift (strongest documented anomaly)
+    W_VPOC = 0.03             # Volume Profile point of control
+    W_ICHIMOKU = 0.04         # Ichimoku cloud trend confirmation
+    W_SECTOR_ROTATION = 0.03  # Sector rotation momentum
 
-    # Scale existing weights down to make room for new factors (15 total now)
+    # Scale existing weights down to make room for new factors (20 total now)
     existing_total = sum(weights.values())
     new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
                         W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION +
-                        W_MTF_ALIGNMENT)
+                        W_MTF_ALIGNMENT + W_EARNINGS_DRIFT + W_VPOC + W_ICHIMOKU +
+                        W_SECTOR_ROTATION)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -2134,11 +2295,15 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_kurtosis = W_KURTOSIS
     w_vol_comp = W_VOL_COMPRESSION
     w_mtf = W_MTF_ALIGNMENT
+    w_edrift = W_EARNINGS_DRIFT
+    w_vpoc = W_VPOC
+    w_ichi = W_ICHIMOKU
+    w_secrot = W_SECTOR_ROTATION
 
     # --- Calculate composite scores ---
     scored = []
     for i, stock in enumerate(raw_factors):
-        # Weighted composite — 14 FACTORS (Renaissance Technologies grade)
+        # Weighted composite — 20 FACTORS (Renaissance Technologies grade)
         composite = (
             momentum_z[i] * w_mom +
             value_z[i] * w_val +
@@ -2155,7 +2320,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             stat_arb_z[i] * w_stat_arb +
             kurtosis_z[i] * w_kurtosis +
             vol_compression_z[i] * w_vol_comp +
-            mtf_alignment_z[i] * w_mtf
+            mtf_alignment_z[i] * w_mtf +
+            earnings_drift_z[i] * w_edrift +
+            vpoc_z[i] * w_vpoc +
+            ichimoku_z[i] * w_ichi +
+            sector_rotation_z[i] * w_secrot
         )
 
         # Apply macro overlay sector adjustment
@@ -2338,6 +2507,18 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "mtf_alignment": {"z": mtf_alignment_z[i], "weight": round(w_mtf, 3),
                              "raw": round(stock["mtf_alignment_raw"], 2),
                              "contribution": round(mtf_alignment_z[i] * w_mtf, 3)},
+            "earnings_drift": {"z": earnings_drift_z[i], "weight": round(w_edrift, 3),
+                               "raw": round(stock["earnings_drift_raw"], 2),
+                               "contribution": round(earnings_drift_z[i] * w_edrift, 3)},
+            "vpoc": {"z": vpoc_z[i], "weight": round(w_vpoc, 3),
+                     "raw": round(stock["vpoc_raw"], 2),
+                     "contribution": round(vpoc_z[i] * w_vpoc, 3)},
+            "ichimoku": {"z": ichimoku_z[i], "weight": round(w_ichi, 3),
+                         "raw": round(stock["ichimoku_raw"], 2),
+                         "contribution": round(ichimoku_z[i] * w_ichi, 3)},
+            "sector_rotation": {"z": sector_rotation_z[i], "weight": round(w_secrot, 3),
+                                "raw": round(stock["sector_rotation_raw"], 2),
+                                "contribution": round(sector_rotation_z[i] * w_secrot, 3)},
         }
 
         # Generate human-readable reasons
@@ -2387,6 +2568,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "adx": stock.get("adx", 25.0),
             "mtf_alignment": round(stock.get("mtf_alignment_raw", 0), 1),
             "garch_vol_ratio": stock.get("garch_vol_ratio", 1.0),
+            "earnings_drift": round(stock.get("earnings_drift_raw", 0), 1),
+            "vpoc_signal": round(stock.get("vpoc_raw", 0), 1),
+            "ichimoku_signal": round(stock.get("ichimoku_raw", 0), 1),
+            "sector_rotation": round(stock.get("sector_rotation_raw", 0), 1),
         })
 
     # Sort by composite score descending
@@ -2776,6 +2961,93 @@ def generate_quant_picks() -> dict:
 
         elapsed = round(time.time() - start_time, 1)
 
+        # ============================================================
+        # DYNAMIC HEDGING ENGINE — Composite Risk Shield
+        # Automatically adjusts exposure based on multiple risk signals.
+        # Protects portfolio during dangerous market conditions.
+        # ============================================================
+        risk_score = 0
+        risk_factors = []
+
+        # VIX level contribution
+        vix_level = regime.get("vix_level", 20) if regime else 20
+        if vix_level > 35:
+            risk_score += 4
+            risk_factors.append(f"VIX crisis ({vix_level:.0f})")
+        elif vix_level > 25:
+            risk_score += 3
+            risk_factors.append(f"VIX high ({vix_level:.0f})")
+        elif vix_level > 20:
+            risk_score += 1
+            risk_factors.append(f"VIX elevated ({vix_level:.0f})")
+
+        # Regime contribution
+        current_regime_str = regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS"
+        if current_regime_str == "BEAR":
+            risk_score += 3
+            risk_factors.append("Bear regime")
+        elif current_regime_str == "SIDEWAYS":
+            risk_score += 1
+            risk_factors.append("Sideways regime")
+
+        # Market breadth contribution
+        breadth = regime.get("breadth_pct", 50) if regime else 50
+        if breadth < 35:
+            risk_score += 2
+            risk_factors.append(f"Weak breadth ({breadth:.0f}%)")
+        elif breadth < 50:
+            risk_score += 1
+
+        # VIX term structure (backwardation = panic)
+        vix_ts = macro.get("vix_term_structure", {}) if macro else {}
+        if vix_ts.get("ratio", 1.0) > 1.05:
+            risk_score += 2
+            risk_factors.append("VIX backwardation (panic)")
+
+        # Determine risk level and exposure
+        if risk_score >= 8:
+            hedge_level = "EXTREME"
+            exposure_pct = 40
+            hedge_action = "40% exposure — close weakest positions, no new longs"
+        elif risk_score >= 5:
+            hedge_level = "HIGH"
+            exposure_pct = 60
+            hedge_action = "60% exposure — tighten all stops 20%"
+        elif risk_score >= 3:
+            hedge_level = "MODERATE"
+            exposure_pct = 80
+            hedge_action = "80% exposure — reduce new positions"
+        else:
+            hedge_level = "LOW"
+            exposure_pct = 100
+            hedge_action = "100% exposure — normal trading"
+
+        dynamic_hedge = {
+            "risk_level": hedge_level,
+            "risk_score": risk_score,
+            "exposure_pct": exposure_pct,
+            "action": hedge_action,
+            "risk_factors": risk_factors,
+        }
+
+        # Compute sector rotation rankings from scored picks
+        sector_rankings = []
+        _sec_mom = {}
+        for s in all_scored:
+            sec = s.get("sector", "Unknown")
+            if sec not in _sec_mom:
+                _sec_mom[sec] = []
+            _sec_mom[sec].append(s.get("momentum_pct", 0))
+        _sec_avg = {s: float(np.mean(v)) for s, v in _sec_mom.items() if v}
+        if _sec_avg:
+            _sorted_secs = sorted(_sec_avg.items(), key=lambda x: x[1], reverse=True)
+            for rank, (sect, mom) in enumerate(_sorted_secs, 1):
+                sector_rankings.append({
+                    "sector": sect, "rank": rank,
+                    "momentum_pct": round(mom, 2),
+                    "zone": "HOT" if rank <= len(_sorted_secs) // 3 else ("COLD" if rank > len(_sorted_secs) * 2 // 3 else "NEUTRAL"),
+                })
+
         return {
             "regime": regime,
             "macro": macro,
@@ -2806,6 +3078,10 @@ def generate_quant_picks() -> dict:
             "regime_transition": rentech_data.get("regime_transition", {}),
             "drawdown_mode": rentech_data.get("drawdown_mode", {}),
             "portfolio_var": rentech_data.get("portfolio_var", {}),
+            # WEEK 2: New intelligence data
+            "dynamic_hedge": dynamic_hedge,
+            "sector_rankings": sector_rankings,
+            "total_factors": 20,
             "_price_data": price_data,  # Pass through for correlation checks in paper_trader
             "generated_at": datetime.now().isoformat(),
             "computation_time_seconds": elapsed,

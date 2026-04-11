@@ -184,7 +184,7 @@ export default function QuantDashboard() {
         />
       )}
       {activeTab === 2 && (
-        <IntelligenceTab intelligence={intelligence} loading={loading.intel} />
+        <IntelligenceTab intelligence={intelligence} loading={loading.intel} quantPicks={quantPicks} />
       )}
       </ErrorBoundary>
     </div>
@@ -922,12 +922,38 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
 // ============================================================
 // TAB 3: SYSTEM INTELLIGENCE
 // ============================================================
-function IntelligenceTab({ intelligence, loading }) {
+function IntelligenceTab({ intelligence, loading, quantPicks }) {
   if (loading) return <LoadingSpinner text="Analyzing system performance..." />
   if (!intelligence) return <EmptyState text="No intelligence data yet" />
 
   const weights = intelligence.current_weights || {}
   const factorPerf = intelligence.factor_performance || {}
+  const hedge = quantPicks?.dynamic_hedge || {}
+  const sectorRankings = quantPicks?.sector_rankings || []
+
+  // All 20 factors for display
+  const ALL_FACTORS = [
+    { key: 'momentum', name: 'Momentum (12-1M)', desc: 'Jegadeesh-Titman trend continuation' },
+    { key: 'value', name: 'Value', desc: 'Earnings yield — cheap stocks outperform' },
+    { key: 'quality', name: 'Quality', desc: 'Return consistency (Sharpe ratio)' },
+    { key: 'low_vol', name: 'Low Volatility', desc: 'GARCH-enhanced vol anomaly' },
+    { key: 'rsi2', name: 'RSI(2) Mean Reversion', desc: 'Connors strategy (75-91% win rate)' },
+    { key: 'volume', name: 'Volume Confirmation', desc: 'OBV trend — smart money flow' },
+    { key: 'smart_money', name: 'Smart Money Divergence', desc: 'Price-volume divergence detection' },
+    { key: 'relative_strength', name: 'Relative Strength', desc: 'Outperformance vs sector peers' },
+    { key: 'bb_squeeze', name: 'Bollinger Squeeze', desc: 'Volatility compression breakout' },
+    { key: 'vwap', name: 'VWAP Proximity', desc: 'Institutional execution quality' },
+    { key: 'hurst', name: 'Hurst Exponent', desc: 'Trend vs mean-reversion classifier' },
+    { key: 'autocorr', name: 'Autocorrelation', desc: 'Serial return pattern exploitation' },
+    { key: 'stat_arb', name: 'Stat Arb Z-Score', desc: 'Distance from statistical fair value' },
+    { key: 'kurtosis', name: 'Kurtosis', desc: 'Fat tail risk detection' },
+    { key: 'vol_compression', name: 'Vol Compression', desc: 'GARCH breakout predictor' },
+    { key: 'mtf_alignment', name: 'Multi-Timeframe', desc: 'Daily+weekly+monthly trend alignment' },
+    { key: 'earnings_drift', name: 'Post-Earnings Drift', desc: 'Earnings beat/miss continuation' },
+    { key: 'vpoc', name: 'Volume Profile (VPOC)', desc: 'Point of control support/resistance' },
+    { key: 'ichimoku', name: 'Ichimoku Cloud', desc: 'Japanese trend confirmation system' },
+    { key: 'sector_rotation', name: 'Sector Rotation', desc: 'Rotate into hot sectors, avoid cold' },
+  ]
 
   const weightData = Object.entries(weights).map(([name, weight]) => ({
     name: name.replaceAll('_', ' '),
@@ -936,8 +962,46 @@ function IntelligenceTab({ intelligence, loading }) {
     sharpe: factorPerf[name]?.sharpe || 0,
   }))
 
+  const hedgeColor = hedge.risk_level === 'LOW' ? 'green' : hedge.risk_level === 'MODERATE' ? 'yellow' : hedge.risk_level === 'HIGH' ? 'orange' : 'red'
+  const hedgeBorder = hedgeColor === 'green' ? 'border-green-500/30' : hedgeColor === 'yellow' ? 'border-yellow-500/30' : hedgeColor === 'orange' ? 'border-orange-500/30' : 'border-red-500/30'
+  const hedgeText = hedgeColor === 'green' ? 'text-green-400' : hedgeColor === 'yellow' ? 'text-yellow-400' : hedgeColor === 'orange' ? 'text-orange-400' : 'text-red-400'
+  const hedgeBg = hedgeColor === 'green' ? 'bg-green-500/10' : hedgeColor === 'yellow' ? 'bg-yellow-500/10' : hedgeColor === 'orange' ? 'bg-orange-500/10' : 'bg-red-500/10'
+
   return (
     <div className="space-y-6">
+      {/* Dynamic Hedge / Risk Shield */}
+      {hedge.risk_level && (
+        <div className={`bg-black border ${hedgeBorder} rounded-xl p-6`}>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-bold text-white">Risk Shield</h2>
+            <span className={`px-4 py-1.5 rounded-full text-sm font-bold ${hedgeBg} ${hedgeText}`}>
+              {hedge.risk_level}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Risk Score</div>
+              <div className={`text-2xl font-bold font-mono ${hedgeText}`}>{hedge.risk_score}/10</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3">
+              <div className="text-neutral-500 text-xs">Exposure</div>
+              <div className={`text-2xl font-bold font-mono ${hedgeText}`}>{hedge.exposure_pct}%</div>
+            </div>
+            <div className="bg-neutral-900 rounded-lg p-3 col-span-2">
+              <div className="text-neutral-500 text-xs">Action</div>
+              <div className="text-white text-sm font-medium mt-1">{hedge.action}</div>
+            </div>
+          </div>
+          {hedge.risk_factors?.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {hedge.risk_factors.map((f, i) => (
+                <span key={i} className={`px-2 py-1 rounded text-xs ${hedgeBg} ${hedgeText}`}>{f}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* System Status */}
       <div className="bg-black border border-neutral-700 rounded-xl p-6">
         <div className="flex items-center gap-3 mb-4">
@@ -953,12 +1017,67 @@ function IntelligenceTab({ intelligence, loading }) {
           <span className="text-neutral-500 text-sm">
             {intelligence.total_closed_trades || 0} trades analyzed
           </span>
+          <span className="text-neutral-500 text-sm ml-auto">
+            {quantPicks?.total_factors || 20} factors active
+          </span>
         </div>
 
         {intelligence.insights?.map((insight, i) => (
           <p key={i} className="text-neutral-400 text-sm mb-1">{insight}</p>
         ))}
       </div>
+
+      {/* All 20 Factors */}
+      <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <h3 className="text-white font-bold mb-4">All {ALL_FACTORS.length} Scoring Factors</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {ALL_FACTORS.map((f, i) => {
+            const isNew = ['earnings_drift', 'vpoc', 'ichimoku', 'sector_rotation'].includes(f.key)
+            return (
+              <div key={f.key} className={`rounded-lg p-3 border ${isNew ? 'bg-blue-950/30 border-blue-500/30' : 'bg-neutral-900 border-neutral-800'}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-neutral-500 text-xs font-mono">#{i + 1}</span>
+                  <span className="text-white text-sm font-semibold">{f.name}</span>
+                  {isNew && <span className="px-1.5 py-0.5 text-[10px] font-bold bg-blue-500/20 text-blue-400 rounded">NEW</span>}
+                </div>
+                <div className="text-neutral-500 text-xs mt-1">{f.desc}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Sector Rotation Heatmap */}
+      {sectorRankings.length > 0 && (
+        <div className="bg-black border border-neutral-700 rounded-xl p-6">
+          <h3 className="text-white font-bold mb-4">Sector Rotation Heatmap</h3>
+          <p className="text-neutral-500 text-sm mb-3">Sectors ranked by momentum — rotate into HOT, avoid COLD</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {sectorRankings.map(s => (
+              <div key={s.sector} className={`rounded-lg p-3 border ${
+                s.zone === 'HOT' ? 'bg-green-950/30 border-green-500/30' :
+                s.zone === 'COLD' ? 'bg-red-950/30 border-red-500/30' :
+                'bg-neutral-900 border-neutral-800'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-white text-sm font-semibold">{s.sector}</span>
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                    s.zone === 'HOT' ? 'bg-green-500/20 text-green-400' :
+                    s.zone === 'COLD' ? 'bg-red-500/20 text-red-400' :
+                    'bg-neutral-500/20 text-neutral-400'
+                  }`}>{s.zone}</span>
+                </div>
+                <div className={`text-lg font-bold font-mono mt-1 ${
+                  s.momentum_pct > 0 ? 'text-green-400' : 'text-red-400'
+                }`}>
+                  {s.momentum_pct > 0 ? '+' : ''}{s.momentum_pct}%
+                </div>
+                <div className="text-neutral-600 text-xs">Rank #{s.rank}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Strengths & Weaknesses */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1057,6 +1176,70 @@ function IntelligenceTab({ intelligence, loading }) {
           </div>
         </div>
       )}
+
+      {/* Market Overlays Active */}
+      <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <h3 className="text-white font-bold mb-4">Active Market Overlays</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {[
+            { name: 'Market Regime Detection', desc: 'S&P 500 trend + VIX + breadth → BULL/BEAR/SIDEWAYS', icon: 'G' },
+            { name: 'Global Macro Overlay', desc: 'Treasury yields, crude oil, gold, VIX, yield curve, dollar strength', icon: 'M' },
+            { name: 'Overnight Intelligence', desc: 'Futures, global markets, Bitcoin, gold/bonds gap detection', icon: 'N' },
+            { name: 'Cross-Asset Signals', desc: 'Dollar, Bitcoin, Copper, Bonds momentum → sector adjustments', icon: 'X' },
+            { name: 'Geopolitical Risk Layer', desc: 'CNN/Yahoo/CNBC scanning for wars, sanctions, conflicts', icon: 'P' },
+            { name: 'Ceasefire/De-escalation', desc: 'Peace dividend: boost tech/consumer, penalize defense/energy', icon: 'C' },
+            { name: 'Earnings Proximity Shield', desc: 'Reduce confidence 10-50% near earnings dates', icon: 'E' },
+            { name: 'Ensemble Voting (3 Models)', desc: 'Momentum, mean-reversion, ML must agree on direction', icon: 'V' },
+            { name: 'Dynamic Hedging Engine', desc: 'Auto-scale exposure based on composite risk score', icon: 'H' },
+          ].map(o => (
+            <div key={o.name} className="bg-neutral-900 rounded-lg p-3 border border-neutral-800 flex gap-3">
+              <div className="w-8 h-8 rounded-lg bg-green-500/10 text-green-400 flex items-center justify-center text-sm font-bold flex-shrink-0">{o.icon}</div>
+              <div>
+                <div className="text-white text-sm font-semibold">{o.name}</div>
+                <div className="text-neutral-500 text-xs">{o.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Risk Management Arsenal */}
+      <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <h3 className="text-white font-bold mb-4">Risk Management Arsenal</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {[
+            { name: 'Kelly Criterion Sizing', desc: 'Optimal bet sizing from win rate + payoff ratio (half-Kelly for safety)' },
+            { name: 'VIX-Scaled Positions', desc: 'VIX<15: 1.3x, VIX 20-25: 0.85x, VIX>35: 0.45x sizing' },
+            { name: 'ATR Trailing Stops', desc: 'Per-stock volatility-based stops that ratchet up, never down' },
+            { name: 'Win-Lock System', desc: 'Auto-lock all positions at daily gain threshold (3-8% depending on regime)' },
+            { name: 'Drawdown Protection', desc: 'Halt at -10% from peak, halve sizes at -5%' },
+            { name: 'Smart Order Timing', desc: 'Avoid first 15min, favor power hour (3-4 PM)' },
+            { name: 'Streak Calibration', desc: '3+ losses → 50% size, 5+ wins → 130% size (press/protect)' },
+            { name: 'Portfolio VaR Budget', desc: '95% VaR from position covariance — block trades when risk is full' },
+            { name: 'Correlation Limits', desc: 'Block trades with >0.75 correlation to 3+ existing positions' },
+            { name: 'Momentum Crash Filter', desc: 'Detect unwinding momentum and dead cat bounces' },
+          ].map(r => (
+            <div key={r.name} className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+              <div className="text-white text-sm font-semibold">{r.name}</div>
+              <div className="text-neutral-500 text-xs mt-1">{r.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Trading Philosophy */}
+      <div className="bg-black border border-purple-500/20 rounded-xl p-6">
+        <h3 className="text-white font-bold mb-4">Trading Philosophy</h3>
+        <div className="space-y-3 text-neutral-400 text-sm">
+          <p><span className="text-white font-semibold">Universe:</span> 260+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>
+          <p><span className="text-white font-semibold">Scoring:</span> 20-factor composite with z-score normalization + adaptive regime-aware weights</p>
+          <p><span className="text-white font-semibold">Edge Sources:</span> Momentum + mean-reversion hybrid, statistical arbitrage, post-earnings drift, Ichimoku trends, volume profile, sector rotation</p>
+          <p><span className="text-white font-semibold">Risk First:</span> Never risk more than Kelly half-fraction. VIX scales all sizes. ATR-based stops per stock. Portfolio VaR budget caps total risk.</p>
+          <p><span className="text-white font-semibold">Regime Adaptive:</span> BEAR → favor defensives + shorts, reduce momentum weight. BULL → favor longs, reduce short exposure. SIDEWAYS → boost mean-reversion.</p>
+          <p><span className="text-white font-semibold">Multi-Layer Confirmation:</span> 3-model ensemble must agree. ADX validates trend strength. Multi-timeframe alignment required. Overnight gaps and cross-asset signals confirm macro direction.</p>
+          <p><span className="text-white font-semibold">Macro Aware:</span> Treasury yields, oil, gold, dollar strength, yield curve inversion, VIX term structure, geopolitical risk, and ceasefire/de-escalation signals all feed into sector-level adjustments.</p>
+        </div>
+      </div>
     </div>
   )
 }
