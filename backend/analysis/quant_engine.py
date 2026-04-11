@@ -1,5 +1,5 @@
 """
-Quantitative Engine — the core intelligence of the Epic Fury hedge fund.
+Quantitative Engine — the core intelligence of the Sentinel Quant hedge fund.
 
 This is the brain that institutional quant funds use to find edges:
   1. Market Regime Detection — BULL / BEAR / SIDEWAYS

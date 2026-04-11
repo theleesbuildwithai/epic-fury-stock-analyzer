@@ -256,7 +256,7 @@ def _fetch_rss(url, timeout=10):
     try:
         ctx = ssl.create_default_context()
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; EpicFuryBot/2.0)"
+            "User-Agent": "Mozilla/5.0 (compatible; SentinelQuantBot/2.0)"
         })
         resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
         xml_data = resp.read().decode("utf-8", errors="replace")

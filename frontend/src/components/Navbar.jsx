@@ -13,7 +13,7 @@ export default function Navbar() {
               <span className="text-black font-black text-sm">EF</span>
             </div>
             <div className="flex items-baseline gap-2">
-              <span className="text-lg font-bold text-white tracking-tight">Epic Fury</span>
+              <span className="text-2xl font-black text-white tracking-tight">Sentinel Quant</span>
               <span className="text-[10px] text-neutral-600 font-medium hidden sm:block tracking-wider uppercase">Stock Analyzer</span>
             </div>
           </Link>

@@ -8,7 +8,7 @@ import PriceForecast from './PriceForecast'
 
 function getWatchlist() {
   try {
-    const data = localStorage.getItem('epic_fury_watchlist')
+    const data = localStorage.getItem('sentinel_quant_watchlist')
     return data ? JSON.parse(data) : []
   } catch {
     return []
@@ -19,12 +19,12 @@ function addToWatchlist(stock) {
   const list = getWatchlist()
   if (list.some(s => s.ticker === stock.ticker)) return
   list.push(stock)
-  localStorage.setItem('epic_fury_watchlist', JSON.stringify(list))
+  localStorage.setItem('sentinel_quant_watchlist', JSON.stringify(list))
 }
 
 function removeFromWatchlist(ticker) {
   const list = getWatchlist().filter(s => s.ticker !== ticker)
-  localStorage.setItem('epic_fury_watchlist', JSON.stringify(list))
+  localStorage.setItem('sentinel_quant_watchlist', JSON.stringify(list))
 }
 
 function isInWatchlist(ticker) {

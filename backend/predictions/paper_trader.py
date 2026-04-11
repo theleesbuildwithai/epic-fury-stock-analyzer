@@ -1,5 +1,5 @@
 """
-Paper Trading System — the execution engine of the Epic Fury hedge fund.
+Paper Trading System — the execution engine of the Sentinel Quant hedge fund.
 
 This manages a $109K virtual portfolio that:
   1. Auto-executes trades based on quant signals (LONG/SHORT picks)

@@ -1,4 +1,4 @@
-# Epic Fury Stock Analyzer
+# Sentinel Quant Stock Analyzer
 
 Real-time stock analysis with technical indicators, trend detection, and performance tracking.
 
@@ -28,4 +28,4 @@ npm run dev
 ## Deploy
 Push to main triggers CodeBuild which builds a Docker image and deploys to App Runner.
 
-Built by the Epic Fury team.
+Built by the Sentinel Quant team.

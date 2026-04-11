@@ -127,7 +127,7 @@ export default function QuantDashboard() {
     <div className="max-w-7xl mx-auto px-4 py-8">
       <div className="mb-6">
         <h1 className="text-3xl font-black text-white tracking-tight">
-          Quant Hedge Fund
+          Sentinel Quant
         </h1>
         <p className="text-neutral-500 mt-1">
           21-factor quant engine • Autonomous trading • Self-learning system
@@ -357,7 +357,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-green-500 via-green-400 to-green-600"></div>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 className="text-2xl font-black text-white">Epic Fury Fund</h2>
+              <h2 className="text-2xl font-black text-white">Sentinel Quant Fund</h2>
               <p className="text-neutral-500 text-xs mt-1">Since March 30, 2026 | Initial Capital: $100,000</p>
             </div>
             <div className="text-right">

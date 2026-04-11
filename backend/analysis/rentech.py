@@ -1,5 +1,5 @@
 """
-Renaissance Technologies-Style Upgrades — Epic Fury Hedge Fund
+Renaissance Technologies-Style Upgrades — Sentinel Quant Hedge Fund
 
 This module adds institutional-grade features inspired by RenTech's Medallion Fund:
 

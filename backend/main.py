@@ -1,5 +1,5 @@
 """
-Epic Fury Stock Analyzer — Backend API
+Sentinel Quant Stock Analyzer — Backend API
 Built with FastAPI (Python)
 
 This is the "engine" of our app. It receives requests from the website,
@@ -31,11 +31,11 @@ from predictions.tracker import get_performance_stats, check_and_resolve_predict
 from predictions.paper_trader import get_portfolio_state, execute_trades_from_signals, run_backtest, get_performance_analytics, check_and_exit_positions, ORIGINAL_CAPITAL
 from predictions.learner import generate_intelligence_report, auto_adjust_weights
 
-logger = logging.getLogger("epic-fury")
+logger = logging.getLogger("sentinel-quant")
 logging.basicConfig(level=logging.WARNING)
 
 # ============================================================
-#  EPIC FURY APPLICATION FIREWALL (WAF)
+#  SENTINEL QUANT APPLICATION FIREWALL (WAF)
 #  Protects against: DDoS, bots, injection, path traversal,
 #  scanner attacks, brute force, and more
 # ============================================================
@@ -218,7 +218,7 @@ class FirewallMiddleware(BaseHTTPMiddleware):
 
 # Create the app
 app = FastAPI(
-    title="Epic Fury Stock Analyzer",
+    title="Sentinel Quant Stock Analyzer",
     description="Real-time stock analysis with technical indicators and performance tracking",
     version="1.0.0",
     docs_url=None,     # Disable Swagger docs in production
@@ -1238,7 +1238,7 @@ def get_intelligence_report():
 @app.get("/health")
 def health_check():
     """Health check — App Runner pings this to make sure the app is alive."""
-    return {"status": "healthy", "app": "Epic Fury Stock Analyzer"}
+    return {"status": "healthy", "app": "Sentinel Quant Stock Analyzer"}
 
 
 @app.get("/api/live-prices")

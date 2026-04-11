@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 
 function getRecentSearches() {
   try {
-    const data = localStorage.getItem('epic_fury_recent_searches')
+    const data = localStorage.getItem('sentinel_quant_recent_searches')
     return data ? JSON.parse(data) : []
   } catch {
     return []
@@ -15,7 +15,7 @@ function addRecentSearch(ticker) {
     recent = recent.filter(t => t !== ticker)
     recent.unshift(ticker)
     if (recent.length > 10) recent = recent.slice(0, 10)
-    localStorage.setItem('epic_fury_recent_searches', JSON.stringify(recent))
+    localStorage.setItem('sentinel_quant_recent_searches', JSON.stringify(recent))
   } catch {
     // Silent fail
   }

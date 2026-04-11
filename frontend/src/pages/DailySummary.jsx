@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 
 function getWatchlistTickers() {
   try {
-    const data = localStorage.getItem('epic_fury_watchlist')
+    const data = localStorage.getItem('sentinel_quant_watchlist')
     if (!data) return ''
     const list = JSON.parse(data)
     return list.map(s => s.ticker).filter(Boolean).join(',')

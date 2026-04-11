@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 
 function getWatchlist() {
   try {
-    const data = localStorage.getItem('epic_fury_watchlist')
+    const data = localStorage.getItem('sentinel_quant_watchlist')
     return data ? JSON.parse(data) : []
   } catch {
     return []
@@ -10,7 +10,7 @@ function getWatchlist() {
 }
 
 function saveWatchlist(list) {
-  localStorage.setItem('epic_fury_watchlist', JSON.stringify(list))
+  localStorage.setItem('sentinel_quant_watchlist', JSON.stringify(list))
 }
 
 // Signal badge colors

@@ -1,8 +1,8 @@
 """
-IBKR (Interactive Brokers) Adapter — Epic Fury Hedge Fund
+IBKR (Interactive Brokers) Adapter — Sentinel Quant Hedge Fund
 =========================================================
 
-Connects Epic Fury's autonomous trading system to Interactive Brokers
+Connects Sentinel Quant's autonomous trading system to Interactive Brokers
 for real execution via the ib_insync library.
 
 SAFETY ARCHITECTURE (NON-NEGOTIABLE):
@@ -14,7 +14,7 @@ SAFETY ARCHITECTURE (NON-NEGOTIABLE):
 - Dual-track: paper trades ALWAYS run alongside IBKR
 - Connection watchdog blocks trades if disconnected
 
-Author: Epic Fury Trading Systems
+Author: Sentinel Quant Trading Systems
 """
 
 import logging

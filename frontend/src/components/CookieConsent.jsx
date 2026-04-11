@@ -4,7 +4,7 @@ export default function CookieConsent() {
   const [show, setShow] = useState(false)
 
   useEffect(() => {
-    const consent = localStorage.getItem('epic_fury_cookie_consent')
+    const consent = localStorage.getItem('sentinel_quant_cookie_consent')
     if (!consent) {
       // Small delay so it slides in smoothly
       setTimeout(() => setShow(true), 1000)
@@ -12,13 +12,13 @@ export default function CookieConsent() {
   }, [])
 
   const handleAccept = () => {
-    localStorage.setItem('epic_fury_cookie_consent', 'accepted')
-    localStorage.setItem('epic_fury_consent_date', new Date().toISOString())
+    localStorage.setItem('sentinel_quant_cookie_consent', 'accepted')
+    localStorage.setItem('sentinel_quant_consent_date', new Date().toISOString())
     setShow(false)
   }
 
   const handleDecline = () => {
-    localStorage.setItem('epic_fury_cookie_consent', 'declined')
+    localStorage.setItem('sentinel_quant_cookie_consent', 'declined')
     setShow(false)
   }
 

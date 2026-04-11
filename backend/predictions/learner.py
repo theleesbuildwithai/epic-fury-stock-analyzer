@@ -1,5 +1,5 @@
 """
-Self-Learning System — how the Epic Fury hedge fund gets smarter over time.
+Self-Learning System — how the Sentinel Quant hedge fund gets smarter over time.
 
 After every batch of trades, this system:
   1. Analyzes which factors are working (win rate, Sharpe by factor)

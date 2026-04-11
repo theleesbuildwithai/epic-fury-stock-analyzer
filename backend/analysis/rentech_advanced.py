@@ -1,5 +1,5 @@
 """
-Renaissance Technologies-Style Advanced Quant Module — Epic Fury Hedge Fund
+Renaissance Technologies-Style Advanced Quant Module — Sentinel Quant Hedge Fund
 =============================================================================
 
 This module implements institutional-grade quantitative techniques inspired by
