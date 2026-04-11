@@ -8,6 +8,7 @@ import ExtraResources from './pages/ExtraResources'
 import News from './pages/News'
 import DailySummary from './pages/DailySummary'
 import QuantDashboard from './pages/QuantDashboard'
+import IBKRDashboard from './pages/IBKRDashboard'
 import CookieConsent from './components/CookieConsent'
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="/news" element={<News />} />
           <Route path="/daily-summary" element={<DailySummary />} />
           <Route path="/quant" element={<QuantDashboard />} />
+          <Route path="/ibkr" element={<IBKRDashboard />} />
         </Routes>
         <CookieConsent />
       </div>

@@ -1379,6 +1379,26 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         "regime": regime,
     }
 
+    # ── IBKR Dual-Track: Mirror trades to Interactive Brokers ──
+    # Paper trades ALWAYS run above. IBKR is additive — never replaces paper.
+    try:
+        from predictions.ibkr_adapter import IBKR_ENABLED, ibkr_execute_trades
+        if IBKR_ENABLED:
+            import threading
+            def _ibkr_mirror():
+                try:
+                    ibkr_result = ibkr_execute_trades(quant_picks)
+                    logger.info(f"IBKR dual-track: opened={len(ibkr_result.get('opened', []))}, "
+                               f"errors={len(ibkr_result.get('errors', []))}")
+                except Exception as e:
+                    logger.error(f"IBKR dual-track error: {e}")
+            t = threading.Thread(target=_ibkr_mirror, daemon=True, name="ibkr-mirror")
+            t.start()
+    except ImportError:
+        pass  # ib_insync not installed — paper-only mode
+    except Exception as e:
+        logger.error(f"IBKR mirror setup error: {e}")
+
     return results
 
 

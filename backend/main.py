@@ -1816,6 +1816,107 @@ def ensemble_signal_endpoint(ticker: str, request: Request):
         raise HTTPException(status_code=500, detail="Ensemble failed")
 
 
+# ─── IBKR (Interactive Brokers) ENDPOINTS ─────────────────────────────────────
+
+@app.get("/api/ibkr/status")
+def ibkr_status_endpoint(request: Request):
+    """IBKR connection status, account summary, and trading mode."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_adapter import ibkr_get_status, ibkr_get_account, get_order_log
+        status = ibkr_get_status()
+        account = ibkr_get_account()
+        recent_orders = get_order_log(limit=20)
+        return {
+            "status": status,
+            "account": account,
+            "recent_orders": recent_orders,
+        }
+    except Exception as e:
+        logger.error(f"IBKR status error: {e}")
+        return {
+            "status": {"connected": False, "enabled": False, "mode": "PAPER",
+                       "error": str(e)},
+            "account": {},
+            "recent_orders": [],
+        }
+
+
+@app.post("/api/ibkr/kill-switch")
+def ibkr_kill_switch(request: Request):
+    """EMERGENCY: Flatten all IBKR positions immediately."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_adapter import ibkr_flatten_all
+        result = ibkr_flatten_all("MANUAL KILL SWITCH")
+        logger.warning(f"IBKR KILL SWITCH activated: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"IBKR kill switch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ibkr/positions")
+def ibkr_positions_endpoint(request: Request):
+    """Get all current IBKR positions with P&L."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_adapter import ibkr_get_positions
+        return {"positions": ibkr_get_positions()}
+    except Exception as e:
+        logger.error(f"IBKR positions error: {e}")
+        return {"positions": [], "error": str(e)}
+
+
+@app.get("/api/ibkr/orders")
+def ibkr_orders_endpoint(request: Request):
+    """Get open/pending IBKR orders."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_adapter import ibkr_get_orders, get_order_log
+        return {
+            "open_orders": ibkr_get_orders(),
+            "order_log": get_order_log(limit=50),
+        }
+    except Exception as e:
+        logger.error(f"IBKR orders error: {e}")
+        return {"open_orders": [], "order_log": [], "error": str(e)}
+
+
+@app.post("/api/ibkr/toggle")
+def ibkr_toggle_endpoint(request: Request):
+    """Enable/disable IBKR execution. Paper trader always runs regardless."""
+    check_rate_limit(request.client.host)
+    try:
+        import json
+        body = {}
+        try:
+            import asyncio
+            # For sync context, just check query params
+        except Exception:
+            pass
+
+        from predictions.ibkr_adapter import ibkr_toggle
+        # Toggle: if currently enabled, disable; if disabled, enable
+        from predictions.ibkr_adapter import IBKR_ENABLED
+        return ibkr_toggle(not IBKR_ENABLED)
+    except Exception as e:
+        logger.error(f"IBKR toggle error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ibkr/unhalt")
+def ibkr_unhalt_endpoint(request: Request):
+    """Resume trading after emergency halt."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_adapter import ibkr_unhalt
+        return ibkr_unhalt()
+    except Exception as e:
+        logger.error(f"IBKR unhalt error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/auto-trading-status")
 def auto_trading_status(request: Request):
     """Get autonomous trading system status — the computer's brain."""
