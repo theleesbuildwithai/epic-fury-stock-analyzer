@@ -522,7 +522,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <div className="text-neutral-600 text-xs">
                 {quantPicks.portfolio_var?.status === 'VAR_EXCEEDED' ? '🚫 BLOCKED' :
                  quantPicks.portfolio_var?.status === 'VAR_WARNING' ? '⚠️ Half-size' :
-                 quantPicks.portfolio_var?.status === 'VAR_ELEVATED' ? '⚡ Elevated' : '✅ OK'}
+                 quantPicks.portfolio_var?.status === 'VAR_ELEVATED' ? '⚡ Elevated' : 'OK'}
               </div>
             </div>
 

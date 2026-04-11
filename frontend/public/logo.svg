@@ -1,11 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 120" fill="none">
-  <!-- Sentinel Quant - Spartan Helmet -->
-  <!-- Crest -->
-  <path d="M42 0 L58 0 L55 20 L45 20 Z" fill="currentColor"/>
-  <!-- Helmet dome + face -->
-  <path d="M20 35 C20 15, 80 15, 80 35 L80 55 C80 65, 75 75, 70 80 L65 85 L65 75 C65 65, 60 58, 55 55 L52 53 L52 85 L48 85 L48 53 L45 55 C40 58, 35 65, 35 75 L35 85 L30 80 C25 75, 20 65, 20 55 Z" fill="currentColor"/>
-  <!-- Bottom jaw left -->
-  <path d="M30 80 L25 105 L32 110 L35 85 Z" fill="currentColor"/>
-  <!-- Bottom jaw right -->
-  <path d="M70 80 L75 105 L68 110 L65 85 Z" fill="currentColor"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 280" fill="white">
+  <!-- Sentinel Quant - Spartan Helmet Silhouette -->
+  <!-- Crest (top plume) -->
+  <path d="M85 0 L115 0 L112 10 Q110 30, 108 50 L92 50 Q90 30, 88 10 Z"/>
+  <!-- Helmet dome -->
+  <path d="M50 80 Q50 35, 100 30 Q150 35, 150 80 L150 120 Q150 140, 140 155 L135 160
+    L135 145 Q135 125, 120 112 L112 107 Q105 103, 100 100 Q95 103, 88 107 L80 112
+    Q65 125, 65 145 L65 160 L60 155 Q50 140, 50 120 Z"/>
+  <!-- Left jaw -->
+  <path d="M60 155 L65 160 L65 145 Q65 155, 62 170 L55 220 L50 240 L60 245 L70 200
+    L72 175 L65 160 Z"/>
+  <!-- Right jaw -->
+  <path d="M140 155 L135 160 L135 145 Q135 155, 138 170 L145 220 L150 240 L140 245 L130 200
+    L128 175 L135 160 Z"/>
+  <!-- Nose guard (center vertical) -->
+  <path d="M96 100 L104 100 L103 175 L97 175 Z"/>
 </svg>
