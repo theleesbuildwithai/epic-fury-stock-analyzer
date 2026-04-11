@@ -50,6 +50,10 @@ _QUANT_CACHE_TTL = 300  # 5 minutes
 _last_quant_call = [0.0]
 _QUANT_DELAY = 3.0  # seconds between Yahoo Finance calls
 
+# Fundamentals cache — 24-hour TTL for yfinance .info data
+_fundamentals_cache = {}
+_FUNDAMENTALS_CACHE_TTL = 86400  # 24 hours
+
 
 def _throttle():
     """Enforce minimum delay between Yahoo Finance API calls."""
@@ -804,6 +808,10 @@ def detect_market_regime() -> dict:
                 "JPM", "V", "UNH", "JNJ", "XOM", "PG", "HD", "BA",
                 "CRM", "AMD", "NFLX", "WMT", "GS", "CAT", "LLY",
                 "MRK", "ABBV", "COST", "CVX", "NEE", "AMT", "GE", "HON",
+                # Mid-cap diversification (20 additional)
+                "PANW", "CRWD", "DDOG", "SNOW", "ZS", "FTNT", "PLTR",
+                "SQ", "COIN", "SHOP", "MELI", "TJX", "ROST", "DHR",
+                "ISRG", "REGN", "VRTX", "ANET", "CDNS", "SNPS",
             ]
             breadth_df = yf.download(
                 breadth_sample, period="3mo", progress=False, group_by="ticker"
@@ -2134,6 +2142,77 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             sector_rotation_raw = 0.0
             # (Computed after all stocks processed — see below)
 
+            # ============================================================
+            # NEW FACTOR 21: CANDLESTICK PATTERN RECOGNITION
+            # Detects classic candlestick patterns from last 3 candles.
+            # Bullish patterns near oversold (RSI<40) = buy signal.
+            # Bearish patterns near overbought (RSI>60) = sell signal.
+            # Uses existing OHLC data — no new API calls.
+            # ============================================================
+            candlestick_raw = 0.0
+            try:
+                opens_cs = df["Open"].iloc[:, 0].values.astype(float) if hasattr(df["Open"], "columns") else df["Open"].values.astype(float)
+                highs_cs = df["High"].iloc[:, 0].values.astype(float) if hasattr(df["High"], "columns") else df["High"].values.astype(float)
+                lows_cs = df["Low"].iloc[:, 0].values.astype(float) if hasattr(df["Low"], "columns") else df["Low"].values.astype(float)
+
+                if len(opens_cs) >= 3 and len(highs_cs) >= 3 and len(lows_cs) >= 3 and len(closes) >= 3:
+                    # Current candle (last candle)
+                    c_open = float(opens_cs[-1])
+                    c_high = float(highs_cs[-1])
+                    c_low = float(lows_cs[-1])
+                    c_close = float(closes[-1])
+                    c_body = abs(c_close - c_open)
+                    c_range = c_high - c_low if c_high > c_low else 0.0001
+
+                    # Previous candle
+                    p_open = float(opens_cs[-2])
+                    p_close = float(closes[-2])
+                    p_body = abs(p_close - p_open)
+
+                    pattern_detected = None
+
+                    # Doji: open ≈ close (within 0.1% of range)
+                    if c_body < c_range * 0.001:
+                        pattern_detected = "doji"
+
+                    # Hammer: small body at top, long lower shadow (>2x body)
+                    lower_shadow = min(c_open, c_close) - c_low
+                    upper_shadow = c_high - max(c_open, c_close)
+                    if c_body > 0 and lower_shadow > 2 * c_body and upper_shadow < c_body:
+                        pattern_detected = "hammer"
+
+                    # Bullish Engulfing: current body fully engulfs prior body, close > open
+                    if (c_close > c_open and p_close < p_open and
+                            c_open <= p_close and c_close >= p_open and
+                            c_body > p_body):
+                        pattern_detected = "bullish_engulfing"
+
+                    # Bearish Engulfing: current body fully engulfs prior body, close < open
+                    if (c_close < c_open and p_close > p_open and
+                            c_open >= p_close and c_close <= p_open and
+                            c_body > p_body):
+                        pattern_detected = "bearish_engulfing"
+
+                    # Score based on pattern + RSI context
+                    if pattern_detected in ("hammer", "bullish_engulfing"):
+                        if rsi14 < 40:
+                            candlestick_raw = 2.0   # Bullish pattern near oversold
+                        elif rsi14 < 50:
+                            candlestick_raw = 1.0   # Bullish pattern, neutral RSI
+                        else:
+                            candlestick_raw = 0.5   # Bullish pattern but not oversold
+                    elif pattern_detected == "bearish_engulfing":
+                        if rsi14 > 60:
+                            candlestick_raw = -2.0  # Bearish pattern near overbought
+                        elif rsi14 > 50:
+                            candlestick_raw = -1.0  # Bearish pattern, neutral RSI
+                        else:
+                            candlestick_raw = -0.5  # Bearish pattern but not overbought
+                    elif pattern_detected == "doji":
+                        candlestick_raw = 0.0       # Doji = indecision, neutral
+            except Exception:
+                candlestick_raw = 0.0
+
             raw_factors.append({
                 "symbol": symbol,
                 "price": round(current_price, 2),
@@ -2158,6 +2237,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "vpoc_raw": vpoc_raw,
                 "ichimoku_raw": ichimoku_raw,
                 "sector_rotation_raw": 0.0,  # computed post-loop
+                "candlestick_raw": candlestick_raw,
                 "adx": round(adx_value, 1),
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
@@ -2230,6 +2310,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     vpoc_z = _safe_zscore([s["vpoc_raw"] for s in raw_factors])
     ichimoku_z = _safe_zscore([s["ichimoku_raw"] for s in raw_factors])
     sector_rotation_z = _safe_zscore([s["sector_rotation_raw"] for s in raw_factors])
+    # CANDLESTICK PATTERN RECOGNITION
+    candlestick_z = _safe_zscore([s["candlestick_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
@@ -2270,13 +2352,14 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     W_VPOC = 0.03             # Volume Profile point of control
     W_ICHIMOKU = 0.04         # Ichimoku cloud trend confirmation
     W_SECTOR_ROTATION = 0.03  # Sector rotation momentum
+    W_CANDLESTICK = 0.03      # Candlestick pattern recognition
 
-    # Scale existing weights down to make room for new factors (20 total now)
+    # Scale existing weights down to make room for new factors (21 total now)
     existing_total = sum(weights.values())
     new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
                         W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION +
                         W_MTF_ALIGNMENT + W_EARNINGS_DRIFT + W_VPOC + W_ICHIMOKU +
-                        W_SECTOR_ROTATION)
+                        W_SECTOR_ROTATION + W_CANDLESTICK)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -2299,11 +2382,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_vpoc = W_VPOC
     w_ichi = W_ICHIMOKU
     w_secrot = W_SECTOR_ROTATION
+    w_candle = W_CANDLESTICK
 
     # --- Calculate composite scores ---
     scored = []
     for i, stock in enumerate(raw_factors):
-        # Weighted composite — 20 FACTORS (Renaissance Technologies grade)
+        # Weighted composite — 21 FACTORS (Renaissance Technologies grade)
         composite = (
             momentum_z[i] * w_mom +
             value_z[i] * w_val +
@@ -2324,7 +2408,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             earnings_drift_z[i] * w_edrift +
             vpoc_z[i] * w_vpoc +
             ichimoku_z[i] * w_ichi +
-            sector_rotation_z[i] * w_secrot
+            sector_rotation_z[i] * w_secrot +
+            candlestick_z[i] * w_candle
         )
 
         # Apply macro overlay sector adjustment
@@ -2519,6 +2604,9 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "sector_rotation": {"z": sector_rotation_z[i], "weight": round(w_secrot, 3),
                                 "raw": round(stock["sector_rotation_raw"], 2),
                                 "contribution": round(sector_rotation_z[i] * w_secrot, 3)},
+            "candlestick": {"z": candlestick_z[i], "weight": round(w_candle, 3),
+                            "raw": round(stock["candlestick_raw"], 2),
+                            "contribution": round(candlestick_z[i] * w_candle, 3)},
         }
 
         # Generate human-readable reasons
@@ -2787,6 +2875,76 @@ def generate_quant_picks() -> dict:
             p["rank"] = i + 1
         for i, p in enumerate(top_shorts):
             p["rank"] = i + 1
+
+        # ============================================================
+        # FUNDAMENTALS ENRICHMENT — real PE, ROE, debt from yfinance
+        # Only for top 30 picks to minimize API calls. 24h cache.
+        # This is an overlay — adds to existing value factor, not a replacement.
+        # ============================================================
+        try:
+            enrich_picks = (top_longs[:20] + top_shorts[:10])[:30]
+            now_ts = time.time()
+            for pick in enrich_picks:
+                sym = pick["symbol"]
+                try:
+                    # Check 24-hour fundamentals cache
+                    if sym in _fundamentals_cache and (now_ts - _fundamentals_cache[sym]["time"]) < _FUNDAMENTALS_CACHE_TTL:
+                        cached = _fundamentals_cache[sym]["data"]
+                        pick["fundamentals"] = cached["fundamentals"]
+                        pick["factors"]["fundamental_value"] = cached["factor_entry"]
+                        continue
+
+                    _throttle()
+                    info = yf.Ticker(sym).info or {}
+
+                    pe = info.get("trailingPE")
+                    fwd_pe = info.get("forwardPE")
+                    roe = info.get("returnOnEquity")
+                    debt_equity = info.get("debtToEquity")
+
+                    # Convert ROE from decimal (0.15) to percent (15) if needed
+                    roe_pct = (roe * 100) if roe is not None and roe < 1.0 else roe
+
+                    fund_score = 0.0
+                    if pe is not None:
+                        if pe < 20:
+                            fund_score += 1.0
+                        elif pe > 40:
+                            fund_score -= 1.0
+                    if fwd_pe is not None and fwd_pe < 15:
+                        fund_score += 0.5
+                    if roe_pct is not None and roe_pct > 15:
+                        fund_score += 0.5
+                    if debt_equity is not None and debt_equity < 100:  # yfinance returns as percentage
+                        fund_score += 0.5
+
+                    fundamentals_dict = {
+                        "pe": round(pe, 2) if pe is not None else None,
+                        "fwd_pe": round(fwd_pe, 2) if fwd_pe is not None else None,
+                        "roe": round(roe_pct, 2) if roe_pct is not None else None,
+                        "debt_equity": round(debt_equity, 2) if debt_equity is not None else None,
+                    }
+
+                    factor_entry = {
+                        "z": 0, "weight": 0.0,
+                        "raw": round(fund_score, 2),
+                        "contribution": round(fund_score * 0.03, 3),
+                    }
+
+                    pick["fundamentals"] = fundamentals_dict
+                    pick["factors"]["fundamental_value"] = factor_entry
+
+                    # Cache for 24 hours
+                    _fundamentals_cache[sym] = {
+                        "data": {"fundamentals": fundamentals_dict, "factor_entry": factor_entry},
+                        "time": now_ts,
+                    }
+
+                except Exception as e:
+                    logger.debug(f"Fundamentals fetch failed for {sym}: {e}")
+                    pick["fundamentals"] = {"pe": None, "fwd_pe": None, "roe": None, "debt_equity": None}
+        except Exception as e:
+            logger.warning(f"Fundamentals enrichment failed (non-fatal): {e}")
 
         # RENTECH: Run full Renaissance Technologies analysis suite
         rentech_data = {}
@@ -3081,7 +3239,7 @@ def generate_quant_picks() -> dict:
             # WEEK 2: New intelligence data
             "dynamic_hedge": dynamic_hedge,
             "sector_rankings": sector_rankings,
-            "total_factors": 20,
+            "total_factors": 21,
             "_price_data": price_data,  # Pass through for correlation checks in paper_trader
             "generated_at": datetime.now().isoformat(),
             "computation_time_seconds": elapsed,

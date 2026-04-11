@@ -199,7 +199,7 @@ MIN_COMPOSITE_SCORE = 2.0  # Default — overridden by _get_min_composite_score(
 # Uses half-Kelly (0.5x) for safety. Clamps 2%-12%.
 # This replaces fixed 6-8% sizing — allocates more to high-edge trades.
 
-def _kelly_position_size(confidence, composite_score, sector, regime, direction):
+def _kelly_position_size(confidence, composite_score, sector, regime, direction, vix_level=None):
     """
     Calculate Kelly Criterion position size based on historical edge.
 
@@ -265,8 +265,17 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction)
     elif regime == "BULL" and direction == "long":
         kelly_adjusted *= 1.1  # Slight boost for longs in bull
 
-    # Hard clamps: 2% minimum, 12% maximum
-    kelly_adjusted = max(0.02, min(0.12, kelly_adjusted))
+    # Regime-aware Kelly clamps — tighter in dangerous markets
+    if regime == "BEAR":
+        kelly_adjusted = max(0.02, min(0.08, kelly_adjusted))  # Max 8% in bear
+    elif regime == "VOLATILE":
+        kelly_adjusted = max(0.02, min(0.06, kelly_adjusted))  # Max 6% in volatile
+    else:
+        kelly_adjusted = max(0.02, min(0.12, kelly_adjusted))  # Normal 12% cap
+
+    # VIX override: high VIX caps Kelly regardless of regime
+    if vix_level is not None and vix_level > 25:
+        kelly_adjusted = min(0.06, kelly_adjusted)  # Max 6% when VIX > 25
 
     logger.debug(f"KELLY: p={p:.2f} b={b:.2f} full={kelly_full:.3f} half={kelly_half:.3f} "
                  f"adj={kelly_adjusted:.3f} conf={confidence}")
@@ -1165,6 +1174,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     current_positions = len(open_tickers)
     available_slots = MAX_POSITIONS - current_positions
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
+    vix_level = quant_picks.get("regime", {}).get("vix_level", None)
 
     # --- DYNAMIC WIN-LOCK SYSTEM ---
     # The system decides its own lock threshold based on VIX + regime.
@@ -1532,6 +1542,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 sector=pick.get("sector", ""),
                 regime=regime,
                 direction=direction,
+                vix_level=vix_level,
             )
 
             # Regime adjustment on top of Kelly

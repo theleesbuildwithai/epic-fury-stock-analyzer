@@ -41,8 +41,8 @@ IBKR_LIVE_TRADING = False      # False = paper port, True = live port (DANGER)
 TRADING_HALTED = False          # Emergency brake — blocks all new orders
 
 # Hard limits — only daily loss limit active
-MAX_POSITION_DOLLARS = 999999999  # No per-position cap
-MAX_TOTAL_EXPOSURE = 999999999    # No total exposure cap
+MAX_POSITION_DOLLARS = 10000      # Max $10K per position (safe default)
+MAX_TOTAL_EXPOSURE = 50000        # Max $50K total exposure (safe default)
 DAILY_LOSS_LIMIT = 500            # Auto-halt if daily loss exceeds this (KEEP)
 MAX_ORDERS_PER_DAY = 999999       # No limit on daily order count
 

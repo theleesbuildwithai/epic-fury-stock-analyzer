@@ -335,6 +335,17 @@ _geo_risk_state = {"level": "LOW", "score": 0, "last_update": None, "events": []
 # Daily profit limit state (2.5% daily gain = sell all and pause)
 _daily_paused = {"paused": False, "pause_date": None, "reason": None}
 
+# Load daily pause state from DB (survives container restarts)
+try:
+    from predictions.models import get_trading_state
+    _saved_pause = get_trading_state("daily_pause_date", "")
+    if _saved_pause == dt.now().strftime("%Y-%m-%d"):
+        _daily_paused["paused"] = True
+        _daily_paused["pause_date"] = _saved_pause
+        _daily_paused["reason"] = get_trading_state("daily_pause_reason", "Restored from DB")
+except Exception:
+    pass
+
 
 def _should_trade_now() -> dict:
     """
@@ -869,6 +880,14 @@ def _check_daily_profit_limit():
                 _daily_paused["pause_date"] = today_str
                 _daily_paused["reason"] = f"Daily gain +{daily_return:.2f}% exceeded 2.5% limit"
                 logger.warning(f"ALL POSITIONS CLOSED. Trading paused until tomorrow.")
+
+                # Persist to DB (survives restarts)
+                try:
+                    from predictions.models import set_trading_state
+                    set_trading_state("daily_pause_date", today_str)
+                    set_trading_state("daily_pause_reason", _daily_paused["reason"])
+                except Exception:
+                    pass
 
                 try:
                     backup_db_to_s3()

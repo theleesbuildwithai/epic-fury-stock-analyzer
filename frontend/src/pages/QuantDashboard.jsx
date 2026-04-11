@@ -931,7 +931,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
   const hedge = quantPicks?.dynamic_hedge || {}
   const sectorRankings = quantPicks?.sector_rankings || []
 
-  // All 20 factors for display
+  // All 21 factors for display
   const ALL_FACTORS = [
     { key: 'momentum', name: 'Momentum (12-1M)', desc: 'Jegadeesh-Titman trend continuation' },
     { key: 'value', name: 'Value', desc: 'Earnings yield — cheap stocks outperform' },
@@ -953,6 +953,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
     { key: 'vpoc', name: 'Volume Profile (VPOC)', desc: 'Point of control support/resistance' },
     { key: 'ichimoku', name: 'Ichimoku Cloud', desc: 'Japanese trend confirmation system' },
     { key: 'sector_rotation', name: 'Sector Rotation', desc: 'Rotate into hot sectors, avoid cold' },
+    { key: 'candlestick', name: 'Candlestick Patterns', desc: 'Hammer, engulfing, doji detection' },
   ]
 
   const weightData = Object.entries(weights).map(([name, weight]) => ({
@@ -1018,7 +1019,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
             {intelligence.total_closed_trades || 0} trades analyzed
           </span>
           <span className="text-neutral-500 text-sm ml-auto">
-            {quantPicks?.total_factors || 20} factors active
+            {quantPicks?.total_factors || 21} factors active
           </span>
         </div>
 
@@ -1032,7 +1033,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
         <h3 className="text-white font-bold mb-4">All {ALL_FACTORS.length} Scoring Factors</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {ALL_FACTORS.map((f, i) => {
-            const isNew = ['earnings_drift', 'vpoc', 'ichimoku', 'sector_rotation'].includes(f.key)
+            const isNew = ['earnings_drift', 'vpoc', 'ichimoku', 'sector_rotation', 'candlestick'].includes(f.key)
             return (
               <div key={f.key} className={`rounded-lg p-3 border ${isNew ? 'bg-blue-950/30 border-blue-500/30' : 'bg-neutral-900 border-neutral-800'}`}>
                 <div className="flex items-center gap-2">

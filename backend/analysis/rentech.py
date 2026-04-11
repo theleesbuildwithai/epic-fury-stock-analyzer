@@ -261,6 +261,89 @@ def find_pairs_trades(price_data: dict) -> list:
 
 
 # ============================================================
+#  ACTUAL STOCK BETA CALCULATION (replaces hardcoded sector betas)
+# ============================================================
+
+_beta_cache = {}
+_BETA_CACHE_TTL = 86400  # 24 hours
+
+
+def calculate_stock_beta(ticker: str, price_data: dict, spy_returns=None) -> float:
+    """Calculate actual beta using 120-day returns vs SPY.
+
+    Uses price_data already downloaded (batch yfinance data).
+    Beta = cov(stock_returns, spy_returns) / var(spy_returns)
+    Falls back to 1.0 if insufficient data. Minimum 60 days required.
+    Cached for 24 hours.
+    """
+    now = time.time()
+    if ticker in _beta_cache and (now - _beta_cache[ticker]["time"]) < _BETA_CACHE_TTL:
+        return _beta_cache[ticker]["data"]
+
+    beta = 1.0  # default fallback
+
+    try:
+        # Get stock closes from price_data
+        if ticker not in price_data:
+            _beta_cache[ticker] = {"data": beta, "time": now}
+            return beta
+
+        stock_df = price_data[ticker]
+        stock_closes = _safe_col(stock_df, "Close").values.astype(float)
+
+        if len(stock_closes) < 60:
+            _beta_cache[ticker] = {"data": beta, "time": now}
+            return beta
+
+        # Use last 120 days (or whatever is available, min 60)
+        window = min(120, len(stock_closes))
+        stock_window = stock_closes[-window:]
+        stock_ret = np.diff(stock_window) / stock_window[:-1]
+
+        # Get SPY returns — reuse if provided, otherwise compute from price_data
+        if spy_returns is None:
+            if "SPY" in price_data:
+                spy_closes = _safe_col(price_data["SPY"], "Close").values.astype(float)
+            else:
+                # SPY not in price_data — try to fetch (with throttle)
+                _throttle_rentech()
+                spy_df = yf.download("SPY", period="6mo", progress=False)
+                if spy_df is None or len(spy_df) < 60:
+                    _beta_cache[ticker] = {"data": beta, "time": now}
+                    return beta
+                spy_closes = _safe_col(spy_df, "Close").values.astype(float)
+
+            spy_window = min(120, len(spy_closes))
+            spy_prices = spy_closes[-spy_window:]
+            spy_returns = np.diff(spy_prices) / spy_prices[:-1]
+
+        # Align lengths
+        min_len = min(len(stock_ret), len(spy_returns))
+        if min_len < 60:
+            _beta_cache[ticker] = {"data": beta, "time": now}
+            return beta
+
+        sr = stock_ret[-min_len:]
+        mr = spy_returns[-min_len:]
+
+        cov_matrix = np.cov(sr, mr)
+        cov_sm = cov_matrix[0][1]
+        var_m = cov_matrix[1][1]
+
+        if var_m > 0:
+            beta = float(cov_sm / var_m)
+            # Clamp to reasonable range
+            beta = max(-2.0, min(4.0, beta))
+
+    except Exception as e:
+        logger.debug(f"Beta calculation failed for {ticker}: {e}")
+        beta = 1.0
+
+    _beta_cache[ticker] = {"data": round(beta, 3), "time": now}
+    return round(beta, 3)
+
+
+# ============================================================
 #  2. PORTFOLIO RISK MANAGEMENT
 # ============================================================
 
@@ -350,30 +433,47 @@ def assess_portfolio_risk(open_trades: list, price_data: dict = None) -> dict:
     else:
         correlation_risk = "LOW"
 
-    # --- Beta Estimation ---
-    # Rough: longs add beta, shorts subtract
-    # Tech/Growth = high beta (~1.3), Defensive = low beta (~0.7)
+    # --- Beta Estimation (actual calculated betas) ---
+    # Uses real covariance-based beta vs SPY when price_data is available.
+    # Falls back to sector-based estimates only when price_data is missing.
     HIGH_BETA_SECTORS = {"Technology", "Consumer Discretionary", "Communication Services", "Financials"}
     LOW_BETA_SECTORS = {"Consumer Staples", "Healthcare", "Utilities", "Real Estate"}
 
+    # Pre-compute SPY returns once for all beta calculations
+    _spy_ret = None
+    if price_data:
+        try:
+            if "SPY" in price_data:
+                _spy_c = _safe_col(price_data["SPY"], "Close").values.astype(float)
+                if len(_spy_c) >= 60:
+                    _spy_w = _spy_c[-min(120, len(_spy_c)):]
+                    _spy_ret = np.diff(_spy_w) / _spy_w[:-1]
+        except Exception:
+            pass
+
     estimated_beta = 0
     for trade in open_trades:
+        ticker = trade.get("ticker", trade.get("symbol", ""))
         sector = trade.get("sector", "Unknown")
         direction = trade.get("direction", "long")
         notional = abs(trade.get("entry_price", 0) * trade.get("shares", 0))
         weight = notional / total_notional if total_notional > 0 else 0
 
-        if sector in HIGH_BETA_SECTORS:
-            sector_beta = 1.3
-        elif sector in LOW_BETA_SECTORS:
-            sector_beta = 0.7
+        # Try actual calculated beta first, fall back to sector estimate
+        if price_data and ticker:
+            stock_beta = calculate_stock_beta(ticker, price_data, spy_returns=_spy_ret)
         else:
-            sector_beta = 1.0
+            if sector in HIGH_BETA_SECTORS:
+                stock_beta = 1.3
+            elif sector in LOW_BETA_SECTORS:
+                stock_beta = 0.7
+            else:
+                stock_beta = 1.0
 
         if direction == "long":
-            estimated_beta += weight * sector_beta
+            estimated_beta += weight * stock_beta
         else:
-            estimated_beta -= weight * sector_beta
+            estimated_beta -= weight * stock_beta
 
     if abs(estimated_beta) > 1.5:
         warnings.append(f"HIGH BETA: Portfolio beta ≈ {estimated_beta:.2f} — high market sensitivity")

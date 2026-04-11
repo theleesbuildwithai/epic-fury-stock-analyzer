@@ -41,13 +41,20 @@ def analyze_factor_performance() -> dict:
     Returns:
         dict of factor_name → performance metrics
     """
-    from predictions.models import get_closed_trades
+    from predictions.models import get_closed
 
-    closed = get_closed_trades(limit=500)
+    closed = get_closed(limit=500)
     if not closed:
         return {"message": "No closed trades to analyze", "factors": {}}
 
-    factor_names = ["momentum", "value", "quality", "low_vol", "rsi2", "volume"]
+    factor_names = [
+        "momentum", "value", "quality", "low_vol", "rsi2", "volume",
+        "smart_money", "relative_strength", "bb_squeeze", "vwap",
+        "hurst", "autocorr", "stat_arb", "kurtosis",
+        "vol_compression", "mtf_alignment",
+        "earnings_drift", "vpoc", "ichimoku", "sector_rotation",
+        "candlestick",
+    ]
 
     # Apply recency weighting — recent trades matter MORE than old ones
     # This makes the system adapt faster to changing market conditions
@@ -121,9 +128,9 @@ def analyze_factor_performance() -> dict:
 
 def analyze_sector_performance() -> dict:
     """Which sectors are we best at trading?"""
-    from predictions.models import get_closed_trades
+    from predictions.models import get_closed
 
-    closed = get_closed_trades(limit=500)
+    closed = get_closed(limit=500)
     if not closed:
         return {"sectors": {}}
 
@@ -163,9 +170,9 @@ def analyze_sector_performance() -> dict:
 
 def analyze_regime_performance() -> dict:
     """How do we perform in different market regimes?"""
-    from predictions.models import get_closed_trades
+    from predictions.models import get_closed
 
-    closed = get_closed_trades(limit=500)
+    closed = get_closed(limit=500)
     if not closed:
         return {"regimes": {}}
 
@@ -208,9 +215,9 @@ def auto_adjust_weights() -> dict:
 
     This is the core of the self-learning system.
     """
-    from predictions.models import get_signal_weights, update_signal_weight, get_closed_trades
+    from predictions.models import get_signal_weights, update_signal_weight, get_closed
 
-    closed = get_closed_trades(limit=500)
+    closed = get_closed(limit=500)
     if len(closed) < MIN_TRADES_FOR_UPDATE:
         return {
             "updated": False,
@@ -287,9 +294,9 @@ def analyze_mistakes() -> dict:
 
     Returns specific rules the system should follow to avoid repeating mistakes.
     """
-    from predictions.models import get_closed_trades
+    from predictions.models import get_closed
 
-    closed = get_closed_trades(limit=500)
+    closed = get_closed(limit=500)
     if not closed:
         return {"lessons": [], "mistake_patterns": {}, "total_losses": 0}
 
@@ -464,7 +471,7 @@ def generate_intelligence_report() -> dict:
 
     This is the "brain scan" of the hedge fund.
     """
-    from predictions.models import get_signal_weights, get_closed_trades
+    from predictions.models import get_signal_weights, get_closed
 
     report = {
         "generated_at": datetime.now().isoformat(),
@@ -488,8 +495,8 @@ def generate_intelligence_report() -> dict:
     report["current_weights"] = weights
 
     # Closed trades count
-    closed = get_closed_trades(limit=500)
-    report["total_closed_trades"] = len(closed)
+    closed = get_closed(limit=500)
+    report["total_closed"] = len(closed)
 
     # --- Generate insights (human-readable) ---
     insights = []
@@ -628,10 +635,10 @@ def generate_intelligence_report() -> dict:
     # --- STREAK ANALYSIS ---
     # Show current win/loss streak and its impact on sizing
     try:
-        if len(closed_trades) >= 3:
+        if len(closed) >= 3:
             streak = 0
-            streak_type = "win" if (closed_trades[0].get("pnl_pct", 0) or 0) > 0 else "loss"
-            for t in closed_trades:
+            streak_type = "win" if (closed[0].get("pnl_pct", 0) or 0) > 0 else "loss"
+            for t in closed:
                 pnl = t.get("pnl_pct", 0) or 0
                 if streak_type == "win" and pnl > 0:
                     streak += 1
@@ -654,7 +661,7 @@ def generate_intelligence_report() -> dict:
                 "impact": impact,
                 "last_10_results": [
                     {"ticker": t.get("ticker", "?"), "pnl_pct": round(t.get("pnl_pct", 0) or 0, 2)}
-                    for t in closed_trades[:10]
+                    for t in closed[:10]
                 ],
             }
     except Exception:
