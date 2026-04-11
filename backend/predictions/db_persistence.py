@@ -15,7 +15,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # S3 configuration
-S3_BUCKET = os.environ.get("DB_BACKUP_BUCKET", "sentinel-quant-portfolio-db")
+S3_BUCKET = os.environ.get("DB_BACKUP_BUCKET", "epic-fury-portfolio-db")
 S3_KEY = "portfolio/predictions.db"
 DB_PATH = os.environ.get("DB_PATH", "predictions.db")
 
