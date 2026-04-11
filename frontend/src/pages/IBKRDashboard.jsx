@@ -238,37 +238,6 @@ export default function IBKRDashboard() {
           </div>
         </div>
 
-        {/* Safety Limits */}
-        <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-8">
-          <h2 className="text-xl font-semibold mb-4">Safety Limits</h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-gray-800/50 rounded-lg p-4">
-              <div className="text-sm text-gray-400">Max Per Position</div>
-              <div className="text-lg font-bold text-yellow-400">
-                ${(s.safety?.max_position_dollars || 5000).toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-gray-800/50 rounded-lg p-4">
-              <div className="text-sm text-gray-400">Max Total Exposure</div>
-              <div className="text-lg font-bold text-yellow-400">
-                ${(s.safety?.max_total_exposure || 25000).toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-gray-800/50 rounded-lg p-4">
-              <div className="text-sm text-gray-400">Daily Loss Limit</div>
-              <div className="text-lg font-bold text-red-400">
-                -${(s.safety?.daily_loss_limit || 500).toLocaleString()}
-              </div>
-            </div>
-            <div className="bg-gray-800/50 rounded-lg p-4">
-              <div className="text-sm text-gray-400">Max Orders/Day</div>
-              <div className="text-lg font-bold text-blue-400">
-                {s.safety?.max_orders_per_day || 50}
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Positions */}
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-8">
           <h2 className="text-xl font-semibold mb-4">
