@@ -130,14 +130,14 @@ export default function QuantDashboard() {
           Quant Hedge Fund
         </h1>
         <p className="text-neutral-500 mt-1">
-          14-factor quant engine • Autonomous trading • Self-learning system
+          21-factor quant engine • Autonomous trading • Self-learning system
         </p>
 
         {/* Portfolio Value — inline with header */}
         {portfolio && (
           <div className="mt-3 flex items-end justify-between flex-wrap gap-3">
             <div className="flex gap-4 text-xs text-neutral-500">
-              <span>14 Quant Factors</span>
+              <span>21 Quant Factors</span>
               <span>500+ Stocks Analyzed</span>
               <span>Event-Driven Trading</span>
               <span>Self-Learning Weekly</span>
@@ -923,11 +923,9 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
 // TAB 3: SYSTEM INTELLIGENCE
 // ============================================================
 function IntelligenceTab({ intelligence, loading, quantPicks }) {
-  if (loading) return <LoadingSpinner text="Analyzing system performance..." />
-  if (!intelligence) return <EmptyState text="No intelligence data yet" />
-
-  const weights = intelligence.current_weights || {}
-  const factorPerf = intelligence.factor_performance || {}
+  const intel = intelligence || {}
+  const weights = intel.current_weights || {}
+  const factorPerf = intel.factor_performance || {}
   const hedge = quantPicks?.dynamic_hedge || {}
   const sectorRankings = quantPicks?.sector_rankings || []
 
@@ -1008,22 +1006,22 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
         <div className="flex items-center gap-3 mb-4">
           <h2 className="text-xl font-bold text-white">System Status</h2>
           <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-            intelligence.system_status === 'confident' ? 'bg-green-500/20 text-green-400' :
-            intelligence.system_status === 'learning' ? 'bg-green-500/20 text-green-400' :
-            intelligence.system_status === 'adapting' ? 'bg-neutral-500/20 text-neutral-400' :
+            intel.system_status === 'confident' ? 'bg-green-500/20 text-green-400' :
+            intel.system_status === 'learning' ? 'bg-green-500/20 text-green-400' :
+            intel.system_status === 'adapting' ? 'bg-neutral-500/20 text-neutral-400' :
             'bg-neutral-500/20 text-neutral-400'
           }`}>
-            {intelligence.system_status?.toUpperCase()}
+            {intel.system_status?.toUpperCase() || 'ACTIVE'}
           </span>
           <span className="text-neutral-500 text-sm">
-            {intelligence.total_closed_trades || 0} trades analyzed
+            {intel.total_closed_trades || 0} trades analyzed
           </span>
           <span className="text-neutral-500 text-sm ml-auto">
             {quantPicks?.total_factors || 21} factors active
           </span>
         </div>
 
-        {intelligence.insights?.map((insight, i) => (
+        {intel.insights?.map((insight, i) => (
           <p key={i} className="text-neutral-400 text-sm mb-1">{insight}</p>
         ))}
       </div>
@@ -1084,8 +1082,8 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-black border border-green-500/30 rounded-xl p-6">
           <h3 className="text-green-400 font-bold mb-3">Strengths</h3>
-          {intelligence.strengths?.length > 0 ? (
-            intelligence.strengths.map((s, i) => (
+          {intel.strengths?.length > 0 ? (
+            intel.strengths.map((s, i) => (
               <p key={i} className="text-neutral-300 text-sm mb-2">+ {s}</p>
             ))
           ) : (
@@ -1094,8 +1092,8 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
         </div>
         <div className="bg-black border border-red-500/30 rounded-xl p-6">
           <h3 className="text-red-400 font-bold mb-3">Weaknesses</h3>
-          {intelligence.weaknesses?.length > 0 ? (
-            intelligence.weaknesses.map((w, i) => (
+          {intel.weaknesses?.length > 0 ? (
+            intel.weaknesses.map((w, i) => (
               <p key={i} className="text-neutral-300 text-sm mb-2">- {w}</p>
             ))
           ) : (
@@ -1135,11 +1133,11 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
       )}
 
       {/* Sector Performance */}
-      {intelligence.sector_performance?.sectors && Object.keys(intelligence.sector_performance.sectors).length > 0 && (
+      {intel.sector_performance?.sectors && Object.keys(intel.sector_performance.sectors).length > 0 && (
         <div className="bg-black border border-neutral-700 rounded-xl p-6">
           <h3 className="text-white font-bold mb-4">Performance by Sector</h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-            {Object.entries(intelligence.sector_performance.sectors).map(([sector, stats]) => (
+            {Object.entries(intel.sector_performance.sectors).map(([sector, stats]) => (
               <div key={sector} className="bg-neutral-900 rounded-lg p-3">
                 <div className="text-white text-sm font-bold">{sector}</div>
                 <div className={`text-lg font-bold font-mono ${
@@ -1155,14 +1153,14 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
       )}
 
       {/* Confidence Calibration */}
-      {intelligence.confidence_calibration && Object.keys(intelligence.confidence_calibration).length > 0 && (
+      {intel.confidence_calibration && Object.keys(intel.confidence_calibration).length > 0 && (
         <div className="bg-black border border-neutral-700 rounded-xl p-6">
           <h3 className="text-white font-bold mb-4">Confidence Calibration</h3>
           <p className="text-neutral-500 text-sm mb-3">
             How well our predicted confidence matches actual outcomes
           </p>
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            {Object.entries(intelligence.confidence_calibration).map(([bucket, data]) => (
+            {Object.entries(intel.confidence_calibration).map(([bucket, data]) => (
               <div key={bucket} className="bg-neutral-900 rounded-lg p-3 text-center">
                 <div className="text-neutral-400 text-xs">{bucket}% predicted</div>
                 <div className={`text-xl font-bold font-mono ${
