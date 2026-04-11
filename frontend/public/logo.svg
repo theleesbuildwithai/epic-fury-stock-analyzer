@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 120" fill="none">
+  <!-- Sentinel Quant - Spartan Helmet -->
+  <!-- Crest -->
+  <path d="M42 0 L58 0 L55 20 L45 20 Z" fill="currentColor"/>
+  <!-- Helmet dome + face -->
+  <path d="M20 35 C20 15, 80 15, 80 35 L80 55 C80 65, 75 75, 70 80 L65 85 L65 75 C65 65, 60 58, 55 55 L52 53 L52 85 L48 85 L48 53 L45 55 C40 58, 35 65, 35 75 L35 85 L30 80 C25 75, 20 65, 20 55 Z" fill="currentColor"/>
+  <!-- Bottom jaw left -->
+  <path d="M30 80 L25 105 L32 110 L35 85 Z" fill="currentColor"/>
+  <!-- Bottom jaw right -->
+  <path d="M70 80 L75 105 L68 110 L65 85 Z" fill="currentColor"/>
+</svg>
