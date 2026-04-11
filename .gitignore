@@ -10,3 +10,4 @@ build/
 .venv/
 venv/
 *.db*
+.cash_adj_done
