@@ -147,6 +147,7 @@ export default function QuantDashboard() {
           loading={loading.portfolio}
           autoStatus={autoStatus}
           queuedTrades={queuedTrades}
+          quantPicks={quantPicks}
         />
       )}
       {activeTab === 2 && (
@@ -306,7 +307,7 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 // TAB 2: PAPER PORTFOLIO
 // ============================================================
-function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queuedTrades }) {
+function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queuedTrades, quantPicks }) {
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
   if (!portfolio) return <LoadingSpinner text="Connecting to trading engine... please wait" />
 
