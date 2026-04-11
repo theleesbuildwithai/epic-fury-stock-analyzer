@@ -1,8 +1,40 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Component } from 'react'
 import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, Cell
 } from 'recharts'
+
+// Error boundary to prevent black screen crashes
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="bg-red-900/20 border border-red-800 rounded-xl p-8 text-center m-4">
+          <p className="text-red-400 font-bold text-lg mb-2">Something went wrong</p>
+          <p className="text-neutral-400 text-sm mb-4">{this.state.error?.message}</p>
+          <button onClick={() => { this.setState({ hasError: false }); window.location.reload() }}
+            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-500 text-sm">
+            Reload Page
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+// Safe number helper — prevents crashes from non-number API values
+const num = (v, fallback = 0) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
 
 const TABS = ['Quant Picks', 'Paper Portfolio', 'System Intelligence']
 
@@ -138,6 +170,7 @@ export default function QuantDashboard() {
       </div>
 
       {/* Tab Content */}
+      <ErrorBoundary>
       {activeTab === 0 && (
         <QuantPicksTab picks={quantPicks} loading={loading.picks} RegimeBadge={RegimeBadge} />
       )}
@@ -153,6 +186,7 @@ export default function QuantDashboard() {
       {activeTab === 2 && (
         <IntelligenceTab intelligence={intelligence} loading={loading.intel} />
       )}
+      </ErrorBoundary>
     </div>
   )
 }
