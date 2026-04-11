@@ -308,6 +308,7 @@ function PicksTable({ picks, direction }) {
 // ============================================================
 function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queuedTrades }) {
   if (loading) return <LoadingSpinner text="Loading portfolio..." />
+  if (!portfolio) return <LoadingSpinner text="Connecting to trading engine... please wait" />
 
   const exp = portfolio?.exposure || {}
   const stats = portfolio?.stats || {}
