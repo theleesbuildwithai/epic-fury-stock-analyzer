@@ -457,14 +457,6 @@ export default function IBKRDashboard() {
                   <div className="text-sm text-gray-400">Volume Traded</div>
                   <div className="text-2xl font-bold text-white">${totalVolume.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
                 </div>
-                <div className="bg-gray-800/50 rounded-lg p-4">
-                  <div className="text-sm text-gray-400">Blocked / Errors</div>
-                  <div className="text-2xl font-bold">
-                    <span className="text-yellow-400">{blocked.length}</span>
-                    <span className="text-gray-600"> / </span>
-                    <span className="text-red-400">{errors.length}</span>
-                  </div>
-                </div>
               </div>
             )
           })()}

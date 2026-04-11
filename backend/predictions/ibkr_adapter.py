@@ -40,11 +40,11 @@ IBKR_ENABLED = False           # Must be True to send ANY orders to IBKR
 IBKR_LIVE_TRADING = False      # False = paper port, True = live port (DANGER)
 TRADING_HALTED = False          # Emergency brake — blocks all new orders
 
-# Hard limits — code-enforced, cannot be overridden by signals
-MAX_POSITION_DOLLARS = 5000    # Max $ per single position
-MAX_TOTAL_EXPOSURE = 25000     # Max $ total across all positions
-DAILY_LOSS_LIMIT = 500         # Auto-halt if daily loss exceeds this
-MAX_ORDERS_PER_DAY = 999999     # No limit on daily order count
+# Hard limits — only daily loss limit active
+MAX_POSITION_DOLLARS = 999999999  # No per-position cap
+MAX_TOTAL_EXPOSURE = 999999999    # No total exposure cap
+DAILY_LOSS_LIMIT = 500            # Auto-halt if daily loss exceeds this (KEEP)
+MAX_ORDERS_PER_DAY = 999999       # No limit on daily order count
 
 # Timing
 RECONNECT_DELAY_BASE = 5       # Seconds, doubles each retry
