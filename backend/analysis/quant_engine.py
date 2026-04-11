@@ -54,6 +54,98 @@ _QUANT_DELAY = 3.0  # seconds between Yahoo Finance calls
 _fundamentals_cache = {}
 _FUNDAMENTALS_CACHE_TTL = 86400  # 24 hours
 
+# Beta cache — stores beta vs SPY for each stock (24h TTL, same as fundamentals)
+_beta_cache = {}
+_BETA_CACHE_TTL = 86400  # 24 hours
+
+
+def _prefetch_fundamentals(symbols: list) -> dict:
+    """
+    Pre-fetch P/E, P/B, forward P/E for all symbols in universe.
+    Uses 24-hour cache to minimize API calls.
+    Returns dict of {symbol: {pe, pb, fwd_pe, earnings_yield, book_to_price}}.
+    Only fetches uncached symbols — typically 0 API calls after first run.
+    """
+    now = time.time()
+    result = {}
+    uncached = []
+
+    for sym in symbols:
+        if sym in _fundamentals_cache and (now - _fundamentals_cache[sym]["time"]) < _FUNDAMENTALS_CACHE_TTL:
+            result[sym] = _fundamentals_cache[sym].get("value_data", {})
+        else:
+            uncached.append(sym)
+
+    # Fetch uncached symbols in small batches (max 5 at a time to avoid rate limits)
+    for sym in uncached[:50]:  # Cap at 50 to avoid excessive API calls
+        try:
+            _throttle()
+            info = yf.Ticker(sym).info or {}
+            pe = info.get("trailingPE")
+            fwd_pe = info.get("forwardPE")
+            pb = info.get("priceToBook")
+
+            earnings_yield = (1.0 / pe) * 100 if pe and pe > 0 else None  # higher = cheaper
+            book_to_price = (1.0 / pb) * 100 if pb and pb > 0 else None  # higher = cheaper
+
+            value_data = {
+                "pe": pe,
+                "fwd_pe": fwd_pe,
+                "pb": pb,
+                "earnings_yield": earnings_yield,
+                "book_to_price": book_to_price,
+            }
+            result[sym] = value_data
+
+            # Update cache (merge with existing cache entry if present)
+            if sym in _fundamentals_cache:
+                _fundamentals_cache[sym]["value_data"] = value_data
+                _fundamentals_cache[sym]["time"] = now
+            else:
+                _fundamentals_cache[sym] = {"value_data": value_data, "time": now}
+
+        except Exception as e:
+            logger.debug(f"Fundamentals prefetch failed for {sym}: {e}")
+            result[sym] = {}
+
+    return result
+
+
+def _calculate_beta(stock_closes: np.ndarray, spy_closes: np.ndarray) -> float:
+    """
+    Calculate stock beta vs SPY using 120-day returns.
+    Beta = Cov(stock, market) / Var(market)
+    Returns beta value (1.0 = market, >1 = more volatile, <1 = defensive).
+    """
+    min_len = min(len(stock_closes), len(spy_closes))
+    if min_len < 60:
+        return 1.0  # default to market beta
+
+    # Use last 120 days (or available)
+    n = min(min_len, 120)
+    stock = stock_closes[-n:]
+    spy = spy_closes[-n:]
+
+    stock_rets = np.diff(stock) / stock[:-1]
+    spy_rets = np.diff(spy) / spy[:-1]
+
+    # Remove NaN/inf
+    valid = np.isfinite(stock_rets) & np.isfinite(spy_rets)
+    stock_rets = stock_rets[valid]
+    spy_rets = spy_rets[valid]
+
+    if len(spy_rets) < 30:
+        return 1.0
+
+    cov = np.cov(stock_rets, spy_rets)[0][1]
+    var_market = np.var(spy_rets)
+
+    if var_market == 0:
+        return 1.0
+
+    beta = float(cov / var_market)
+    return round(max(-2.0, min(4.0, beta)), 3)  # clamp to reasonable range
+
 
 def _throttle():
     """Enforce minimum delay between Yahoo Finance API calls."""
@@ -1505,21 +1597,31 @@ def _safe_zscore(values: list) -> list:
 def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                                    macro: dict = None) -> list:
     """
-    Calculate 6-factor composite score for each stock in the universe.
+    Calculate 22-factor composite score for each stock in the universe.
 
     Factors (orthogonal by design — each captures a different edge):
       1. MOMENTUM — 12-month return minus last month (Jegadeesh & Titman, 1993)
-         Captures: trend continuation. Winner stocks keep winning.
-      2. VALUE — P/E ratio inverted (earnings yield)
-         Captures: cheap stocks outperform expensive over time.
-      3. QUALITY — Return on Equity (ROE) from fundamentals
-         Captures: well-managed companies with durable advantages.
-      4. LOW VOLATILITY — inverse of 60-day realized volatility
-         Captures: low-vol anomaly. Less volatile stocks have higher risk-adjusted returns.
-      5. RSI(2) MEAN REVERSION — Connors strategy (75-91% historical win rate)
-         Captures: short-term oversold bounces. Buy when RSI(2) < 10, above 200-SMA.
-      6. VOLUME CONFIRMATION — On-Balance Volume (OBV) trend
-         Captures: smart money flow. Volume precedes price.
+      2. VALUE — Real P/E + P/B fundamentals (earnings yield + book-to-price)
+      3. QUALITY — Consistency of returns (Sharpe ratio)
+      4. LOW VOLATILITY — GARCH-enhanced volatility forecast
+      5. RSI(2) MEAN REVERSION — Connors strategy
+      6. VOLUME — On-Balance Volume trend
+      7. SMART MONEY — Price/volume divergence
+      8. RELATIVE STRENGTH — vs sector peers
+      9. BOLLINGER SQUEEZE — Volatility compression breakout
+     10. VWAP — Institutional execution flow
+     11. HURST EXPONENT — Trend vs mean-reversion detection
+     12. AUTOCORRELATION — Serial return patterns
+     13. STATISTICAL ARBITRAGE — Distance from fair value
+     14. KURTOSIS — Fat tail risk
+     15. VOLUME COMPRESSION — GARCH breakout predictor
+     16. MULTI-TIMEFRAME — Daily+weekly+monthly alignment
+     17. EARNINGS DRIFT — Post-earnings momentum
+     18. VPOC — Volume profile point of control
+     19. ICHIMOKU CLOUD — Trend confirmation
+     20. SECTOR ROTATION — Sector momentum ranking
+     21. CANDLESTICK — Pattern recognition (doji, hammer, engulfing)
+     22. BETA — Stock beta vs SPY (low-beta anomaly)
 
     Each factor is z-scored across the universe for fair comparison,
     then combined using adaptive weights from the learning system.
@@ -1536,6 +1638,20 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
     # Get adaptive weights (learned from past performance)
     weights = get_signal_weights()
+
+    # Pre-fetch fundamentals for all symbols (cached 24h, minimal API calls)
+    all_symbols = list(price_data.keys())
+    fundamentals_data = _prefetch_fundamentals(all_symbols)
+
+    # Download SPY data once for beta calculation (reuse regime's SPY data if possible)
+    spy_closes = None
+    try:
+        _throttle()
+        spy_df = yf.download("^GSPC", period="6mo", progress=False)
+        if spy_df is not None and len(spy_df) >= 60:
+            spy_closes = _safe_close(spy_df).values.astype(float)
+    except Exception:
+        logger.debug("SPY download for beta calc failed — using default beta=1.0")
 
     # Collect raw factor values for all stocks
     raw_factors = []
@@ -1563,16 +1679,30 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 ret_12m = (closes[-21] / closes[0]) - 1 if len(closes) > 21 else 0
             momentum_raw = float(ret_12m) * 100
 
-            # --- Factor 2: VALUE (earnings yield = inverse P/E) ---
-            # Higher earnings yield = cheaper = better
-            # We'll use price-to-earnings from recent data
-            # For batch efficiency, use a simplified proxy: 60-day mean reversion
-            # (stocks that have fallen more are "cheaper" relative to recent history)
+            # --- Factor 2: VALUE (real fundamentals + mean reversion blend) ---
+            # Primary: Earnings yield (1/PE) + Book-to-price (1/PB) from yfinance
+            # Fallback: 60-day mean reversion proxy when fundamentals unavailable
+            # Higher value_raw = cheaper = better
+            fund = fundamentals_data.get(symbol, {})
+            ey = fund.get("earnings_yield")  # 1/PE * 100 (higher = cheaper)
+            btp = fund.get("book_to_price")  # 1/PB * 100 (higher = cheaper)
+
+            # Mean reversion component (always available)
             if len(closes) >= 60:
                 price_vs_60d_avg = (current_price / float(np.mean(closes[-60:]))) - 1
-                value_raw = -price_vs_60d_avg * 100  # negative = cheaper = better
+                mean_rev = -price_vs_60d_avg * 100
             else:
-                value_raw = 0.0
+                mean_rev = 0.0
+
+            if ey is not None and btp is not None:
+                # Full fundamental value: 50% earnings yield + 30% book-to-price + 20% mean reversion
+                value_raw = ey * 0.5 + btp * 0.3 + mean_rev * 0.2
+            elif ey is not None:
+                # Partial: 70% earnings yield + 30% mean reversion
+                value_raw = ey * 0.7 + mean_rev * 0.3
+            else:
+                # Fallback: pure mean reversion (no fundamentals available)
+                value_raw = mean_rev
 
             # --- Factor 3: QUALITY (consistency of returns) ---
             # Proxy: Sharpe ratio of daily returns over last 120 days
@@ -2213,6 +2343,22 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             except Exception:
                 candlestick_raw = 0.0
 
+            # ============================================================
+            # FACTOR 22: STOCK BETA (Low-Beta Anomaly)
+            # Calculates actual beta vs SPY using 120-day returns.
+            # Low-beta stocks deliver higher risk-adjusted returns (Frazzini & Pedersen).
+            # Score: negative beta = better (low-beta anomaly: prefer defensive stocks)
+            # In BULL regime, high-beta is acceptable; in BEAR, low-beta is critical.
+            # ============================================================
+            beta_raw = 0.0
+            if spy_closes is not None:
+                beta = _calculate_beta(closes, spy_closes)
+                # Low-beta anomaly: lower beta = higher score
+                # Center at 1.0 (market beta), invert so low beta scores high
+                beta_raw = -(beta - 1.0) * 3.0  # beta=0.5 → +1.5, beta=1.5 → -1.5
+            else:
+                beta = 1.0
+
             raw_factors.append({
                 "symbol": symbol,
                 "price": round(current_price, 2),
@@ -2238,6 +2384,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "ichimoku_raw": ichimoku_raw,
                 "sector_rotation_raw": 0.0,  # computed post-loop
                 "candlestick_raw": candlestick_raw,
+                "beta_raw": beta_raw,
+                "beta": round(beta, 3) if isinstance(beta, float) else 1.0,
                 "adx": round(adx_value, 1),
                 "gap_signal": gap_signal,
                 "momentum_crash": momentum_crash_flag,
@@ -2312,6 +2460,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     sector_rotation_z = _safe_zscore([s["sector_rotation_raw"] for s in raw_factors])
     # CANDLESTICK PATTERN RECOGNITION
     candlestick_z = _safe_zscore([s["candlestick_raw"] for s in raw_factors])
+    # STOCK BETA — low-beta anomaly (Frazzini & Pedersen)
+    beta_z = _safe_zscore([s["beta_raw"] for s in raw_factors])
 
     # --- Regime adjustments ---
     # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
@@ -2353,13 +2503,14 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     W_ICHIMOKU = 0.04         # Ichimoku cloud trend confirmation
     W_SECTOR_ROTATION = 0.03  # Sector rotation momentum
     W_CANDLESTICK = 0.03      # Candlestick pattern recognition
+    W_BETA = 0.03              # Stock beta (low-beta anomaly)
 
-    # Scale existing weights down to make room for new factors (21 total now)
+    # Scale existing weights down to make room for new factors (22 total now)
     existing_total = sum(weights.values())
     new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
                         W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION +
                         W_MTF_ALIGNMENT + W_EARNINGS_DRIFT + W_VPOC + W_ICHIMOKU +
-                        W_SECTOR_ROTATION + W_CANDLESTICK)
+                        W_SECTOR_ROTATION + W_CANDLESTICK + W_BETA)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -2383,11 +2534,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_ichi = W_ICHIMOKU
     w_secrot = W_SECTOR_ROTATION
     w_candle = W_CANDLESTICK
+    w_beta = W_BETA
 
     # --- Calculate composite scores ---
     scored = []
     for i, stock in enumerate(raw_factors):
-        # Weighted composite — 21 FACTORS (Renaissance Technologies grade)
+        # Weighted composite — 22 FACTORS (Renaissance Technologies grade)
         composite = (
             momentum_z[i] * w_mom +
             value_z[i] * w_val +
@@ -2409,7 +2561,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             vpoc_z[i] * w_vpoc +
             ichimoku_z[i] * w_ichi +
             sector_rotation_z[i] * w_secrot +
-            candlestick_z[i] * w_candle
+            candlestick_z[i] * w_candle +
+            beta_z[i] * w_beta
         )
 
         # Apply macro overlay sector adjustment
@@ -2607,6 +2760,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "candlestick": {"z": candlestick_z[i], "weight": round(w_candle, 3),
                             "raw": round(stock["candlestick_raw"], 2),
                             "contribution": round(candlestick_z[i] * w_candle, 3)},
+            "beta": {"z": beta_z[i], "weight": round(w_beta, 3),
+                     "raw": round(stock["beta_raw"], 2),
+                     "contribution": round(beta_z[i] * w_beta, 3),
+                     "actual_beta": stock.get("beta", 1.0)},
         }
 
         # Generate human-readable reasons
@@ -2744,7 +2901,7 @@ def generate_quant_picks() -> dict:
       1. Detect market regime (BULL/BEAR/SIDEWAYS)
       2. Get macro overlay (bonds, oil, gold, VIX)
       3. Batch download price data for entire universe (2 API calls max)
-      4. Calculate 6-factor composite scores
+      4. Calculate 22-factor composite scores
       5. Apply earnings proximity risk reduction
       6. Rank and return top LONG and SHORT picks
 
@@ -3239,7 +3396,7 @@ def generate_quant_picks() -> dict:
             # WEEK 2: New intelligence data
             "dynamic_hedge": dynamic_hedge,
             "sector_rankings": sector_rankings,
-            "total_factors": 21,
+            "total_factors": 22,
             "_price_data": price_data,  # Pass through for correlation checks in paper_trader
             "generated_at": datetime.now().isoformat(),
             "computation_time_seconds": elapsed,

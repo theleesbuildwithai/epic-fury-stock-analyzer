@@ -130,14 +130,14 @@ export default function QuantDashboard() {
           Sentinel Quant
         </h1>
         <p className="text-neutral-500 mt-1">
-          21-factor quant engine • Autonomous trading • Self-learning system
+          22-factor quant engine • Autonomous trading • Self-learning system
         </p>
 
         {/* Portfolio Value — inline with header */}
         {portfolio && (
           <div className="mt-3 flex items-end justify-between flex-wrap gap-3">
             <div className="flex gap-4 text-xs text-neutral-500">
-              <span>21 Quant Factors</span>
+              <span>22 Quant Factors</span>
               <span>500+ Stocks Analyzed</span>
               <span>Event-Driven Trading</span>
               <span>Self-Learning Weekly</span>
@@ -929,10 +929,10 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
   const hedge = quantPicks?.dynamic_hedge || {}
   const sectorRankings = quantPicks?.sector_rankings || []
 
-  // All 21 factors for display
+  // All 22 factors for display
   const ALL_FACTORS = [
     { key: 'momentum', name: 'Momentum (12-1M)', desc: 'Jegadeesh-Titman trend continuation' },
-    { key: 'value', name: 'Value', desc: 'Earnings yield — cheap stocks outperform' },
+    { key: 'value', name: 'Value (P/E + P/B)', desc: 'Real fundamentals — earnings yield + book-to-price' },
     { key: 'quality', name: 'Quality', desc: 'Return consistency (Sharpe ratio)' },
     { key: 'low_vol', name: 'Low Volatility', desc: 'GARCH-enhanced vol anomaly' },
     { key: 'rsi2', name: 'RSI(2) Mean Reversion', desc: 'Connors strategy (75-91% win rate)' },
@@ -952,6 +952,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
     { key: 'ichimoku', name: 'Ichimoku Cloud', desc: 'Japanese trend confirmation system' },
     { key: 'sector_rotation', name: 'Sector Rotation', desc: 'Rotate into hot sectors, avoid cold' },
     { key: 'candlestick', name: 'Candlestick Patterns', desc: 'Hammer, engulfing, doji detection' },
+    { key: 'beta', name: 'Stock Beta', desc: 'Low-beta anomaly — defensive stocks outperform risk-adjusted' },
   ]
 
   const weightData = Object.entries(weights).map(([name, weight]) => ({
@@ -1017,7 +1018,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
             {intel.total_closed_trades || 0} trades analyzed
           </span>
           <span className="text-neutral-500 text-sm ml-auto">
-            {quantPicks?.total_factors || 21} factors active
+            {quantPicks?.total_factors || 22} factors active
           </span>
         </div>
 
@@ -1231,7 +1232,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
         <h3 className="text-white font-bold mb-4">Trading Philosophy</h3>
         <div className="space-y-3 text-neutral-400 text-sm">
           <p><span className="text-white font-semibold">Universe:</span> 500+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>
-          <p><span className="text-white font-semibold">Scoring:</span> 21-factor composite with z-score normalization + adaptive regime-aware weights</p>
+          <p><span className="text-white font-semibold">Scoring:</span> 22-factor composite with z-score normalization + adaptive regime-aware weights</p>
           <p><span className="text-white font-semibold">Edge Sources:</span> Momentum + mean-reversion hybrid, statistical arbitrage, post-earnings drift, Ichimoku trends, volume profile, sector rotation</p>
           <p><span className="text-white font-semibold">Risk First:</span> Never risk more than Kelly half-fraction. VIX scales all sizes. ATR-based stops per stock. Portfolio VaR budget caps total risk.</p>
           <p><span className="text-white font-semibold">Regime Adaptive:</span> BEAR → favor defensives + shorts, reduce momentum weight. BULL → favor longs, reduce short exposure. SIDEWAYS → boost mean-reversion.</p>

@@ -684,6 +684,52 @@ scheduler.add_job(
     misfire_grace_time=7200,
 )
 
+# --- DAILY LEARNING CYCLE (5pm ET, Mon-Fri) ---
+# After market close: analyze factor performance, adjust weights, learn from mistakes.
+# More frequent than weekly = faster adaptation to changing market conditions.
+def _daily_learning_cycle():
+    """Daily post-market learning: adjust weights and analyze mistakes."""
+    try:
+        from predictions.learner import (
+            analyze_factor_performance,
+            auto_adjust_weights,
+            analyze_mistakes,
+        )
+
+        logger.warning("DAILY LEARNING CYCLE: Starting post-market analysis...")
+
+        # Step 1: Analyze factor performance
+        factor_perf = analyze_factor_performance()
+        if factor_perf:
+            logger.warning(f"  Factor analysis: {len(factor_perf)} factors analyzed")
+
+        # Step 2: Auto-adjust weights (only if enough trades)
+        weight_result = auto_adjust_weights()
+        if weight_result:
+            logger.warning(f"  Weight adjustment: {weight_result.get('status', 'done')}")
+
+        # Step 3: Analyze mistakes (learn from losses)
+        mistakes = analyze_mistakes()
+        if mistakes:
+            n_mistakes = len(mistakes.get("patterns", []))
+            logger.warning(f"  Mistake analysis: {n_mistakes} patterns identified")
+
+        logger.warning("DAILY LEARNING CYCLE complete")
+    except Exception as e:
+        logger.error(f"Daily learning cycle error: {e}")
+
+scheduler.add_job(
+    _daily_learning_cycle,
+    "cron",
+    day_of_week="mon-fri",
+    hour=17,
+    minute=0,
+    id="daily_learning",
+    name="Daily Post-Market Learning Cycle",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
 # --- DAILY PERFORMANCE CHECK (6pm ET) ---
 # Every evening: check portfolio health, log daily P&L
 def _daily_health_check():
