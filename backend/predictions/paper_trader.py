@@ -752,8 +752,22 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
         result["max_corr"] = round(max_corr, 3)
         result["correlated_with"] = corr_ticker
 
-        # Block if correlation > 0.90 with any existing position (loosened to allow more trades)
-        if max_corr > 0.90:
+        # Dynamic threshold using crisis correlations from 50-year history
+        # If two stocks become highly correlated during crashes, use a tighter threshold
+        corr_threshold = 0.90  # Default
+        try:
+            from analysis.historical_calibration import get_calibration
+            cal = get_calibration()
+            crisis_corr = cal.get("crisis_correlations", {})
+            if new_symbol in crisis_corr and corr_ticker:
+                crisis_pairs = crisis_corr[new_symbol].get("crisis_pairs", {})
+                if corr_ticker in crisis_pairs and crisis_pairs[corr_ticker] > 0.80:
+                    corr_threshold = 0.75  # Tighter for crash-correlated pairs
+                    logger.info(f"CRISIS CORR: {new_symbol}↔{corr_ticker} crisis_corr={crisis_pairs[corr_ticker]:.2f} → threshold tightened to 0.75")
+        except Exception:
+            pass
+
+        if max_corr > corr_threshold:
             result["correlated"] = True
 
     except Exception as e:

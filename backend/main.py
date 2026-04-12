@@ -1089,12 +1089,32 @@ def _adaptive_profit_protection():
                 except Exception:
                     pass
 
-        # --- PEAK DRAWDOWN PROTECTION (proportional) ---
-        # Tiered response instead of sell-all:
-        # 1.5% drawdown = sell losing positions only
-        # 3.0% drawdown = sell most positions (keep near-completion trades)
-        # 5.0% drawdown = emergency sell-all (safety net)
-        if peak >= 10.0 and drawdown_from_peak >= 1.5:
+        # --- PEAK DRAWDOWN PROTECTION (dynamically calibrated) ---
+        # Thresholds calibrated from 50 years of historical drawdown patterns.
+        # If history shows drawdowns at this depth usually recover quickly → less aggressive.
+        # If this is a historically severe drawdown → more aggressive selling.
+        dd_tier1, dd_tier2, dd_tier3 = 1.5, 3.0, 5.0  # defaults
+        try:
+            from analysis.historical_calibration import get_calibration
+            cal = get_calibration()
+            dd_patterns = cal.get("drawdown_patterns", {})
+            if dd_patterns:
+                percentiles = dd_patterns.get("percentiles", {})
+                p25 = abs(percentiles.get("p25_depth", -8))
+                p50 = abs(percentiles.get("p50_depth", -12))
+                # Scale our thresholds relative to historical norms
+                # If avg drawdown is -15%, our 1.5% threshold is very early
+                # If avg drawdown is -8%, our 1.5% threshold is appropriate
+                avg_depth = abs(dd_patterns.get("avg_depth_pct", -12))
+                scale = max(0.5, min(2.0, avg_depth / 12.0))
+                dd_tier1 = round(1.5 * scale, 1)
+                dd_tier2 = round(3.0 * scale, 1)
+                dd_tier3 = round(5.0 * scale, 1)
+                logger.debug(f"Drawdown thresholds calibrated from history: {dd_tier1}/{dd_tier2}/{dd_tier3}% (avg historical: {dd_patterns.get('avg_depth_pct')}%)")
+        except Exception:
+            pass
+
+        if peak >= 10.0 and drawdown_from_peak >= dd_tier1:
             from predictions.models import get_open_trades, close_paper_trade
             from predictions.paper_trader import _get_current_prices
             open_trades = get_open_trades()
@@ -1115,15 +1135,15 @@ def _adaptive_profit_protection():
                 else:
                     pnl_pct = ((entry / price) - 1) * 100
 
-                if drawdown_from_peak >= 5.0:
+                if drawdown_from_peak >= dd_tier3:
                     # Emergency: sell everything
                     should_sell = True
-                elif drawdown_from_peak >= 3.0:
+                elif drawdown_from_peak >= dd_tier2:
                     # Aggressive: sell everything except profitable swing/position trades
                     hold_class = trade.get("hold_class", "swing")
                     should_sell = not (hold_class in ("swing", "position") and pnl_pct > 1.0)
                 else:
-                    # Moderate (1.5-3%): only sell losing positions
+                    # Moderate: only sell losing positions
                     should_sell = pnl_pct < 0
 
                 if should_sell:

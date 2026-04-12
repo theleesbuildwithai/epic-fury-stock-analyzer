@@ -2670,6 +2670,65 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                         composite += 0.15
                     elif rot_signal == "weak":
                         composite -= 0.15
+
+                # 4. Earnings seasonality: boost stocks with consistent post-earnings drift
+                earnings_seas = sym_cal.get("earnings_seasonality", {})
+                if earnings_seas:
+                    consistency = earnings_seas.get("consistency_pct", 50)
+                    avg_drift = earnings_seas.get("avg_drift_5d_pct", 0)
+                    if consistency > 70 and avg_drift > 0:
+                        composite += 0.15  # Stock consistently drifts up after earnings
+                    elif consistency > 70 and avg_drift < 0:
+                        composite -= 0.1  # Stock consistently drifts down
+
+            # 5. Cross-asset leading indicators
+            cross_asset = cal.get("cross_asset_leads", {})
+            if stock_sector in cross_asset:
+                lead = cross_asset[stock_sector]
+                lead_corr = lead.get("correlation", 0)
+                if abs(lead_corr) > 0.08:
+                    # Small boost/penalty based on whether leading indicator is positive
+                    composite += max(-0.2, min(0.2, lead_corr * 2.0))
+
+            # 6. Volatility regime sizing signal
+            vol_regimes = cal.get("volatility_regimes", {})
+            if vol_regimes and macro:
+                current_vix = macro.get("vix", {}).get("value", 20)
+                if current_vix < 15:
+                    vr = vol_regimes.get("LOW", {})
+                elif current_vix < 20:
+                    vr = vol_regimes.get("NORMAL", {})
+                elif current_vix < 30:
+                    vr = vol_regimes.get("HIGH", {})
+                else:
+                    vr = vol_regimes.get("CRISIS", {})
+                # If historically this VIX regime has negative avg returns, penalize longs
+                hist_daily_ret = vr.get("avg_daily_return_pct", 0)
+                if hist_daily_ret < -0.02:
+                    composite -= 0.1
+                elif hist_daily_ret > 0.05:
+                    composite += 0.05
+
+            # 7. VIX term structure historical patterns
+            vix_patterns = cal.get("vix_patterns", {})
+            if vix_patterns and macro and "vix_term_structure" in macro:
+                vix_struct = macro["vix_term_structure"]
+                structure = vix_struct.get("structure", "flat")
+                if structure == "backwardation":
+                    # After backwardation, what does history say about forward returns?
+                    backw_data = vix_patterns.get("backwardation", {})
+                    fwd_21d = backw_data.get("21d_forward_return", 0)
+                    if fwd_21d > 1.0:
+                        # Historically, market recovers after backwardation → buy signal
+                        composite += 0.15
+                    elif fwd_21d < -1.0:
+                        composite -= 0.1
+                elif structure == "contango":
+                    cont_data = vix_patterns.get("contango", {})
+                    fwd_21d = cont_data.get("21d_forward_return", 0)
+                    if fwd_21d > 0.5:
+                        composite += 0.05  # Calm markets tend to continue rising
+
         except Exception:
             pass  # Calibration not available yet — no adjustment
 
