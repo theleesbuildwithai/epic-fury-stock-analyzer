@@ -1361,11 +1361,40 @@ def get_macro_overlay() -> dict:
             logger.debug(f"Geopolitical risk check failed: {e}")
             macro["geopolitical_risk"] = {"level": "UNKNOWN", "score": 0}
 
+        # --- KNOWN GEOPOLITICAL EVENTS ---
+        # Hardcoded awareness of major upcoming/recent geo events
+        # so the system is pre-positioned even before news catches up
+        from datetime import datetime as _dt
+        KNOWN_GEO_EVENTS = {
+            "iran_usa_ceasefire_end": "2026-04-13",  # Iran-USA ceasefire deal ending
+        }
+        known_event_active = False
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        for event_name, event_date in KNOWN_GEO_EVENTS.items():
+            if today_str >= event_date:
+                # Event has occurred or is occurring — check if within impact window (14 days)
+                days_since = (_dt.strptime(today_str, "%Y-%m-%d") - _dt.strptime(event_date, "%Y-%m-%d")).days
+                if days_since <= 14:
+                    known_event_active = True
+                    logger.info(f"KNOWN GEO EVENT: {event_name} active (day {days_since}) — forcing elevated risk posture")
+
         # --- CEASEFIRE / DE-ESCALATION OVERLAY ---
         # When geopolitical tensions ease (ceasefire, peace deals), the market
         # rotates: risk-on sectors rally (tech, discretionary), war-premium
         # sectors pull back (energy, defense). This overlay captures that shift.
         geo_level = macro.get("geopolitical_risk", {}).get("level", "LOW")
+        geo_data = macro.get("geopolitical_risk", {})
+        ceasefire_detected = geo_data.get("ceasefire_detected", False)
+
+        # If a known geo event is active (e.g. ceasefire ending), override to ELEVATED
+        # UNLESS fresh ceasefire headlines are found (meaning a new deal was reached)
+        if known_event_active and not ceasefire_detected:
+            geo_level = "ELEVATED"
+            macro["geopolitical_risk"]["level"] = "ELEVATED"
+            macro["geopolitical_risk"]["score"] = max(macro.get("geopolitical_risk", {}).get("score", 0), 4)
+            macro["known_geo_event_override"] = True
+            logger.info(f"GEO OVERRIDE: Known event forcing ELEVATED (ceasefire ending, no new peace headlines)")
+
         if geo_level in ("LOW", "MINIMAL", "UNKNOWN"):
             # Peace dividend: boost risk-on, penalize war-premium
             adjustments["Technology"] = round(adjustments.get("Technology", 0) + 1.5, 1)
@@ -1381,6 +1410,18 @@ def get_macro_overlay() -> dict:
             macro["sector_adjustments"] = adjustments
             macro["ceasefire_overlay"] = True
             logger.info(f"CEASEFIRE OVERLAY: Boosting tech/growth +1.5, penalizing energy -1.5 (geo={geo_level})")
+        elif known_event_active:
+            # Ceasefire ending — REVERSE the peace overlay
+            # War premium returns: energy/defense up, tech/growth down, commodities up
+            adjustments["Energy"] = round(adjustments.get("Energy", 0) + 1.5, 1)
+            adjustments["Industrials"] = round(adjustments.get("Industrials", 0) + 1.0, 1)
+            adjustments["Commodities"] = round(adjustments.get("Commodities", 0) + 1.0, 1)
+            adjustments["Technology"] = round(adjustments.get("Technology", 0) - 0.8, 1)
+            adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) - 0.5, 1)
+            macro["sector_adjustments"] = adjustments
+            macro["ceasefire_overlay"] = False
+            macro["ceasefire_ending_overlay"] = True
+            logger.info(f"CEASEFIRE ENDING OVERLAY: Boosting energy/defense/commodities, penalizing tech/growth")
 
         return macro
 

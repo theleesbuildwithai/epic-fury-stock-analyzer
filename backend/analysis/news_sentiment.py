@@ -176,7 +176,10 @@ GEO_TENSION_KEYWORDS = [
     "proxy war", "insurgency", "coup", "regime change",
     "humanitarian crisis", "refugee", "evacuation", "no-fly zone",
     "arms deal", "weapons shipment", "military aid", "nato",
-    "negotiations collapse",
+    "negotiations collapse", "negotiations failed", "talks failed",
+    "ceasefire ended", "ceasefire expired", "ceasefire collapsed",
+    "deal fell apart", "ceasefire deadline", "deal expired",
+    "peace deal collapsed", "truce ended", "truce expired",
     "troop buildup", "military exercise", "show of force",
     "diplomatic expulsion", "asset freeze", "travel ban",
     # Expanded tension terms

@@ -396,6 +396,13 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <div className="text-red-400 font-bold font-mono text-lg">{portfolio.num_shorts || 0}</div>
               <div className="text-neutral-600 text-xs">{exp.short_pct || 0}% exposure</div>
             </div>
+            {(portfolio.num_options || 0) > 0 && (
+              <div className="bg-neutral-900/80 rounded-lg p-3 border border-cyan-500/20">
+                <div className="text-neutral-500 text-xs">Options</div>
+                <div className="text-cyan-400 font-bold font-mono text-lg">{portfolio.num_options || 0}</div>
+                <div className="text-neutral-600 text-xs">{exp.options_pct || 0}% premium</div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -877,6 +884,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <thead>
                 <tr className="text-neutral-500 text-xs border-b border-neutral-800">
                   <th className="text-left py-2 px-2">Ticker</th>
+                  <th className="text-left py-2 px-2">Type</th>
                   <th className="text-left py-2 px-2">Dir</th>
                   <th className="text-right py-2 px-2">Entry</th>
                   <th className="text-right py-2 px-2">Current</th>
@@ -887,15 +895,35 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                 </tr>
               </thead>
               <tbody>
-                {portfolio.positions.map(p => (
+                {portfolio.positions.map(p => {
+                  const isOption = p.instrument_type === 'call' || p.instrument_type === 'put';
+                  return (
                   <tr key={p.trade_id} className={`border-b border-neutral-800/50 ${(p.unrealized_pct || 0) >= 0 ? 'bg-green-500/[0.02]' : 'bg-red-500/[0.02]'}`}>
-                    <td className="py-2 px-2 font-bold text-white">{p.ticker}</td>
+                    <td className="py-2 px-2 font-bold text-white">
+                      {p.ticker}
+                      {isOption && p.strike_price && (
+                        <span className="text-neutral-500 text-xs ml-1">${p.strike_price}</span>
+                      )}
+                    </td>
+                    <td className="py-2 px-2 text-xs font-bold">
+                      {isOption ? (
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                          p.instrument_type === 'call' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-violet-500/20 text-violet-400'
+                        }`}>
+                          {p.instrument_type.toUpperCase()}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-600 text-[10px]">STK</span>
+                      )}
+                    </td>
                     <td className={`py-2 px-2 text-xs font-bold ${
                       p.direction === 'long' ? 'text-green-400' : 'text-red-400'
                     }`}>
                       {(p.direction || 'long').toUpperCase()}
                     </td>
-                    <td className="py-2 px-2 text-right font-mono text-neutral-400">${p.entry_price ?? 0}</td>
+                    <td className="py-2 px-2 text-right font-mono text-neutral-400">
+                      {isOption ? `$${p.premium ?? p.entry_price ?? 0}` : `$${p.entry_price ?? 0}`}
+                    </td>
                     <td className="py-2 px-2 text-right font-mono text-white">${p.current_price ?? 0}</td>
                     <td className={`py-2 px-2 text-right font-mono font-bold ${
                       (p.unrealized_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'
@@ -905,10 +933,19 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                     <td className="py-2 px-2 text-right font-mono text-neutral-400">
                       ${(p.position_value || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}
                     </td>
-                    <td className="py-2 px-2 text-right text-neutral-400">{p.days_held ?? 0}d</td>
-                    <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
+                    <td className="py-2 px-2 text-right text-neutral-400">
+                      {isOption && p.dte != null ? (
+                        <span>{p.dte}d <span className="text-neutral-600 text-[10px]">DTE</span></span>
+                      ) : (
+                        <span>{p.days_held ?? 0}d</span>
+                      )}
+                    </td>
+                    <td className="py-2 px-2 text-neutral-500 text-xs">
+                      {isOption && p.contracts ? `${p.contracts}x ` : ''}{p.sector}
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

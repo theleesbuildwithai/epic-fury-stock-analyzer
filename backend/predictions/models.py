@@ -122,9 +122,28 @@ def init_db():
     except Exception:
         try:
             conn.execute("ALTER TABLE paper_trades ADD COLUMN hold_class TEXT DEFAULT 'swing'")
-            logger.info("Migration: added hold_class column to paper_trades")
         except Exception:
             pass
+
+    # Migration: add options trading columns if missing
+    options_columns = [
+        ("instrument_type", "TEXT DEFAULT 'equity'"),
+        ("strike_price", "REAL"),
+        ("expiration_date", "TEXT"),
+        ("contracts", "REAL"),
+        ("premium_per_contract", "REAL"),
+        ("underlying_price_at_entry", "REAL"),
+        ("option_delta", "REAL"),
+        ("option_iv", "REAL"),
+    ]
+    for col_name, col_type in options_columns:
+        try:
+            conn.execute(f"SELECT {col_name} FROM paper_trades LIMIT 1")
+        except Exception:
+            try:
+                conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
 
     # Initialize paper_cash if empty
     existing = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
@@ -268,21 +287,37 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
                      shares: float, signal_score: float = 0, regime: str = "",
                      factors: dict = None, stop_loss: float = 0,
                      target_price: float = 0, hold_days: int = 30,
-                     sector: str = "", hold_class: str = "swing") -> int:
-    """Save a new paper trade and atomically deduct cash."""
-    cost = round(entry_price * shares, 2)
+                     sector: str = "", hold_class: str = "swing",
+                     instrument_type: str = "equity", strike_price: float = None,
+                     expiration_date: str = None, contracts: float = None,
+                     premium_per_contract: float = None,
+                     underlying_price_at_entry: float = None,
+                     option_delta: float = None, option_iv: float = None) -> int:
+    """Save a new paper trade and atomically deduct cash.
+    For options: cost = premium_per_contract * contracts * 100 (total premium).
+    For equity: cost = entry_price * shares (as before).
+    """
+    if instrument_type in ("call", "put") and contracts and premium_per_contract:
+        cost = round(premium_per_contract * contracts * 100, 2)
+    else:
+        cost = round(entry_price * shares, 2)
     conn = get_db()
     # Atomically: insert trade AND deduct cash in same transaction
     cursor = conn.execute(
         """INSERT INTO paper_trades
            (ticker, direction, entry_price, shares, entry_date, signal_score,
             regime_at_entry, factors_used, stop_loss_price, target_price,
-            hold_duration_days, sector, hold_class, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+            hold_duration_days, sector, hold_class, status,
+            instrument_type, strike_price, expiration_date, contracts,
+            premium_per_contract, underlying_price_at_entry, option_delta, option_iv)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open',
+                   ?, ?, ?, ?, ?, ?, ?, ?)""",
         (ticker.upper(), direction, entry_price, shares,
          datetime.now().isoformat(), signal_score, regime,
          json.dumps(factors or {}), stop_loss, target_price, hold_days, sector,
-         hold_class)
+         hold_class,
+         instrument_type, strike_price, expiration_date, contracts,
+         premium_per_contract, underlying_price_at_entry, option_delta, option_iv)
     )
     trade_id = cursor.lastrowid
     conn.execute("UPDATE paper_cash SET cash = cash - ? WHERE id=1", (cost,))
@@ -336,7 +371,11 @@ def update_trade_stop(trade_id: int, new_stop: float):
 
 
 def close_paper_trade(trade_id: int, exit_price: float):
-    """Close a paper trade, calculate P&L, and atomically return cash."""
+    """Close a paper trade, calculate P&L, and atomically return cash.
+    For options: exit_price is the exit premium per share.
+    P&L = (exit_premium - entry_premium) * contracts * 100.
+    Cash returned = exit_premium * contracts * 100.
+    """
     conn = get_db()
     trade = conn.execute(
         "SELECT * FROM paper_trades WHERE id = ?", (trade_id,)
@@ -345,18 +384,42 @@ def close_paper_trade(trade_id: int, exit_price: float):
         entry = trade["entry_price"]
         shares = trade["shares"]
         direction = trade["direction"]
-        if direction == "long":
-            pnl_pct = ((exit_price - entry) / entry) * 100
-        else:  # short
-            pnl_pct = ((entry - exit_price) / entry) * 100
-        pnl_dollars = pnl_pct / 100 * entry * shares
-        # Atomically: close trade AND return cash in same transaction
-        # For longs: get back exit_price * shares
-        # For shorts: get back entry_price * shares + pnl (entry cost + profit/loss)
-        if direction == "long":
-            cash_returned = exit_price * shares
+        instrument_type = trade["instrument_type"] or "equity"
+
+        if instrument_type in ("call", "put"):
+            # Options P&L: based on premium change
+            entry_premium = trade["premium_per_contract"] or entry
+            exit_premium = exit_price
+            num_contracts = trade["contracts"] or 1
+            multiplier = 100  # 100 shares per contract
+
+            if direction == "long":
+                # Bought option: profit if premium rises
+                pnl_dollars = (exit_premium - entry_premium) * num_contracts * multiplier
+                pnl_pct = ((exit_premium - entry_premium) / entry_premium) * 100 if entry_premium > 0 else 0
+            else:
+                # Sold option: profit if premium falls
+                pnl_dollars = (entry_premium - exit_premium) * num_contracts * multiplier
+                pnl_pct = ((entry_premium - exit_premium) / entry_premium) * 100 if entry_premium > 0 else 0
+            cash_returned = exit_premium * num_contracts * multiplier
+            # For sold options that expired worthless, exit_premium = 0, cash_returned = 0
+            # but the premium was already collected at entry (added to cash)
+            if direction == "short":
+                # Sold options: we collected premium at entry, now we buy back
+                # Cash returned = collateral released + P&L
+                cash_returned = (entry_premium * num_contracts * multiplier) + pnl_dollars
         else:
-            cash_returned = entry * shares + pnl_dollars  # Original collateral + P&L
+            # Equity P&L (unchanged)
+            if direction == "long":
+                pnl_pct = ((exit_price - entry) / entry) * 100
+            else:  # short
+                pnl_pct = ((entry - exit_price) / entry) * 100
+            pnl_dollars = pnl_pct / 100 * entry * shares
+            if direction == "long":
+                cash_returned = exit_price * shares
+            else:
+                cash_returned = entry * shares + pnl_dollars
+
         conn.execute(
             """UPDATE paper_trades
                SET exit_price=?, exit_date=?, pnl_dollars=?, pnl_pct=?, status='closed'
@@ -367,6 +430,30 @@ def close_paper_trade(trade_id: int, exit_price: float):
         conn.execute("UPDATE paper_cash SET cash = cash + ? WHERE id=1", (round(cash_returned, 2),))
         conn.commit()
     conn.close()
+
+
+def get_options_exposure() -> dict:
+    """Get total options exposure for risk management."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM paper_trades WHERE status='open' AND instrument_type IN ('call', 'put')"
+    ).fetchall()
+    conn.close()
+    total_premium = 0
+    total_contracts = 0
+    total_delta_exposure = 0
+    for r in rows:
+        premium = (r["premium_per_contract"] or 0) * (r["contracts"] or 0) * 100
+        total_premium += premium
+        total_contracts += (r["contracts"] or 0)
+        delta = r["option_delta"] or 0.5
+        total_delta_exposure += delta * (r["contracts"] or 0) * 100
+    return {
+        "total_premium_deployed": round(total_premium, 2),
+        "total_contracts": total_contracts,
+        "total_delta_exposure": round(total_delta_exposure, 2),
+        "num_option_positions": len(rows),
+    }
 
 
 def save_portfolio_snapshot(total_value: float, cash: float,

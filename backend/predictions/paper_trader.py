@@ -816,16 +816,39 @@ def get_portfolio_state() -> dict:
             entry_price = trade["entry_price"]
             shares = trade["shares"]
             direction = trade["direction"]
+            instrument_type = trade.get("instrument_type") or "equity"
 
-            if direction == "long":
-                unrealized_pnl = (current_price - entry_price) * shares
-                unrealized_pct = ((current_price / entry_price) - 1) * 100
-            else:  # short
-                unrealized_pnl = (entry_price - current_price) * shares
-                unrealized_pct = ((entry_price / current_price) - 1) * 100
-
-            position_value = abs(shares * current_price)
-            positions_value += position_value
+            if instrument_type in ("call", "put"):
+                # Options: value = contracts * current_premium * 100
+                # Use entry premium as rough current value (live premium fetched on exit)
+                entry_premium = trade.get("premium_per_contract") or entry_price
+                num_contracts = trade.get("contracts") or shares
+                position_value = entry_premium * num_contracts * 100
+                # Rough P&L estimate using underlying price movement
+                strike = trade.get("strike_price", 0)
+                if instrument_type == "call":
+                    intrinsic = max(0, current_price - strike) if strike else 0
+                else:
+                    intrinsic = max(0, strike - current_price) if strike else 0
+                # Estimate current premium = max(intrinsic, entry_premium * 0.1)
+                est_premium = max(intrinsic, entry_premium * 0.1)
+                if direction == "long":
+                    unrealized_pnl = (est_premium - entry_premium) * num_contracts * 100
+                    unrealized_pct = ((est_premium / entry_premium) - 1) * 100 if entry_premium > 0 else 0
+                else:
+                    unrealized_pnl = (entry_premium - est_premium) * num_contracts * 100
+                    unrealized_pct = ((entry_premium / est_premium) - 1) * 100 if est_premium > 0 else 0
+                positions_value += position_value
+            else:
+                # Equity: unchanged logic
+                if direction == "long":
+                    unrealized_pnl = (current_price - entry_price) * shares
+                    unrealized_pct = ((current_price / entry_price) - 1) * 100
+                else:  # short
+                    unrealized_pnl = (entry_price - current_price) * shares
+                    unrealized_pct = ((entry_price / current_price) - 1) * 100
+                position_value = abs(shares * current_price)
+                positions_value += position_value
 
             # Check days held
             try:
@@ -834,10 +857,20 @@ def get_portfolio_state() -> dict:
             except Exception:
                 days_held = 0
 
-            positions.append({
+            # DTE for options
+            dte = None
+            if instrument_type in ("call", "put") and trade.get("expiration_date"):
+                try:
+                    exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
+                    dte = (exp - datetime.now()).days
+                except Exception:
+                    pass
+
+            pos_data = {
                 "trade_id": trade["id"],
                 "ticker": ticker,
                 "direction": direction,
+                "instrument_type": instrument_type,
                 "entry_price": entry_price,
                 "current_price": round(current_price, 2),
                 "shares": shares,
@@ -850,7 +883,21 @@ def get_portfolio_state() -> dict:
                 "signal_score": trade.get("signal_score"),
                 "regime": trade.get("regime_at_entry"),
                 "sector": trade.get("sector"),
-            })
+            }
+
+            # Add options-specific fields
+            if instrument_type in ("call", "put"):
+                pos_data.update({
+                    "strike_price": trade.get("strike_price"),
+                    "expiration_date": trade.get("expiration_date"),
+                    "contracts": trade.get("contracts"),
+                    "premium": trade.get("premium_per_contract"),
+                    "dte": dte,
+                    "option_delta": trade.get("option_delta"),
+                    "option_iv": trade.get("option_iv"),
+                })
+
+            positions.append(pos_data)
 
     # Calculate performance metrics
     total_current = cash + positions_value
@@ -900,6 +947,16 @@ def get_portfolio_state() -> dict:
             except Exception:
                 trades_per_day = round(len(closed_trades) / max(1, len(dates_with_trades)), 1)
 
+    # --- Options exposure metrics ---
+    options_positions = [p for p in positions if p.get("instrument_type") in ("call", "put")]
+    equity_positions = [p for p in positions if p.get("instrument_type", "equity") == "equity"]
+    options_premium_deployed = sum(p["position_value"] for p in options_positions)
+    options_pct = round((options_premium_deployed / total_current) * 100, 1) if total_current > 0 else 0
+    options_delta_exposure = sum(
+        abs(p.get("option_delta", 0.5)) * (p.get("contracts", 0) or p["shares"]) * 100
+        for p in options_positions
+    )
+
     result = {
         "total_value": round(total_current, 2),
         "cash": round(cash, 2),
@@ -909,6 +966,7 @@ def get_portfolio_state() -> dict:
         "num_positions": len(positions),
         "num_longs": sum(1 for p in positions if p["direction"] == "long"),
         "num_shorts": sum(1 for p in positions if p["direction"] == "short"),
+        "num_options": len(options_positions),
         "max_positions": MAX_POSITIONS,
         "exposure": {
             "long_value": round(long_value, 2),
@@ -920,6 +978,9 @@ def get_portfolio_state() -> dict:
             "long_pct": long_pct,
             "short_pct": short_pct,
             "cash_pct": cash_pct,
+            "options_premium_deployed": round(options_premium_deployed, 2),
+            "options_pct": options_pct,
+            "options_delta_exposure": round(options_delta_exposure, 2),
         },
         "positions": positions,
         "recent_closed": [{
@@ -1666,6 +1727,127 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     stop_loss = round(price * (1 - stop_pct_adj), 2)
                 else:
                     stop_loss = round(price * (1 + stop_pct_adj), 2)
+
+            # --- OPTIONS DECISION: Check if options are better than equity ---
+            options_opened = False
+            try:
+                from predictions.options_engine import (
+                    should_use_options, fetch_option_chain,
+                    select_strike, select_expiration,
+                )
+                from predictions.models import get_options_exposure
+
+                portfolio_for_opts = {
+                    "total_value": total_value,
+                    "cash": cash,
+                }
+                open_trades_for_opts = []
+                for t in get_open_trades():
+                    t_data = dict(t)
+                    if t.get("ticker") == symbol:
+                        # Add unrealized P&L for covered call evaluation
+                        t_data["unrealized_pct"] = ((price - t["entry_price"]) / t["entry_price"] * 100) if t["direction"] == "long" else 0
+                    open_trades_for_opts.append(t_data)
+
+                opts_decision = should_use_options(
+                    pick={
+                        "ticker": symbol, "direction": direction,
+                        "confidence": pick.get("confidence", 50),
+                        "composite_score": pick.get("composite_score", 0),
+                        "price": price, "entry_price": price,
+                    },
+                    regime=regime,
+                    portfolio_state=portfolio_for_opts,
+                    open_trades=open_trades_for_opts,
+                )
+
+                if opts_decision.get("use_options"):
+                    strategy = opts_decision["strategy"]
+                    chain_data = fetch_option_chain(symbol, max_expiries=3)
+
+                    if chain_data:
+                        # Determine option type from strategy
+                        if strategy in ("buy_call", "sell_covered_call"):
+                            opt_type = "call"
+                        else:
+                            opt_type = "put"
+
+                        # Select strike
+                        opt_dir = "long" if strategy.startswith("buy") else "short"
+                        strike_info = select_strike(
+                            chain_data, price, opt_type,
+                            conviction=pick.get("confidence", 50),
+                            composite_score=pick.get("composite_score", 0),
+                        )
+
+                        if strike_info and strike_info.get("premium", 0) > 0:
+                            premium = strike_info["premium"]
+                            # Position sizing: same dollar amount as equity trade
+                            max_opts_cost = position_value  # Same $ as would use for equity
+                            # Check options exposure limit (15% of portfolio)
+                            opts_exp = get_options_exposure()
+                            remaining_opts_budget = (total_value * 0.15) - opts_exp["total_premium_deployed"]
+                            max_opts_cost = min(max_opts_cost, remaining_opts_budget)
+                            # Single option trade limit: 4% of portfolio
+                            max_opts_cost = min(max_opts_cost, total_value * 0.04)
+
+                            if max_opts_cost > premium * 100:  # At least 1 contract worth
+                                num_contracts = max(1, int(max_opts_cost / (premium * 100)))
+                                total_cost = premium * num_contracts * 100
+
+                                if total_cost <= cash:
+                                    adaptive_hold = auto_decision["hold_days"]
+                                    opt_trade_id = save_paper_trade(
+                                        ticker=symbol,
+                                        direction=opt_dir,
+                                        entry_price=premium,
+                                        shares=num_contracts,  # contracts stored in shares for compatibility
+                                        signal_score=pick.get("composite_score", 0),
+                                        regime=regime,
+                                        factors={**(pick.get("factors", {})), "options_strategy": strategy, "options_rationale": opts_decision["rationale"]},
+                                        stop_loss=round(premium * 0.5, 2),  # 50% premium stop
+                                        target_price=round(premium * 2.0, 2),  # 100% premium target
+                                        hold_days=adaptive_hold,
+                                        sector=pick.get("sector", ""),
+                                        hold_class="swing",
+                                        instrument_type=opt_type,
+                                        strike_price=strike_info["strike"],
+                                        expiration_date=strike_info["expiry"],
+                                        contracts=num_contracts,
+                                        premium_per_contract=premium,
+                                        underlying_price_at_entry=price,
+                                        option_delta=strike_info.get("delta_est"),
+                                        option_iv=strike_info.get("iv"),
+                                    )
+
+                                    cash = get_cash()
+                                    open_tickers.add(symbol)
+                                    current_positions += 1
+                                    sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
+                                    options_opened = True
+
+                                    results["opened"].append({
+                                        "trade_id": opt_trade_id,
+                                        "symbol": symbol,
+                                        "direction": opt_dir,
+                                        "instrument_type": opt_type,
+                                        "strategy": strategy,
+                                        "strike": strike_info["strike"],
+                                        "expiry": strike_info["expiry"],
+                                        "premium": premium,
+                                        "contracts": num_contracts,
+                                        "position_value": round(total_cost, 2),
+                                        "confidence": pick["confidence"],
+                                        "score": pick["composite_score"],
+                                        "sector": pick.get("sector"),
+                                        "auto_decision": opts_decision["rationale"],
+                                    })
+                                    logger.info(f"OPTIONS TRADE: {strategy} {num_contracts}x {symbol} {strike_info['strike']} {opt_type} @ ${premium} (exp {strike_info['expiry']})")
+            except Exception as e:
+                logger.debug(f"Options decision failed for {symbol}: {e}")
+
+            if options_opened:
+                continue  # Skip equity execution — options trade was placed
 
             try:
                 # AUTONOMOUS HOLD DURATION — decided by the machine per-stock
@@ -2488,8 +2670,50 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
 
         entry_price = trade["entry_price"]
         direction = trade["direction"]
+        instrument_type = trade.get("instrument_type") or "equity"
         should_close = False
         close_reason = ""
+
+        # --- OPTIONS EXIT CHECK (before equity logic) ---
+        if instrument_type in ("call", "put"):
+            try:
+                from predictions.options_engine import get_current_premium, check_option_exit
+                # For options, get current premium instead of stock price
+                strike = trade.get("strike_price", 0)
+                expiry = trade.get("expiration_date", "")
+                current_premium = get_current_premium(ticker, strike, expiry, instrument_type)
+                if current_premium <= 0:
+                    # Fallback: use current stock price relative to strike for rough estimate
+                    if instrument_type == "call":
+                        intrinsic = max(0, current_price - strike) if strike else 0
+                    else:
+                        intrinsic = max(0, strike - current_price) if strike else 0
+                    current_premium = max(0.01, intrinsic)
+
+                exit_check = check_option_exit(trade, current_premium)
+                if exit_check.get("should_exit"):
+                    try:
+                        close_paper_trade(trade["id"], current_premium)
+                        entry_prem = trade.get("premium_per_contract") or entry_price
+                        opt_pnl = ((current_premium - entry_prem) / entry_prem * 100) if entry_prem > 0 else 0
+                        if direction == "short":
+                            opt_pnl = ((entry_prem - current_premium) / entry_prem * 100) if entry_prem > 0 else 0
+                        closed.append({
+                            "ticker": ticker,
+                            "direction": direction,
+                            "instrument_type": instrument_type,
+                            "entry_price": entry_price,
+                            "exit_price": round(current_premium, 2),
+                            "pnl_pct": round(opt_pnl, 2),
+                            "reason": exit_check["reason"],
+                        })
+                        logger.warning(f"OPTIONS EXIT: {ticker} {direction} {instrument_type} | {opt_pnl:+.1f}% | {exit_check['reason']}")
+                    except Exception as e:
+                        logger.error(f"Options close failed {ticker}: {e}")
+                continue  # Skip equity exit logic for options
+            except Exception as e:
+                logger.debug(f"Options exit check failed for {ticker}: {e}")
+                continue  # Don't apply equity exit rules to options
 
         # Calculate current P&L
         if direction == "long":
