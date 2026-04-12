@@ -1550,19 +1550,19 @@ def get_earnings_shield(price_data: dict) -> dict:
                     next_earnings = next_earnings.tz_localize(None)
                 days_until = (next_earnings - now).days
 
-                if 0 <= days_until <= 1:
+                if 0 <= days_until <= 3:
                     blocked.append({
                         "symbol": symbol,
                         "earnings_date": str(next_earnings.date()),
                         "days_until": days_until,
-                        "action": "BLOCK — earnings imminent, do not enter",
+                        "action": "BLOCK — earnings within 3 days, binary event risk",
                     })
-                elif 2 <= days_until <= 3:
+                elif 4 <= days_until <= 5:
                     warning.append({
                         "symbol": symbol,
                         "earnings_date": str(next_earnings.date()),
                         "days_until": days_until,
-                        "action": "WARNING — earnings soon, reduce position or exit",
+                        "action": "WARNING — earnings in 4-5 days, consider reducing exposure",
                     })
         except Exception:
             continue

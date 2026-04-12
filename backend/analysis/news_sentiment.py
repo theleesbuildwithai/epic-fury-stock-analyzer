@@ -830,3 +830,231 @@ def assess_geopolitical_risk():
 
     _news_cache[cache_key] = {"data": result, "time": now}
     return result
+
+
+# ============================================================
+#  AUTONOMOUS GEOPOLITICAL EVENT DETECTION
+# ============================================================
+
+GEO_DEADLINE_KEYWORDS = [
+    "deadline", "set to expire", "expires", "due to end", "runs out",
+    "lapses", "last day", "final day", "will end", "ending",
+    "set to end", "about to expire", "hours left", "days left",
+    "countdown", "ticking clock", "final hours", "time running out",
+    "due to expire", "slated to end", "scheduled to end",
+    "will lapse", "nearing expiration", "approaching deadline",
+]
+
+GEO_EVENT_TYPES = [
+    "ceasefire", "cease fire", "cease-fire", "truce", "armistice",
+    "sanctions", "embargo", "trade ban",
+    "treaty", "agreement", "accord", "pact", "deal",
+    "talks", "negotiations", "summit", "conference",
+    "election", "vote", "referendum", "runoff",
+    "nuclear deal", "arms deal", "peace deal", "trade deal",
+    "un resolution", "security council",
+]
+
+GEO_OUTCOME_POSITIVE = [
+    "extended", "renewed", "reached", "signed", "ratified",
+    "agreed", "breakthrough", "accord signed", "deal struck",
+    "talks succeed", "peace reached", "deal extended",
+    "sanctions lifted", "embargo lifted", "truce holds",
+    "ceasefire holds", "agreement reached", "treaty signed",
+]
+
+GEO_OUTCOME_NEGATIVE = [
+    "collapsed", "failed", "broke down", "expired", "walked out",
+    "stalled", "rejected", "vetoed", "no deal", "talks fail",
+    "deadline missed", "fell apart", "broke apart", "derailed",
+    "sanctions reimposed", "deal dead", "negotiations collapse",
+    "ceasefire violated", "truce broken", "agreement violated",
+]
+
+
+def _extract_date_from_headline(headline: str) -> tuple:
+    """
+    Extract an approximate date from a headline.
+    Returns (date_str YYYY-MM-DD, confidence 'high'|'medium'|'low').
+    Returns (None, None) if no date found.
+    """
+    import re
+    from datetime import timedelta
+    today = datetime.now()
+    headline_lower = headline.lower()
+
+    # 1. Explicit month-day: "April 15" or "April 15, 2026"
+    month_names = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
+        "oct": 10, "nov": 11, "dec": 12,
+    }
+    pattern = r'\b(' + '|'.join(month_names.keys()) + r')\s+(\d{1,2})(?:,?\s*(\d{4}))?\b'
+    match = re.search(pattern, headline_lower)
+    if match:
+        month = month_names[match.group(1)]
+        day = int(match.group(2))
+        year = int(match.group(3)) if match.group(3) else today.year
+        try:
+            target = datetime(year, month, day)
+            if target < today and not match.group(3):
+                target = datetime(year + 1, month, day)
+            return (target.strftime("%Y-%m-%d"), "high")
+        except ValueError:
+            pass
+
+    # 2. Day names: "Monday", "Tuesday", etc.
+    day_names = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for day_name, day_num in day_names.items():
+        if day_name in headline_lower:
+            days_ahead = (day_num - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            target = today + timedelta(days=days_ahead)
+            return (target.strftime("%Y-%m-%d"), "medium")
+
+    # 3. Relative references
+    if "tomorrow" in headline_lower:
+        return ((today + timedelta(days=1)).strftime("%Y-%m-%d"), "medium")
+    if "today" in headline_lower and any(kw in headline_lower for kw in GEO_DEADLINE_KEYWORDS):
+        return (today.strftime("%Y-%m-%d"), "high")
+    if "next week" in headline_lower:
+        return ((today + timedelta(days=7)).strftime("%Y-%m-%d"), "low")
+    if "this weekend" in headline_lower:
+        days_to_sat = (5 - today.weekday()) % 7
+        return ((today + timedelta(days=max(1, days_to_sat))).strftime("%Y-%m-%d"), "low")
+    if "end of month" in headline_lower:
+        import calendar
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        return (datetime(today.year, today.month, last_day).strftime("%Y-%m-%d"), "low")
+    if "end of week" in headline_lower:
+        days_to_fri = (4 - today.weekday()) % 7
+        return ((today + timedelta(days=max(1, days_to_fri))).strftime("%Y-%m-%d"), "low")
+
+    return (None, None)
+
+
+def detect_upcoming_events() -> list:
+    """
+    Scan news headlines for upcoming geopolitical deadlines.
+    Requires at least 2 of 3 keyword categories: deadline + hotspot + event_type.
+    """
+    from datetime import timedelta
+    headlines = get_market_news()
+    if not headlines:
+        return []
+
+    detected = {}
+    today = datetime.now()
+
+    for item in headlines:
+        title = (item.get("title") or "").lower()
+        if not title or len(title) < 15:
+            continue
+
+        has_deadline = any(kw in title for kw in GEO_DEADLINE_KEYWORDS)
+        matched_hotspot = None
+        for hotspot in GEO_HOTSPOTS:
+            if hotspot in title:
+                matched_hotspot = hotspot
+                break
+        matched_event_type = None
+        for evt in GEO_EVENT_TYPES:
+            if evt in title:
+                matched_event_type = evt
+                break
+
+        matches = sum([has_deadline, matched_hotspot is not None, matched_event_type is not None])
+        if matches < 2:
+            continue
+
+        date_str, date_confidence = _extract_date_from_headline(item.get("title", ""))
+        if not date_str:
+            date_str = (today + timedelta(days=7)).strftime("%Y-%m-%d")
+            date_confidence = "very_low"
+
+        try:
+            event_date = datetime.strptime(date_str, "%Y-%m-%d")
+            if event_date > today + timedelta(days=90):
+                continue
+            if event_date < today - timedelta(days=7):
+                continue
+        except ValueError:
+            continue
+
+        region = matched_hotspot or "unknown"
+        event_type = matched_event_type or "geopolitical"
+        event_key = f"{event_type.replace(' ', '_')}_{region.replace(' ', '_')}"
+
+        if event_key in detected:
+            existing = detected[event_key]
+            existing["source_count"] = existing.get("source_count", 1) + 1
+            if existing["source_count"] >= 2 and existing["confidence"] != "high":
+                existing["confidence"] = "high"
+            continue
+
+        detected[event_key] = {
+            "event_key": event_key,
+            "event_type": event_type,
+            "region": region,
+            "estimated_date": date_str,
+            "confidence": date_confidence or "low",
+            "source_headline": (item.get("title") or "")[:200],
+            "source_feed": item.get("source", ""),
+            "source_count": 1,
+        }
+
+    return list(detected.values())
+
+
+def detect_event_outcomes() -> list:
+    """
+    Check active geo events for outcomes (extended, renewed, collapsed, failed).
+    Returns list of {event_key, outcome} for resolved events.
+    """
+    try:
+        from predictions.models import get_active_geo_events
+    except ImportError:
+        return []
+
+    active_events = get_active_geo_events()
+    if not active_events:
+        return []
+
+    headlines = get_market_news()
+    if not headlines:
+        return []
+
+    outcomes = []
+    for event in active_events:
+        region = (event.get("region") or "").lower()
+        if not region:
+            continue
+
+        for item in headlines:
+            title = (item.get("title") or "").lower()
+            if region not in title:
+                continue
+
+            if any(kw in title for kw in GEO_OUTCOME_POSITIVE):
+                outcomes.append({"event_key": event["event_key"], "outcome": "positive"})
+                break
+            if any(kw in title for kw in GEO_OUTCOME_NEGATIVE):
+                outcomes.append({"event_key": event["event_key"], "outcome": "negative"})
+                break
+
+    # Expire events 14+ days old with no outcome
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    for event in active_events:
+        if event["estimated_date"] < cutoff:
+            if not any(o["event_key"] == event["event_key"] for o in outcomes):
+                outcomes.append({"event_key": event["event_key"], "outcome": "expired_unknown"})
+
+    return outcomes

@@ -26,6 +26,36 @@ from analysis.quant_engine import _throttle
 
 logger = logging.getLogger(__name__)
 
+# MULTI-DAY CONFIRMATION TRACKER
+# For low-conviction picks (35-55%), require the signal to appear
+# in 2 consecutive scans before entering. Reduces whipsaw losses.
+_signal_confirmation = {}  # {"AAPL_long": {"first_seen": datetime, "scan_count": int}}
+_CONFIRMATION_TTL = timedelta(hours=36)
+
+
+def _check_signal_confirmation(symbol: str, direction: str, confidence: int) -> bool:
+    """
+    For low-conviction picks (35-55%), require 2 consecutive scans.
+    High-conviction picks (55%+) execute immediately.
+    """
+    if confidence > 55:
+        return True
+    now = datetime.now()
+    key = f"{symbol}_{direction}"
+    if key in _signal_confirmation:
+        entry = _signal_confirmation[key]
+        if now - entry["first_seen"] > _CONFIRMATION_TTL:
+            _signal_confirmation[key] = {"first_seen": now, "scan_count": 1}
+            return False
+        entry["scan_count"] += 1
+        if entry["scan_count"] >= 2:
+            del _signal_confirmation[key]
+            return True
+        return False
+    else:
+        _signal_confirmation[key] = {"first_seen": now, "scan_count": 1}
+        return False
+
 
 def _safe_col(df, col_name):
     """Extract a column from yfinance DataFrame, handling multi-level columns."""
@@ -372,13 +402,16 @@ def _get_streak_calibration():
     if streak_type == "win":
         if streak >= 8:
             return {"streak_type": "win", "streak_length": streak,
-                    "size_multiplier": 1.25, "confidence_shift": -8}
+                    "size_multiplier": 1.25, "confidence_shift": -8,
+                    "sector_penalties": _get_sector_streak_penalties(recent)}
         elif streak >= 5:
             return {"streak_type": "win", "streak_length": streak,
-                    "size_multiplier": 1.15, "confidence_shift": -5}
+                    "size_multiplier": 1.15, "confidence_shift": -5,
+                    "sector_penalties": _get_sector_streak_penalties(recent)}
         else:
             return {"streak_type": "win", "streak_length": streak,
-                    "size_multiplier": 1.0, "confidence_shift": 0}
+                    "size_multiplier": 1.0, "confidence_shift": 0,
+                    "sector_penalties": _get_sector_streak_penalties(recent)}
     else:  # loss
         if streak >= 5:
             return {"streak_type": "loss", "streak_length": streak,
@@ -396,9 +429,10 @@ def _get_streak_calibration():
 
 def _get_sector_streak_penalties(recent_trades: list) -> dict:
     """
-    Track per-sector loss streaks.
-    If 3+ consecutive losses in a sector, penalize that sector's positions by 50%.
-    Returns dict of {sector: multiplier}.
+    Track per-sector streaks (losses AND wins).
+    3+ consecutive losses → 0.50x size (penalty)
+    3+ consecutive wins → confidence boost for next pick in that sector
+    Returns dict of {sector: {"size_multiplier": float, "confidence_boost": int}}.
     """
     sector_results = {}
     for t in recent_trades:
@@ -408,21 +442,35 @@ def _get_sector_streak_penalties(recent_trades: list) -> dict:
             sector_results[sector] = []
         sector_results[sector].append(pnl)
 
-    penalties = {}
+    adjustments = {}
     for sector, pnls in sector_results.items():
-        # Count consecutive losses from most recent
         consecutive_losses = 0
+        consecutive_wins = 0
         for p in pnls:
             if p <= 0:
+                if consecutive_wins > 0:
+                    break
                 consecutive_losses += 1
             else:
-                break
-        if consecutive_losses >= 3:
-            penalties[sector] = 0.50  # Half-size for losing sectors
-        elif consecutive_losses >= 2:
-            penalties[sector] = 0.75
+                if consecutive_losses > 0:
+                    break
+                consecutive_wins += 1
 
-    return penalties
+        adj = {"size_multiplier": 1.0, "confidence_boost": 0}
+        if consecutive_losses >= 3:
+            adj["size_multiplier"] = 0.50
+        elif consecutive_losses >= 2:
+            adj["size_multiplier"] = 0.75
+
+        if consecutive_wins >= 5:
+            adj["confidence_boost"] = 12
+        elif consecutive_wins >= 3:
+            adj["confidence_boost"] = 8
+
+        if adj["size_multiplier"] != 1.0 or adj["confidence_boost"] != 0:
+            adjustments[sector] = adj
+
+    return adjustments
 
 
 # ============================================================
@@ -754,7 +802,7 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
 
         # Dynamic threshold using crisis correlations from 50-year history
         # If two stocks become highly correlated during crashes, use a tighter threshold
-        corr_threshold = 0.90  # Default
+        corr_threshold = 0.45  # Tighter default — prevent holding too many similar positions
         try:
             from analysis.historical_calibration import get_calibration
             cal = get_calibration()
@@ -762,8 +810,8 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
             if new_symbol in crisis_corr and corr_ticker:
                 crisis_pairs = crisis_corr[new_symbol].get("crisis_pairs", {})
                 if corr_ticker in crisis_pairs and crisis_pairs[corr_ticker] > 0.80:
-                    corr_threshold = 0.75  # Tighter for crash-correlated pairs
-                    logger.info(f"CRISIS CORR: {new_symbol}↔{corr_ticker} crisis_corr={crisis_pairs[corr_ticker]:.2f} → threshold tightened to 0.75")
+                    corr_threshold = 0.35  # Extra tight for crash-correlated pairs
+                    logger.info(f"CRISIS CORR: {new_symbol}↔{corr_ticker} crisis_corr={crisis_pairs[corr_ticker]:.2f} → threshold tightened to 0.35")
         except Exception:
             pass
 
@@ -1417,6 +1465,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                            and abs(p.get("composite_score", 0)) >= min_score
                            and p["symbol"] not in open_tickers]
 
+        # SHORT-SIDE QUALITY GATE: Shorts are harder — require stronger signals
+        pre_gate = len(short_candidates)
+        short_candidates = [p for p in short_candidates
+                           if p.get("composite_score", 0) <= -4 and p["confidence"] >= 65]
+        if pre_gate > len(short_candidates):
+            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need score<=-4, conf>=65%)")
+
         # Defensive sectors — safe for long positions even in bear markets
         # These are stable, dividend-paying, recession-resistant sectors
         DEFENSIVE_SECTORS = {"Consumer Staples", "Healthcare", "Utilities", "ETF"}
@@ -1524,6 +1579,14 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     })
                     continue
 
+            # MULTI-DAY CONFIRMATION: Low conviction picks need 2 scans
+            if not _check_signal_confirmation(symbol, direction, pick.get("confidence", 50)):
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Multi-day confirmation: needs 2 scans (confidence {pick['confidence']}%, <55%)",
+                })
+                continue
+
             # CORRELATION CHECK: Don't hold highly correlated positions
             # This is what separates hedge funds from retail — true diversification
             if len(open_tickers) >= 3:
@@ -1563,9 +1626,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             conf_cap = mistake_adj.get("confidence_cap", 95)
             pick["confidence"] = min(pick["confidence"], conf_cap)
 
-            # Check sector concentration — raised from 5 to 8 to allow more trades
+            # Check sector concentration — max 4 per sector per direction for diversification
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
-            if sector_counts.get(sector_key, 0) >= 8:
+            if sector_counts.get(sector_key, 0) >= 4:
                 results["skipped"].append({
                     "symbol": symbol,
                     "reason": f"Sector concentration limit ({pick.get('sector')} {direction})",
@@ -1684,8 +1747,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # Per-sector streak penalty (reduces size for sectors on losing streaks)
-            sector_streak_mod = sector_streak_penalties.get(pick.get("sector", ""), 1.0)
+            # Per-sector streak adjustment (penalty for losing sectors, boost for winning)
+            sector_streak_data = sector_streak_penalties.get(pick.get("sector", ""), {})
+            if isinstance(sector_streak_data, dict):
+                sector_streak_mod = sector_streak_data.get("size_multiplier", 1.0)
+                sector_conf_boost = sector_streak_data.get("confidence_boost", 0)
+                if sector_conf_boost > 0:
+                    pick["confidence"] = min(95, pick["confidence"] + sector_conf_boost)
+                    logger.info(f"SECTOR WIN STREAK: {pick.get('sector')} +{sector_conf_boost}% confidence")
+            else:
+                sector_streak_mod = float(sector_streak_data) if sector_streak_data else 1.0
 
             # Apply all multipliers: VIX, drawdown, overnight, circuit breaker, streak, timing, VaR, correlation, sector streak
             position_value = (total_value * size_pct * drawdown_multiplier * vix_multiplier *

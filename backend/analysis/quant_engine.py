@@ -1361,22 +1361,29 @@ def get_macro_overlay() -> dict:
             logger.debug(f"Geopolitical risk check failed: {e}")
             macro["geopolitical_risk"] = {"level": "UNKNOWN", "score": 0}
 
-        # --- KNOWN GEOPOLITICAL EVENTS ---
-        # Hardcoded awareness of major upcoming/recent geo events
-        # so the system is pre-positioned even before news catches up
+        # --- KNOWN GEOPOLITICAL EVENTS (DYNAMIC + HARDCODED FALLBACK) ---
+        # Merges auto-detected events from DB with hardcoded fallback events.
+        # System pre-positions even before news catches up.
         from datetime import datetime as _dt
-        KNOWN_GEO_EVENTS = {
+        _HARDCODED_GEO_EVENTS = {
             "iran_usa_ceasefire_end": "2026-04-13",  # Iran-USA ceasefire deal ending
         }
+        # Dynamic: load auto-detected events from DB
+        _all_geo_events = dict(_HARDCODED_GEO_EVENTS)
+        try:
+            from predictions.models import get_upcoming_geo_events, get_active_geo_events
+            for ev in get_upcoming_geo_events(days_ahead=21) + get_active_geo_events():
+                _all_geo_events[ev["event_key"]] = ev["estimated_date"]
+        except Exception:
+            pass  # Fall back to hardcoded if DB unavailable
         known_event_active = False
         today_str = _dt.now().strftime("%Y-%m-%d")
-        for event_name, event_date in KNOWN_GEO_EVENTS.items():
+        for event_name, event_date in _all_geo_events.items():
             if today_str >= event_date:
-                # Event has occurred or is occurring — check if within impact window (14 days)
                 days_since = (_dt.strptime(today_str, "%Y-%m-%d") - _dt.strptime(event_date, "%Y-%m-%d")).days
                 if days_since <= 14:
                     known_event_active = True
-                    logger.info(f"KNOWN GEO EVENT: {event_name} active (day {days_since}) — forcing elevated risk posture")
+                    logger.info(f"GEO EVENT ACTIVE: {event_name} (day {days_since}) — forcing elevated risk posture")
 
         # --- CEASEFIRE / DE-ESCALATION OVERLAY ---
         # When geopolitical tensions ease (ceasefire, peace deals), the market
@@ -2488,6 +2495,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "momentum_pct": round(momentum_raw, 2),
                 "closes": closes.tolist() if hasattr(closes, 'tolist') else list(closes),
                 "vol_ratio": float(np.mean(volumes[-20:]) / (np.mean(volumes[-60:]) + 1)) if len(volumes) >= 60 else (float(np.mean(volumes[-20:]) / (np.mean(volumes[-20:]) + 1)) if len(volumes) >= 20 else 1.0),
+                "today_volume_ratio": round(float(volumes[-1]) / (float(np.mean(volumes[-21:-1])) + 1), 2) if len(volumes) >= 21 else 1.0,
             })
 
         except Exception as e:
@@ -2976,6 +2984,16 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             round(stock["price"] - (atr_proxy * 3 * 14), 2) if direction == "SHORT" else None
         )
 
+        # VOLUME CONFIRMATION: penalize low-volume signals, boost high-volume
+        today_vol_ratio = stock.get("today_volume_ratio", 1.0)
+        if direction != "NEUTRAL":
+            if today_vol_ratio < 1.2:
+                vol_penalty = max(-15, int((today_vol_ratio - 1.2) * 30))
+                confidence = max(15, confidence + vol_penalty)
+            elif today_vol_ratio > 1.5:
+                vol_boost = min(8, int((today_vol_ratio - 1.2) * 5))
+                confidence = min(95, confidence + vol_boost)
+
         scored.append({
             "symbol": stock["symbol"],
             "ticker": stock["symbol"],  # alias for frontend compatibility
@@ -3003,6 +3021,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             "vpoc_signal": round(stock.get("vpoc_raw", 0), 1),
             "ichimoku_signal": round(stock.get("ichimoku_raw", 0), 1),
             "sector_rotation": round(stock.get("sector_rotation_raw", 0), 1),
+            "today_volume_ratio": today_vol_ratio,
         })
 
     # Sort by composite score descending

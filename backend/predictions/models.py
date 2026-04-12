@@ -110,6 +110,25 @@ def init_db():
             value TEXT NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS geo_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            region TEXT,
+            description TEXT,
+            estimated_date TEXT NOT NULL,
+            confidence TEXT DEFAULT 'low',
+            source_headline TEXT,
+            source_feed TEXT,
+            detected_at TEXT NOT NULL,
+            outcome TEXT DEFAULT 'pending',
+            outcome_detected_at TEXT,
+            is_manual_override INTEGER DEFAULT 0,
+            last_seen_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_geo_events_date ON geo_events(estimated_date);
     """)
 
     # Performance indexes
@@ -511,6 +530,111 @@ def get_signal_weights() -> dict:
             "candlestick": 0.03, "beta": 0.03,
         }
     return {row["factor_name"]: row["current_weight"] for row in rows}
+
+
+# ============================================================
+#  GEOPOLITICAL EVENT TRACKING
+# ============================================================
+
+def save_geo_event(event_key: str, event_type: str, region: str,
+                   description: str, estimated_date: str, confidence: str = "low",
+                   source_headline: str = "", source_feed: str = ""):
+    """Save or update a detected geopolitical event. Manual overrides are never overwritten."""
+    conn = get_db()
+    now = datetime.now().isoformat()
+    # Check if manual override exists — don't overwrite its date
+    existing = conn.execute(
+        "SELECT is_manual_override, estimated_date FROM geo_events WHERE event_key=?",
+        (event_key,)
+    ).fetchone()
+    if existing and existing["is_manual_override"]:
+        # Just update last_seen_at, don't touch the date
+        conn.execute(
+            "UPDATE geo_events SET last_seen_at=?, source_headline=?, source_feed=? WHERE event_key=?",
+            (now, source_headline, source_feed, event_key)
+        )
+    else:
+        conn.execute(
+            """INSERT OR REPLACE INTO geo_events
+               (event_key, event_type, region, description, estimated_date,
+                confidence, source_headline, source_feed, detected_at, last_seen_at,
+                outcome, is_manual_override)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)""",
+            (event_key, event_type, region, description, estimated_date,
+             confidence, source_headline, source_feed, now, now)
+        )
+    conn.commit()
+    conn.close()
+
+
+def save_manual_geo_event(event_key: str, event_type: str, region: str,
+                          description: str, estimated_date: str):
+    """Save a manually entered geo event (overrides auto-detection)."""
+    conn = get_db()
+    now = datetime.now().isoformat()
+    conn.execute(
+        """INSERT OR REPLACE INTO geo_events
+           (event_key, event_type, region, description, estimated_date,
+            confidence, source_headline, source_feed, detected_at, last_seen_at,
+            outcome, is_manual_override)
+           VALUES (?, ?, ?, ?, ?, 'high', 'manual entry', 'manual', ?, ?, 'pending', 1)""",
+        (event_key, event_type, region, description, estimated_date, now, now)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_upcoming_geo_events(days_ahead: int = 14) -> list:
+    """Get pending geo events in the next N days."""
+    conn = get_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    from datetime import timedelta
+    future = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    rows = conn.execute(
+        """SELECT * FROM geo_events
+           WHERE estimated_date BETWEEN ? AND ? AND outcome='pending'
+           ORDER BY estimated_date ASC""",
+        (today, future)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_active_geo_events() -> list:
+    """Get events that have passed but have no outcome yet (within 14 days)."""
+    conn = get_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    rows = conn.execute(
+        """SELECT * FROM geo_events
+           WHERE estimated_date < ? AND estimated_date >= ? AND outcome='pending'
+           ORDER BY estimated_date DESC""",
+        (today, cutoff)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_geo_event_outcome(event_key: str, outcome: str):
+    """Update the outcome of a geo event (positive, negative, expired_unknown)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE geo_events SET outcome=?, outcome_detected_at=? WHERE event_key=?",
+        (outcome, datetime.now().isoformat(), event_key)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_geo_events(limit: int = 50) -> list:
+    """Get all geo events for API display."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM geo_events ORDER BY estimated_date DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def update_signal_weight(factor_name: str, weight: float, win_rate: float = 0,

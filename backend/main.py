@@ -910,6 +910,53 @@ scheduler.add_job(
     misfire_grace_time=300,
 )
 
+# --- AUTONOMOUS GEO EVENT TRACKER ---
+# Scans news for upcoming geopolitical deadlines (ceasefires, sanctions, treaties)
+# and auto-populates the geo_events DB so the system pre-positions before events.
+
+def _geo_event_tracker():
+    """Detect upcoming geo events from news and track outcomes of active events."""
+    try:
+        from analysis.news_sentiment import detect_upcoming_events, detect_event_outcomes
+        from predictions.models import save_geo_event, update_geo_event_outcome
+
+        # 1. Detect new upcoming events from headlines
+        new_events = detect_upcoming_events()
+        for ev in new_events:
+            save_geo_event(
+                event_key=ev["event_key"],
+                event_type=ev["event_type"],
+                region=ev["region"],
+                description=ev.get("source_headline", ""),
+                estimated_date=ev["estimated_date"],
+                confidence=ev["confidence"],
+                source_headline=ev.get("source_headline", ""),
+                source_feed=ev.get("source_feed", ""),
+            )
+        if new_events:
+            logger.warning(f"GEO EVENT TRACKER: Detected {len(new_events)} events — {[e['event_key'] for e in new_events]}")
+
+        # 2. Check outcomes of active events
+        outcomes = detect_event_outcomes()
+        for outcome in outcomes:
+            update_geo_event_outcome(outcome["event_key"], outcome["outcome"])
+            logger.warning(f"GEO EVENT OUTCOME: {outcome['event_key']} -> {outcome['outcome']}")
+
+        if not new_events and not outcomes:
+            logger.info("GEO EVENT TRACKER: No new events or outcomes detected")
+    except Exception as e:
+        logger.error(f"GEO EVENT TRACKER ERROR: {e}")
+
+scheduler.add_job(
+    _geo_event_tracker,
+    "interval",
+    minutes=30,
+    id="geo_event_tracker",
+    name="Geopolitical Event Tracker (auto-detect deadlines every 30 min)",
+    max_instances=1,
+    misfire_grace_time=600,
+)
+
 # --- DAILY 2.5% TAKE-PROFIT RULE ---
 # If the fund is up 2.5%+ in a single day, sell ALL holdings and pause until tomorrow.
 # This locks in exceptional daily gains and prevents giving them back.
@@ -1656,6 +1703,22 @@ def geopolitical_risk(request: Request):
     except Exception as e:
         logger.error(f"Geopolitical risk error: {e}")
         return {"risk_level": "UNKNOWN", "risk_score": 0, "error": str(e), "scanner_state": _geo_risk_state}
+
+
+@app.get("/api/geo-events")
+def geo_events(request: Request):
+    """Auto-detected geopolitical events — upcoming deadlines, active events, outcomes."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_upcoming_geo_events, get_active_geo_events, get_all_geo_events
+        return {
+            "upcoming": get_upcoming_geo_events(days_ahead=30),
+            "active": get_active_geo_events(),
+            "all_events": get_all_geo_events(limit=50),
+        }
+    except Exception as e:
+        logger.error(f"Geo events error: {e}")
+        return {"upcoming": [], "active": [], "all_events": [], "error": str(e)}
 
 
 @app.get("/api/tariff-risk")
