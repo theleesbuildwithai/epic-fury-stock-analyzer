@@ -1786,7 +1786,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                             max_opts_cost = position_value  # Same $ as would use for equity
                             # Check options exposure limit (15% of portfolio)
                             opts_exp = get_options_exposure()
-                            remaining_opts_budget = (total_value * 0.15) - opts_exp["total_premium_deployed"]
+                            remaining_opts_budget = max(0, (total_value * 0.15) - opts_exp["total_premium_deployed"])
                             max_opts_cost = min(max_opts_cost, remaining_opts_budget)
                             # Single option trade limit: 4% of portfolio
                             max_opts_cost = min(max_opts_cost, total_value * 0.04)
@@ -1843,6 +1843,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                                         "auto_decision": opts_decision["rationale"],
                                     })
                                     logger.info(f"OPTIONS TRADE: {strategy} {num_contracts}x {symbol} {strike_info['strike']} {opt_type} @ ${premium} (exp {strike_info['expiry']})")
+                    else:
+                        logger.info(f"OPTIONS SKIP: No option chain available for {symbol} — falling through to equity")
             except Exception as e:
                 logger.debug(f"Options decision failed for {symbol}: {e}")
 
@@ -2683,12 +2685,32 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 expiry = trade.get("expiration_date", "")
                 current_premium = get_current_premium(ticker, strike, expiry, instrument_type)
                 if current_premium <= 0:
-                    # Fallback: use current stock price relative to strike for rough estimate
+                    # Fallback: estimate premium from intrinsic + rough time value
                     if instrument_type == "call":
                         intrinsic = max(0, current_price - strike) if strike else 0
                     else:
                         intrinsic = max(0, strike - current_price) if strike else 0
-                    current_premium = max(0.01, intrinsic)
+                    # Add estimated time value based on DTE to avoid false -99% P&L
+                    dte = 0
+                    if expiry:
+                        try:
+                            from datetime import datetime as _dt_fb
+                            dte = (_dt_fb.strptime(expiry, "%Y-%m-%d") - _dt_fb.now()).days
+                        except Exception:
+                            dte = 0
+                    entry_prem_fb = trade.get("premium_per_contract", 0) or 0
+                    if intrinsic > 0:
+                        # Has intrinsic: add small time value
+                        time_value = max(0.05, entry_prem_fb * 0.1) if dte > 5 else 0.01
+                        current_premium = intrinsic + time_value
+                    elif dte > 5 and entry_prem_fb > 0:
+                        # OTM but still has time: decay from entry premium
+                        decay_factor = max(0.15, dte / 60.0)
+                        current_premium = max(0.05, entry_prem_fb * decay_factor)
+                    else:
+                        # Near-expiry OTM: nearly worthless but not $0.01
+                        current_premium = max(0.03, intrinsic + 0.02)
+                    logger.debug(f"Options premium fallback for {ticker}: intrinsic={intrinsic:.2f}, dte={dte}, est_premium={current_premium:.2f}")
 
                 exit_check = check_option_exit(trade, current_premium)
                 if exit_check.get("should_exit"):

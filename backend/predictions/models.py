@@ -401,13 +401,19 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 # Sold option: profit if premium falls
                 pnl_dollars = (entry_premium - exit_premium) * num_contracts * multiplier
                 pnl_pct = ((entry_premium - exit_premium) / entry_premium) * 100 if entry_premium > 0 else 0
-            cash_returned = exit_premium * num_contracts * multiplier
-            # For sold options that expired worthless, exit_premium = 0, cash_returned = 0
-            # but the premium was already collected at entry (added to cash)
-            if direction == "short":
-                # Sold options: we collected premium at entry, now we buy back
-                # Cash returned = collateral released + P&L
-                cash_returned = (entry_premium * num_contracts * multiplier) + pnl_dollars
+            if direction == "long":
+                # Bought option: we paid premium at entry (cash deducted)
+                # At exit: we sell the option, get back exit_premium * contracts * 100
+                cash_returned = max(0, exit_premium * num_contracts * multiplier)
+            else:
+                # Sold option: we collected premium at entry (cash was NOT deducted —
+                # instead, collateral equal to premium was reserved by deducting cash)
+                # At exit: we buy back the option. Cash returned = collateral - buyback cost
+                # = entry_premium * contracts * 100 - exit_premium * contracts * 100 + pnl
+                # Simplified: just return the net P&L (collateral was already in cash)
+                buyback_cost = exit_premium * num_contracts * multiplier
+                collateral = entry_premium * num_contracts * multiplier
+                cash_returned = max(0, collateral - buyback_cost + pnl_dollars)
         else:
             # Equity P&L (unchanged)
             if direction == "long":
