@@ -248,6 +248,13 @@ try:
 except Exception as e:
     logger.warning(f"S3 restore skipped: {e}")
 
+# Restore historical calibration from S3
+try:
+    from analysis.historical_calibration import restore_calibration_from_s3 as restore_cal
+    restore_cal()
+except Exception as e:
+    logger.debug(f"Historical calibration restore skipped: {e}")
+
 # Initialize the database when the app starts
 init_db()
 
@@ -684,6 +691,42 @@ scheduler.add_job(
     misfire_grace_time=7200,
 )
 
+# --- HISTORICAL CALIBRATION (50-year pattern analysis) ---
+# Runs 15 min after startup and weekly on Sunday 8am.
+# Downloads max history, analyzes seasonal/rotation/regime/momentum patterns.
+def _build_historical_calibration():
+    """Build 50-year historical calibration in background."""
+    try:
+        from analysis.historical_calibration import build_calibration
+        from analysis.quant_engine import QUANT_UNIVERSE, SECTOR_MAP
+        build_calibration(QUANT_UNIVERSE, SECTOR_MAP)
+    except Exception as e:
+        logger.error(f"Historical calibration build failed: {e}")
+
+# Startup: build calibration 15 minutes after boot (after DB restore + first trade cycle)
+scheduler.add_job(
+    _build_historical_calibration,
+    "date",
+    run_date=dt.now() + timedelta(minutes=15),
+    id="historical_calibration_startup",
+    name="Historical Calibration (startup)",
+    max_instances=1,
+    misfire_grace_time=3600,
+)
+
+# Weekly refresh: Sunday 8am ET
+scheduler.add_job(
+    _build_historical_calibration,
+    "cron",
+    day_of_week="sun",
+    hour=8,
+    minute=0,
+    id="historical_calibration_weekly",
+    name="Historical Calibration (weekly refresh)",
+    max_instances=1,
+    misfire_grace_time=7200,
+)
+
 # --- DAILY LEARNING CYCLE (5pm ET, Mon-Fri) ---
 # After market close: analyze factor performance, adjust weights, learn from mistakes.
 # More frequent than weekly = faster adaptation to changing market conditions.
@@ -906,26 +949,35 @@ def _check_daily_profit_limit():
             daily_return = ((total_value / yesterday_value) - 1) * 100
 
             if daily_return >= 2.5:
-                logger.warning(f"DAILY PROFIT LIMIT HIT: +{daily_return:.2f}% today — selling all and pausing")
+                logger.warning(f"DAILY PROFIT LIMIT HIT: +{daily_return:.2f}% today — selective sell + pause new trades")
 
-                # Sell all positions
+                # Selective sell: close intraday trades and losers, keep multi-day holds
                 from predictions.models import get_open_trades, close_paper_trade
                 from predictions.paper_trader import _get_current_prices
                 open_trades = get_open_trades()
                 symbols = list(set(t["ticker"] for t in open_trades))
                 prices = _get_current_prices(symbols)
 
+                sold_count = 0
                 for trade in open_trades:
                     price = prices.get(trade["ticker"], trade["entry_price"])
-                    try:
-                        close_paper_trade(trade["id"], price)
-                    except Exception:
-                        pass
+                    hold_class = trade.get("hold_class", "swing")
+                    entry = trade["entry_price"]
+                    direction = trade["direction"]
+                    pnl_pct = ((price / entry) - 1) * 100 if direction == "long" else ((entry / price) - 1) * 100
+
+                    # Sell intraday trades and losing positions; keep profitable swing/position
+                    if hold_class == "intraday" or pnl_pct < 0:
+                        try:
+                            close_paper_trade(trade["id"], price)
+                            sold_count += 1
+                        except Exception:
+                            pass
 
                 _daily_paused["paused"] = True
                 _daily_paused["pause_date"] = today_str
                 _daily_paused["reason"] = f"Daily gain +{daily_return:.2f}% exceeded 2.5% limit"
-                logger.warning(f"ALL POSITIONS CLOSED. Trading paused until tomorrow.")
+                logger.warning(f"Sold {sold_count} trades (intraday + losers). Kept multi-day holds. Trading paused until tomorrow.")
 
                 # Persist to DB (survives restarts)
                 try:
@@ -988,7 +1040,61 @@ def _adaptive_profit_protection():
         is_end_of_day = (hour == 15 and minute >= 30) or hour >= 16
 
         if total_return >= 10.0 and is_end_of_day:
-            # End of day with big total return — sell positions that are profitable
+            # End of day — only sell intraday trades and positions that hit targets
+            # Multi-day swing/position trades survive overnight
+            from predictions.models import get_open_trades, close_paper_trade
+            from predictions.paper_trader import _get_current_prices
+            open_trades = get_open_trades()
+            if not open_trades:
+                return
+
+            symbols = list(set(t["ticker"] for t in open_trades))
+            prices = _get_current_prices(symbols)
+
+            sold_count = 0
+            for trade in open_trades:
+                price = prices.get(trade["ticker"], trade["entry_price"])
+                entry = trade["entry_price"]
+                direction = trade["direction"]
+                hold_class = trade.get("hold_class", "swing")
+                target = trade.get("target_price", entry * 1.05)
+
+                if direction == "long":
+                    pnl_pct = ((price / entry) - 1) * 100
+                    target_achieved = (price - entry) / (target - entry + 0.01) if target > entry else 1.0
+                else:
+                    pnl_pct = ((entry / price) - 1) * 100
+                    target_achieved = (entry - price) / (entry - target + 0.01) if entry > target else 1.0
+
+                # EOD sell: intraday trades always, swing/position only if target hit
+                should_sell = (
+                    (hold_class == "intraday" and pnl_pct > 0.5) or
+                    target_achieved >= 0.9
+                )
+
+                if should_sell:
+                    try:
+                        close_paper_trade(trade["id"], price)
+                        sold_count += 1
+                    except Exception:
+                        pass
+
+            if sold_count > 0:
+                logger.warning(
+                    f"ADAPTIVE PROFIT PROTECTION: EOD selective sell — closed {sold_count} trades "
+                    f"(total return: +{total_return:.1f}%, peak: +{peak:.1f}%)"
+                )
+                try:
+                    backup_db_to_s3()
+                except Exception:
+                    pass
+
+        # --- PEAK DRAWDOWN PROTECTION (proportional) ---
+        # Tiered response instead of sell-all:
+        # 1.5% drawdown = sell losing positions only
+        # 3.0% drawdown = sell most positions (keep near-completion trades)
+        # 5.0% drawdown = emergency sell-all (safety net)
+        if peak >= 10.0 and drawdown_from_peak >= 1.5:
             from predictions.models import get_open_trades, close_paper_trade
             from predictions.paper_trader import _get_current_prices
             open_trades = get_open_trades()
@@ -1009,47 +1115,28 @@ def _adaptive_profit_protection():
                 else:
                     pnl_pct = ((entry / price) - 1) * 100
 
-                # Sell profitable trades at end of day to lock in portfolio gains
-                if pnl_pct > 0.5:
+                if drawdown_from_peak >= 5.0:
+                    # Emergency: sell everything
+                    should_sell = True
+                elif drawdown_from_peak >= 3.0:
+                    # Aggressive: sell everything except profitable swing/position trades
+                    hold_class = trade.get("hold_class", "swing")
+                    should_sell = not (hold_class in ("swing", "position") and pnl_pct > 1.0)
+                else:
+                    # Moderate (1.5-3%): only sell losing positions
+                    should_sell = pnl_pct < 0
+
+                if should_sell:
                     try:
                         close_paper_trade(trade["id"], price)
                         sold_count += 1
                     except Exception:
                         pass
 
-            if sold_count > 0:
-                logger.warning(
-                    f"ADAPTIVE PROFIT PROTECTION: EOD sell — closed {sold_count} profitable trades "
-                    f"(total return: +{total_return:.1f}%, peak: +{peak:.1f}%)"
-                )
-                try:
-                    backup_db_to_s3()
-                except Exception:
-                    pass
-
-        # --- PEAK DRAWDOWN PROTECTION ---
-        # If we've been at 10%+ return and now it's dropping, protect the gains
-        if peak >= 10.0 and drawdown_from_peak >= 1.5:
-            # We've lost 1.5% from our peak — sell everything to protect
-            from predictions.models import get_open_trades, close_paper_trade
-            from predictions.paper_trader import _get_current_prices
-            open_trades = get_open_trades()
-            if not open_trades:
-                return
-
-            symbols = list(set(t["ticker"] for t in open_trades))
-            prices = _get_current_prices(symbols)
-
-            for trade in open_trades:
-                price = prices.get(trade["ticker"], trade["entry_price"])
-                try:
-                    close_paper_trade(trade["id"], price)
-                except Exception:
-                    pass
-
+            level = "EMERGENCY" if drawdown_from_peak >= 5.0 else ("AGGRESSIVE" if drawdown_from_peak >= 3.0 else "MODERATE")
             logger.warning(
-                f"PEAK DRAWDOWN PROTECTION: Peak was +{peak:.1f}%, now +{total_return:.1f}% "
-                f"(dropped {drawdown_from_peak:.1f}%) — sold all to protect gains"
+                f"PEAK DRAWDOWN PROTECTION ({level}): Peak was +{peak:.1f}%, now +{total_return:.1f}% "
+                f"(dropped {drawdown_from_peak:.1f}%) — sold {sold_count}/{len(open_trades)} trades"
             )
             try:
                 backup_db_to_s3()

@@ -569,11 +569,19 @@ def _autonomous_stop_and_target(
         stop_loss = round(price * (1 + stop_pct), 2)
         target_price = round(price * (1 - target_pct), 2)
 
+    # Classify hold type for selective sell logic
+    if hold_days <= 1:
+        hold_class = "intraday"
+    elif hold_days <= 14:
+        hold_class = "swing"
+    else:
+        hold_class = "position"
+
     reasoning = (
         f"ATR={atr_pct*100:.1f}%/day | "
         f"Stop={stop_pct*100:.1f}% ({atr_mult_stop:.1f}x ATR) | "
         f"Target={target_pct*100:.1f}% ({rr_ratio:.1f}:1 R:R) | "
-        f"Hold={hold_days}d"
+        f"Hold={hold_days}d ({hold_class})"
     )
 
     logger.info(f"AUTONOMOUS DECISION {symbol} {direction}: {reasoning}")
@@ -582,6 +590,7 @@ def _autonomous_stop_and_target(
         "stop_loss": stop_loss,
         "target_price": target_price,
         "hold_days": hold_days,
+        "hold_class": hold_class,
         "stop_pct": round(stop_pct * 100, 1),
         "target_pct": round(target_pct * 100, 1),
         "atr_pct": round(atr_pct * 100, 1),
@@ -1199,31 +1208,52 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     winlock_caution = winlock["caution_pct"]
 
     if daily_gain >= winlock_threshold:
-        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today (threshold: {winlock_threshold}%) — SELLING ALL | {winlock['reason']}")
+        # SELECTIVE WIN-LOCK: sell intraday trades and positions near target, keep multi-day holds
+        logger.warning(f"WIN-LOCK: Up {daily_gain:+.1f}% today (threshold: {winlock_threshold}%) — SELECTIVE SELL | {winlock['reason']}")
+        sold_count = 0
         for trade in get_open_trades():
             t_ticker = trade["ticker"]
             t_price = current_prices_for_winlock.get(t_ticker)
-            if t_price:
+            if not t_price:
+                continue
+            t_dir = trade["direction"]
+            t_entry = trade["entry_price"]
+            t_target = trade.get("target_price", t_entry * 1.05)
+            t_hold_class = trade.get("hold_class", "swing")
+
+            if t_dir == "long":
+                t_pnl = ((t_price / t_entry) - 1) * 100
+                target_achieved = (t_price - t_entry) / (t_target - t_entry + 0.01) if t_target > t_entry else 1.0
+            else:
+                t_pnl = ((t_entry / t_price) - 1) * 100
+                target_achieved = (t_entry - t_price) / (t_entry - t_target + 0.01) if t_entry > t_target else 1.0
+
+            # Sell if: intraday trade, OR 80%+ of target achieved, OR losing money
+            should_sell = (
+                t_hold_class == "intraday" or
+                target_achieved >= 0.8 or
+                t_pnl < 0
+            )
+
+            if should_sell:
                 try:
                     close_paper_trade(trade["id"], t_price)
-                    t_dir = trade["direction"]
-                    t_entry = trade["entry_price"]
-                    if t_dir == "long":
-                        t_pnl = ((t_price / t_entry) - 1) * 100
-                    else:
-                        t_pnl = ((t_entry / t_price) - 1) * 100
+                    sold_count += 1
                     results["closed"].append({
                         "ticker": t_ticker, "direction": t_dir,
                         "entry_price": t_entry, "exit_price": round(t_price, 2),
                         "pnl_pct": round(t_pnl, 2),
-                        "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}% ≥ {winlock_threshold}% | {winlock['reason']}",
+                        "reason": f"WIN-LOCK selective: daily +{daily_gain:.1f}% | class={t_hold_class} target={target_achieved:.0%}",
                     })
                     open_tickers.discard(t_ticker)
                 except Exception as e:
                     results["errors"].append(f"WIN-LOCK close {t_ticker}: {e}")
+            else:
+                logger.info(f"WIN-LOCK HOLD: Keeping {t_ticker} ({t_hold_class}, {t_pnl:+.1f}%, target {target_achieved:.0%})")
+
         cash = get_cash()
-        results["skipped"].append({"symbol": "ALL", "reason": f"WIN-LOCK: up {daily_gain:+.1f}% — sold all (auto-threshold: {winlock_threshold}% | {winlock['reason']})"})
-        available_slots = 0
+        results["skipped"].append({"symbol": "WIN-LOCK", "reason": f"Selective sell: up {daily_gain:+.1f}% — sold {sold_count} trades, kept multi-day holds"})
+        available_slots = max(0, available_slots - sold_count)
     elif daily_gain >= winlock_caution:
         logger.warning(f"WIN-LOCK CAUTION: Up {daily_gain:+.1f}% (caution at {winlock_caution}%) — reducing new trade size by 50%")
 
@@ -1639,6 +1669,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     target_price=target,
                     hold_days=adaptive_hold,
                     sector=pick.get("sector", ""),
+                    hold_class=auto_decision.get("hold_class", "swing"),
                 )
 
                 # Cash deducted atomically inside save_paper_trade()
@@ -2383,32 +2414,57 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     winlock_threshold = winlock["lock_pct"]
 
     if daily_gain >= winlock_threshold:
-        logger.warning(f"EXIT CHECKER WIN-LOCK: Up {daily_gain:+.1f}% (threshold: {winlock_threshold}%) — SELLING ALL! | {winlock['reason']}")
+        # SELECTIVE WIN-LOCK: only sell intraday + near-target + losing positions
+        logger.warning(f"EXIT CHECKER WIN-LOCK: Up {daily_gain:+.1f}% (threshold: {winlock_threshold}%) — SELECTIVE SELL | {winlock['reason']}")
+        kept_count = 0
         for trade in open_trades:
             ticker = trade["ticker"]
             price = current_prices.get(ticker)
-            if price:
+            if not price:
+                continue
+            direction = trade["direction"]
+            entry_price = trade["entry_price"]
+            target = trade.get("target_price", entry_price * 1.05)
+            hold_class = trade.get("hold_class", "swing")
+
+            if direction == "long":
+                pnl_pct = ((price / entry_price) - 1) * 100
+                target_achieved = (price - entry_price) / (target - entry_price + 0.01) if target > entry_price else 1.0
+            else:
+                pnl_pct = ((entry_price / price) - 1) * 100
+                target_achieved = (entry_price - price) / (entry_price - target + 0.01) if entry_price > target else 1.0
+
+            should_sell = (
+                hold_class == "intraday" or
+                target_achieved >= 0.8 or
+                pnl_pct < 0
+            )
+
+            if should_sell:
                 try:
                     close_paper_trade(trade["id"], price)
-                    direction = trade["direction"]
-                    entry_price = trade["entry_price"]
-                    if direction == "long":
-                        pnl_pct = ((price / entry_price) - 1) * 100
-                    else:
-                        pnl_pct = ((entry_price / price) - 1) * 100
                     closed.append({
                         "ticker": ticker, "direction": direction,
                         "entry_price": entry_price, "exit_price": round(price, 2),
                         "pnl_pct": round(pnl_pct, 2),
-                        "reason": f"WIN-LOCK: daily gain {daily_gain:+.1f}% ≥ {winlock_threshold}% | {winlock['reason']}",
+                        "reason": f"WIN-LOCK selective: daily +{daily_gain:.1f}% | class={hold_class} target={target_achieved:.0%}",
                     })
                 except Exception as e:
                     logger.error(f"WIN-LOCK close {ticker}: {e}")
+            else:
+                kept_count += 1
+                logger.info(f"WIN-LOCK HOLD: Keeping {ticker} ({hold_class}, {pnl_pct:+.1f}%, target {target_achieved:.0%})")
+
         cash = get_cash()
-        total_value = cash
+        remaining_positions = len(get_open_trades())
+        positions_val_after = sum(
+            current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
+            for t in get_open_trades()
+        )
+        total_value = cash + positions_val_after
         cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-        save_portfolio_snapshot(total_value, cash, 0, daily_gain, cum_ret, 0, 0, 0)
-        return {"closed": closed, "checked": len(open_trades), "win_lock": True, "winlock_info": winlock}
+        save_portfolio_snapshot(total_value, cash, remaining_positions, daily_gain, cum_ret, 0, 0, 0)
+        return {"closed": closed, "checked": len(open_trades), "kept": kept_count, "win_lock": True, "winlock_info": winlock}
 
     for trade in open_trades:
         ticker = trade["ticker"]

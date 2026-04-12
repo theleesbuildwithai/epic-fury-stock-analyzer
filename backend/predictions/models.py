@@ -66,7 +66,8 @@ def init_db():
             stop_loss_price REAL,
             target_price REAL,
             hold_duration_days INTEGER DEFAULT 30,
-            sector TEXT
+            sector TEXT,
+            hold_class TEXT DEFAULT 'swing'
         );
 
         CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -114,6 +115,16 @@ def init_db():
     # Performance indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON paper_trades(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_date ON paper_trades(entry_date)")
+
+    # Migration: add hold_class column if missing (for existing DBs)
+    try:
+        conn.execute("SELECT hold_class FROM paper_trades LIMIT 1")
+    except Exception:
+        try:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN hold_class TEXT DEFAULT 'swing'")
+            logger.info("Migration: added hold_class column to paper_trades")
+        except Exception:
+            pass
 
     # Initialize paper_cash if empty
     existing = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
@@ -257,7 +268,7 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
                      shares: float, signal_score: float = 0, regime: str = "",
                      factors: dict = None, stop_loss: float = 0,
                      target_price: float = 0, hold_days: int = 30,
-                     sector: str = "") -> int:
+                     sector: str = "", hold_class: str = "swing") -> int:
     """Save a new paper trade and atomically deduct cash."""
     cost = round(entry_price * shares, 2)
     conn = get_db()
@@ -266,11 +277,12 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
         """INSERT INTO paper_trades
            (ticker, direction, entry_price, shares, entry_date, signal_score,
             regime_at_entry, factors_used, stop_loss_price, target_price,
-            hold_duration_days, sector, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+            hold_duration_days, sector, hold_class, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
         (ticker.upper(), direction, entry_price, shares,
          datetime.now().isoformat(), signal_score, regime,
-         json.dumps(factors or {}), stop_loss, target_price, hold_days, sector)
+         json.dumps(factors or {}), stop_loss, target_price, hold_days, sector,
+         hold_class)
     )
     trade_id = cursor.lastrowid
     conn.execute("UPDATE paper_cash SET cash = cash - ? WHERE id=1", (cost,))

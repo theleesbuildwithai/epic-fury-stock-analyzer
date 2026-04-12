@@ -526,12 +526,33 @@ QUANT_UNIVERSE = [
     "AWK",   # American Water Works — ultimate defensive
     "WEC",   # WEC Energy — stable dividend, safe haven
     # ============================================================
-    # ETFs for sector-level signals (16) — expanded for macro reads
+    # Commodities ETFs (20) — trade commodities via liquid ETFs
+    # ============================================================
+    "GLD",   # SPDR Gold Trust — safe haven, inflation hedge
+    "SLV",   # iShares Silver Trust — industrial + precious metal
+    "USO",   # United States Oil Fund — crude oil exposure
+    "UNG",   # United States Natural Gas Fund
+    "COPX",  # Global X Copper Miners ETF
+    "DBA",   # Invesco DB Agriculture Fund
+    "WEAT",  # Teucrium Wheat Fund
+    "CORN",  # Teucrium Corn Fund
+    "SOYB",  # Teucrium Soybean Fund
+    "PPLT",  # abrdn Physical Platinum Shares
+    "PALL",  # abrdn Physical Palladium Shares
+    "URA",   # Global X Uranium ETF
+    "CPER",  # United States Copper Index Fund
+    "DBB",   # Invesco DB Base Metals Fund
+    "DBC",   # Invesco DB Commodity Index Tracking Fund
+    "PDBC",  # Invesco Optimum Yield Diversified Commodity
+    "IAU",   # iShares Gold Trust
+    "GSG",   # iShares S&P GSCI Commodity-Indexed Trust
+    "REMX",  # VanEck Rare Earth/Strategic Metals ETF
+    "SGOL",  # abrdn Physical Gold Shares
+    # ============================================================
+    # ETFs for sector-level signals (14) — expanded for macro reads
     # ============================================================
     "SPY", "QQQ", "IWM", "XLF", "XLE", "XLV", "XLK", "XLI", "XLP", "XLU",
-    "GLD",   # Gold ETF — safe haven, Iran/geopolitical hedge
     "TLT",   # 20+ Year Treasury ETF — rate/Fed play, CPI reaction
-    "USO",   # Oil ETF — Iran/Strait of Hormuz play
     "XBI",   # Biotech ETF — pharma tariff impact
     "ARKK",  # ARK Innovation — high-beta growth, biggest loser in selloffs
     "VXX",   # VIX Short-Term Futures — volatility play
@@ -685,11 +706,19 @@ SECTOR_MAP = {
     "AEP": "Utilities", "SRE": "Utilities", "D": "Utilities",
     "EXC": "Utilities", "XEL": "Utilities", "AWK": "Utilities",
     "WEC": "Utilities",
-    # ETFs (16) — sector + macro signals
+    # Commodities ETFs (20) — traded as first-class assets
+    "GLD": "Commodities", "SLV": "Commodities", "USO": "Commodities",
+    "UNG": "Commodities", "COPX": "Commodities", "DBA": "Commodities",
+    "WEAT": "Commodities", "CORN": "Commodities", "SOYB": "Commodities",
+    "PPLT": "Commodities", "PALL": "Commodities", "URA": "Commodities",
+    "CPER": "Commodities", "DBB": "Commodities", "DBC": "Commodities",
+    "PDBC": "Commodities", "IAU": "Commodities", "GSG": "Commodities",
+    "REMX": "Commodities", "SGOL": "Commodities",
+    # ETFs (14) — sector + macro signals
     "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "XLF": "ETF",
     "XLE": "ETF", "XLV": "ETF", "XLK": "ETF", "XLI": "ETF",
-    "XLP": "ETF", "XLU": "ETF", "GLD": "ETF", "TLT": "ETF",
-    "USO": "ETF", "XBI": "ETF", "ARKK": "ETF", "VXX": "ETF",
+    "XLP": "ETF", "XLU": "ETF", "TLT": "ETF",
+    "XBI": "ETF", "ARKK": "ETF", "VXX": "ETF",
     # Expanded Technology
     "ORCL": "Technology", "IBM": "Technology", "HPQ": "Technology",
     "HPE": "Technology", "CSCO": "Technology", "AKAM": "Technology",
@@ -1193,6 +1222,18 @@ def get_macro_overlay() -> dict:
             comm_adj += 0.5
         adjustments["Communication"] = round(comm_adj, 1)
 
+        # Commodities: inversely correlated with dollar, correlated with inflation/fear
+        commodities_adj = 0
+        if gold_trend == "rising":
+            commodities_adj += 1.0  # Risk-off / inflation = bullish commodities
+        if oil_trend == "rising":
+            commodities_adj += 0.5  # Energy commodities rise together
+        if vix_val > 25:
+            commodities_adj += 0.5  # Fear drives safe haven commodity demand
+        if tnx_trend == "rising":
+            commodities_adj -= 0.3  # Rising yields compete with non-yielding commodities
+        adjustments["Commodities"] = round(commodities_adj, 1)
+
         macro["sector_adjustments"] = adjustments
 
         # --- ADVANCED: Yield Curve Inversion Detection ---
@@ -1215,10 +1256,10 @@ def get_macro_overlay() -> dict:
                             ),
                         }
                         if spread < 0:
-                            # Inverted yield curve: penalize cyclicals, boost defensives
+                            # Inverted yield curve: penalize cyclicals, boost defensives + safe havens
                             for sector in ["Technology", "Consumer Discretionary", "Financials", "Industrials"]:
                                 adjustments[sector] = round(adjustments.get(sector, 0) - 0.5, 1)
-                            for sector in ["Healthcare", "Consumer Staples", "Utilities"]:
+                            for sector in ["Healthcare", "Consumer Staples", "Utilities", "Commodities"]:
                                 adjustments[sector] = round(adjustments.get(sector, 0) + 0.5, 1)
                 except Exception:
                     pass
@@ -1280,13 +1321,15 @@ def get_macro_overlay() -> dict:
                     "proxy_value": round(uup_current, 2),
                     "trend": dollar_trend,
                 }
-                # Strong dollar hurts Energy & Materials (commodity exporters)
+                # Strong dollar hurts Energy, Materials & Commodities (priced in USD)
                 if dollar_trend == "strengthening":
                     adjustments["Energy"] = round(adjustments.get("Energy", 0) - 0.5, 1)
                     adjustments["Materials"] = round(adjustments.get("Materials", 0) - 0.5, 1)
+                    adjustments["Commodities"] = round(adjustments.get("Commodities", 0) - 0.8, 1)
                 elif dollar_trend == "weakening":
                     adjustments["Energy"] = round(adjustments.get("Energy", 0) + 0.3, 1)
                     adjustments["Materials"] = round(adjustments.get("Materials", 0) + 0.3, 1)
+                    adjustments["Commodities"] = round(adjustments.get("Commodities", 0) + 1.0, 1)
         except Exception as e:
             logger.debug(f"Dollar check failed: {e}")
 
@@ -1333,6 +1376,8 @@ def get_macro_overlay() -> dict:
             adjustments["Energy"] = round(adjustments.get("Energy", 0) - 1.5, 1)
             # Defense stocks cool off
             adjustments["Industrials"] = round(adjustments.get("Industrials", 0) - 0.5, 1)
+            # Safe haven commodities lose fear premium in peacetime
+            adjustments["Commodities"] = round(adjustments.get("Commodities", 0) - 0.5, 1)
             macro["sector_adjustments"] = adjustments
             macro["ceasefire_overlay"] = True
             logger.info(f"CEASEFIRE OVERLAY: Boosting tech/growth +1.5, penalizing energy -1.5 (geo={geo_level})")
@@ -2150,6 +2195,9 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             # ============================================================
             earnings_drift_raw = 0.0
             try:
+                # Commodity ETFs don't have earnings — skip this factor
+                if SECTOR_MAP.get(symbol) == "Commodities":
+                    raise ValueError("skip")
                 if len(closes) >= 10:
                     # Check for earnings gap in last 10 trading days
                     # Large volume spike (>2x avg) + price gap = likely earnings
@@ -2586,6 +2634,44 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                         composite += geo_adj * 0.15  # Scale to z-score range
                 except Exception:
                     pass
+
+        # --- HISTORICAL CALIBRATION OVERLAY ---
+        # Uses 50-year patterns to fine-tune signals
+        try:
+            from analysis.historical_calibration import get_calibration
+            cal = get_calibration()
+            sym_cal = cal.get("stocks", {}).get(stock["symbol"], {})
+
+            if sym_cal:
+                # 1. Seasonal boost: if current month is historically strong/weak
+                seasonal = sym_cal.get("seasonal", {})
+                current_month = str(datetime.now().month)
+                if current_month in seasonal:
+                    month_avg = seasonal[current_month]
+                    # Scale: +0.02% avg daily = small boost, +0.05% = medium
+                    seasonal_boost = max(-0.3, min(0.3, month_avg * 5.0))
+                    composite += seasonal_boost
+
+                # 2. Regime calibration: scale confidence by historical regime performance
+                regime_perf = sym_cal.get("regime_performance", {})
+                current_regime_key = (regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS").lower()
+                hist_win_rate = regime_perf.get(f"{current_regime_key}_win_rate", 50)
+                if hist_win_rate > 55:
+                    composite += 0.1  # Stock historically does well in this regime
+                elif hist_win_rate < 45:
+                    composite -= 0.1  # Stock historically struggles in this regime
+
+                # 3. Sector rotation boost from long-term cycles
+                sector_rot = cal.get("sector_rotation", {})
+                stock_sector = stock.get("sector", "")
+                if stock_sector in sector_rot:
+                    rot_signal = sector_rot[stock_sector].get("signal", "")
+                    if rot_signal == "strong":
+                        composite += 0.15
+                    elif rot_signal == "weak":
+                        composite -= 0.15
+        except Exception:
+            pass  # Calibration not available yet — no adjustment
 
         # Scale composite to a more intuitive range (-10 to +10)
         final_score = round(composite * 3.0, 2)

@@ -1,17 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 280" fill="white">
-  <!-- Sentinel Quant - Spartan Helmet Silhouette -->
-  <!-- Crest (top plume) -->
-  <path d="M85 0 L115 0 L112 10 Q110 30, 108 50 L92 50 Q90 30, 88 10 Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="white">
+  <!-- Sentinel Quant - Spartan Side Profile -->
+  <!-- Plume crest sweeping back -->
+  <path d="M85 25 C90 15, 100 8, 120 5 C140 2, 165 5, 180 15 C170 10, 155 12, 140 18 C125 24, 112 35, 105 48 L95 48 C92 40, 88 32, 85 25 Z"/>
+  <!-- Crest ridge lines -->
+  <path d="M95 48 L105 48 C110 38, 120 28, 135 20 L130 24 C118 32, 108 40, 102 48 L98 48 C96 44, 95 48, 95 48 Z" fill-opacity="0.15"/>
   <!-- Helmet dome -->
-  <path d="M50 80 Q50 35, 100 30 Q150 35, 150 80 L150 120 Q150 140, 140 155 L135 160
-    L135 145 Q135 125, 120 112 L112 107 Q105 103, 100 100 Q95 103, 88 107 L80 112
-    Q65 125, 65 145 L65 160 L60 155 Q50 140, 50 120 Z"/>
-  <!-- Left jaw -->
-  <path d="M60 155 L65 160 L65 145 Q65 155, 62 170 L55 220 L50 240 L60 245 L70 200
-    L72 175 L65 160 Z"/>
-  <!-- Right jaw -->
-  <path d="M140 155 L135 160 L135 145 Q135 155, 138 170 L145 220 L150 240 L140 245 L130 200
-    L128 175 L135 160 Z"/>
-  <!-- Nose guard (center vertical) -->
-  <path d="M96 100 L104 100 L103 175 L97 175 Z"/>
+  <path d="M55 80 C55 55, 70 40, 90 35 L90 48 L95 48 C92 52, 88 60, 85 70 L85 95 L55 95 Z"/>
+  <!-- Face plate -->
+  <path d="M85 70 L85 95 L120 95 C130 88, 135 78, 135 68 C135 56, 125 48, 110 45 L105 48 C115 50, 125 58, 125 68 C125 78, 120 88, 112 92 L85 92 L85 70 Z" fill-rule="evenodd"/>
+  <!-- Eye opening (dark) -->
+  <path d="M88 72 C90 68, 96 65, 104 65 C112 65, 118 68, 122 74 C120 80, 114 85, 106 87 L88 87 Z" fill-opacity="0"/>
+  <!-- Nose guard dropping down -->
+  <path d="M85 95 L85 125 L75 135 L70 128 L78 115 L78 95 Z"/>
+  <!-- Lower face guard / chin -->
+  <path d="M75 135 L85 125 L90 132 L95 142 L85 150 L72 145 Z"/>
+  <!-- Neck armor -->
+  <path d="M55 95 L78 95 L78 115 L70 128 L55 120 L45 130 L38 125 L48 110 Z"/>
+  <!-- Back armor plate -->
+  <path d="M38 125 L45 130 L38 150 L32 160 L25 155 L32 140 Z"/>
+  <!-- Armor detail lines on cheek -->
+  <path d="M88 100 L105 96" stroke="white" stroke-width="1.5" fill="none" opacity="0.4"/>
+  <path d="M88 104 L108 100" stroke="white" stroke-width="1.5" fill="none" opacity="0.35"/>
+  <path d="M88 108 L100 105" stroke="white" stroke-width="1.5" fill="none" opacity="0.3"/>
 </svg>

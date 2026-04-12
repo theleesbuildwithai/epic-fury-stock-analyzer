@@ -138,7 +138,7 @@ export default function QuantDashboard() {
           <div className="mt-3 flex items-end justify-between flex-wrap gap-3">
             <div className="flex gap-4 text-xs text-neutral-500">
               <span>22 Quant Factors</span>
-              <span>500+ Stocks Analyzed</span>
+              <span>520+ Stocks Analyzed</span>
               <span>Event-Driven Trading</span>
               <span>Self-Learning Weekly</span>
             </div>
@@ -195,9 +195,9 @@ export default function QuantDashboard() {
 // TAB 1: QUANT PICKS
 // ============================================================
 function QuantPicksTab({ picks, loading, RegimeBadge }) {
-  if (loading) return <LoadingSpinner text="Analyzing 500+ stocks across 14 quant factors... this takes ~90 seconds" />
+  if (loading) return <LoadingSpinner text="Analyzing 520+ stocks across 14 quant factors... this takes ~90 seconds" />
   if (!picks) return <EmptyState text="Quant picks are being computed. Refresh in 60 seconds." />
-  if (picks.cache_status === 'cold') return <EmptyState text={picks.message || "Analyzing 500+ stocks... data will appear after the next trade cycle."} />
+  if (picks.cache_status === 'cold') return <EmptyState text={picks.message || "Analyzing 520+ stocks... data will appear after the next trade cycle."} />
 
   const regime = picks.regime || {}
   const macro = picks.macro || {}
@@ -795,7 +795,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             </div>
           )}
           <p className="text-neutral-600 text-xs mt-2 italic">
-            The computer autonomously analyzes 500+ stocks and executes trades event-driven during market hours. No human intervention required.
+            The computer autonomously analyzes 520+ stocks and executes trades event-driven during market hours. No human intervention required.
           </p>
         </div>
       )}
@@ -1231,7 +1231,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
       <div className="bg-black border border-purple-500/20 rounded-xl p-6">
         <h3 className="text-white font-bold mb-4">Trading Philosophy</h3>
         <div className="space-y-3 text-neutral-400 text-sm">
-          <p><span className="text-white font-semibold">Universe:</span> 500+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>
+          <p><span className="text-white font-semibold">Universe:</span> 520+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>
           <p><span className="text-white font-semibold">Scoring:</span> 22-factor composite with z-score normalization + adaptive regime-aware weights</p>
           <p><span className="text-white font-semibold">Edge Sources:</span> Momentum + mean-reversion hybrid, statistical arbitrage, post-earnings drift, Ichimoku trends, volume profile, sector rotation</p>
           <p><span className="text-white font-semibold">Risk First:</span> Never risk more than Kelly half-fraction. VIX scales all sizes. ATR-based stops per stock. Portfolio VaR budget caps total risk.</p>
