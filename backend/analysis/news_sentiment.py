@@ -946,7 +946,8 @@ def detect_upcoming_events() -> list:
     Requires at least 2 of 3 keyword categories: deadline + hotspot + event_type.
     """
     from datetime import timedelta
-    headlines = get_market_news()
+    news = get_market_news()
+    headlines = news.get("headlines", []) if isinstance(news, dict) else []
     if not headlines:
         return []
 
@@ -1027,7 +1028,8 @@ def detect_event_outcomes() -> list:
     if not active_events:
         return []
 
-    headlines = get_market_news()
+    news = get_market_news()
+    headlines = news.get("headlines", []) if isinstance(news, dict) else []
     if not headlines:
         return []
 

@@ -41,6 +41,14 @@ def _check_signal_confirmation(symbol: str, direction: str, confidence: int) -> 
     if confidence > 55:
         return True
     now = datetime.now()
+
+    # Periodic cleanup: purge expired entries to prevent unbounded growth
+    if len(_signal_confirmation) > 200:
+        expired = [k for k, v in _signal_confirmation.items()
+                   if now - v["first_seen"] > _CONFIRMATION_TTL]
+        for k in expired:
+            del _signal_confirmation[k]
+
     key = f"{symbol}_{direction}"
     if key in _signal_confirmation:
         entry = _signal_confirmation[key]
@@ -269,6 +277,8 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
 
     # Payoff ratio (b)
     b = avg_win / avg_loss
+    if b <= 0:
+        return 0.02  # No edge — use minimum size
 
     # Kelly fraction: f* = (p * b - q) / b
     kelly_full = (p * b - q) / b

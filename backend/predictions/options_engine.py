@@ -120,6 +120,8 @@ def select_strike(chain_data: dict, current_price: float, option_type: str,
     """
     if not chain_data or not chain_data.get("chains"):
         return {}
+    if current_price <= 0:
+        return {}
 
     abs_score = abs(composite_score)
     high_conviction = conviction >= 70 and abs_score >= 4.0
@@ -420,6 +422,13 @@ def check_option_exit(trade: dict, current_premium: float) -> dict:
             dte = (exp_date - datetime.now().date()).days
         except Exception:
             pass
+    else:
+        # Missing expiration date — force exit to avoid orphaned position
+        return {
+            "should_exit": True,
+            "reason": "MISSING EXPIRATION: no expiration_date on option — force closing",
+            "exit_price": current_premium,
+        }
 
     # --- Exit Rule 1: Auto-close at DTE <= 2 (never exercise) ---
     if dte <= 2:
