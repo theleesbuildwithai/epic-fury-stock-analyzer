@@ -1721,6 +1721,56 @@ def geo_events(request: Request):
         return {"upcoming": [], "active": [], "all_events": [], "error": str(e)}
 
 
+@app.get("/api/force-reset")
+def force_reset(request: Request):
+    """Emergency: close ALL positions and reset cash to 12.07% return ($122,156.30).
+    Hit this endpoint once from browser to reset, then remove it."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_open_trades, close_paper_trade, set_cash, get_cash
+        import yfinance as yf
+
+        open_trades = get_open_trades()
+        closed_count = 0
+        for trade in open_trades:
+            try:
+                ticker = trade["ticker"]
+                instrument_type = trade.get("instrument_type") or "equity"
+                if instrument_type in ("call", "put"):
+                    # Close options at $0.01 (write off)
+                    close_paper_trade(trade["id"], 0.01)
+                else:
+                    # Close equity at current price
+                    try:
+                        data = yf.download(ticker, period="1d", progress=False)
+                        if data is not None and len(data) > 0:
+                            price = float(data["Close"].iloc[-1])
+                        else:
+                            price = trade["entry_price"]
+                    except Exception:
+                        price = trade["entry_price"]
+                    close_paper_trade(trade["id"], price)
+                closed_count += 1
+            except Exception as e:
+                logger.error(f"Force close {trade['ticker']} failed: {e}")
+
+        # Reset cash to target: $109,000 * 1.1207 = $122,156.30
+        TARGET_CASH = 122156.30
+        set_cash(TARGET_CASH)
+        final_cash = get_cash()
+
+        return {
+            "status": "RESET COMPLETE",
+            "positions_closed": closed_count,
+            "cash_set_to": final_cash,
+            "target_return": "12.07%",
+            "message": "All positions closed. Cash reset. Ready for Monday."
+        }
+    except Exception as e:
+        logger.error(f"Force reset error: {e}")
+        return {"status": "ERROR", "error": str(e)}
+
+
 @app.get("/api/tariff-risk")
 def tariff_risk(request: Request):
     """Tariff/trade war risk assessment — escalation detection and sector impacts."""
