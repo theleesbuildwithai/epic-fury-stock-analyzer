@@ -881,19 +881,36 @@ def get_portfolio_state() -> dict:
             instrument_type = trade.get("instrument_type") or "equity"
 
             if instrument_type in ("call", "put"):
-                # Options: value = contracts * current_premium * 100
-                # Use entry premium as rough current value (live premium fetched on exit)
+                # Options: estimate current premium from intrinsic + time value
                 entry_premium = trade.get("premium_per_contract") or entry_price
                 num_contracts = trade.get("contracts") or shares
-                position_value = entry_premium * num_contracts * 100
-                # Rough P&L estimate using underlying price movement
                 strike = trade.get("strike_price", 0)
                 if instrument_type == "call":
                     intrinsic = max(0, current_price - strike) if strike else 0
                 else:
                     intrinsic = max(0, strike - current_price) if strike else 0
-                # Estimate current premium = max(intrinsic, entry_premium * 0.1)
-                est_premium = max(intrinsic, entry_premium * 0.1)
+                # Better premium estimation: intrinsic + remaining time value
+                # Time value decays linearly; estimate as fraction of entry time value
+                entry_intrinsic = 0
+                if strike:
+                    if instrument_type == "call":
+                        entry_intrinsic = max(0, (trade.get("underlying_price_at_entry") or entry_price) - strike)
+                    else:
+                        entry_intrinsic = max(0, strike - (trade.get("underlying_price_at_entry") or entry_price))
+                entry_time_value = max(0, entry_premium - entry_intrinsic)
+                # Estimate remaining time value (rough: 70% of entry time value if not near expiry)
+                dte_est = 14  # default
+                if trade.get("expiration_date"):
+                    try:
+                        exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
+                        dte_est = max(0, (exp - datetime.now()).days)
+                    except Exception:
+                        pass
+                hold_days = max(1, (trade.get("hold_duration_days") or 30))
+                time_decay_factor = max(0.1, min(1.0, dte_est / max(1, hold_days)))
+                remaining_time_value = entry_time_value * time_decay_factor
+                est_premium = max(intrinsic + remaining_time_value, entry_premium * 0.05)
+                position_value = est_premium * num_contracts * 100
                 if direction == "long":
                     unrealized_pnl = (est_premium - entry_premium) * num_contracts * 100
                     unrealized_pct = ((est_premium / entry_premium) - 1) * 100 if entry_premium > 0 else 0
