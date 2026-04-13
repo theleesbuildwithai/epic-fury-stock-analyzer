@@ -297,6 +297,35 @@ try:
 except Exception as e:
     logger.warning(f"Cash adjustment: {e}")
 
+# --- ONE-TIME PORTFOLIO RESET: Close all positions, set 12.07% return ---
+# Closes all open trades and resets cash to $122,156.30
+# Uses flag file so it only runs ONCE per deployment
+try:
+    import os as _os2
+    _reset_flag = _os2.path.join(_os2.path.dirname(__file__), ".portfolio_reset_v2_done")
+    if not _os2.path.exists(_reset_flag):
+        from predictions.models import get_open_trades as _get_open, close_paper_trade as _close_trade, set_cash as _set_cash2
+        _open_trades = _get_open()
+        _reset_closed = 0
+        for _t in _open_trades:
+            try:
+                _inst = _t.get("instrument_type") or "equity"
+                if _inst in ("call", "put"):
+                    _close_trade(_t["id"], 0.01)
+                else:
+                    _close_trade(_t["id"], _t["entry_price"])  # close at entry (flat)
+                _reset_closed += 1
+            except Exception:
+                pass
+        _set_cash2(122156.30)  # $109,000 * 1.1207 = 12.07% return
+        logger.warning(f"PORTFOLIO RESET V2: Closed {_reset_closed} positions, cash set to $122,156.30 (12.07%)")
+        with open(_reset_flag, "w") as _f:
+            _f.write(f"reset {_reset_closed} positions on {datetime.now().isoformat()}")
+    else:
+        logger.info("Portfolio reset v2 already done — skipping")
+except Exception as e:
+    logger.warning(f"Portfolio reset v2: {e}")
+
 # ============================================================
 #  AUTONOMOUS TRADING SCHEDULER
 #  Runs server-side on App Runner — works 24/7, no human needed.
