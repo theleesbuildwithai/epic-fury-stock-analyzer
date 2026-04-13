@@ -345,6 +345,10 @@ def _is_good_entry_time():
         hour, minute = et.hour, et.minute
         t = hour * 60 + minute  # minutes since midnight
 
+        # WEEKEND CHECK: No trading on Saturday/Sunday — prices are stale
+        if et.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            return {"can_trade": False, "window": "weekend", "size_modifier": 0.0, "confidence_shift": 0}
+
         market_open = 9 * 60 + 30   # 9:30 AM
         avoid_end = 9 * 60 + 45     # 9:45 AM
         caution_end = 10 * 60 + 30  # 10:30 AM
@@ -352,8 +356,8 @@ def _is_good_entry_time():
         market_close = 16 * 60      # 4:00 PM
 
         if t < market_open or t >= market_close:
-            # Outside market hours — still allow (scheduler might run off-hours)
-            return {"can_trade": True, "window": "off_hours", "size_modifier": 1.0, "confidence_shift": 0}
+            # Outside market hours — block new entries, prices are stale
+            return {"can_trade": False, "window": "off_hours", "size_modifier": 0.0, "confidence_shift": 0}
         elif t < avoid_end:
             # First 15 minutes — avoid new entries (noise, spread is wide)
             return {"can_trade": False, "window": "avoid", "size_modifier": 0.0, "confidence_shift": 0}
