@@ -1283,6 +1283,24 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 should_close = True
                 close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap reached"
 
+            # GEO EVENT OVERRIDE: Close positions fighting the geo overlay
+            # e.g., close SHORT energy when ceasefire ends (energy going up)
+            if not should_close:
+                macro_data = quant_picks.get("macro", {})
+                ceasefire_ending = macro_data.get("ceasefire_ending_overlay", False)
+                ceasefire_active = macro_data.get("ceasefire_overlay", False)
+                trade_sector = trade.get("sector", "")
+
+                if ceasefire_ending and direction == "short" and trade_sector in ("Energy", "Industrials", "Materials"):
+                    should_close = True
+                    close_reason = f"GEO EVENT EXIT: Short {trade_sector} closed — ceasefire ending, war premium returning"
+                    logger.warning(f"GEO EXIT: Closing short {ticker} ({trade_sector}) — ceasefire ending overlay active")
+                elif ceasefire_active and direction == "long" and trade_sector in ("Energy", "Industrials"):
+                    # If holding long energy/defense during peace, consider closing
+                    if pnl_pct < 2:  # Only close if not solidly profitable
+                        should_close = True
+                        close_reason = f"GEO EVENT EXIT: Long {trade_sector} closed — ceasefire detected, war premium fading"
+
             # Check if signal has reversed (optional aggressive exit)
             if not should_close and pnl_pct < -5:
                 # If losing more than 5% and we have new signals,
