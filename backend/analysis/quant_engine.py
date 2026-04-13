@@ -1377,13 +1377,23 @@ def get_macro_overlay() -> dict:
         except Exception:
             pass  # Fall back to hardcoded if DB unavailable
         known_event_active = False
+        known_event_approaching = False  # NEW: 3-day pre-position window
         today_str = _dt.now().strftime("%Y-%m-%d")
+        today_dt = _dt.strptime(today_str, "%Y-%m-%d")
         for event_name, event_date in _all_geo_events.items():
-            if today_str >= event_date:
-                days_since = (_dt.strptime(today_str, "%Y-%m-%d") - _dt.strptime(event_date, "%Y-%m-%d")).days
-                if days_since <= 14:
-                    known_event_active = True
-                    logger.info(f"GEO EVENT ACTIVE: {event_name} (day {days_since}) — forcing elevated risk posture")
+            event_dt = _dt.strptime(event_date, "%Y-%m-%d")
+            days_until = (event_dt - today_dt).days
+            days_since = (today_dt - event_dt).days
+
+            if days_until <= 3 and days_until > 0:
+                # PRE-POSITION: Event is 1-3 days away — start adjusting NOW
+                known_event_approaching = True
+                known_event_active = True
+                logger.warning(f"GEO EVENT APPROACHING: {event_name} in {days_until} days — pre-positioning")
+            elif days_since >= 0 and days_since <= 14:
+                # Event has occurred — within impact window
+                known_event_active = True
+                logger.info(f"GEO EVENT ACTIVE: {event_name} (day {days_since}) — forcing elevated risk posture")
 
         # --- CEASEFIRE / DE-ESCALATION OVERLAY ---
         # When geopolitical tensions ease (ceasefire, peace deals), the market

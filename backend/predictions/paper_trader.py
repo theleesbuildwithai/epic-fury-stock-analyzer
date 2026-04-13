@@ -1730,6 +1730,42 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
+            # GEO EVENT ENTRY BLOCKER — prevent trades fighting the geo overlay
+            # e.g., never short energy or long tech when ceasefire is ending
+            macro_data = quant_picks.get("macro", {})
+            geo_ceasefire_ending = macro_data.get("ceasefire_ending_overlay", False)
+            geo_ceasefire_active = macro_data.get("ceasefire_overlay", False)
+            pick_sector = pick.get("sector", "")
+
+            if geo_ceasefire_ending:
+                # Ceasefire ending: energy/defense/commodities UP, tech/growth DOWN
+                if direction == "short" and pick_sector in ("Energy", "Industrials", "Materials"):
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": f"GEO BLOCK: Cannot short {pick_sector} — ceasefire ending, war premium returning",
+                    })
+                    logger.warning(f"GEO ENTRY BLOCK: Blocked short {symbol} ({pick_sector}) — ceasefire ending")
+                    continue
+                if direction == "long" and pick_sector in ("Technology", "Consumer Discretionary", "Communication"):
+                    # Don't block entirely, but penalize confidence heavily
+                    pick["confidence"] = max(15, pick["confidence"] - 25)
+                    if pick["confidence"] < MIN_CONFIDENCE:
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": f"GEO BLOCK: Long {pick_sector} penalized below min — ceasefire ending, risk-off",
+                        })
+                        continue
+            elif geo_ceasefire_active:
+                # Active ceasefire: energy/defense DOWN, tech/growth UP
+                if direction == "long" and pick_sector in ("Energy", "Industrials"):
+                    pick["confidence"] = max(15, pick["confidence"] - 20)
+                    if pick["confidence"] < MIN_CONFIDENCE:
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": f"GEO BLOCK: Long {pick_sector} penalized — ceasefire active, peace dividend",
+                        })
+                        continue
+
             # KELLY CRITERION POSITION SIZING — allocate based on actual edge
             # Falls back to fixed sizing if insufficient trade history
             kelly_size = _kelly_position_size(
