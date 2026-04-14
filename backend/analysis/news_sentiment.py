@@ -1060,3 +1060,153 @@ def detect_event_outcomes() -> list:
                 outcomes.append({"event_key": event["event_key"], "outcome": "expired_unknown"})
 
     return outcomes
+
+
+# ============================================================
+#  CONTEXT-AWARE GEO IMPACT ANALYZER
+#  Instead of hardcoding "ceasefire ending = energy up, tech down",
+#  this reads current headlines to determine the ACTUAL market impact.
+#  Sometimes energy goes DOWN even when a ceasefire ends (e.g., if
+#  a new deal is reached, or if the market already priced it in).
+# ============================================================
+
+# Sector sentiment keywords — what headlines say about each sector
+_SECTOR_BULLISH_KEYWORDS = {
+    "Energy": ["oil surges", "oil rallies", "crude jumps", "energy stocks soar", "oil prices rise",
+               "opec cuts", "supply disruption", "pipeline attack", "oil embargo", "energy crisis",
+               "oil spikes", "petroleum", "gas prices surge", "fuel shortage", "oil supply"],
+    "Technology": ["tech rally", "tech stocks surge", "ai boom", "semiconductor demand", "tech rebound",
+                   "nasdaq surges", "growth stocks rally", "innovation", "tech earnings beat",
+                   "software demand", "cloud growth", "chip stocks surge"],
+    "Industrials": ["defense stocks", "military spending", "defense budget", "arms deal",
+                    "infrastructure bill", "manufacturing boom", "industrial production up"],
+}
+
+_SECTOR_BEARISH_KEYWORDS = {
+    "Energy": ["oil drops", "oil falls", "crude drops", "oil prices fall", "oil plunges",
+               "energy stocks fall", "oil glut", "supply surplus", "demand destruction",
+               "oil prices drop", "crude tumbles", "oil selloff", "petroleum drops",
+               "opec increase", "oil overproduction", "energy decline"],
+    "Technology": ["tech selloff", "tech stocks fall", "growth stocks drop", "nasdaq drops",
+                   "tech correction", "ai bubble", "tech regulation", "antitrust",
+                   "tech earnings miss", "semiconductor slump", "chip stocks fall"],
+    "Industrials": ["defense cuts", "military pullback", "peace dividend", "defense spending cut",
+                    "manufacturing slump", "industrial slowdown"],
+}
+
+# Escalation vs de-escalation keywords
+_ESCALATION_KEYWORDS = [
+    "tensions rise", "escalat", "military buildup", "troops deploy", "missile launch",
+    "attack", "strike", "retaliat", "war", "conflict intensif", "invaded", "bombing",
+    "nuclear threat", "sanctions imposed", "trade war", "tariff", "blockade",
+    "hostilities", "combat", "offensive", "mobiliz", "arms race",
+]
+
+_DEESCALATION_KEYWORDS = [
+    "peace talks", "ceasefire extended", "truce", "de-escalat", "diplomacy",
+    "negotiations resume", "peace deal", "agreement reached", "tensions ease",
+    "ceasefire holds", "sanctions lifted", "embargo lifted", "withdraw",
+    "pullback", "demilitariz", "peace accord", "diplomatic solution",
+    "talks resume", "compromise", "concessions", "goodwill gesture",
+]
+
+
+def analyze_geo_impact_direction() -> dict:
+    """
+    Analyze current headlines to determine the ACTUAL direction of geo impact
+    on each sector. Returns sentiment scores instead of hardcoded assumptions.
+
+    Returns: {
+        "geo_direction": "escalation" | "deescalation" | "neutral",
+        "confidence": float (0-1),
+        "sector_signals": {
+            "Energy": float (-1 to +1, positive = bullish),
+            "Technology": float,
+            "Industrials": float,
+        },
+        "headline_evidence": [str],
+        "should_override_default": bool,
+    }
+    """
+    news = get_market_news()
+    headlines = news.get("headlines", []) if isinstance(news, dict) else []
+    if not headlines:
+        return {
+            "geo_direction": "neutral",
+            "confidence": 0.0,
+            "sector_signals": {},
+            "headline_evidence": [],
+            "should_override_default": False,
+        }
+
+    escalation_score = 0
+    deescalation_score = 0
+    sector_scores = {"Energy": 0.0, "Technology": 0.0, "Industrials": 0.0}
+    evidence = []
+
+    for item in headlines:
+        title = (item.get("title") or "").lower()
+        if not title or len(title) < 10:
+            continue
+
+        # Check escalation vs de-escalation
+        for kw in _ESCALATION_KEYWORDS:
+            if kw in title:
+                escalation_score += 1
+                break
+        for kw in _DEESCALATION_KEYWORDS:
+            if kw in title:
+                deescalation_score += 1
+                break
+
+        # Check sector-specific sentiment
+        for sector in sector_scores:
+            bullish_kws = _SECTOR_BULLISH_KEYWORDS.get(sector, [])
+            bearish_kws = _SECTOR_BEARISH_KEYWORDS.get(sector, [])
+            for kw in bullish_kws:
+                if kw in title:
+                    sector_scores[sector] += 1.0
+                    if len(evidence) < 5:
+                        evidence.append(f"BULLISH {sector}: {title[:80]}")
+                    break
+            for kw in bearish_kws:
+                if kw in title:
+                    sector_scores[sector] -= 1.0
+                    if len(evidence) < 5:
+                        evidence.append(f"BEARISH {sector}: {title[:80]}")
+                    break
+
+    # Normalize sector scores to -1 to +1 range
+    max_abs = max(abs(v) for v in sector_scores.values()) if any(sector_scores.values()) else 1
+    if max_abs > 0:
+        for sector in sector_scores:
+            sector_scores[sector] = round(sector_scores[sector] / max(max_abs, 3), 2)
+
+    # Determine overall direction
+    total = escalation_score + deescalation_score
+    if total == 0:
+        direction = "neutral"
+        confidence = 0.0
+    elif escalation_score > deescalation_score * 1.5:
+        direction = "escalation"
+        confidence = min(1.0, escalation_score / max(total, 1))
+    elif deescalation_score > escalation_score * 1.5:
+        direction = "deescalation"
+        confidence = min(1.0, deescalation_score / max(total, 1))
+    else:
+        direction = "neutral"
+        confidence = 0.3
+
+    # Override default if headlines give strong sector-specific signals
+    should_override = (
+        confidence >= 0.4 or
+        any(abs(v) >= 0.5 for v in sector_scores.values())
+    )
+
+    return {
+        "geo_direction": direction,
+        "confidence": round(confidence, 2),
+        "sector_signals": sector_scores,
+        "headline_evidence": evidence,
+        "should_override_default": should_override,
+    }

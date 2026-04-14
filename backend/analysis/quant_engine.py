@@ -1395,50 +1395,86 @@ def get_macro_overlay() -> dict:
                 known_event_active = True
                 logger.info(f"GEO EVENT ACTIVE: {event_name} (day {days_since}) — forcing elevated risk posture")
 
-        # --- CEASEFIRE / DE-ESCALATION OVERLAY ---
-        # When geopolitical tensions ease (ceasefire, peace deals), the market
-        # rotates: risk-on sectors rally (tech, discretionary), war-premium
-        # sectors pull back (energy, defense). This overlay captures that shift.
+        # --- CONTEXT-AWARE GEO OVERLAY ---
+        # Instead of hardcoding "ceasefire ending = energy up, tech down",
+        # we READ the headlines to determine what's actually happening.
+        # The system decides for itself based on current news sentiment.
         geo_level = macro.get("geopolitical_risk", {}).get("level", "LOW")
         geo_data = macro.get("geopolitical_risk", {})
         ceasefire_detected = geo_data.get("ceasefire_detected", False)
 
-        # If a known geo event is active (e.g. ceasefire ending), override to ELEVATED
-        # UNLESS fresh ceasefire headlines are found (meaning a new deal was reached)
+        # Get REAL-TIME headline sentiment for sectors
+        try:
+            from analysis.news_sentiment import analyze_geo_impact_direction
+            geo_impact = analyze_geo_impact_direction()
+            macro["geo_impact_analysis"] = geo_impact
+            logger.info(f"GEO IMPACT ANALYSIS: direction={geo_impact['geo_direction']}, "
+                        f"confidence={geo_impact['confidence']}, sectors={geo_impact['sector_signals']}")
+        except Exception as _e:
+            logger.debug(f"Geo impact analysis failed: {_e}")
+            geo_impact = {"geo_direction": "neutral", "confidence": 0, "sector_signals": {},
+                          "should_override_default": False, "headline_evidence": []}
+
+        # If a known geo event is active, raise risk level
         if known_event_active and not ceasefire_detected:
             geo_level = "ELEVATED"
             macro["geopolitical_risk"]["level"] = "ELEVATED"
             macro["geopolitical_risk"]["score"] = max(macro.get("geopolitical_risk", {}).get("score", 0), 4)
             macro["known_geo_event_override"] = True
-            logger.info(f"GEO OVERRIDE: Known event forcing ELEVATED (ceasefire ending, no new peace headlines)")
+            logger.info(f"GEO OVERRIDE: Known event forcing ELEVATED risk posture")
 
-        if geo_level in ("LOW", "MINIMAL", "UNKNOWN"):
-            # Peace dividend: boost risk-on, penalize war-premium
-            adjustments["Technology"] = round(adjustments.get("Technology", 0) + 1.5, 1)
-            adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) + 1.0, 1)
-            adjustments["Communication"] = round(adjustments.get("Communication", 0) + 0.8, 1)
-            adjustments["Financials"] = round(adjustments.get("Financials", 0) + 0.5, 1)
-            # Oil loses war premium
-            adjustments["Energy"] = round(adjustments.get("Energy", 0) - 1.5, 1)
-            # Defense stocks cool off
-            adjustments["Industrials"] = round(adjustments.get("Industrials", 0) - 0.5, 1)
-            # Safe haven commodities lose fear premium in peacetime
-            adjustments["Commodities"] = round(adjustments.get("Commodities", 0) - 0.5, 1)
+        # CONTEXT-AWARE SECTOR ADJUSTMENTS
+        # Use headline sentiment to decide direction instead of hardcoding
+        sector_signals = geo_impact.get("sector_signals", {})
+        geo_direction = geo_impact.get("geo_direction", "neutral")
+        geo_confidence = geo_impact.get("confidence", 0)
+
+        if geo_impact.get("should_override_default") and any(sector_signals.values()):
+            # Headlines give us clear sector direction — USE IT
+            for sector, signal in sector_signals.items():
+                if abs(signal) >= 0.3:
+                    adj_amount = round(signal * 1.5, 1)  # Scale signal to adjustment
+                    adjustments[sector] = round(adjustments.get(sector, 0) + adj_amount, 1)
+                    logger.info(f"GEO SMART OVERLAY: {sector} adjustment {adj_amount:+.1f} from headline sentiment")
+
+            # Also adjust correlated sectors based on overall direction
+            if geo_direction == "escalation":
+                adjustments["Commodities"] = round(adjustments.get("Commodities", 0) + 0.8, 1)
+                adjustments["Utilities"] = round(adjustments.get("Utilities", 0) + 0.5, 1)
+                macro["ceasefire_overlay"] = False
+                macro["ceasefire_ending_overlay"] = True
+            elif geo_direction == "deescalation":
+                adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) + 0.8, 1)
+                adjustments["Communication"] = round(adjustments.get("Communication", 0) + 0.5, 1)
+                adjustments["Financials"] = round(adjustments.get("Financials", 0) + 0.5, 1)
+                macro["ceasefire_overlay"] = True
+                macro["ceasefire_ending_overlay"] = False
+            else:
+                macro["ceasefire_overlay"] = False
+                macro["ceasefire_ending_overlay"] = False
+
+            macro["sector_adjustments"] = adjustments
+            macro["geo_overlay_source"] = "headline_sentiment"
+            logger.info(f"GEO OVERLAY: Using headline-driven adjustments (direction={geo_direction}, conf={geo_confidence})")
+
+        elif geo_level in ("LOW", "MINIMAL", "UNKNOWN") and not known_event_active:
+            # No geo events, low risk — mild peace dividend (smaller than before)
+            adjustments["Technology"] = round(adjustments.get("Technology", 0) + 0.8, 1)
+            adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) + 0.5, 1)
+            adjustments["Energy"] = round(adjustments.get("Energy", 0) - 0.5, 1)
             macro["sector_adjustments"] = adjustments
             macro["ceasefire_overlay"] = True
-            logger.info(f"CEASEFIRE OVERLAY: Boosting tech/growth +1.5, penalizing energy -1.5 (geo={geo_level})")
+            macro["ceasefire_ending_overlay"] = False
+            macro["geo_overlay_source"] = "default_peace"
+            logger.info(f"DEFAULT PEACE OVERLAY: Mild risk-on adjustments (geo={geo_level})")
+
         elif known_event_active:
-            # Ceasefire ending — REVERSE the peace overlay
-            # War premium returns: energy/defense up, tech/growth down, commodities up
-            adjustments["Energy"] = round(adjustments.get("Energy", 0) + 1.5, 1)
-            adjustments["Industrials"] = round(adjustments.get("Industrials", 0) + 1.0, 1)
-            adjustments["Commodities"] = round(adjustments.get("Commodities", 0) + 1.0, 1)
-            adjustments["Technology"] = round(adjustments.get("Technology", 0) - 0.8, 1)
-            adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) - 0.5, 1)
-            macro["sector_adjustments"] = adjustments
+            # Geo event active but NO clear headline direction — stay NEUTRAL
+            # Don't force energy up or tech down — let the market data decide
             macro["ceasefire_overlay"] = False
-            macro["ceasefire_ending_overlay"] = True
-            logger.info(f"CEASEFIRE ENDING OVERLAY: Boosting energy/defense/commodities, penalizing tech/growth")
+            macro["ceasefire_ending_overlay"] = True  # flag for entry blocker awareness
+            macro["geo_overlay_source"] = "event_active_neutral"
+            logger.info(f"GEO EVENT ACTIVE: No clear headline direction — staying neutral on sectors")
 
         return macro
 
@@ -3357,16 +3393,27 @@ def generate_quant_picks() -> dict:
                     elif adj <= -1.0:
                         penalized_sectors.add(sector)
 
-            # TACO TRADE PROTECTION — Ceasefire sectors are ALWAYS protected
-            # from mean reversion shorts, regardless of geo risk level.
-            # During ceasefire: Tech rallies, Healthcare rallies, Financials rally,
-            # Consumer Discretionary rallies. Don't let MR overbought signals
-            # short these sectors and fight the ceasefire momentum.
-            TACO_PROTECTED_LONG_SECTORS = {"Technology", "Healthcare", "Financials", "Consumer Discretionary"}
-            TACO_PENALIZED_SECTORS = {"Energy"}  # Energy gets shorted during ceasefire
+            # TACO TRADE PROTECTION — Context-aware sector protection
+            # Uses headline sentiment to determine which sectors to protect from MR shorts.
+            # If headlines show energy is bearish, don't protect it. If tech is bullish, protect it.
+            _geo_impact = macro.get("geo_impact_analysis", {}) if macro else {}
+            _sector_signals = _geo_impact.get("sector_signals", {})
+            TACO_PROTECTED_LONG_SECTORS = set()
+            TACO_PENALIZED_SECTORS = set()
+            # Protect sectors that headlines say are bullish
+            for _sector, _signal in _sector_signals.items():
+                if _signal > 0.3:
+                    TACO_PROTECTED_LONG_SECTORS.add(_sector)
+                elif _signal < -0.3:
+                    TACO_PENALIZED_SECTORS.add(_sector)
+            # Default protection for low-geo-risk environment
+            if not TACO_PROTECTED_LONG_SECTORS and not TACO_PENALIZED_SECTORS:
+                if macro and macro.get("ceasefire_overlay"):
+                    TACO_PROTECTED_LONG_SECTORS = {"Technology", "Healthcare", "Financials", "Consumer Discretionary"}
+                    TACO_PENALIZED_SECTORS = {"Energy"}
             boosted_sectors |= TACO_PROTECTED_LONG_SECTORS
             penalized_sectors |= TACO_PENALIZED_SECTORS
-            logger.info(f"TACO TRADE: Protected sectors (no MR shorts): {TACO_PROTECTED_LONG_SECTORS}")
+            logger.info(f"TACO TRADE: Protected={TACO_PROTECTED_LONG_SECTORS}, Penalized={TACO_PENALIZED_SECTORS} (headline-driven)")
 
             for mr in mr_setups:
                 sym = mr["symbol"]

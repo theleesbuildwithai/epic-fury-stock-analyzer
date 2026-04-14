@@ -964,8 +964,9 @@ def get_portfolio_state() -> dict:
                 "sector": trade.get("sector"),
             }
 
-            # Add options-specific fields
+            # Add options-specific fields with emphasis
             if instrument_type in ("call", "put"):
+                _opt_label = "📞 CALL" if instrument_type == "call" else "📉 PUT"
                 pos_data.update({
                     "strike_price": trade.get("strike_price"),
                     "expiration_date": trade.get("expiration_date"),
@@ -974,6 +975,8 @@ def get_portfolio_state() -> dict:
                     "dte": dte,
                     "option_delta": trade.get("option_delta"),
                     "option_iv": trade.get("option_iv"),
+                    "option_label": _opt_label,
+                    "display_name": f"{_opt_label} {symbol} ${trade.get('strike_price', '?')} exp {trade.get('expiration_date', '?')}",
                 })
 
             positions.append(pos_data)
@@ -1026,8 +1029,10 @@ def get_portfolio_state() -> dict:
             except Exception:
                 trades_per_day = round(len(closed_trades) / max(1, len(dates_with_trades)), 1)
 
-    # --- Options exposure metrics ---
+    # --- Options exposure metrics (CALLS and PUTS emphasized) ---
     options_positions = [p for p in positions if p.get("instrument_type") in ("call", "put")]
+    call_positions = [p for p in positions if p.get("instrument_type") == "call"]
+    put_positions = [p for p in positions if p.get("instrument_type") == "put"]
     equity_positions = [p for p in positions if p.get("instrument_type", "equity") == "equity"]
     options_premium_deployed = sum(p["position_value"] for p in options_positions)
     options_pct = round((options_premium_deployed / total_current) * 100, 1) if total_current > 0 else 0
@@ -1035,6 +1040,8 @@ def get_portfolio_state() -> dict:
         abs(p.get("option_delta", 0.5)) * (p.get("contracts", 0) or p["shares"]) * 100
         for p in options_positions
     )
+    calls_value = sum(p["position_value"] for p in call_positions)
+    puts_value = sum(p["position_value"] for p in put_positions)
 
     result = {
         "total_value": round(total_current, 2),
@@ -1046,6 +1053,8 @@ def get_portfolio_state() -> dict:
         "num_longs": sum(1 for p in positions if p["direction"] == "long"),
         "num_shorts": sum(1 for p in positions if p["direction"] == "short"),
         "num_options": len(options_positions),
+        "num_calls": len(call_positions),
+        "num_puts": len(put_positions),
         "max_positions": MAX_POSITIONS,
         "exposure": {
             "long_value": round(long_value, 2),
@@ -1060,6 +1069,10 @@ def get_portfolio_state() -> dict:
             "options_premium_deployed": round(options_premium_deployed, 2),
             "options_pct": options_pct,
             "options_delta_exposure": round(options_delta_exposure, 2),
+            "calls_value": round(calls_value, 2),
+            "puts_value": round(puts_value, 2),
+            "calls_count": len(call_positions),
+            "puts_count": len(put_positions),
         },
         "positions": positions,
         "recent_closed": [{
@@ -1304,23 +1317,26 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 should_close = True
                 close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap reached"
 
-            # GEO EVENT OVERRIDE: Close positions fighting the geo overlay
-            # e.g., close SHORT energy when ceasefire ends (energy going up)
+            # GEO EVENT OVERRIDE: Close positions fighting headline sentiment
+            # Context-aware: reads actual headlines instead of hardcoded rules
             if not should_close:
                 macro_data = quant_picks.get("macro", {})
                 ceasefire_ending = macro_data.get("ceasefire_ending_overlay", False)
                 ceasefire_active = macro_data.get("ceasefire_overlay", False)
                 trade_sector = trade.get("sector", "")
+                geo_impact = macro_data.get("geo_impact_analysis", {})
+                sector_signals = geo_impact.get("sector_signals", {})
+                sector_signal = sector_signals.get(trade_sector, 0)
 
-                if ceasefire_ending and direction == "short" and trade_sector in ("Energy", "Industrials", "Materials"):
+                # Close positions that FIGHT the headline sentiment
+                if direction == "short" and sector_signal > 0.5:
                     should_close = True
-                    close_reason = f"GEO EVENT EXIT: Short {trade_sector} closed — ceasefire ending, war premium returning"
-                    logger.warning(f"GEO EXIT: Closing short {ticker} ({trade_sector}) — ceasefire ending overlay active")
-                elif ceasefire_active and direction == "long" and trade_sector in ("Energy", "Industrials"):
-                    # If holding long energy/defense during peace, consider closing
-                    if pnl_pct < 2:  # Only close if not solidly profitable
+                    close_reason = f"GEO EVENT EXIT: Short {trade_sector} closed — headlines bullish (signal={sector_signal:+.2f})"
+                    logger.warning(f"GEO EXIT: Closing short {ticker} ({trade_sector}) — headlines bullish")
+                elif direction == "long" and sector_signal < -0.5:
+                    if pnl_pct < 2:
                         should_close = True
-                        close_reason = f"GEO EVENT EXIT: Long {trade_sector} closed — ceasefire detected, war premium fading"
+                        close_reason = f"GEO EVENT EXIT: Long {trade_sector} closed — headlines bearish (signal={sector_signal:+.2f})"
 
             # Check if signal has reversed (optional aggressive exit)
             if not should_close and pnl_pct < -5:
@@ -1547,9 +1563,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             logger.info(f"BEAR regime: {len(short_candidates)} shorts, {len(bear_longs)} safe longs "
                         f"({len(safe_longs)} defensive + {len(high_conviction_longs)} high-conviction)")
         elif regime == "BULL":
-            # BULL + TACO TRADE: Minimize shorts — everything is going up during ceasefire
-            # Check if ceasefire is active
-            ceasefire_active = quant_picks.get("macro", {}).get("ceasefire_overlay", {}).get("ceasefire_active", False)
+            # BULL: Check if de-escalation is active (context-aware)
+            _geo_dir = quant_picks.get("macro", {}).get("geo_impact_analysis", {}).get("geo_direction", "neutral")
+            ceasefire_active = _geo_dir == "deescalation" or quant_picks.get("macro", {}).get("ceasefire_overlay", False)
 
             for p in long_candidates:
                 p["_adj_confidence"] = p["confidence"] + 15
@@ -1751,41 +1767,46 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 continue
 
-            # GEO EVENT ENTRY BLOCKER — prevent trades fighting the geo overlay
-            # e.g., never short energy or long tech when ceasefire is ending
+            # GEO EVENT ENTRY BLOCKER — context-aware, reads headline sentiment
+            # Instead of hardcoding "never short energy when ceasefire ending",
+            # the system reads current headlines to determine what to block.
             macro_data = quant_picks.get("macro", {})
             geo_ceasefire_ending = macro_data.get("ceasefire_ending_overlay", False)
             geo_ceasefire_active = macro_data.get("ceasefire_overlay", False)
             pick_sector = pick.get("sector", "")
+            geo_impact = macro_data.get("geo_impact_analysis", {})
+            geo_sector_signals = geo_impact.get("sector_signals", {})
+            geo_overlay_source = macro_data.get("geo_overlay_source", "")
 
-            if geo_ceasefire_ending:
-                # Ceasefire ending: energy/defense/commodities UP, tech/growth DOWN
-                if direction == "short" and pick_sector in ("Energy", "Industrials", "Materials"):
+            if geo_ceasefire_ending or geo_ceasefire_active:
+                # Check if headlines say THIS sector is going in THIS direction
+                sector_signal = geo_sector_signals.get(pick_sector, 0)
+
+                # Block trades that FIGHT the headline sentiment
+                if direction == "short" and sector_signal > 0.3:
+                    # Headlines say sector is bullish — don't short it
                     results["skipped"].append({
                         "symbol": symbol,
-                        "reason": f"GEO BLOCK: Cannot short {pick_sector} — ceasefire ending, war premium returning",
+                        "reason": f"GEO BLOCK: Cannot short {pick_sector} — headlines bullish (signal={sector_signal:+.2f})",
                     })
-                    logger.warning(f"GEO ENTRY BLOCK: Blocked short {symbol} ({pick_sector}) — ceasefire ending")
+                    logger.warning(f"GEO ENTRY BLOCK: Blocked short {symbol} ({pick_sector}) — headline bullish")
                     continue
-                if direction == "long" and pick_sector in ("Technology", "Consumer Discretionary", "Communication"):
-                    # Don't block entirely, but penalize confidence heavily
-                    pick["confidence"] = max(15, pick["confidence"] - 25)
-                    if pick["confidence"] < MIN_CONFIDENCE:
-                        results["skipped"].append({
-                            "symbol": symbol,
-                            "reason": f"GEO BLOCK: Long {pick_sector} penalized below min — ceasefire ending, risk-off",
-                        })
-                        continue
-            elif geo_ceasefire_active:
-                # Active ceasefire: energy/defense DOWN, tech/growth UP
-                if direction == "long" and pick_sector in ("Energy", "Industrials"):
+                elif direction == "long" and sector_signal < -0.3:
+                    # Headlines say sector is bearish — penalize long
                     pick["confidence"] = max(15, pick["confidence"] - 20)
                     if pick["confidence"] < MIN_CONFIDENCE:
                         results["skipped"].append({
                             "symbol": symbol,
-                            "reason": f"GEO BLOCK: Long {pick_sector} penalized — ceasefire active, peace dividend",
+                            "reason": f"GEO BLOCK: Long {pick_sector} penalized — headlines bearish (signal={sector_signal:+.2f})",
                         })
                         continue
+
+                # If no headline signal but geo event is active, apply mild caution
+                if geo_ceasefire_ending and abs(sector_signal) < 0.3:
+                    if direction in ("long", "short"):
+                        # Mild confidence reduction for uncertainty
+                        pick["confidence"] = max(15, pick["confidence"] - 8)
+                        logger.info(f"GEO CAUTION: {direction} {symbol} ({pick_sector}) — geo event active, no clear headline direction")
 
             # KELLY CRITERION POSITION SIZING — allocate based on actual edge
             # Falls back to fixed sizing if insufficient trade history
@@ -1940,12 +1961,12 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                             premium = strike_info["premium"]
                             # Position sizing: same dollar amount as equity trade
                             max_opts_cost = position_value  # Same $ as would use for equity
-                            # Check options exposure limit (15% of portfolio)
+                            # Check options exposure limit (25% of portfolio)
                             opts_exp = get_options_exposure()
-                            remaining_opts_budget = max(0, (total_value * 0.15) - opts_exp["total_premium_deployed"])
+                            remaining_opts_budget = max(0, (total_value * 0.25) - opts_exp["total_premium_deployed"])
                             max_opts_cost = min(max_opts_cost, remaining_opts_budget)
-                            # Single option trade limit: 4% of portfolio
-                            max_opts_cost = min(max_opts_cost, total_value * 0.04)
+                            # Single option trade limit: 5% of portfolio
+                            max_opts_cost = min(max_opts_cost, total_value * 0.05)
 
                             if max_opts_cost > premium * 100:  # At least 1 contract worth
                                 num_contracts = max(1, int(max_opts_cost / (premium * 100)))
@@ -1998,7 +2019,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                                         "sector": pick.get("sector"),
                                         "auto_decision": opts_decision["rationale"],
                                     })
-                                    logger.info(f"OPTIONS TRADE: {strategy} {num_contracts}x {symbol} {strike_info['strike']} {opt_type} @ ${premium} (exp {strike_info['expiry']})")
+                                    _opt_emoji = "📞 CALL" if opt_type == "call" else "📉 PUT"
+                                    logger.warning(f"🎯 OPTIONS TRADE: {_opt_emoji} — {strategy} {num_contracts}x {symbol} ${strike_info['strike']} @ ${premium:.2f}/contract (exp {strike_info['expiry']}) | Total: ${premium * num_contracts * 100:.0f}")
                     else:
                         logger.info(f"OPTIONS SKIP: No option chain available for {symbol} — falling through to equity")
             except Exception as e:

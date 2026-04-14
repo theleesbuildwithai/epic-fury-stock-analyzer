@@ -290,59 +290,64 @@ def should_use_options(pick: dict, regime: str, portfolio_state: dict,
 
     result = {"use_options": False, "strategy": None, "rationale": ""}
 
-    # Check if options exposure is already maxed
+    # Check if options exposure is already maxed (raised to 25% for more options)
     try:
         from predictions.models import get_options_exposure, get_cash
         opts_exp = get_options_exposure()
         total_value = portfolio_state.get("total_value", 109000)
         opts_pct = opts_exp["total_premium_deployed"] / total_value if total_value > 0 else 0
-        if opts_pct >= 0.15:
-            result["rationale"] = "Options exposure at limit (15%)"
+        if opts_pct >= 0.25:
+            result["rationale"] = "Options exposure at limit (25%)"
             return result
     except Exception:
         pass
 
-    # --- Strategy 1: Buy calls on high-conviction longs ---
-    if direction == "long" and confidence >= 65 and abs_score >= 3.5:
+    # --- Strategy 1: Buy calls on conviction longs (lowered thresholds for more options) ---
+    if direction == "long" and confidence >= 55 and abs_score >= 2.5:
         result["use_options"] = True
         result["strategy"] = "buy_call"
-        result["rationale"] = f"High conviction long (score={composite:.1f}, conf={confidence}%) — buy call for leveraged upside with defined risk"
+        result["rationale"] = f"Conviction long (score={composite:.1f}, conf={confidence}%) — buy call for leveraged upside with defined risk"
         return result
 
-    # --- Strategy 2: Buy puts on high-conviction shorts ---
-    if direction == "short" and confidence >= 65 and abs_score >= 3.5:
+    # --- Strategy 2: Buy puts on conviction shorts (lowered thresholds) ---
+    if direction == "short" and confidence >= 55 and abs_score >= 2.5:
         result["use_options"] = True
         result["strategy"] = "buy_put"
-        result["rationale"] = f"High conviction short (score={composite:.1f}, conf={confidence}%) — buy put for defined-risk downside bet (no margin)"
+        result["rationale"] = f"Conviction short (score={composite:.1f}, conf={confidence}%) — buy put for defined-risk downside bet (no margin)"
         return result
 
-    # --- Strategy 3: Buy calls instead of equity in BEAR regime (defined risk) ---
-    if direction == "long" and regime == "BEAR" and confidence >= 55 and abs_score >= 2.5:
+    # --- Strategy 3: Buy calls/puts in volatile regime (defined risk) ---
+    if regime in ("BEAR", "VOLATILE") and confidence >= 50 and abs_score >= 2.0:
         result["use_options"] = True
-        result["strategy"] = "buy_call"
-        result["rationale"] = f"BEAR regime long — using call for defined risk instead of equity exposure"
+        result["strategy"] = "buy_call" if direction == "long" else "buy_put"
+        result["rationale"] = f"{regime} regime — using options for defined risk instead of equity exposure"
         return result
 
-    # --- Strategy 4: Sell covered call on existing profitable long ---
+    # --- Strategy 4: Buy puts for shorts in any regime (defined risk, no margin) ---
+    if direction == "short" and confidence >= 50 and abs_score >= 2.0:
+        result["use_options"] = True
+        result["strategy"] = "buy_put"
+        result["rationale"] = f"Short via put (score={composite:.1f}) — defined risk, no margin requirement"
+        return result
+
+    # --- Strategy 5: Sell covered call on existing profitable long ---
     if open_trades and direction == "long" and abs_score < 2.0:
-        # Check if we already hold this stock as a profitable long
         for trade in (open_trades or []):
             if (trade.get("ticker") == ticker and
                 trade.get("direction") == "long" and
                 trade.get("instrument_type", "equity") == "equity" and
                 trade.get("status") == "open"):
                 unrealized_pct = trade.get("unrealized_pct", 0)
-                if unrealized_pct > 5:
+                if unrealized_pct > 3:  # Lowered from 5%
                     result["use_options"] = True
                     result["strategy"] = "sell_covered_call"
-                    result["rationale"] = f"Existing long +{unrealized_pct:.1f}% with weakening signal — sell covered call for income"
+                    result["rationale"] = f"Existing long +{unrealized_pct:.1f}% — sell covered call for income"
                     result["covered_trade_id"] = trade.get("trade_id") or trade.get("id")
                     return result
 
-    # --- Strategy 5: Sell cash-secured put on mild bullish ---
-    if direction == "long" and 1.0 <= abs_score <= 2.0 and confidence >= 50:
+    # --- Strategy 6: Sell cash-secured put on mild bullish ---
+    if direction == "long" and 1.0 <= abs_score <= 2.5 and confidence >= 45:
         cash = portfolio_state.get("cash", 0)
-        # Need enough cash to secure the put (strike * 100)
         price = pick.get("price", 0) or pick.get("entry_price", 0)
         if price > 0 and cash >= price * 100:
             result["use_options"] = True

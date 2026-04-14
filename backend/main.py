@@ -302,7 +302,7 @@ except Exception as e:
 # Uses flag file so it only runs ONCE per deployment
 try:
     import os as _os2
-    _reset_flag = _os2.path.join(_os2.path.dirname(__file__), ".portfolio_reset_v2_done")
+    _reset_flag = _os2.path.join(_os2.path.dirname(__file__), ".portfolio_reset_v3_done")
     if not _os2.path.exists(_reset_flag):
         from predictions.models import get_open_trades as _get_open, close_paper_trade as _close_trade, set_cash as _set_cash2
         _open_trades = _get_open()
@@ -318,13 +318,13 @@ try:
             except Exception:
                 pass
         _set_cash2(122156.30)  # $109,000 * 1.1207 = 12.07% return
-        logger.warning(f"PORTFOLIO RESET V2: Closed {_reset_closed} positions, cash set to $122,156.30 (12.07%)")
+        logger.warning(f"PORTFOLIO RESET V3: Closed {_reset_closed} positions, cash set to $122,156.30 (12.07%)")
         with open(_reset_flag, "w") as _f:
             _f.write(f"reset {_reset_closed} positions on {datetime.now().isoformat()}")
     else:
-        logger.info("Portfolio reset v2 already done — skipping")
+        logger.info("Portfolio reset v3 already done — skipping")
 except Exception as e:
-    logger.warning(f"Portfolio reset v2: {e}")
+    logger.warning(f"Portfolio reset v3: {e}")
 
 # ============================================================
 #  AUTONOMOUS TRADING SCHEDULER
@@ -472,9 +472,10 @@ def _should_trade_now() -> dict:
     if _geo_risk_state.get("level") in ("ELEVATED", "CRITICAL"):
         reasons.append(f"GEO-RISK {_geo_risk_state['level']} (score {_geo_risk_state.get('score', 0)}) — defensive rebalance needed")
 
-    # --- TRIGGER 8: Periodic full scan every 30 min during market hours ---
-    if 9 <= hour <= 16 and minute in (0, 1, 30, 31) and not reasons:
-        reasons.append("PERIODIC SCAN — 30-min market check")
+    # --- TRIGGER 8: Periodic full scan every 15 min during market hours ---
+    # System is ALWAYS trading during hours — subconsciously watching the market
+    if 9 <= hour <= 16 and minute in (0, 1, 15, 16, 30, 31, 45, 46) and not reasons:
+        reasons.append("PERIODIC SCAN — 15-min market check (always trading)")
 
     should_trade = len(reasons) > 0
     return {"should_trade": should_trade, "reasons": reasons}
@@ -979,11 +980,11 @@ def _geo_event_tracker():
 scheduler.add_job(
     _geo_event_tracker,
     "interval",
-    minutes=30,
+    minutes=10,
     id="geo_event_tracker",
-    name="Geopolitical Event Tracker (auto-detect deadlines every 30 min)",
+    name="Geopolitical Event Tracker (auto-detect deadlines every 10 min)",
     max_instances=1,
-    misfire_grace_time=600,
+    misfire_grace_time=300,
 )
 
 # --- DAILY 2.5% TAKE-PROFIT RULE ---
