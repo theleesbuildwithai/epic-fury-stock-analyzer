@@ -966,7 +966,7 @@ def get_portfolio_state() -> dict:
 
             # Add options-specific fields with emphasis
             if instrument_type in ("call", "put"):
-                _opt_label = "📞 CALL" if instrument_type == "call" else "📉 PUT"
+                _opt_label = "CALL" if instrument_type == "call" else "PUT"
                 pos_data.update({
                     "strike_price": trade.get("strike_price"),
                     "expiration_date": trade.get("expiration_date"),
@@ -2019,8 +2019,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                                         "sector": pick.get("sector"),
                                         "auto_decision": opts_decision["rationale"],
                                     })
-                                    _opt_emoji = "📞 CALL" if opt_type == "call" else "📉 PUT"
-                                    logger.warning(f"🎯 OPTIONS TRADE: {_opt_emoji} — {strategy} {num_contracts}x {symbol} ${strike_info['strike']} @ ${premium:.2f}/contract (exp {strike_info['expiry']}) | Total: ${premium * num_contracts * 100:.0f}")
+                                    _opt_label = "CALL" if opt_type == "call" else "PUT"
+                                    logger.warning(f"OPTIONS TRADE: {_opt_label} — {strategy} {num_contracts}x {symbol} ${strike_info['strike']} @ ${premium:.2f}/contract (exp {strike_info['expiry']}) | Total: ${premium * num_contracts * 100:.0f}")
                     else:
                         logger.info(f"OPTIONS SKIP: No option chain available for {symbol} — falling through to equity")
             except Exception as e:

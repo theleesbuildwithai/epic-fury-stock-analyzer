@@ -728,8 +728,8 @@ class IBKRAdapter:
                     "contracts": scaled_contracts,
                 })
 
-                opt_emoji = "📞 CALL" if opt_type == "call" else "📉 PUT"
-                logger.warning(f"🎯 IBKR {opt_emoji}: {action} {scaled_contracts}x {ticker} ${strike} exp {expiry} @ ${fill_price:.2f}")
+                opt_label = "CALL" if opt_type == "call" else "PUT"
+                logger.warning(f"IBKR {opt_label}: {action} {scaled_contracts}x {ticker} ${strike} exp {expiry} @ ${fill_price:.2f}")
 
                 return {
                     "ticker": ticker,

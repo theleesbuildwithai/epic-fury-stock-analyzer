@@ -397,14 +397,14 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <div className="text-neutral-600 text-xs">{exp.short_pct || 0}% exposure</div>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-cyan-500/30">
-              <div className="text-neutral-500 text-xs">📞 Calls</div>
+              <div className="text-neutral-500 text-xs">Calls</div>
               <div className="text-cyan-400 font-bold font-mono text-lg">{portfolio.num_calls || 0}</div>
               <div className="text-neutral-600 text-xs">
                 ${((exp.calls_value || 0)).toLocaleString(undefined, {maximumFractionDigits: 0})}
               </div>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-violet-500/30">
-              <div className="text-neutral-500 text-xs">📉 Puts</div>
+              <div className="text-neutral-500 text-xs">Puts</div>
               <div className="text-violet-400 font-bold font-mono text-lg">{portfolio.num_puts || 0}</div>
               <div className="text-neutral-600 text-xs">
                 ${((exp.puts_value || 0)).toLocaleString(undefined, {maximumFractionDigits: 0})}
@@ -931,9 +931,13 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                       )}
                     </td>
                     <td className={`py-2 px-2 text-xs font-bold ${
-                      p.direction === 'long' ? 'text-green-400' : 'text-red-400'
+                      isOption
+                        ? (p.instrument_type === 'call' ? 'text-cyan-400' : 'text-violet-400')
+                        : (p.direction === 'long' ? 'text-green-400' : 'text-red-400')
                     }`}>
-                      {(p.direction || 'long').toUpperCase()}
+                      {isOption
+                        ? p.instrument_type.toUpperCase()
+                        : (p.direction || 'long').toUpperCase()}
                     </td>
                     <td className="py-2 px-2 text-right font-mono text-neutral-400">
                       {isOption ? `$${p.premium ?? p.entry_price ?? 0}` : `$${p.entry_price ?? 0}`}
