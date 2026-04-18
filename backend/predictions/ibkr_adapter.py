@@ -32,8 +32,11 @@ logger = logging.getLogger(__name__)
 # ALL CAPS = THIS IS CRITICAL SAFETY CONFIG. CHANGE WITH EXTREME CARE.
 
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
-IBKR_PAPER_PORT = int(os.getenv("IBKR_PAPER_PORT", "7497"))  # Paper trading port — DEFAULT
-IBKR_LIVE_PORT = int(os.getenv("IBKR_LIVE_PORT", "7496"))     # Live trading port — NEVER default
+# IB Gateway default ports: 4001 (live), 4002 (paper)
+# TWS default ports: 7496 (live), 7497 (paper)
+# Default to Gateway since that's the recommended headless app for API trading.
+IBKR_PAPER_PORT = int(os.getenv("IBKR_PAPER_PORT", "4002"))   # Gateway paper
+IBKR_LIVE_PORT = int(os.getenv("IBKR_LIVE_PORT", "4001"))     # Gateway live
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "1"))
 
 # Master switches — ALL default to OFF/SAFE
