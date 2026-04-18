@@ -1,0 +1,35 @@
+[Unit]
+Description=IB Gateway (via IBC, headless with Xvfb)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/ibc
+Environment=DISPLAY=:99
+Environment=IBC_INI=/opt/ibc/config.ini
+Environment=TWS_MAJOR_VRSN=1030
+Environment=GATEWAY_DIR=/opt/Jts/ibgateway
+
+# Start Xvfb (virtual display), then IBC which runs Gateway inside it
+ExecStartPre=/bin/bash -c 'Xvfb :99 -screen 0 1024x768x16 &'
+ExecStart=/opt/ibc/scripts/ibcstart.sh "${TWS_MAJOR_VRSN}" -g \
+    --tws-path="${GATEWAY_DIR}" \
+    --ibc-path="/opt/ibc" \
+    --ibc-ini="${IBC_INI}" \
+    --mode=live
+
+ExecStopPost=/bin/bash -c 'pkill -f Xvfb || true'
+
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

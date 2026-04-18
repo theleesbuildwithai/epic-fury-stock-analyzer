@@ -1,0 +1,33 @@
+[Unit]
+Description=Epic Fury IBKR Mirror Backend
+After=ibkr-gateway.service network-online.target
+Wants=ibkr-gateway.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/epic-fury-stock-analyzer/backend
+
+# All IBKR mirror env vars (matches what we tested locally)
+Environment=IBKR_ENABLED=true
+Environment=IBKR_LIVE_TRADING=true
+Environment=IBKR_MIRROR_MODE=true
+Environment=IBKR_MIRROR_OPTIONS=true
+Environment=IBKR_MIN_TRADE_DOLLARS=100
+Environment=IBKR_HOST=127.0.0.1
+Environment=IBKR_LIVE_PORT=4001
+
+# Backend binds to 127.0.0.1 only — NEVER expose the API to the internet.
+# To access remotely use SSH tunnel: ssh -L 8000:localhost:8000 ubuntu@<ec2-ip>
+ExecStart=/home/ubuntu/epic-fury-stock-analyzer/backend/venv/bin/python3 \
+    -m uvicorn main:app --host 127.0.0.1 --port 8000
+
+Restart=on-failure
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
