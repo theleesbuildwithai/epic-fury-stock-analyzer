@@ -123,7 +123,13 @@ class IBKRAdapter:
     # ── Connection Management ─────────────────────────────────────────────
 
     def connect(self) -> bool:
-        """Connect to IBKR TWS or IB Gateway."""
+        """Connect to IBKR TWS or IB Gateway.
+
+        Handles FastAPI worker-thread case: ib_insync requires an asyncio
+        event loop in the current thread. FastAPI's threadpool workers have
+        none by default, so we create one if needed, then apply nest_asyncio
+        so it plays nice with any outer loop.
+        """
         if not IBKR_ENABLED:
             logger.info("IBKR disabled — skipping connection")
             return False
@@ -132,6 +138,23 @@ class IBKRAdapter:
         mode = "LIVE" if IBKR_LIVE_TRADING else "PAPER"
 
         try:
+            # Ensure this thread has an asyncio event loop
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError("event loop closed")
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            # Let ib_insync run its loop alongside FastAPI's
+            try:
+                import nest_asyncio
+                nest_asyncio.apply(loop)
+            except ImportError:
+                pass
+
             from ib_insync import IB
             with self._lock:
                 if self._ib is not None:
@@ -141,7 +164,7 @@ class IBKRAdapter:
                         pass
 
                 self._ib = IB()
-                self._ib.connect(IBKR_HOST, port, clientId=IBKR_CLIENT_ID)
+                self._ib.connect(IBKR_HOST, port, clientId=IBKR_CLIENT_ID, timeout=10)
                 self._connected = True
                 self._reconnect_attempts = 0
                 self._last_error = None
