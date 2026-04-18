@@ -2058,6 +2058,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     "trade_id": trade_id,
                     "symbol": symbol,
                     "direction": direction,
+                    "instrument_type": "equity",
                     "price": price,
                     "shares": round(shares, 4),
                     "position_value": round(shares * price, 2),
@@ -2130,17 +2131,33 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         "regime": regime,
     }
 
-    # ── IBKR Dual-Track: Mirror trades to Interactive Brokers ──
-    # Paper trades ALWAYS run above. IBKR is additive — never replaces paper.
+    # ── IBKR Dual-Track: Mirror paper trades 1:1 (scaled to real account) ──
+    # Paper trades ALWAYS run above. IBKR mirrors them proportionally so
+    # whatever % of paper portfolio is bought, same % of IBKR account is bought.
+    # User's account value auto-scales (deposits/withdrawals adjust sizing).
     try:
         from predictions.ibkr_adapter import IBKR_ENABLED, ibkr_execute_trades
         if IBKR_ENABLED:
             import threading
+            # Snapshot the paper trades we just opened + portfolio value for scaling
+            _paper_opened = list(results.get("opened", []))
+            # Fresh portfolio value after trades
+            try:
+                _paper_portfolio_value = get_portfolio_state().get("total_value", ORIGINAL_CAPITAL)
+            except Exception:
+                _paper_portfolio_value = get_cash() + positions_value
             def _ibkr_mirror():
                 try:
-                    ibkr_result = ibkr_execute_trades(quant_picks)
-                    logger.info(f"IBKR dual-track: opened={len(ibkr_result.get('opened', []))}, "
-                               f"errors={len(ibkr_result.get('errors', []))}")
+                    ibkr_result = ibkr_execute_trades(
+                        quant_picks,
+                        paper_opened=_paper_opened,
+                        paper_portfolio_value=_paper_portfolio_value,
+                    )
+                    logger.warning(f"IBKR MIRROR: opened={len(ibkr_result.get('opened', []))} "
+                               f"skipped={len(ibkr_result.get('skipped', []))} "
+                               f"errors={len(ibkr_result.get('errors', []))} "
+                               f"scale={ibkr_result.get('scale_factor')} "
+                               f"live_acct=${ibkr_result.get('live_account_value', 0):.0f}")
                 except Exception as e:
                     logger.error(f"IBKR dual-track error: {e}")
             t = threading.Thread(target=_ibkr_mirror, daemon=True, name="ibkr-mirror")

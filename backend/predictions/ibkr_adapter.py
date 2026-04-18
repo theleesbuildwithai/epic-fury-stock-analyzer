@@ -18,6 +18,7 @@ Author: Sentinel Quant Trading Systems
 """
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -30,21 +31,30 @@ logger = logging.getLogger(__name__)
 # ─── SAFETY CONFIGURATION ────────────────────────────────────────────────────
 # ALL CAPS = THIS IS CRITICAL SAFETY CONFIG. CHANGE WITH EXTREME CARE.
 
-IBKR_HOST = "127.0.0.1"
-IBKR_PAPER_PORT = 7497       # Paper trading port — DEFAULT
-IBKR_LIVE_PORT = 7496         # Live trading port — NEVER default to this
-IBKR_CLIENT_ID = 1
+IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
+IBKR_PAPER_PORT = int(os.getenv("IBKR_PAPER_PORT", "7497"))  # Paper trading port — DEFAULT
+IBKR_LIVE_PORT = int(os.getenv("IBKR_LIVE_PORT", "7496"))     # Live trading port — NEVER default
+IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "1"))
 
 # Master switches — ALL default to OFF/SAFE
-IBKR_ENABLED = False           # Must be True to send ANY orders to IBKR
-IBKR_LIVE_TRADING = False      # False = paper port, True = live port (DANGER)
+IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"
+IBKR_LIVE_TRADING = os.getenv("IBKR_LIVE_TRADING", "false").lower() == "true"
 TRADING_HALTED = False          # Emergency brake — blocks all new orders
 
-# Hard limits — only daily loss limit active
-MAX_POSITION_DOLLARS = 10000      # Max $10K per position (safe default)
-MAX_TOTAL_EXPOSURE = 50000        # Max $50K total exposure (safe default)
-DAILY_LOSS_LIMIT = 500            # Auto-halt if daily loss exceeds this (KEEP)
-MAX_ORDERS_PER_DAY = 999999       # No limit on daily order count
+# ─── MIRROR MODE: scales paper trades proportionally to user's real account ──
+# User has $10K in IBKR, paper trader has $122K. Mirror mode scales every
+# position down by the ratio so the same strategy runs on a smaller account.
+IBKR_ACCOUNT_SIZE = float(os.getenv("IBKR_ACCOUNT_SIZE", "10000"))  # Your real $ in IBKR
+IBKR_MIRROR_MODE = os.getenv("IBKR_MIRROR_MODE", "true").lower() == "true"
+IBKR_MIRROR_OPTIONS = os.getenv("IBKR_MIRROR_OPTIONS", "true").lower() == "true"  # Also mirror calls/puts
+IBKR_MIN_TRADE_DOLLARS = float(os.getenv("IBKR_MIN_TRADE_DOLLARS", "100"))  # Skip trades smaller than this
+
+# Hard limits — ALL AUTO-SCALED from account size by default
+# For $10K: max position $2K (20%), max exposure $10K (100%), daily loss $300 (3%)
+MAX_POSITION_DOLLARS = float(os.getenv("IBKR_MAX_POSITION", str(IBKR_ACCOUNT_SIZE * 0.20)))
+MAX_TOTAL_EXPOSURE = float(os.getenv("IBKR_MAX_EXPOSURE", str(IBKR_ACCOUNT_SIZE * 1.00)))
+DAILY_LOSS_LIMIT = float(os.getenv("IBKR_DAILY_LOSS_LIMIT", str(IBKR_ACCOUNT_SIZE * 0.03)))
+MAX_ORDERS_PER_DAY = int(os.getenv("IBKR_MAX_ORDERS_PER_DAY", "50"))  # Sensible default
 
 # Timing
 RECONNECT_DELAY_BASE = 5       # Seconds, doubles each retry
@@ -248,18 +258,20 @@ class IBKRAdapter:
 
     def _check_position_limits(self, ticker: str, shares: int, price: float,
                                 direction: str) -> tuple:
-        """Check if a specific order passes position size limits."""
+        """Check if a specific order passes position size limits.
+        Uses LIVE scaled limits (not stale static) so they adjust with account size."""
         order_value = abs(shares * price)
+        limits = self._get_live_safety_limits()
 
-        if order_value > MAX_POSITION_DOLLARS:
+        if order_value > limits["max_position"]:
             return False, (f"Position ${order_value:.0f} exceeds max "
-                          f"${MAX_POSITION_DOLLARS} for {ticker}")
+                          f"${limits['max_position']:.0f} (20% of account) for {ticker}")
 
         # Check total exposure
         total_exposure = self._get_total_exposure()
-        if total_exposure + order_value > MAX_TOTAL_EXPOSURE:
+        if total_exposure + order_value > limits["max_exposure"]:
             return False, (f"Total exposure ${total_exposure + order_value:.0f} "
-                          f"would exceed max ${MAX_TOTAL_EXPOSURE}")
+                          f"would exceed max ${limits['max_exposure']:.0f} (100% of account)")
 
         if shares <= 0:
             return False, f"Invalid share count: {shares}"
@@ -280,12 +292,65 @@ class IBKRAdapter:
             logger.error(f"Failed to get exposure: {e}")
             return MAX_TOTAL_EXPOSURE  # Assume worst case
 
+    def _get_live_account_value(self) -> float:
+        """Get the REAL current IBKR account net liquidation value.
+        This auto-adjusts as user adds or withdraws money — no config needed."""
+        try:
+            summary = self.get_account_summary()
+            nl = summary.get("net_liquidation")
+            if nl and nl > 0:
+                return float(nl)
+        except Exception as e:
+            logger.warning(f"Could not fetch live account value: {e}")
+        # Fallback to env var if live fetch fails
+        return IBKR_ACCOUNT_SIZE
+
+    def _get_mirror_scale(self, paper_portfolio_value: float) -> float:
+        """
+        Compute the scale factor to convert paper trader positions into
+        IBKR positions sized for the user's real account.
+
+        Uses LIVE IBKR account value so scaling auto-adjusts when user
+        deposits or withdraws money — no config change needed.
+
+        scale = live_ibkr_value / paper_total
+        e.g. $10K IBKR / $122K paper ≈ 0.082 (every position gets 8.2% size)
+             $50K IBKR / $122K paper ≈ 0.410 (every position gets 41% size)
+        """
+        if not IBKR_MIRROR_MODE or paper_portfolio_value <= 0:
+            return 1.0
+        live_value = self._get_live_account_value()
+        scale = live_value / max(paper_portfolio_value, 1.0)
+        # Cap scale at 1.0 — we never trade MORE in IBKR than paper
+        return min(scale, 1.0)
+
+    def _get_live_safety_limits(self) -> dict:
+        """Safety limits auto-scale from LIVE IBKR account value.
+        User can deposit more → limits grow. Withdraw → limits shrink.
+        Keeps risk at the same % of account regardless of account size."""
+        live_value = self._get_live_account_value()
+        return {
+            "max_position": live_value * 0.20,   # 20% of account per position
+            "max_exposure": live_value * 1.00,   # 100% of account (no leverage)
+            "daily_loss_limit": live_value * 0.03,  # 3% daily stop
+        }
+
     # ── Order Execution ───────────────────────────────────────────────────
 
-    def execute_trades(self, quant_picks: dict) -> dict:
+    def execute_trades(self, quant_picks: dict, paper_opened: list = None,
+                        paper_portfolio_value: float = 0) -> dict:
         """
         Execute trades on IBKR based on quant signals.
         Mirrors the interface of paper_trader.execute_trades_from_signals().
+
+        Mirror mode: if paper_opened is provided, IBKR mirrors the EXACT same
+        trades the paper trader just made, scaled to the user's account size.
+        This guarantees 1:1 sync with the paper system.
+
+        Args:
+            quant_picks: Quant engine output (fallback source)
+            paper_opened: List of trades paper trader just opened (preferred)
+            paper_portfolio_value: Total paper portfolio value (for scaling)
 
         Returns dict with opened, closed, skipped, errors lists.
         """
@@ -295,6 +360,7 @@ class IBKRAdapter:
             "skipped": [],
             "errors": [],
             "ibkr_mode": "LIVE" if IBKR_LIVE_TRADING else "PAPER",
+            "mirror_mode": IBKR_MIRROR_MODE,
         }
 
         # Master safety check
@@ -310,10 +376,35 @@ class IBKRAdapter:
 
         regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
-        # Process long picks
+        # Compute scale factor (live IBKR value / paper total value)
+        scale = self._get_mirror_scale(paper_portfolio_value) if paper_portfolio_value else 1.0
+        results["scale_factor"] = round(scale, 4)
+        results["live_account_value"] = round(self._get_live_account_value(), 2)
+        logger.warning(f"IBKR MIRROR: scale={scale:.4f} (live_acct=${results['live_account_value']:.0f}, paper=${paper_portfolio_value:.0f})")
+
+        # ── MIRROR MODE: copy each paper trade 1:1 (scaled) ──
+        if paper_opened and IBKR_MIRROR_MODE:
+            for paper_trade in paper_opened:
+                instrument = paper_trade.get("instrument_type", "equity")
+                if instrument in ("call", "put") and not IBKR_MIRROR_OPTIONS:
+                    results["skipped"].append({
+                        "ticker": paper_trade.get("symbol"),
+                        "reason": "Options mirroring disabled (IBKR_MIRROR_OPTIONS=false)",
+                    })
+                    continue
+                result = self._mirror_paper_trade(paper_trade, regime, scale)
+                if result.get("status") == "filled":
+                    results["opened"].append(result)
+                elif result.get("status") == "skipped":
+                    results["skipped"].append(result)
+                else:
+                    results["errors"].append(result)
+            return results
+
+        # ── FALLBACK: use quant_picks directly if no paper_opened provided ──
         long_picks = quant_picks.get("long_picks", [])
-        for pick in long_picks[:5]:  # Max 5 new positions per cycle
-            result = self._submit_entry_order(pick, "long", regime)
+        for pick in long_picks[:5]:
+            result = self._submit_entry_order(pick, "long", regime, scale=scale)
             if result.get("status") == "filled":
                 results["opened"].append(result)
             elif result.get("status") == "skipped":
@@ -321,10 +412,9 @@ class IBKRAdapter:
             else:
                 results["errors"].append(result)
 
-        # Process short picks
         short_picks = quant_picks.get("short_picks", [])
-        for pick in short_picks[:3]:  # Max 3 short positions per cycle
-            result = self._submit_entry_order(pick, "short", regime)
+        for pick in short_picks[:3]:
+            result = self._submit_entry_order(pick, "short", regime, scale=scale)
             if result.get("status") == "filled":
                 results["opened"].append(result)
             elif result.get("status") == "skipped":
@@ -334,12 +424,36 @@ class IBKRAdapter:
 
         return results
 
+    def _mirror_paper_trade(self, paper_trade: dict, regime: str, scale: float) -> dict:
+        """
+        Mirror a single paper trade onto IBKR, scaled to the user's account.
+        Handles both equity and options.
+        """
+        symbol = paper_trade.get("symbol") or paper_trade.get("ticker")
+        direction = paper_trade.get("direction", "long")
+        instrument = paper_trade.get("instrument_type", "equity")
+
+        if instrument in ("call", "put"):
+            return self._submit_option_order(paper_trade, regime, scale)
+        else:
+            return self._submit_entry_order(paper_trade, direction, regime,
+                                             scale=scale,
+                                             paper_shares=paper_trade.get("shares"),
+                                             paper_value=paper_trade.get("position_value"))
+
     def _submit_entry_order(self, pick: dict, direction: str,
-                            regime: str) -> dict:
-        """Submit a single entry order with bracket (stop + target)."""
+                            regime: str, scale: float = 1.0,
+                            paper_shares: int = None,
+                            paper_value: float = None) -> dict:
+        """Submit a single entry order with bracket (stop + target).
+
+        If paper_shares/paper_value are provided and scale < 1.0, the IBKR
+        position is sized as paper_value * scale (mirrors the paper trade
+        proportionally). Otherwise uses MAX_POSITION_DOLLARS.
+        """
         global _orders_today
 
-        ticker = pick.get("ticker", "")
+        ticker = pick.get("ticker") or pick.get("symbol", "")
         if not ticker:
             return {"ticker": "?", "status": "error", "reason": "No ticker"}
 
@@ -364,12 +478,25 @@ class IBKRAdapter:
 
             self._ib.cancelMktData(contract)
 
-            # Calculate position size (respect hard cap)
-            raw_value = MAX_POSITION_DOLLARS
-            shares = int(raw_value / current_price)
+            # ── Position sizing ──
+            # Mirror mode: scale the paper trade's dollar value down to IBKR size
+            limits = self._get_live_safety_limits()
+            max_position = limits["max_position"]
+            if paper_value and scale < 1.0:
+                # Proportional mirror: same % of portfolio as paper trade
+                target_value = paper_value * scale
+                target_value = min(target_value, max_position)
+            else:
+                target_value = min(max_position, MAX_POSITION_DOLLARS)
+
+            if target_value < IBKR_MIN_TRADE_DOLLARS:
+                return {"ticker": ticker, "status": "skipped",
+                        "reason": f"Trade size ${target_value:.2f} below minimum ${IBKR_MIN_TRADE_DOLLARS}"}
+
+            shares = int(target_value / current_price)
             if shares <= 0:
                 return {"ticker": ticker, "status": "skipped",
-                        "reason": f"Price ${current_price:.2f} too high for max position ${MAX_POSITION_DOLLARS}"}
+                        "reason": f"Price ${current_price:.2f} too high for scaled position ${target_value:.2f}"}
 
             # Position limit check
             ok, reason = self._check_position_limits(
@@ -493,6 +620,144 @@ class IBKRAdapter:
                 "error": str(e),
             })
             logger.error(f"IBKR order error for {ticker}: {e}")
+            return {"ticker": ticker, "status": "error", "reason": str(e)}
+
+    # ── OPTIONS ORDER SUBMISSION ──────────────────────────────────────────
+
+    def _submit_option_order(self, paper_trade: dict, regime: str,
+                             scale: float = 1.0) -> dict:
+        """
+        Mirror a paper options trade onto IBKR. Uses the SAME strike and
+        expiry chosen by the paper trader, just scaled down in contracts.
+        """
+        global _orders_today
+        ticker = paper_trade.get("symbol") or paper_trade.get("ticker", "")
+        opt_type = paper_trade.get("instrument_type", "call")  # 'call' or 'put'
+        strike = paper_trade.get("strike")
+        expiry = paper_trade.get("expiry")
+        paper_contracts = paper_trade.get("contracts", 1)
+        paper_premium = paper_trade.get("premium", 0)
+        strategy = paper_trade.get("strategy", "buy_call")
+
+        if not ticker or not strike or not expiry:
+            return {"ticker": ticker, "status": "skipped",
+                    "reason": f"Missing option details (strike={strike}, expiry={expiry})"}
+
+        try:
+            from ib_insync import Option, MarketOrder, LimitOrder, StopOrder
+
+            # IBKR expiry format: YYYYMMDD (strip dashes from 2026-04-18)
+            expiry_ibkr = expiry.replace("-", "")
+
+            # Build option contract
+            right = "C" if opt_type == "call" else "P"
+            contract = Option(ticker, expiry_ibkr, float(strike), right, "SMART")
+            self._ib.qualifyContracts(contract)
+
+            # Get current premium for sizing validation
+            ticker_data = self._ib.reqMktData(contract, '', False, False)
+            self._ib.sleep(2)
+            current_premium = ticker_data.marketPrice()
+            if not current_premium or current_premium <= 0:
+                current_premium = ticker_data.last or ticker_data.close or paper_premium
+            self._ib.cancelMktData(contract)
+
+            if not current_premium or current_premium <= 0:
+                return {"ticker": ticker, "status": "skipped",
+                        "reason": "Cannot get option premium"}
+
+            # ── Scale contracts proportionally ──
+            # Mirror: IBKR_contracts = paper_contracts * scale (min 1)
+            scaled_contracts = max(1, int(round(paper_contracts * scale)))
+
+            # Validate size against live account safety limits
+            limits = self._get_live_safety_limits()
+            position_value = scaled_contracts * current_premium * 100
+            if position_value > limits["max_position"]:
+                # Reduce contracts to fit within position limit
+                scaled_contracts = max(1, int(limits["max_position"] / (current_premium * 100)))
+                position_value = scaled_contracts * current_premium * 100
+
+            if position_value < IBKR_MIN_TRADE_DOLLARS:
+                return {"ticker": ticker, "status": "skipped",
+                        "reason": f"Option trade ${position_value:.2f} below minimum ${IBKR_MIN_TRADE_DOLLARS}"}
+
+            # Check exposure
+            total_exposure = self._get_total_exposure()
+            if total_exposure + position_value > limits["max_exposure"]:
+                return {"ticker": ticker, "status": "skipped",
+                        "reason": f"Option trade would exceed max exposure"}
+
+            # BUY or SELL depending on strategy
+            action = "BUY" if strategy.startswith("buy") else "SELL"
+
+            _log_order({
+                "action": "SUBMIT_OPTION",
+                "ticker": ticker,
+                "option_type": opt_type,
+                "strike": strike,
+                "expiry": expiry,
+                "contracts": scaled_contracts,
+                "premium": current_premium,
+                "position_value": round(position_value, 2),
+                "strategy": strategy,
+                "scale": round(scale, 4),
+            })
+
+            # Submit as limit order at 2% above market (give room for fill)
+            limit_price = round(current_premium * (1.02 if action == "BUY" else 0.98), 2)
+            order = LimitOrder(action, scaled_contracts, limit_price)
+            trade = self._ib.placeOrder(contract, order)
+
+            # Wait for fill
+            start_wait = time.time()
+            while (time.time() - start_wait < FILL_TIMEOUT
+                   and trade.orderStatus.status not in ("Filled", "Cancelled")):
+                self._ib.sleep(0.5)
+
+            if trade.orderStatus.status == "Filled":
+                fill_price = trade.orderStatus.avgFillPrice
+                with _orders_today_lock:
+                    _orders_today += 1
+
+                _log_order({
+                    "action": "OPTION_FILLED",
+                    "ticker": ticker,
+                    "option_type": opt_type,
+                    "fill_price": fill_price,
+                    "contracts": scaled_contracts,
+                })
+
+                opt_emoji = "📞 CALL" if opt_type == "call" else "📉 PUT"
+                logger.warning(f"🎯 IBKR {opt_emoji}: {action} {scaled_contracts}x {ticker} ${strike} exp {expiry} @ ${fill_price:.2f}")
+
+                return {
+                    "ticker": ticker,
+                    "instrument_type": opt_type,
+                    "strategy": strategy,
+                    "strike": strike,
+                    "expiry": expiry,
+                    "contracts": scaled_contracts,
+                    "premium": fill_price,
+                    "position_value": round(scaled_contracts * fill_price * 100, 2),
+                    "status": "filled",
+                    "order_id": trade.order.orderId,
+                    "ibkr_mode": "LIVE" if IBKR_LIVE_TRADING else "PAPER",
+                }
+            else:
+                try:
+                    self._ib.cancelOrder(trade.order)
+                except Exception:
+                    pass
+                return {"ticker": ticker, "status": "error",
+                        "reason": f"Option fill timeout — status: {trade.orderStatus.status}"}
+
+        except ImportError:
+            return {"ticker": ticker, "status": "error",
+                    "reason": "ib_insync not installed"}
+        except Exception as e:
+            _log_order({"action": "OPTION_ERROR", "ticker": ticker, "error": str(e)})
+            logger.error(f"IBKR option error for {ticker}: {e}")
             return {"ticker": ticker, "status": "error", "reason": str(e)}
 
     # ── Exit / Kill Switch ────────────────────────────────────────────────
@@ -710,6 +975,17 @@ class IBKRAdapter:
 
     def get_status(self) -> dict:
         """Full status summary for the dashboard."""
+        live_value = 0.0
+        try:
+            if self.is_connected():
+                live_value = self._get_live_account_value()
+        except Exception:
+            pass
+        limits = self._get_live_safety_limits() if self.is_connected() else {
+            "max_position": MAX_POSITION_DOLLARS,
+            "max_exposure": MAX_TOTAL_EXPOSURE,
+            "daily_loss_limit": DAILY_LOSS_LIMIT,
+        }
         return {
             "connected": self.is_connected(),
             "enabled": IBKR_ENABLED,
@@ -718,12 +994,20 @@ class IBKRAdapter:
             "port": IBKR_LIVE_PORT if IBKR_LIVE_TRADING else IBKR_PAPER_PORT,
             "last_error": self._last_error,
             "reconnect_attempts": self._reconnect_attempts,
+            "mirror": {
+                "mode": IBKR_MIRROR_MODE,
+                "mirror_options": IBKR_MIRROR_OPTIONS,
+                "live_account_value": round(live_value, 2),
+                "min_trade_dollars": IBKR_MIN_TRADE_DOLLARS,
+            },
             "safety": {
-                "max_position_dollars": MAX_POSITION_DOLLARS,
-                "max_total_exposure": MAX_TOTAL_EXPOSURE,
-                "daily_loss_limit": DAILY_LOSS_LIMIT,
+                "max_position_dollars": round(limits["max_position"], 2),
+                "max_total_exposure": round(limits["max_exposure"], 2),
+                "daily_loss_limit": round(limits["daily_loss_limit"], 2),
                 "max_orders_per_day": MAX_ORDERS_PER_DAY,
                 "market_hours_only": True,
+                "auto_scaled": True,
+                "notes": "Limits auto-scale from live IBKR account value (20%/100%/3%)",
             },
         }
 
@@ -746,10 +1030,18 @@ def get_ibkr_adapter() -> IBKRAdapter:
 
 # ─── CONVENIENCE FUNCTIONS (match paper_trader interface) ─────────────────────
 
-def ibkr_execute_trades(quant_picks: dict) -> dict:
-    """Execute trades via IBKR. Same interface as execute_trades_from_signals."""
+def ibkr_execute_trades(quant_picks: dict, paper_opened: list = None,
+                         paper_portfolio_value: float = 0) -> dict:
+    """Execute trades via IBKR. Mirrors paper trader 1:1 (scaled to account size).
+
+    Args:
+        quant_picks: Fresh quant engine output (fallback)
+        paper_opened: Trades the paper trader just opened (preferred for exact mirror)
+        paper_portfolio_value: Total paper portfolio $ value (for scaling)
+    """
     adapter = get_ibkr_adapter()
-    return adapter.execute_trades(quant_picks)
+    return adapter.execute_trades(quant_picks, paper_opened=paper_opened,
+                                    paper_portfolio_value=paper_portfolio_value)
 
 
 def ibkr_flatten_all(reason: str = "manual") -> dict:
