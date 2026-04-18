@@ -845,6 +845,7 @@ scheduler.add_job(
     name="Daily Post-Market Learning Cycle",
     max_instances=1,
     misfire_grace_time=3600,
+    replace_existing=True,
 )
 
 # --- DAILY PERFORMANCE CHECK (6pm ET) ---
@@ -1312,10 +1313,11 @@ scheduler.add_job(
     "cron",
     hour=19,
     minute=30,
-    id="daily_learning",
+    id="daily_learning_evening",
     name="Daily Learning Cycle (7:30pm)",
     max_instances=1,
     misfire_grace_time=3600,
+    replace_existing=True,
 )
 
 scheduler.start()
