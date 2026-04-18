@@ -2080,15 +2080,29 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         total_value = state["total_value"]  # Already uses atomic cash
 
         # Get S&P 500 performance for comparison
+        # IMPORTANT: sp500_cum must be TRUE cumulative from inception, not 1-month rolling
         sp500_daily = 0
         sp500_cum = 0
         try:
+            # Determine inception date (matches fund's actual start)
+            try:
+                from predictions.models import get_all_paper_trades as _get_all_trades
+                _all_trades = _get_all_trades()
+                if _all_trades:
+                    _earliest = min(t.get("entry_date", "2026-01-01") for t in _all_trades)
+                    _inception = _earliest[:10]
+                else:
+                    _inception = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            except Exception:
+                _inception = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
             _throttle()
-            sp_df = yf.download("^GSPC", period="1mo", progress=False)
+            # Download from inception to today (not just last month!)
+            sp_df = yf.download("^GSPC", start=_inception, progress=False)
             if sp_df is not None and len(sp_df) >= 2:
                 sp_closes = _safe_col(sp_df, "Close").values.astype(float)
                 sp500_daily = ((sp_closes[-1] / sp_closes[-2]) - 1) * 100
-                # Use first available snapshot date or 1 month ago
+                # TRUE cumulative: from inception close to today
                 sp500_cum = ((sp_closes[-1] / sp_closes[0]) - 1) * 100
         except Exception:
             pass

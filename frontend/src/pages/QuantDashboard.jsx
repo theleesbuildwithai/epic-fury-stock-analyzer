@@ -371,7 +371,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
           </div>
 
           {/* Key metrics row */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 mt-5">
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-neutral-800">
               <div className="text-neutral-500 text-xs">Cash</div>
               <div className="text-white font-bold font-mono text-lg">
@@ -396,11 +396,25 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <div className="text-red-400 font-bold font-mono text-lg">{portfolio.num_shorts || 0}</div>
               <div className="text-neutral-600 text-xs">{exp.short_pct || 0}% exposure</div>
             </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-cyan-500/30">
+              <div className="text-neutral-500 text-xs">📞 Calls</div>
+              <div className="text-cyan-400 font-bold font-mono text-lg">{portfolio.num_calls || 0}</div>
+              <div className="text-neutral-600 text-xs">
+                ${((exp.calls_value || 0)).toLocaleString(undefined, {maximumFractionDigits: 0})}
+              </div>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-violet-500/30">
+              <div className="text-neutral-500 text-xs">📉 Puts</div>
+              <div className="text-violet-400 font-bold font-mono text-lg">{portfolio.num_puts || 0}</div>
+              <div className="text-neutral-600 text-xs">
+                ${((exp.puts_value || 0)).toLocaleString(undefined, {maximumFractionDigits: 0})}
+              </div>
+            </div>
             {(portfolio.num_options || 0) > 0 && (
-              <div className="bg-neutral-900/80 rounded-lg p-3 border border-cyan-500/20">
-                <div className="text-neutral-500 text-xs">Options</div>
-                <div className="text-cyan-400 font-bold font-mono text-lg">{portfolio.num_options || 0}</div>
-                <div className="text-neutral-600 text-xs">{exp.options_pct || 0}% premium</div>
+              <div className="bg-neutral-900/80 rounded-lg p-3 border border-amber-500/30">
+                <div className="text-neutral-500 text-xs">Options %</div>
+                <div className="text-amber-400 font-bold font-mono text-lg">{exp.options_pct || 0}%</div>
+                <div className="text-neutral-600 text-xs">of portfolio</div>
               </div>
             )}
           </div>

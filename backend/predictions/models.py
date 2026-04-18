@@ -512,6 +512,28 @@ def get_portfolio_snapshots(days: int = 365) -> list:
     return [dict(row) for row in reversed(rows)]
 
 
+def update_snapshot_sp500(snapshot_date: str, sp500_cum: float, sp500_daily: float = None):
+    """Update the S&P 500 cumulative return on an existing snapshot.
+    Used to backfill correct historical S&P data when the calculation bug is fixed."""
+    conn = get_db()
+    if sp500_daily is not None:
+        conn.execute(
+            """UPDATE portfolio_snapshots
+               SET sp500_cumulative_return_pct=?, sp500_daily_return_pct=?
+               WHERE snapshot_date=?""",
+            (sp500_cum, sp500_daily, snapshot_date)
+        )
+    else:
+        conn.execute(
+            """UPDATE portfolio_snapshots
+               SET sp500_cumulative_return_pct=?
+               WHERE snapshot_date=?""",
+            (sp500_cum, snapshot_date)
+        )
+    conn.commit()
+    conn.close()
+
+
 def get_signal_weights() -> dict:
     """Get current factor weights from the learning system."""
     conn = get_db()

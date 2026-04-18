@@ -326,6 +326,50 @@ try:
 except Exception as e:
     logger.warning(f"Portfolio reset v3: {e}")
 
+# --- ONE-TIME S&P 500 BACKFILL: Fix buggy 1-month rolling values ---
+# Previously, sp500_cumulative_return_pct was computed from only 1 month of
+# S&P data, making the equity curve's S&P benchmark look wrong. This backfills
+# correct cumulative values from inception for all historical snapshots.
+try:
+    import os as _os3
+    _sp_backfill_flag = _os3.path.join(_os3.path.dirname(__file__), ".sp500_backfill_v1_done")
+    if not _os3.path.exists(_sp_backfill_flag):
+        from predictions.models import get_portfolio_snapshots as _get_snaps, update_snapshot_sp500 as _update_snap
+        import yfinance as _yf3
+        _snaps = _get_snaps(days=365)
+        if _snaps and len(_snaps) >= 2:
+            _earliest_snap = _snaps[0]["snapshot_date"]
+            _sp_df = _yf3.download("^GSPC", start=_earliest_snap, progress=False)
+            if _sp_df is not None and len(_sp_df) >= 2:
+                _sp_closes = _sp_df["Close"].values.astype(float)
+                _sp_dates = [d.strftime("%Y-%m-%d") for d in _sp_df.index]
+                _baseline_close = float(_sp_closes[0])
+                _fixed = 0
+                for _snap in _snaps:
+                    _snap_date = _snap["snapshot_date"]
+                    _prev_close = None
+                    _match_close = None
+                    for _i, _d in enumerate(_sp_dates):
+                        if _d <= _snap_date:
+                            _match_close = float(_sp_closes[_i])
+                            if _i > 0:
+                                _prev_close = float(_sp_closes[_i - 1])
+                    if _match_close:
+                        _cum = ((_match_close / _baseline_close) - 1) * 100
+                        _daily = ((_match_close / _prev_close) - 1) * 100 if _prev_close else 0
+                        try:
+                            _update_snap(_snap_date, round(_cum, 2), round(_daily, 2))
+                            _fixed += 1
+                        except Exception:
+                            pass
+                logger.warning(f"S&P BACKFILL V1: Fixed {_fixed} historical snapshots with correct cumulative returns")
+                with open(_sp_backfill_flag, "w") as _f:
+                    _f.write(f"backfilled {_fixed} snapshots on {datetime.now().isoformat()}")
+    else:
+        logger.info("S&P backfill v1 already done — skipping")
+except Exception as e:
+    logger.warning(f"S&P backfill v1: {e}")
+
 # ============================================================
 #  AUTONOMOUS TRADING SCHEDULER
 #  Runs server-side on App Runner — works 24/7, no human needed.
