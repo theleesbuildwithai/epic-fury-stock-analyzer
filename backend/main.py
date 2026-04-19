@@ -2279,6 +2279,119 @@ def ibkr_unhalt_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── IBKR Safety Endpoints (drift, slippage, pre-flight, reconciliation) ──────
+
+@app.get("/api/ibkr/drift")
+def ibkr_drift_endpoint(request: Request):
+    """Check position drift between paper and IBKR. Returns critical/warning/ok."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_safety import check_position_drift, get_drift_history
+        from predictions.ibkr_adapter import get_ibkr_adapter
+        adapter = get_ibkr_adapter()
+        if not adapter.is_connected():
+            return {"status": "unavailable", "reason": "IBKR not connected"}
+        paper_state = get_portfolio_state()
+        ibkr_positions = adapter._ib.positions() if adapter._ib else []
+        ibkr_pos_dicts = [
+            {
+                "ticker": p.contract.symbol,
+                "position": p.position,
+                "avgCost": p.avgCost,
+            }
+            for p in ibkr_positions
+        ]
+        scale = adapter._get_mirror_scale(paper_state.get("total_value", 0))
+        result = check_position_drift(
+            paper_state.get("positions", []),
+            ibkr_pos_dicts,
+            scale,
+        )
+        return {
+            "current": result,
+            "history": get_drift_history(limit=10),
+        }
+    except Exception as e:
+        logger.error(f"IBKR drift check error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/ibkr/slippage")
+def ibkr_slippage_endpoint(request: Request):
+    """Get slippage summary and recent fill comparisons."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_safety import get_slippage_summary, get_slippage_log
+        return {
+            "summary_24h": get_slippage_summary(window_hours=24),
+            "summary_7d": get_slippage_summary(window_hours=168),
+            "recent_fills": get_slippage_log(limit=30),
+        }
+    except Exception as e:
+        logger.error(f"IBKR slippage error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/ibkr/preflight")
+def ibkr_preflight_endpoint(request: Request):
+    """Run pre-flight self-test. Submits + cancels a test order to verify wiring."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_safety import run_preflight_test
+        from predictions.ibkr_adapter import get_ibkr_adapter
+        adapter = get_ibkr_adapter()
+        if not adapter.is_connected():
+            return {"overall": "FAIL", "reason": "IBKR not connected"}
+        result = run_preflight_test(adapter)
+        return result
+    except Exception as e:
+        logger.error(f"IBKR preflight error: {e}")
+        return {"overall": "FAIL", "error": str(e)}
+
+
+@app.get("/api/ibkr/preflight")
+def ibkr_preflight_status(request: Request):
+    """Get the most recent pre-flight result without running a new test."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_safety import get_preflight_result
+        return get_preflight_result() or {"status": "never_run"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/ibkr/filter-stats")
+def ibkr_filter_stats_endpoint(request: Request):
+    """Get current strategy filter state — sector cooldowns, rapid-fire counter, etc."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.strategy_filters import get_filter_stats
+        return get_filter_stats()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/ibkr/reconcile")
+def ibkr_reconcile_endpoint(request: Request):
+    """End-of-day reconciliation: paper P&L vs IBKR P&L."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_safety import daily_reconciliation_report
+        from predictions.ibkr_adapter import get_ibkr_adapter, ibkr_get_account, ibkr_get_positions
+        adapter = get_ibkr_adapter()
+        paper_state = get_portfolio_state()
+        ibkr_account = ibkr_get_account() if adapter.is_connected() else {}
+        ibkr_positions = ibkr_get_positions() if adapter.is_connected() else []
+        ibkr_state = {
+            **ibkr_account,
+            "positions": ibkr_positions,
+        }
+        return daily_reconciliation_report(paper_state, ibkr_state)
+    except Exception as e:
+        logger.error(f"IBKR reconcile error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
 @app.get("/api/auto-trading-status")
 def auto_trading_status(request: Request):
     """Get autonomous trading system status — the computer's brain."""

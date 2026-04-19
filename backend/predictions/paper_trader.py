@@ -2141,6 +2141,42 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             import threading
             # Snapshot the paper trades we just opened + portfolio value for scaling
             _paper_opened = list(results.get("opened", []))
+
+            # ── STRATEGY FILTERS — applied BEFORE mirroring to IBKR ──
+            # Reduces whipsaw, blocks rapid-fire opens, gates options to
+            # liquid windows. Paper still fired these trades; IBKR is the
+            # filtered slice that reaches real money.
+            try:
+                from predictions.strategy_filters import (
+                    apply_all_filters, record_sector_trade, record_open,
+                )
+                _filtered_opens = []
+                _filter_blocked = []
+                for _trade in _paper_opened:
+                    _result = apply_all_filters(_trade)
+                    if _result["allow"]:
+                        # Apply confidence adjustment so downstream sizing is correct
+                        _trade["confidence"] = _result["adjusted_confidence"]
+                        _filtered_opens.append(_trade)
+                        record_sector_trade(_trade.get("sector", ""), _trade.get("direction", ""))
+                        record_open(_trade.get("symbol", _trade.get("ticker", "")))
+                    else:
+                        _filter_blocked.append({
+                            "symbol": _trade.get("symbol", _trade.get("ticker")),
+                            "blocked_by": _result["blocking_filter"],
+                            "reasons": _result["reasons"],
+                        })
+                if _filter_blocked:
+                    logger.warning(
+                        f"STRATEGY FILTERS blocked {len(_filter_blocked)}/{len(_paper_opened)} "
+                        f"trades from IBKR mirror: {[b['symbol'] for b in _filter_blocked]}"
+                    )
+                _paper_opened = _filtered_opens
+            except ImportError:
+                pass  # filters module not available — proceed with all trades
+            except Exception as _fe:
+                logger.error(f"Strategy filter error (proceeding without filter): {_fe}")
+
             # Fresh portfolio value after trades
             try:
                 _paper_portfolio_value = get_portfolio_state().get("total_value", ORIGINAL_CAPITAL)
