@@ -302,15 +302,15 @@ def should_use_options(pick: dict, regime: str, portfolio_state: dict,
     except Exception:
         pass
 
-    # --- Strategy 1: Buy calls on conviction longs (lowered thresholds for more options) ---
-    if direction == "long" and confidence >= 55 and abs_score >= 2.5:
+    # --- Strategy 1: Buy calls on conviction longs (aggressively lowered) ---
+    if direction == "long" and confidence >= 50 and abs_score >= 1.8:
         result["use_options"] = True
         result["strategy"] = "buy_call"
         result["rationale"] = f"Conviction long (score={composite:.1f}, conf={confidence}%) — buy call for leveraged upside with defined risk"
         return result
 
-    # --- Strategy 2: Buy puts on conviction shorts (lowered thresholds) ---
-    if direction == "short" and confidence >= 55 and abs_score >= 2.5:
+    # --- Strategy 2: Buy puts on conviction shorts (aggressively lowered) ---
+    if direction == "short" and confidence >= 50 and abs_score >= 1.8:
         result["use_options"] = True
         result["strategy"] = "buy_put"
         result["rationale"] = f"Conviction short (score={composite:.1f}, conf={confidence}%) — buy put for defined-risk downside bet (no margin)"

@@ -259,6 +259,34 @@ function QuantPicksTab({ picks, loading, RegimeBadge }) {
         </div>
       </div>
 
+      {/* CALL Picks — longs that qualify for call options */}
+      <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <h2 className="text-xl font-bold text-cyan-400 mb-4">
+          CALL Picks ({(picks.long_picks || []).filter(p => (p.confidence || 0) >= 50 && Math.abs(p.composite_score || 0) >= 1.8).length})
+        </h2>
+        <p className="text-neutral-500 text-xs mb-3">Long picks qualifying for call options (conf ≥ 50%, |score| ≥ 1.8)</p>
+        <div className="overflow-x-auto">
+          <PicksTable
+            picks={(picks.long_picks || []).filter(p => (p.confidence || 0) >= 50 && Math.abs(p.composite_score || 0) >= 1.8)}
+            direction="CALL"
+          />
+        </div>
+      </div>
+
+      {/* PUT Picks — shorts that qualify for put options */}
+      <div className="bg-black border border-neutral-700 rounded-xl p-6">
+        <h2 className="text-xl font-bold text-violet-400 mb-4">
+          PUT Picks ({(picks.short_picks || []).filter(p => (p.confidence || 0) >= 50 && Math.abs(p.composite_score || 0) >= 1.8).length})
+        </h2>
+        <p className="text-neutral-500 text-xs mb-3">Short picks qualifying for put options (conf ≥ 50%, |score| ≥ 1.8)</p>
+        <div className="overflow-x-auto">
+          <PicksTable
+            picks={(picks.short_picks || []).filter(p => (p.confidence || 0) >= 50 && Math.abs(p.composite_score || 0) >= 1.8)}
+            direction="PUT"
+          />
+        </div>
+      </div>
+
       <p className="text-neutral-600 text-xs text-center italic">
         {picks.disclaimer}
       </p>

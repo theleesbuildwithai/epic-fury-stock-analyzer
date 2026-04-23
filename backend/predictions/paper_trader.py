@@ -35,10 +35,10 @@ _CONFIRMATION_TTL = timedelta(hours=36)
 
 def _check_signal_confirmation(symbol: str, direction: str, confidence: int) -> bool:
     """
-    For low-conviction picks (35-55%), require 2 consecutive scans.
-    High-conviction picks (55%+) execute immediately.
+    For low-conviction picks (35-45%), require 2 consecutive scans.
+    Most picks (45%+) execute immediately — was blocking too many good trades.
     """
-    if confidence > 55:
+    if confidence >= 45:
         return True
     now = datetime.now()
 
@@ -816,7 +816,7 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
 
         # Dynamic threshold using crisis correlations from 50-year history
         # If two stocks become highly correlated during crashes, use a tighter threshold
-        corr_threshold = 0.45  # Tighter default — prevent holding too many similar positions
+        corr_threshold = 0.70  # Loosened from 0.45 — was blocking too many good trades
         try:
             from analysis.historical_calibration import get_calibration
             cal = get_calibration()
@@ -824,7 +824,7 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
             if new_symbol in crisis_corr and corr_ticker:
                 crisis_pairs = crisis_corr[new_symbol].get("crisis_pairs", {})
                 if corr_ticker in crisis_pairs and crisis_pairs[corr_ticker] > 0.80:
-                    corr_threshold = 0.35  # Extra tight for crash-correlated pairs
+                    corr_threshold = 0.55  # Loosened from 0.35 — still careful for crisis pairs
                     logger.info(f"CRISIS CORR: {new_symbol}↔{corr_ticker} crisis_corr={crisis_pairs[corr_ticker]:.2f} → threshold tightened to 0.35")
         except Exception:
             pass
@@ -1533,7 +1533,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # SHORT-SIDE QUALITY GATE: Shorts are harder — require stronger signals
         pre_gate = len(short_candidates)
         short_candidates = [p for p in short_candidates
-                           if p.get("composite_score", 0) <= -4 and p["confidence"] >= 65]
+                           if p.get("composite_score", 0) <= -3 and p["confidence"] >= 55]
         if pre_gate > len(short_candidates):
             logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need score<=-4, conf>=65%)")
 
@@ -1693,7 +1693,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
             # Check sector concentration — max 4 per sector per direction for diversification
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
-            if sector_counts.get(sector_key, 0) >= 4:
+            if sector_counts.get(sector_key, 0) >= 8:
                 results["skipped"].append({
                     "symbol": symbol,
                     "reason": f"Sector concentration limit ({pick.get('sector')} {direction})",
