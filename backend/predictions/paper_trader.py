@@ -1680,17 +1680,24 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     })
                     continue
 
-            # MISTAKE LEARNING: Cap sector penalty so it can't fully block legit trades
+            # MISTAKE LEARNING: Per-direction sector penalty — fixes short-side bias
+            # Uses long_sector_penalties for long picks, short_sector_penalties for shorts.
+            # Falls back to legacy sector_penalties for backwards compatibility.
             pick_sector = pick.get("sector", "Unknown")
-            sector_penalty = mistake_adj.get("sector_penalties", {}).get(pick_sector, 0)
+            if direction == "long":
+                dir_penalty = mistake_adj.get("long_sector_penalties", {}).get(pick_sector, 0)
+            else:
+                dir_penalty = mistake_adj.get("short_sector_penalties", {}).get(pick_sector, 0)
+            legacy_penalty = mistake_adj.get("sector_penalties", {}).get(pick_sector, 0)
+            sector_penalty = dir_penalty if dir_penalty != 0 else legacy_penalty
             if sector_penalty != 0:
-                # Cap the penalty at -10 — was unbounded and silently blocking trades
-                capped_penalty = max(-10, sector_penalty) if sector_penalty < 0 else min(10, sector_penalty)
+                # Cap penalty at -20 (was -10) — stronger signal for repeat losers
+                capped_penalty = max(-20, sector_penalty) if sector_penalty < 0 else min(10, sector_penalty)
                 pick["confidence"] = max(15, pick["confidence"] + capped_penalty)
                 if pick["confidence"] < MIN_CONFIDENCE:
                     results["skipped"].append({
                         "symbol": symbol,
-                        "reason": f"Learned mistake: {pick_sector} sector has high loss rate (penalty {capped_penalty})",
+                        "reason": f"Learned mistake: {direction} {pick_sector} has high loss rate (penalty {capped_penalty})",
                     })
                     continue
 

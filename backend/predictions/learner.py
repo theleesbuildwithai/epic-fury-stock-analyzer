@@ -21,8 +21,8 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-MIN_TRADES_FOR_UPDATE = 10  # Don't adjust weights with fewer trades (was 20 — faster learning)
-WEIGHT_ADJUSTMENT_RATE = 0.20  # How much to shift weights (20% per cycle — more aggressive learning)
+MIN_TRADES_FOR_UPDATE = 10  # Don't adjust weights with fewer trades
+WEIGHT_ADJUSTMENT_RATE = 0.30  # 30% per cycle — faster learning given higher trade volume
 MIN_WEIGHT = 0.05  # No factor can go below 5%
 MAX_WEIGHT = 0.40  # No factor can go above 40%
 RECENCY_DECAY = 0.95  # Recent trades matter more: each older trade has 5% less influence
@@ -165,6 +165,51 @@ def analyze_sector_performance() -> dict:
         "sectors": sorted_sectors,
         "best_sector": max(results, key=lambda k: results[k]["win_rate"]) if results else None,
         "worst_sector": min(results, key=lambda k: results[k]["win_rate"]) if results else None,
+    }
+
+
+def analyze_sector_performance_by_direction() -> dict:
+    """
+    Per-direction sector analysis — critical for fixing short side performance.
+    Returns separate stats for longs and shorts in each sector so the system
+    can block bad-short sectors without blocking good-long sectors (and vice versa).
+    """
+    from predictions.models import get_closed
+
+    closed = get_closed(limit=500)
+    if not closed:
+        return {"long_sectors": {}, "short_sectors": {}}
+
+    by_direction = {"long": {}, "short": {}}
+    for trade in closed:
+        sector = trade.get("sector") or "Unknown"
+        direction = (trade.get("direction") or "long").lower()
+        if direction not in by_direction:
+            continue
+        if sector not in by_direction[direction]:
+            by_direction[direction][sector] = {"wins": 0, "total": 0, "returns": []}
+
+        pnl = trade.get("pnl_pct", 0) or 0
+        by_direction[direction][sector]["total"] += 1
+        by_direction[direction][sector]["returns"].append(pnl)
+        if pnl > 0:
+            by_direction[direction][sector]["wins"] += 1
+
+    def _summarize(stats_dict):
+        result = {}
+        for sector, data in stats_dict.items():
+            if data["total"] < 3:
+                continue
+            result[sector] = {
+                "total_trades": data["total"],
+                "win_rate": round(data["wins"] / data["total"] * 100, 1),
+                "avg_return": round(float(np.mean(data["returns"])), 2),
+            }
+        return dict(sorted(result.items(), key=lambda x: x[1]["win_rate"], reverse=True))
+
+    return {
+        "long_sectors": _summarize(by_direction["long"]),
+        "short_sectors": _summarize(by_direction["short"]),
     }
 
 
@@ -432,22 +477,44 @@ def get_mistake_adjustments() -> dict:
     Returns real-time adjustments based on learned mistakes.
     Used by paper_trader to avoid repeating errors.
 
-    Returns:
-        dict with sector_penalties, regime_direction_blocks, confidence_cap
+    Now includes per-direction sector penalties so a sector that's bad for shorts
+    but good for longs gets penalized correctly per side, instead of blanket-blocking.
     """
     mistakes = analyze_mistakes()
     adjustments = {
-        "sector_penalties": {},      # sector -> confidence penalty
-        "blocked_combos": [],        # ["BEAR_LONG", etc.] — combos to avoid
-        "confidence_cap": 95,        # max confidence (lower if overconfident)
-        "tighten_stops": False,      # if True, use tighter stop-loss
+        "sector_penalties": {},          # sector -> confidence penalty (legacy, both directions)
+        "long_sector_penalties": {},     # sector -> penalty for LONG trades only
+        "short_sector_penalties": {},    # sector -> penalty for SHORT trades only
+        "blocked_combos": [],            # ["BEAR_LONG", etc.] — combos to avoid
+        "confidence_cap": 95,            # max confidence (lower if overconfident)
+        "tighten_stops": False,          # if True, use tighter stop-loss
     }
 
     patterns = mistakes.get("mistake_patterns", {})
 
-    # Penalize weak sectors
+    # Legacy blanket sector penalty (kept for backwards compatibility)
     for sector in patterns.get("weak_sectors", []):
-        adjustments["sector_penalties"][sector] = -10  # -10% confidence for bad sectors
+        adjustments["sector_penalties"][sector] = -15  # -15% (was -10) — stronger learning
+
+    # PER-DIRECTION sector penalties — fixes the short-side problem
+    # Sectors with <40% win rate for a given direction get penalized for THAT direction only
+    try:
+        by_dir = analyze_sector_performance_by_direction()
+        for sector, stats in by_dir.get("long_sectors", {}).items():
+            wr = stats.get("win_rate", 50)
+            n = stats.get("total_trades", 0)
+            if n >= 5 and wr < 40:
+                # Scale penalty: worse win rate = larger penalty, capped at -20
+                penalty = max(-20, -10 - int((40 - wr) / 2))
+                adjustments["long_sector_penalties"][sector] = penalty
+        for sector, stats in by_dir.get("short_sectors", {}).items():
+            wr = stats.get("win_rate", 50)
+            n = stats.get("total_trades", 0)
+            if n >= 5 and wr < 40:
+                penalty = max(-20, -10 - int((40 - wr) / 2))
+                adjustments["short_sector_penalties"][sector] = penalty
+    except Exception:
+        pass  # Per-direction is enhancement; falls back to legacy if it fails
 
     # Don't completely block regime/direction combos, but heavily penalize
     for combo in patterns.get("bad_regime_direction_combos", []):
