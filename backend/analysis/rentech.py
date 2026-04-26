@@ -593,14 +593,14 @@ def calculate_portfolio_var(open_trades: list, price_data: dict,
     z_cvar = 2.063  # E[X | X > z_0.95] for standard normal
     cvar_pct = round(port_vol * z_cvar * 100, 4)
 
-    # VaR budget enforcement
-    if var_pct > 3.0:
-        var_multiplier = 0.0  # BLOCK new positions
+    # VaR budget enforcement (loosened — was blocking too aggressively)
+    if var_pct > 5.0:
+        var_multiplier = 0.3  # Reduced sizing instead of full halt — was 0.0
         status = "VAR_EXCEEDED"
-    elif var_pct > 2.0:
+    elif var_pct > 3.5:
         var_multiplier = 0.5  # Half-size
         status = "VAR_WARNING"
-    elif var_pct > 1.5:
+    elif var_pct > 2.5:
         var_multiplier = 0.75
         status = "VAR_ELEVATED"
     else:

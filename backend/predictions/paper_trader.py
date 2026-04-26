@@ -1648,7 +1648,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if not _check_signal_confirmation(symbol, direction, pick.get("confidence", 50)):
                 results["skipped"].append({
                     "symbol": symbol,
-                    "reason": f"Multi-day confirmation: needs 2 scans (confidence {pick['confidence']}%, <55%)",
+                    "reason": f"Multi-day confirmation: needs 2 scans (confidence {pick['confidence']}%, <45%)",
                 })
                 continue
 
@@ -1663,15 +1663,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     })
                     continue
 
-            # MISTAKE LEARNING: Penalize sectors we've lost money in
+            # MISTAKE LEARNING: Cap sector penalty so it can't fully block legit trades
             pick_sector = pick.get("sector", "Unknown")
             sector_penalty = mistake_adj.get("sector_penalties", {}).get(pick_sector, 0)
             if sector_penalty != 0:
-                pick["confidence"] = max(15, pick["confidence"] + sector_penalty)
+                # Cap the penalty at -10 — was unbounded and silently blocking trades
+                capped_penalty = max(-10, sector_penalty) if sector_penalty < 0 else min(10, sector_penalty)
+                pick["confidence"] = max(15, pick["confidence"] + capped_penalty)
                 if pick["confidence"] < MIN_CONFIDENCE:
                     results["skipped"].append({
                         "symbol": symbol,
-                        "reason": f"Learned mistake: {pick_sector} sector has high loss rate",
+                        "reason": f"Learned mistake: {pick_sector} sector has high loss rate (penalty {capped_penalty})",
                     })
                     continue
 
@@ -1845,11 +1847,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             except Exception as e:
                 logger.debug(f"Correlation check failed for {symbol}: {e}")
 
-            # VaR budget block
+            # VaR budget block — only halt if multiplier is exactly 0 (now rare)
             if var_multiplier <= 0:
                 results["skipped"].append({
                     "symbol": symbol,
-                    "reason": f"VAR BUDGET EXCEEDED: Portfolio VaR at {var_data.get('var_pct', 0):.2f}% (max 3%)",
+                    "reason": f"VAR BUDGET EXCEEDED: Portfolio VaR at {var_data.get('var_pct', 0):.2f}% (max 5%)",
                 })
                 continue
 
