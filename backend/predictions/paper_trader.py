@@ -138,13 +138,30 @@ def prewarm_benchmark_cache():
     try:
         logger.info("Pre-warming benchmark cache (S&P 500)...")
         from predictions.models import get_all_paper_trades
+        # Use PERSISTENT inception date — survives portfolio resets so the S&P
+        # comparison window stays meaningful across deploys.
+        import os as _os_warm
+        _inception_flag = _os_warm.path.join(_os_warm.path.dirname(__file__), ".fund_inception_date")
         try:
-            all_trades = get_all_paper_trades()
-            if all_trades:
-                earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
-                inception_date = earliest[:10]
+            if _os_warm.path.exists(_inception_flag):
+                with open(_inception_flag) as _f:
+                    inception_date = _f.read().strip()[:10]
             else:
-                inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+                try:
+                    all_trades = get_all_paper_trades()
+                    if all_trades:
+                        earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
+                        inception_date = earliest[:10]
+                    else:
+                        inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+                except Exception:
+                    inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+                # Persist forever — never changes again
+                try:
+                    with open(_inception_flag, "w") as _f:
+                        _f.write(inception_date)
+                except Exception:
+                    pass
         except Exception:
             inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
 
@@ -2709,16 +2726,42 @@ def get_performance_analytics() -> dict:
     # --- Benchmarking vs S&P 500 (with robust caching + last-known-good fallback) ---
     try:
         from predictions.models import get_all_paper_trades
-        # Determine inception date (matches fund's actual start)
+        # PERSISTENT INCEPTION DATE — survives portfolio resets so S&P comparison
+        # window stays meaningful. Stored in a flag file on first run, never changes.
+        # Must be >= 60 days back for a meaningful S&P comparison window.
+        import os as _os_inception
+        _inception_flag = _os_inception.path.join(_os_inception.path.dirname(__file__), ".fund_inception_date")
+        _min_inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
         try:
-            all_trades = get_all_paper_trades()
-            if all_trades:
-                earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
-                inception_date = earliest[:10]
+            if _os_inception.path.exists(_inception_flag):
+                with open(_inception_flag) as _f:
+                    inception_date = _f.read().strip()[:10]
             else:
-                inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+                # First time: derive from earliest trade, but enforce min 60 days back
+                try:
+                    all_trades = get_all_paper_trades()
+                    if all_trades:
+                        earliest = min(t.get("entry_date", "2026-01-01") for t in all_trades)
+                        candidate = earliest[:10]
+                        # If earliest trade is < 60 days ago, use 180 days back instead
+                        candidate_dt = datetime.strptime(candidate, "%Y-%m-%d")
+                        if (datetime.now() - candidate_dt).days < 60:
+                            inception_date = _min_inception_date
+                        else:
+                            inception_date = candidate
+                    else:
+                        inception_date = _min_inception_date
+                except Exception:
+                    inception_date = _min_inception_date
+                # Persist it forever — never changes again, even after portfolio reset
+                try:
+                    with open(_inception_flag, "w") as _f:
+                        _f.write(inception_date)
+                    logger.warning(f"FUND INCEPTION FIXED: {inception_date} (persists across portfolio resets — meaningful S&P window)")
+                except Exception:
+                    pass
         except Exception:
-            inception_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+            inception_date = _min_inception_date
 
         sharpe_start = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
 
