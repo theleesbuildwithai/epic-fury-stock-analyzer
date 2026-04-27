@@ -228,6 +228,69 @@ app = FastAPI(
 # Firewall — processes every request before anything else
 app.add_middleware(FirewallMiddleware)
 
+# ============================================================
+#  ADMIN AUTH — protects sensitive write/destructive endpoints
+#  (kill switch, toggle, force-reset, etc.) from unauthorized access
+# ============================================================
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+ADMIN_IP_ALLOWLIST = [ip.strip() for ip in os.getenv("ADMIN_IP_ALLOWLIST", "").split(",") if ip.strip()]
+admin_audit_log = []  # In-memory rotating audit log
+MAX_AUDIT_LOG_ENTRIES = 500
+
+
+def admin_audit(request: Request, action: str, success: bool, details: str = ""):
+    """Record every admin endpoint access (success or failure)."""
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+    except Exception:
+        client_ip = "unknown"
+    entry = {
+        "timestamp": dt.now().isoformat(),
+        "ip": client_ip,
+        "action": action,
+        "success": success,
+        "details": details,
+        "user_agent": request.headers.get("user-agent", "")[:120],
+    }
+    admin_audit_log.append(entry)
+    if len(admin_audit_log) > MAX_AUDIT_LOG_ENTRIES:
+        admin_audit_log.pop(0)
+    if not success:
+        logger.warning(f"ADMIN AUTH FAIL [{action}] from {client_ip}: {details}")
+
+
+def require_admin(request: Request):
+    """
+    Gatekeeper for sensitive endpoints. Enforces:
+      1. Admin API key (X-Admin-Key header) — REQUIRED if ADMIN_API_KEY env var is set
+      2. IP allowlist — REQUIRED if ADMIN_IP_ALLOWLIST env var is set
+    If neither env var is set, auth is bypassed (dev mode only — set both in production).
+    """
+    # If no admin key configured, log warning but allow (back-compat / dev mode)
+    if not ADMIN_API_KEY:
+        admin_audit(request, "AUTH_BYPASSED_NO_KEY_SET", True,
+                    "ADMIN_API_KEY env var not set — endpoint open. Set it in App Runner config.")
+        return True
+
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+    except Exception:
+        client_ip = "unknown"
+
+    # IP allowlist (if configured)
+    if ADMIN_IP_ALLOWLIST and client_ip not in ADMIN_IP_ALLOWLIST:
+        admin_audit(request, "IP_DENIED", False, f"IP {client_ip} not in allowlist")
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # API key check
+    api_key = request.headers.get("X-Admin-Key", "").strip()
+    if not api_key or api_key != ADMIN_API_KEY:
+        admin_audit(request, "INVALID_API_KEY", False, f"Bad/missing X-Admin-Key from {client_ip}")
+        raise HTTPException(status_code=401, detail="Access denied")
+
+    return True
+
+
 # CORS — only allow our own domain (same-origin requests from frontend)
 app.add_middleware(
     CORSMiddleware,
@@ -1802,6 +1865,8 @@ def force_reset(request: Request):
     """Emergency: close ALL positions and reset cash to 12.07% return ($122,156.30).
     Hit this endpoint once from browser to reset, then remove it."""
     check_rate_limit(request.client.host)
+    require_admin(request)
+    admin_audit(request, "FORCE_RESET", True, "Portfolio reset triggered")
     try:
         from predictions.models import get_open_trades, close_paper_trade, set_cash, get_cash
         import yfinance as yf
@@ -2206,14 +2271,17 @@ def ibkr_status_endpoint(request: Request):
 
 @app.post("/api/ibkr/kill-switch")
 def ibkr_kill_switch(request: Request):
-    """EMERGENCY: Flatten all IBKR positions immediately."""
+    """EMERGENCY: Flatten all IBKR positions immediately. ADMIN-ONLY."""
     check_rate_limit(request.client.host)
+    require_admin(request)
     try:
         from predictions.ibkr_adapter import ibkr_flatten_all
         result = ibkr_flatten_all("MANUAL KILL SWITCH")
+        admin_audit(request, "IBKR_KILL_SWITCH", True, f"Flattened {result.get('count', 0)} positions")
         logger.warning(f"IBKR KILL SWITCH activated: {result}")
         return result
     except Exception as e:
+        admin_audit(request, "IBKR_KILL_SWITCH", False, f"Error: {e}")
         logger.error(f"IBKR kill switch error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2247,36 +2315,48 @@ def ibkr_orders_endpoint(request: Request):
 
 @app.post("/api/ibkr/toggle")
 def ibkr_toggle_endpoint(request: Request):
-    """Enable/disable IBKR execution. Paper trader always runs regardless."""
+    """Enable/disable IBKR execution. ADMIN-ONLY (write endpoint)."""
     check_rate_limit(request.client.host)
+    require_admin(request)
     try:
-        import json
-        body = {}
-        try:
-            import asyncio
-            # For sync context, just check query params
-        except Exception:
-            pass
-
         from predictions.ibkr_adapter import ibkr_toggle
-        # Toggle: if currently enabled, disable; if disabled, enable
         from predictions.ibkr_adapter import IBKR_ENABLED
-        return ibkr_toggle(not IBKR_ENABLED)
+        result = ibkr_toggle(not IBKR_ENABLED)
+        admin_audit(request, "IBKR_TOGGLE", True, f"Toggled to {result.get('enabled')}")
+        return result
     except Exception as e:
+        admin_audit(request, "IBKR_TOGGLE", False, f"Error: {e}")
         logger.error(f"IBKR toggle error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/ibkr/unhalt")
 def ibkr_unhalt_endpoint(request: Request):
-    """Resume trading after emergency halt."""
+    """Resume trading after emergency halt. ADMIN-ONLY."""
     check_rate_limit(request.client.host)
+    require_admin(request)
     try:
         from predictions.ibkr_adapter import ibkr_unhalt
-        return ibkr_unhalt()
+        result = ibkr_unhalt()
+        admin_audit(request, "IBKR_UNHALT", True, "Trading resumed")
+        return result
     except Exception as e:
+        admin_audit(request, "IBKR_UNHALT", False, f"Error: {e}")
         logger.error(f"IBKR unhalt error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/audit-log")
+def admin_audit_log_endpoint(request: Request):
+    """View admin endpoint access log. ADMIN-ONLY."""
+    check_rate_limit(request.client.host)
+    require_admin(request)
+    return {
+        "entries": admin_audit_log[-200:],  # Last 200 entries
+        "total": len(admin_audit_log),
+        "auth_configured": bool(ADMIN_API_KEY),
+        "ip_allowlist_configured": bool(ADMIN_IP_ALLOWLIST),
+    }
 
 
 # ─── IBKR Safety Endpoints (drift, slippage, pre-flight, reconciliation) ──────
