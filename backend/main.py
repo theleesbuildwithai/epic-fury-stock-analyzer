@@ -470,7 +470,7 @@ _last_vix = {"value": None}
 _last_news_score = {"value": 0}
 _last_trade_time = {"value": None}
 _scan_count = {"value": 0}
-MIN_TRADE_INTERVAL_MINUTES = 15  # Don't trade more than once every 15 min
+MIN_TRADE_INTERVAL_MINUTES = 5  # Allow cycles every 5 min so we can react quickly to market moves
 
 # Geo-political risk state (updated by scanner every 15 min)
 _geo_risk_state = {"level": "LOW", "score": 0, "last_update": None, "events": []}
@@ -523,9 +523,25 @@ def _should_trade_now() -> dict:
         if elapsed < MIN_TRADE_INTERVAL_MINUTES:
             return {"should_trade": False, "reasons": [f"Too soon — last trade {elapsed:.0f}min ago (min {MIN_TRADE_INTERVAL_MINUTES}min)"]}
 
+    # --- TRIGGER 0: PRE-MARKET PRIME at 9:00am ET ---
+    # Generates picks 30 min before market open so they're ready to fire at 9:30.
+    # Cache is fresh, picks are computed, system is hot when the bell rings.
+    if hour == 9 and 0 <= minute <= 5:
+        reasons.append("PRE-MARKET PRIME — generating picks for 9:30 open")
+
+    # --- TRIGGER 0b: PRE-MARKET WARM at 9:15am ET ---
+    # Second warm-up scan 15 min before open. Catches any overnight changes.
+    if hour == 9 and 15 <= minute <= 20:
+        reasons.append("PRE-MARKET WARM — refreshing picks 15min before open")
+
     # --- TRIGGER 1: Market open — always trade at 9:30am ET ---
     if hour == 9 and 28 <= minute <= 35:
         reasons.append("MARKET OPEN — must rebalance positions")
+
+    # --- TRIGGER 1b: Market open follow-through at 9:35-9:45 ---
+    # If first cycle missed (or partial), make sure we get full coverage by 9:45.
+    if hour == 9 and 36 <= minute <= 45:
+        reasons.append("MARKET OPEN follow-through — capturing remaining picks")
 
     # --- TRIGGER 2: Market close — always trade at 3:55pm ET ---
     if hour == 15 and 53 <= minute <= 59:
@@ -616,6 +632,13 @@ def _smart_trade_monitor():
 
         # 1. Generate fresh quant picks (analyzes 200+ stocks)
         picks = generate_quant_picks()
+
+        # If MARKET OPEN trigger fired, set force_market_open so we trade
+        # the 9:30-9:45 window instead of waiting (with reduced size for safety).
+        reasons_str = " ".join(decision.get("reasons", []))
+        if "MARKET OPEN" in reasons_str or "PRE-MARKET" in reasons_str or "FIRST SCAN" in reasons_str:
+            picks["force_market_open"] = True
+            logger.warning("MARKET OPEN trigger active — will trade open window with reduced size")
 
         # 2. Execute trades based on signals
         result = execute_trades_from_signals(picks)
@@ -2246,13 +2269,18 @@ def ensemble_signal_endpoint(ticker: str, request: Request):
 # ─── IBKR (Interactive Brokers) ENDPOINTS ─────────────────────────────────────
 
 @app.get("/api/ibkr/status")
-def ibkr_status_endpoint(request: Request):
-    """IBKR connection status, account summary, and trading mode."""
+def ibkr_status_endpoint(request: Request, refresh: bool = False):
+    """IBKR connection status, account summary, and trading mode.
+
+    Query params:
+        refresh: If true, bypass the 10s account cache for live values.
+            Use for dashboard refresh button.
+    """
     check_rate_limit(request.client.host)
     try:
         from predictions.ibkr_adapter import ibkr_get_status, ibkr_get_account, get_order_log
         status = ibkr_get_status()
-        account = ibkr_get_account()
+        account = ibkr_get_account(force_refresh=refresh)
         recent_orders = get_order_log(limit=20)
         return {
             "status": status,
@@ -2501,12 +2529,22 @@ def auto_trading_status(request: Request):
     except Exception:
         trade_decision = {"should_trade": False, "reasons": ["Error checking"]}
 
+    # Expose current trading window so dashboard knows if we're pre-market,
+    # in avoid window, in normal trading, or off-hours.
+    try:
+        from predictions.paper_trader import _is_good_entry_time
+        timing_window = _is_good_entry_time()
+    except Exception:
+        timing_window = {"window": "unknown", "can_trade": False, "size_modifier": 0, "confidence_shift": 0}
+
     return {
         **auto_trade_stats,
         "next_scan": next_run,
         "trading_mode": "EVENT-DRIVEN",
-        "schedule": "Monitors every 5 min, trades only when conditions change (news, regime shift, VIX spike, stop-loss, market open/close)",
+        "schedule": "Monitors every 5 min, trades only when conditions change (pre-market 9am, market open 9:30, news, regime shift, VIX spike, stop-loss, market close)",
         "would_trade_now": trade_decision,
+        "current_window": timing_window,
+        "min_trade_interval_minutes": MIN_TRADE_INTERVAL_MINUTES,
         "overnight_intel": overnight_summary,
         "recent_activity": auto_trade_log[-20:],
     }

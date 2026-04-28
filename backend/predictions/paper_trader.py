@@ -96,9 +96,24 @@ _benchmark_lock = threading.Lock()
 
 
 def _fetch_sp500_data(inception_date: str, sharpe_start: str):
-    """Download S&P 500 data with retries. Returns (sp_closes, sharpe_closes) or (None, None)."""
+    """Download S&P 500 data with retries + persistent disk cache fallback.
+
+    Tries 3 sources in order:
+      1. Live yfinance fetch (3 retries each for inception + sharpe)
+      2. Last successful disk cache (~/.sp500_disk_cache.json)
+      3. Returns (None, None) only if no live and no cache
+
+    The disk cache survives container restarts so a single yfinance outage
+    can never wipe out the S&P benchmark display.
+    """
+    import json as _json_sp
+    import os as _os_sp
     sp_closes = None
     sharpe_closes = None
+
+    # Disk cache path (persists across deploys via S3 or local volume)
+    _disk_cache_path = _os_sp.path.join(_os_sp.path.dirname(__file__), ".sp500_disk_cache.json")
+
     try:
         for attempt in range(3):
             try:
@@ -129,6 +144,40 @@ def _fetch_sp500_data(inception_date: str, sharpe_start: str):
                 time.sleep(1.0 + attempt)
     except Exception as e:
         logger.error(f"_fetch_sp500_data outer failure: {e}")
+
+    # On successful fetch, save to disk cache for future fallback
+    if sp_closes is not None and sharpe_closes is not None:
+        try:
+            with open(_disk_cache_path, "w") as _f:
+                _json_sp.dump({
+                    "saved_at": datetime.now().isoformat(),
+                    "inception_date": inception_date,
+                    "sharpe_start": sharpe_start,
+                    "sp_closes": sp_closes.tolist(),
+                    "sharpe_closes": sharpe_closes.tolist(),
+                }, _f)
+            logger.info(f"S&P disk cache updated: {len(sp_closes)} inception, {len(sharpe_closes)} sharpe")
+        except Exception as cache_err:
+            logger.warning(f"Could not save S&P disk cache: {cache_err}")
+        return sp_closes, sharpe_closes
+
+    # Live fetch failed — try disk cache fallback
+    if sp_closes is None or sharpe_closes is None:
+        try:
+            if _os_sp.path.exists(_disk_cache_path):
+                with open(_disk_cache_path) as _f:
+                    cached = _json_sp.load(_f)
+                if sp_closes is None and cached.get("sp_closes"):
+                    sp_closes = np.array(cached["sp_closes"], dtype=float)
+                    logger.warning(f"S&P inception: using disk cache from {cached.get('saved_at', '?')} "
+                                   f"({len(sp_closes)} pts) — yfinance unavailable")
+                if sharpe_closes is None and cached.get("sharpe_closes"):
+                    sharpe_closes = np.array(cached["sharpe_closes"], dtype=float)
+                    logger.warning(f"S&P sharpe: using disk cache from {cached.get('saved_at', '?')} "
+                                   f"({len(sharpe_closes)} pts) — yfinance unavailable")
+        except Exception as cache_err:
+            logger.error(f"Could not read S&P disk cache fallback: {cache_err}")
+
     return sp_closes, sharpe_closes
 
 
@@ -346,9 +395,14 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
 # First 15 min = noise. Power hour (3-4 PM) = institutional flow.
 # Avoid bad entry timing, prefer high-quality windows.
 
-def _is_good_entry_time():
+def _is_good_entry_time(force_market_open: bool = False):
     """
     Check current ET time and classify the trading window.
+
+    Args:
+        force_market_open: If True, allows trading during the 9:30-9:45 avoid window.
+            Used when MARKET OPEN trigger fires so we capture the open instead of
+            waiting until 9:45. Weekend and off-hours blocks are NEVER overridden.
 
     Returns dict with:
         can_trade (bool): whether to allow new entries
@@ -363,6 +417,7 @@ def _is_good_entry_time():
         t = hour * 60 + minute  # minutes since midnight
 
         # WEEKEND CHECK: No trading on Saturday/Sunday — prices are stale
+        # Never overridable — there's no real market.
         if et.weekday() >= 5:  # 5=Saturday, 6=Sunday
             return {"can_trade": False, "window": "weekend", "size_modifier": 0.0, "confidence_shift": 0}
 
@@ -374,9 +429,14 @@ def _is_good_entry_time():
 
         if t < market_open or t >= market_close:
             # Outside market hours — block new entries, prices are stale
+            # Never overridable — markets are closed.
             return {"can_trade": False, "window": "off_hours", "size_modifier": 0.0, "confidence_shift": 0}
         elif t < avoid_end:
-            # First 15 minutes — avoid new entries (noise, spread is wide)
+            # First 15 minutes — normally avoid new entries (noise, spread is wide)
+            # BUT: if MARKET OPEN trigger fires, we want to capture the open, not wait.
+            # Use smaller size and higher confidence requirement to compensate for noise.
+            if force_market_open:
+                return {"can_trade": True, "window": "market_open_force", "size_modifier": 0.6, "confidence_shift": 5}
             return {"can_trade": False, "window": "avoid", "size_modifier": 0.0, "confidence_shift": 0}
         elif t < caution_end:
             # 9:45-10:30 — caution zone, reduce size
@@ -1494,15 +1554,25 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     overnight_size_mod = overnight.get("position_size_modifier", 1.0) if overnight else 1.0
 
     # --- SMART ORDER TIMING: Check if this is a good entry window ---
-    timing = _is_good_entry_time()
+    # Allow MARKET OPEN trigger to override the 9:30-9:45 avoid window so we
+    # capture the open instead of waiting until 9:45 (which delays everything).
+    force_market_open = bool(quant_picks.get("force_market_open", False))
+    timing = _is_good_entry_time(force_market_open=force_market_open)
     timing_size_mod = timing["size_modifier"]
     timing_conf_shift = timing["confidence_shift"]
     if timing["window"] == "avoid":
-        logger.info(f"SMART TIMING: Skipping new entries — first 15 min window (9:30-9:45 ET)")
+        logger.warning(f"SMART TIMING: BLOCKED new entries — first 15 min window (9:30-9:45 ET). "
+                       f"Pass force_market_open=True to override.")
+    elif timing["window"] == "market_open_force":
+        logger.warning(f"SMART TIMING: MARKET OPEN FORCE — trading the 9:30 open with reduced size (0.6x)")
     elif timing["window"] == "power_hour":
         logger.info(f"SMART TIMING: Power hour active — institutional flow window")
     elif timing["window"] == "caution":
         logger.info(f"SMART TIMING: Caution window (9:45-10:30) — reduced sizing")
+    elif timing["window"] == "off_hours":
+        logger.warning(f"SMART TIMING: BLOCKED — outside market hours (9:30-16:00 ET)")
+    elif timing["window"] == "weekend":
+        logger.warning(f"SMART TIMING: BLOCKED — weekend, market closed")
 
     # --- PORTFOLIO VaR BUDGET ---
     var_data = quant_picks.get("portfolio_var", {})

@@ -893,11 +893,22 @@ class IBKRAdapter:
 
     # ── Account Info ──────────────────────────────────────────────────────
 
-    def get_account_summary(self) -> dict:
-        """Get IBKR account summary (cached 30s)."""
+    def get_account_summary(self, force_refresh: bool = False) -> dict:
+        """Get IBKR account summary.
+
+        Args:
+            force_refresh: If True, bypass the 10s cache and fetch live values.
+                Use for dashboard refresh button or user-triggered checks.
+
+        Cache TTL is 10s (was 30s) so account values stay near-real-time
+        without hammering the IBKR API.
+        """
         now = time.time()
-        if now - self._account_cache_time < 30 and self._account_cache:
-            return self._account_cache
+        if not force_refresh and now - self._account_cache_time < 10 and self._account_cache:
+            cached = dict(self._account_cache)
+            cached["data_age_seconds"] = round(now - self._account_cache_time, 1)
+            cached["from_cache"] = True
+            return cached
 
         if not self.is_connected():
             return {
@@ -913,6 +924,9 @@ class IBKRAdapter:
                 "mode": "LIVE" if IBKR_LIVE_TRADING else "PAPER",
                 "enabled": IBKR_ENABLED,
                 "trading_halted": TRADING_HALTED,
+                "fetched_at": datetime.now().isoformat(),
+                "from_cache": False,
+                "data_age_seconds": 0.0,
             }
 
             for av in account_values:
@@ -929,6 +943,10 @@ class IBKRAdapter:
                     summary["realized_pnl"] = float(av.value)
                 elif tag == "GrossPositionValue":
                     summary["gross_position_value"] = float(av.value)
+                elif tag == "AvailableFunds":
+                    summary["available_funds"] = float(av.value)
+                elif tag == "MaintMarginReq":
+                    summary["maint_margin_req"] = float(av.value)
 
             with _daily_pnl_lock:
                 summary["daily_pnl"] = _daily_pnl
@@ -1082,10 +1100,15 @@ def ibkr_get_status() -> dict:
     return adapter.get_status()
 
 
-def ibkr_get_account() -> dict:
-    """Get IBKR account summary."""
+def ibkr_get_account(force_refresh: bool = False) -> dict:
+    """Get IBKR account summary.
+
+    Args:
+        force_refresh: bypass 10s cache for live values. Use when user clicks
+            a refresh button on the dashboard.
+    """
     adapter = get_ibkr_adapter()
-    return adapter.get_account_summary()
+    return adapter.get_account_summary(force_refresh=force_refresh)
 
 
 def ibkr_get_positions() -> list:
