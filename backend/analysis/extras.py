@@ -171,15 +171,22 @@ BANNER_SYMBOLS = [
 
 def get_banner_data():
     """Get current prices and daily changes for banner tickers.
-    Always returns the most recent trading day's data, even when market is closed.
-    Downloads in batches of 10 to avoid yfinance timeouts with 28+ symbols."""
+
+    Source priority (per fetch):
+      1. Yahoo Finance batch (primary — full data with prev close)
+      2. CNBC for any tickers Yahoo dropped (safety net)
+
+    Always returns the most recent trading day's data. CNBC fallback ensures
+    no tickers are missing from the banner even when Yahoo rate-limits.
+    """
     def fetch():
-        results = []
         symbols = [s[0] for s in BANNER_SYMBOLS]
         symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
+        results_by_symbol = {}  # symbol -> entry dict
         as_of_date = None
 
-        # Download in batches of 10 — large batch downloads drop tickers
+        # 1) PRIMARY: Yahoo Finance batches of 10
+        # (Yahoo gives us prev close + current — best data for change calc.)
         batch_size = 10
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
@@ -194,8 +201,6 @@ def get_banner_data():
 
             for symbol in batch:
                 try:
-                    name = symbol_to_name[symbol]
-
                     if isinstance(df.columns, pd.MultiIndex):
                         if symbol in df.columns.get_level_values(0):
                             close_series = df[(symbol, "Close")].dropna()
@@ -221,20 +226,62 @@ def get_banner_data():
                         except Exception:
                             pass
 
-                    results.append({
+                    results_by_symbol[symbol] = {
                         "symbol": symbol,
-                        "name": name,
+                        "name": symbol_to_name[symbol],
                         "price": round(current, 2),
                         "change": round(change, 2),
                         "change_pct": round(change_pct, 2),
-                    })
+                        "_source": "yahoo",
+                    }
                 except Exception:
                     continue
+
+        # 2) SAFETY NET: For any symbol Yahoo dropped, try CNBC
+        missing = [s for s in symbols if s not in results_by_symbol]
+        if missing:
+            try:
+                cnbc_data = cnbc_quote_batch(missing)
+                for sym, val in cnbc_data.items():
+                    # CNBC gives us price + change_pct directly. Compute "change"
+                    # in dollars from those: change = price - (price / (1 + pct/100)).
+                    try:
+                        price = val["price"]
+                        change_pct = val["change_pct"]
+                        prev_price = price / (1.0 + (change_pct / 100.0)) if (1.0 + change_pct / 100.0) != 0 else price
+                        change_dollars = price - prev_price
+                    except Exception:
+                        price = val.get("price", 0)
+                        change_pct = val.get("change_pct", 0)
+                        change_dollars = 0
+                    results_by_symbol[sym] = {
+                        "symbol": sym,
+                        "name": symbol_to_name.get(sym, sym),
+                        "price": round(price, 2),
+                        "change": round(change_dollars, 2),
+                        "change_pct": round(change_pct, 2),
+                        "_source": "cnbc",
+                    }
+            except Exception:
+                pass  # CNBC fallback failure is non-fatal — just leave gaps
+
+        # Build final list in canonical order, drop the internal _source field
+        # from output but keep it in a separate "sources" summary for debugging.
+        results = []
+        sources_used = {"yahoo": 0, "cnbc": 0}
+        for sym, name in BANNER_SYMBOLS:
+            if sym in results_by_symbol:
+                entry = dict(results_by_symbol[sym])
+                src = entry.pop("_source", "yahoo")
+                sources_used[src] = sources_used.get(src, 0) + 1
+                results.append(entry)
 
         return {
             "tickers": results,
             "market_open": is_market_open(),
             "as_of": as_of_date,
+            "sources": sources_used,
+            "missing_count": len(BANNER_SYMBOLS) - len(results),
         }
 
     return _get_cached("banner_data", fetch)
@@ -262,14 +309,18 @@ SECTOR_ETFS = [
 _sector_last_good = {}
 
 
-def _fetch_sectors_from_cnbc(symbols):
-    """Fetch sector data from CNBC's public quote API.
+def cnbc_quote_batch(symbols):
+    """Fetch quote data from CNBC's public quote API for any symbols.
+
+    Works for: stocks, ETFs, indices (^GSPC, ^IXIC, ^DJI), commodities (GC=F, CL=F).
 
     Returns dict keyed by symbol: {symbol: {"price": float, "change_pct": float}}.
     Returns empty dict on any failure — caller should fall back to yfinance.
 
-    CNBC's quote endpoint is faster and more reliable than yfinance batch calls
-    for index/ETF data. It's their internal API used by the cnbc.com sector page.
+    Used as a backup when Yahoo Finance is rate-limited or returning partial data.
+    Same data shape as yfinance — drop-in replacement at the value level.
+
+    APPROVED DATA SOURCES per project standards: Yahoo Finance, CNBC, CNN, Bloomberg.
     """
     import requests as _requests
     import json as _json
@@ -418,8 +469,9 @@ def get_sector_heatmap():
         as_of_date = None
         sources_used = []
 
-        # 1) Try CNBC primary
-        cnbc = _fetch_sectors_from_cnbc(symbols)
+        # 1) Try CNBC primary (it's faster and more reliable than yfinance batch
+        #    specifically for sector ETF data)
+        cnbc = cnbc_quote_batch(symbols)
         if cnbc:
             sources_used.append(f"cnbc({len(cnbc)})")
             for sym, val in cnbc.items():
