@@ -256,54 +256,230 @@ SECTOR_ETFS = [
     ("XLC", "Communication"),
 ]
 
+# Per-sector "last known good" cache. Survives transient fetch failures so
+# the heatmap never loses sectors when a single fetch hiccups.
+# Format: {symbol: {"price": float, "change_pct": float, "fetched_at": iso_str, "source": "cnbc"|"yfinance"}}
+_sector_last_good = {}
+
+
+def _fetch_sectors_from_cnbc(symbols):
+    """Fetch sector data from CNBC's public quote API.
+
+    Returns dict keyed by symbol: {symbol: {"price": float, "change_pct": float}}.
+    Returns empty dict on any failure — caller should fall back to yfinance.
+
+    CNBC's quote endpoint is faster and more reliable than yfinance batch calls
+    for index/ETF data. It's their internal API used by the cnbc.com sector page.
+    """
+    import requests as _requests
+    import json as _json
+    out = {}
+    try:
+        # CNBC quote API — pipe-separated symbols
+        url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+        params = {
+            "symbols": "|".join(symbols),
+            "requestMethod": "itv",
+            "noform": "1",
+            "partnerId": "20",
+            "fund": "1",
+            "exthrs": "1",
+            "output": "json",
+        }
+        headers = {
+            # CNBC blocks default Python user-agents
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.cnbc.com/",
+        }
+        resp = _requests.get(url, params=params, headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return out
+
+        # Response is sometimes wrapped in JSONP-like text — try multiple parse paths
+        text = resp.text.strip()
+        data = None
+        try:
+            data = resp.json()
+        except Exception:
+            # Some CNBC responses come as text — try stripping JSONP wrappers
+            try:
+                # Strip leading "callback(" and trailing ")" if present
+                if text.startswith("(") and text.endswith(")"):
+                    text = text[1:-1]
+                data = _json.loads(text)
+            except Exception:
+                return out
+
+        # CNBC structure: FormattedQuoteResult.FormattedQuote (list)
+        quotes = []
+        try:
+            if isinstance(data, dict):
+                fqr = data.get("FormattedQuoteResult") or {}
+                fq = fqr.get("FormattedQuote") if isinstance(fqr, dict) else None
+                if isinstance(fq, list):
+                    quotes = fq
+                elif isinstance(fq, dict):
+                    quotes = [fq]
+        except Exception:
+            return out
+
+        for q in quotes:
+            try:
+                sym = (q.get("symbol") or "").upper()
+                if not sym or sym not in symbols:
+                    continue
+                # CNBC fields: 'last' (price), 'change_pct' or 'changePct'
+                price_raw = q.get("last") or q.get("lastTradePrice") or q.get("price")
+                change_pct_raw = (q.get("change_pct") or q.get("changePct")
+                                  or q.get("ChangePct") or q.get("percentChange"))
+                if price_raw is None or change_pct_raw is None:
+                    continue
+                # Strip any non-numeric chars (CNBC sometimes sends "+0.45" or "0.45%")
+                price_str = str(price_raw).replace(",", "").replace("$", "").strip()
+                change_str = str(change_pct_raw).replace("%", "").replace("+", "").strip()
+                price = float(price_str)
+                change_pct = float(change_str)
+                out[sym] = {"price": round(price, 2), "change_pct": round(change_pct, 2)}
+            except Exception:
+                # Skip individual malformed quote, keep going
+                continue
+    except Exception as e:
+        # Network/timeout/anything — caller falls back to yfinance
+        try:
+            import logging as _lg
+            _lg.getLogger(__name__).debug(f"CNBC sector fetch failed: {e}")
+        except Exception:
+            pass
+    return out
+
+
+def _fetch_sectors_from_yfinance(symbols, symbol_to_name):
+    """Fallback: fetch sectors from yfinance batch (the original code path).
+
+    Returns dict keyed by symbol: {symbol: {"price": float, "change_pct": float, "as_of_date": str|None}}.
+    """
+    out = {}
+    as_of_date = None
+    _throttle()
+    try:
+        df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
+    except Exception:
+        return out, as_of_date
+
+    if df is None or df.empty:
+        return out, as_of_date
+
+    for symbol in symbols:
+        try:
+            if isinstance(df.columns, pd.MultiIndex):
+                if symbol not in df.columns.get_level_values(0):
+                    continue
+                close_series = df[(symbol, "Close")].dropna()
+            else:
+                continue
+
+            if close_series is None or len(close_series) < 2:
+                continue
+
+            current = float(close_series.iloc[-1])
+            prev = float(close_series.iloc[-2])
+            change_pct = ((current / prev) - 1) * 100
+
+            if as_of_date is None:
+                try:
+                    as_of_date = str(close_series.index[-1].date())
+                except Exception:
+                    pass
+
+            out[symbol] = {
+                "price": round(current, 2),
+                "change_pct": round(change_pct, 2),
+            }
+        except Exception:
+            continue
+    return out, as_of_date
+
 
 def get_sector_heatmap():
     """Get performance for each S&P 500 sector via SPDR ETFs.
-    Always returns the most recent trading day's data."""
+
+    Source priority (per fetch):
+      1. CNBC quote API (primary — faster, more reliable for ETFs)
+      2. yfinance batch (fallback if CNBC fails or returns partial)
+      3. Per-sector last-known-good cache (so partial outages don't drop sectors)
+
+    Always returns all 11 sectors when at least one source has cached them.
+    """
     def fetch():
         symbols = [s[0] for s in SECTOR_ETFS]
         symbol_to_name = {s[0]: s[1] for s in SECTOR_ETFS}
-        _throttle()
-        try:
-            df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
-        except Exception:
-            return {"sectors": [], "market_open": is_market_open(), "error": "Could not fetch sector data"}
-
-        if df is None or df.empty:
-            return {"sectors": [], "market_open": is_market_open(), "error": "No data"}
-
-        sectors = []
+        sectors_by_symbol = {}  # symbol -> dict
         as_of_date = None
-        for symbol in symbols:
-            try:
-                if isinstance(df.columns, pd.MultiIndex):
-                    if symbol not in df.columns.get_level_values(0):
-                        continue
-                    close_series = df[(symbol, "Close")].dropna()
-                else:
-                    continue
+        sources_used = []
 
-                if close_series is None or len(close_series) < 2:
-                    continue
+        # 1) Try CNBC primary
+        cnbc = _fetch_sectors_from_cnbc(symbols)
+        if cnbc:
+            sources_used.append(f"cnbc({len(cnbc)})")
+            for sym, val in cnbc.items():
+                sectors_by_symbol[sym] = {**val, "_source": "cnbc"}
 
-                current = float(close_series.iloc[-1])
-                prev = float(close_series.iloc[-2])
-                change_pct = ((current / prev) - 1) * 100
+        # 2) For any sector still missing, fall back to yfinance
+        missing = [s for s in symbols if s not in sectors_by_symbol]
+        if missing:
+            yf_data, yf_as_of = _fetch_sectors_from_yfinance(missing, symbol_to_name)
+            if yf_data:
+                sources_used.append(f"yfinance({len(yf_data)})")
+                if yf_as_of and not as_of_date:
+                    as_of_date = yf_as_of
+                for sym, val in yf_data.items():
+                    sectors_by_symbol[sym] = {**val, "_source": "yfinance"}
 
-                if as_of_date is None:
-                    try:
-                        as_of_date = str(close_series.index[-1].date())
-                    except Exception:
-                        pass
+        # 3) For any STILL missing, use last-known-good cache
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            for sym in still_missing:
+                cached = _sector_last_good.get(sym)
+                if cached:
+                    sectors_by_symbol[sym] = {
+                        "price": cached["price"],
+                        "change_pct": cached["change_pct"],
+                        "_source": f"cache_{cached.get('source', 'unknown')}",
+                        "_stale_at": cached.get("fetched_at"),
+                    }
 
-                sectors.append({
-                    "symbol": symbol,
-                    "name": symbol_to_name[symbol],
-                    "price": round(current, 2),
-                    "change_pct": round(change_pct, 2),
-                })
-            except Exception:
-                continue
+        # 4) Update last-known-good cache for everything we got fresh
+        try:
+            now_iso = datetime.now().isoformat()
+            for sym, val in sectors_by_symbol.items():
+                src = val.get("_source", "")
+                if src in ("cnbc", "yfinance"):
+                    _sector_last_good[sym] = {
+                        "price": val["price"],
+                        "change_pct": val["change_pct"],
+                        "fetched_at": now_iso,
+                        "source": src,
+                    }
+        except Exception:
+            pass
+
+        # Build final list in canonical order, sorted by performance
+        sectors = []
+        for sym, name in SECTOR_ETFS:
+            if sym in sectors_by_symbol:
+                v = sectors_by_symbol[sym]
+                entry = {
+                    "symbol": sym,
+                    "name": name,
+                    "price": v["price"],
+                    "change_pct": v["change_pct"],
+                }
+                # Pass through staleness flag if from cache
+                if v.get("_source", "").startswith("cache_"):
+                    entry["stale"] = True
+                    entry["stale_at"] = v.get("_stale_at")
+                sectors.append(entry)
 
         sectors.sort(key=lambda x: x["change_pct"], reverse=True)
         return {
@@ -311,6 +487,8 @@ def get_sector_heatmap():
             "market_open": is_market_open(),
             "as_of": as_of_date,
             "generated_at": datetime.now().isoformat(),
+            "sources": sources_used,
+            "missing_count": 11 - len(sectors),
         }
 
     return _get_cached("sector_heatmap", fetch, ttl=300)
