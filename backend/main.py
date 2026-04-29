@@ -480,12 +480,42 @@ _daily_paused = {"paused": False, "pause_date": None, "reason": None}
 
 # Load daily pause state from DB (survives container restarts)
 try:
-    from predictions.models import get_trading_state
+    from predictions.models import get_trading_state, set_trading_state as _set_state
     _saved_pause = get_trading_state("daily_pause_date", "")
+    _saved_reason = get_trading_state("daily_pause_reason", "")
     if _saved_pause == dt.now().strftime("%Y-%m-%d"):
-        _daily_paused["paused"] = True
-        _daily_paused["pause_date"] = _saved_pause
-        _daily_paused["reason"] = get_trading_state("daily_pause_reason", "Restored from DB")
+        # ONE-TIME AUTO-CLEAR: if the saved pause reason mentions a >5% jump,
+        # it's almost certainly the V3 reset false-positive. Clear it on boot.
+        # This flag file ensures we only auto-clear once, in case real >5% gains
+        # happen later that the system genuinely should pause on.
+        import os as _os_pause
+        _pause_clear_flag = _os_pause.path.join(_os_pause.path.dirname(__file__), ".daily_pause_clear_v1_done")
+        _is_synthetic = False
+        try:
+            # Reasons stored as "Daily gain +X.XX% exceeded 2.5% limit"
+            import re as _re_pause
+            _m = _re_pause.search(r"\+([\d.]+)%", _saved_reason or "")
+            if _m and float(_m.group(1)) >= 5.0:
+                _is_synthetic = True
+        except Exception:
+            pass
+
+        if _is_synthetic and not _os_pause.path.exists(_pause_clear_flag):
+            logger.warning(
+                f"DAILY PAUSE AUTO-CLEAR: Detected synthetic >5% gain in saved reason "
+                f"('{_saved_reason}'). Clearing pause on startup."
+            )
+            try:
+                _set_state("daily_pause_date", "")
+                _set_state("daily_pause_reason", "")
+                with open(_pause_clear_flag, "w") as _f:
+                    _f.write(f"cleared on {dt.now().isoformat()} (was: {_saved_reason})")
+            except Exception as _clear_err:
+                logger.warning(f"Could not write pause-clear flag: {_clear_err}")
+        else:
+            _daily_paused["paused"] = True
+            _daily_paused["pause_date"] = _saved_pause
+            _daily_paused["reason"] = _saved_reason or "Restored from DB"
 except Exception:
     pass
 
@@ -1155,6 +1185,31 @@ def _check_daily_profit_limit():
         if row:
             yesterday_value = row[0]
             daily_return = ((total_value / yesterday_value) - 1) * 100
+
+            # SANITY CHECK: A real day's gain can't exceed ~5%. If we see >5%
+            # and the fund hasn't done many trades today, it's almost certainly
+            # a portfolio reset/manual adjustment, not a real trading gain.
+            # Don't pause trading on synthetic jumps.
+            from predictions.models import get_db as _gdb
+            _conn = _gdb()
+            try:
+                trades_today_row = _conn.execute(
+                    "SELECT COUNT(*) FROM paper_trades WHERE entry_date >= ? OR exit_date >= ?",
+                    (today_str, today_str)
+                ).fetchone()
+                trades_today = trades_today_row[0] if trades_today_row else 0
+            except Exception:
+                trades_today = 0
+            finally:
+                _conn.close()
+
+            if daily_return >= 5.0 and trades_today < 3:
+                logger.warning(
+                    f"DAILY PROFIT CHECK: +{daily_return:.2f}% appears synthetic "
+                    f"(only {trades_today} trades today). Likely reset/adjustment, NOT pausing. "
+                    f"yesterday=${yesterday_value:.0f}, today=${total_value:.0f}"
+                )
+                return  # Skip pause — this is not a real trading gain
 
             if daily_return >= 2.5:
                 logger.warning(f"DAILY PROFIT LIMIT HIT: +{daily_return:.2f}% today — selective sell + pause new trades")
@@ -2463,6 +2518,44 @@ def ibkr_unhalt_endpoint(request: Request):
     except Exception as e:
         admin_audit(request, "IBKR_UNHALT", False, f"Error: {e}")
         logger.error(f"IBKR unhalt error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/clear-daily-pause")
+def clear_daily_pause_endpoint(request: Request):
+    """Clear the daily profit-limit pause. ADMIN-ONLY.
+
+    Use when the daily pause was triggered falsely (e.g., portfolio reset
+    caused a synthetic +10% jump). Resumes paper trading immediately.
+    """
+    check_rate_limit(request.client.host)
+    require_admin(request)
+    global _daily_paused
+    try:
+        was_paused = _daily_paused.get("paused", False)
+        old_reason = _daily_paused.get("reason", "")
+        _daily_paused = {"paused": False, "pause_date": None, "reason": None}
+
+        # Clear DB persistence too
+        try:
+            from predictions.models import set_trading_state
+            set_trading_state("daily_pause_date", "")
+            set_trading_state("daily_pause_reason", "")
+        except Exception as _db_err:
+            logger.debug(f"Could not clear DB pause state: {_db_err}")
+
+        admin_audit(request, "CLEAR_DAILY_PAUSE", True,
+                    f"was_paused={was_paused}, old_reason={old_reason}")
+        logger.warning(f"DAILY PAUSE CLEARED via admin endpoint (was: {old_reason or 'not paused'})")
+        return {
+            "cleared": True,
+            "was_paused": was_paused,
+            "old_reason": old_reason,
+            "now_paused": False,
+        }
+    except Exception as e:
+        admin_audit(request, "CLEAR_DAILY_PAUSE", False, f"Error: {e}")
+        logger.error(f"clear_daily_pause error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

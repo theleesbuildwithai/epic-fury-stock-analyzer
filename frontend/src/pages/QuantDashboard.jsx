@@ -792,62 +792,70 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
         </div>
       )}
 
-      {/* Autonomous Trading Status */}
-      {autoStatus && (
-        <div className="bg-black border border-green-500/30 rounded-xl p-5">
-          <div className="flex items-center gap-3 mb-3">
-            <div className={`w-3 h-3 rounded-full ${
-              autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500 animate-pulse' :
-              autoStatus.status === 'trading' ? 'bg-green-500 animate-pulse' :
-              'bg-red-500'
-            }`} />
-            <h3 className="text-white font-bold text-lg">Autonomous Trading</h3>
-            <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-              autoStatus.status === 'trading' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
-              autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
-              'bg-red-500/20 text-red-400 border border-red-500/30'
-            }`}>
-              {autoStatus.status === 'idle' ? 'ACTIVE' : autoStatus.status?.toUpperCase()}
-            </span>
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
-            <div className="bg-neutral-900 rounded-lg p-3">
-              <div className="text-neutral-500 text-xs">Trade Cycles</div>
-              <div className="text-white font-bold font-mono text-lg">{autoStatus.total_cycles}</div>
-            </div>
-            <div className="bg-neutral-900 rounded-lg p-3">
-              <div className="text-neutral-500 text-xs">Trades Opened</div>
-              <div className="text-green-400 font-bold font-mono text-lg">{autoStatus.total_trades_opened}</div>
-            </div>
-            <div className="bg-neutral-900 rounded-lg p-3">
-              <div className="text-neutral-500 text-xs">Trades Closed</div>
-              <div className="text-red-400 font-bold font-mono text-lg">{autoStatus.total_trades_closed}</div>
-            </div>
-            <div className="bg-neutral-900 rounded-lg p-3">
-              <div className="text-neutral-500 text-xs">Schedule</div>
-              <div className="text-green-400 font-bold text-sm">Event-Driven</div>
-            </div>
-            <div className="bg-neutral-900 rounded-lg p-3">
-              <div className="text-neutral-500 text-xs">Next Run</div>
-              <div className="text-white font-mono text-sm">
-                {autoStatus.next_scheduled_run
-                  ? new Date(autoStatus.next_scheduled_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                  : 'Soon'}
-              </div>
-            </div>
-          </div>
-          {autoStatus.last_result && (
-            <div className="mt-3 text-neutral-500 text-xs">
-              Last cycle: {autoStatus.last_result.opened} opened, {autoStatus.last_result.closed} closed
-              {autoStatus.last_result.regime && ` | ${autoStatus.last_result.regime} regime`}
-              {autoStatus.last_run && ` | ${new Date(autoStatus.last_run).toLocaleString()}`}
-            </div>
-          )}
-          <p className="text-neutral-600 text-xs mt-2 italic">
-            The computer autonomously analyzes 520+ stocks and executes trades event-driven during market hours. No human intervention required.
-          </p>
+      {/* Autonomous Trading Status — always renders so the bar appears immediately
+          on page load. Shows "Loading..." placeholders until autoStatus arrives,
+          then fills in with real data on first fetch (~1-2s after mount). */}
+      <div className="bg-black border border-green-500/30 rounded-xl p-5">
+        <div className="flex items-center gap-3 mb-3">
+          <div className={`w-3 h-3 rounded-full ${
+            !autoStatus ? 'bg-neutral-600 animate-pulse' :
+            autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500 animate-pulse' :
+            autoStatus.status === 'trading' ? 'bg-green-500 animate-pulse' :
+            'bg-red-500'
+          }`} />
+          <h3 className="text-white font-bold text-lg">Autonomous Trading</h3>
+          <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+            !autoStatus ? 'bg-neutral-700/30 text-neutral-400 border border-neutral-700/50' :
+            autoStatus.status === 'trading' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
+            autoStatus.status === 'running' || autoStatus.status === 'idle' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
+            'bg-red-500/20 text-red-400 border border-red-500/30'
+          }`}>
+            {!autoStatus ? 'LOADING…' : (autoStatus.status === 'idle' ? 'ACTIVE' : autoStatus.status?.toUpperCase())}
+          </span>
         </div>
-      )}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+          <div className="bg-neutral-900 rounded-lg p-3">
+            <div className="text-neutral-500 text-xs">Trade Cycles</div>
+            <div className="text-white font-bold font-mono text-lg">
+              {autoStatus ? (autoStatus.total_cycles ?? '–') : '–'}
+            </div>
+          </div>
+          <div className="bg-neutral-900 rounded-lg p-3">
+            <div className="text-neutral-500 text-xs">Trades Opened</div>
+            <div className="text-green-400 font-bold font-mono text-lg">
+              {autoStatus ? (autoStatus.total_trades_opened ?? '–') : '–'}
+            </div>
+          </div>
+          <div className="bg-neutral-900 rounded-lg p-3">
+            <div className="text-neutral-500 text-xs">Trades Closed</div>
+            <div className="text-red-400 font-bold font-mono text-lg">
+              {autoStatus ? (autoStatus.total_trades_closed ?? '–') : '–'}
+            </div>
+          </div>
+          <div className="bg-neutral-900 rounded-lg p-3">
+            <div className="text-neutral-500 text-xs">Schedule</div>
+            <div className="text-green-400 font-bold text-sm">Event-Driven</div>
+          </div>
+          <div className="bg-neutral-900 rounded-lg p-3">
+            <div className="text-neutral-500 text-xs">Next Run</div>
+            <div className="text-white font-mono text-sm">
+              {autoStatus?.next_scheduled_run
+                ? new Date(autoStatus.next_scheduled_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : 'Soon'}
+            </div>
+          </div>
+        </div>
+        {autoStatus?.last_result && (
+          <div className="mt-3 text-neutral-500 text-xs">
+            Last cycle: {autoStatus.last_result.opened} opened, {autoStatus.last_result.closed} closed
+            {autoStatus.last_result.regime && ` | ${autoStatus.last_result.regime} regime`}
+            {autoStatus.last_run && ` | ${new Date(autoStatus.last_run).toLocaleString()}`}
+          </div>
+        )}
+        <p className="text-neutral-600 text-xs mt-2 italic">
+          The computer autonomously analyzes 520+ stocks and executes trades event-driven during market hours. No human intervention required.
+        </p>
+      </div>
 
       {/* Queued Trades — what the AI wants to trade next */}
       {queuedTrades && queuedTrades.total_queued > 0 && (
