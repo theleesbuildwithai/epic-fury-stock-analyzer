@@ -11,3 +11,14 @@ build/
 venv/
 *.db*
 .cash_adj_done
+
+# Local-only state flag files (must never be committed — would interfere
+# with production state on App Runner / EC2)
+.portfolio_reset_*_done
+.fund_inception_date
+.sp500_disk_cache.json
+.daily_pause_clear_*_done
+backend/.portfolio_reset_*_done
+backend/predictions/.fund_inception_date
+backend/predictions/.sp500_disk_cache.json
+backend/.daily_pause_clear_*_done
