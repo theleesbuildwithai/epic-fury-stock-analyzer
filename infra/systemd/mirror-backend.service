@@ -18,6 +18,14 @@ Environment=IBKR_MIN_TRADE_DOLLARS=100
 Environment=IBKR_HOST=127.0.0.1
 Environment=IBKR_LIVE_PORT=4001
 
+# S3 cross-pollination — push account snapshot to S3 every 30s so the public
+# App Runner dashboard can display real IBKR data. Requires IAM role with
+# s3:PutObject on the bucket.
+Environment=IBKR_PUSH_SNAPSHOT=true
+Environment=IBKR_SNAPSHOT_INTERVAL_SECONDS=30
+Environment=DB_BACKUP_BUCKET=epic-fury-portfolio-db
+Environment=AWS_DEFAULT_REGION=us-east-1
+
 # Backend binds to 127.0.0.1 only — NEVER expose the API to the internet.
 # To access remotely use SSH tunnel: ssh -L 8000:localhost:8000 ubuntu@<ec2-ip>
 ExecStart=/home/ubuntu/epic-fury-stock-analyzer/backend/venv/bin/python3 \

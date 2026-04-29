@@ -13,12 +13,26 @@ export default function IBKRDashboard() {
       const res = await fetch('/api/ibkr/status')
       const json = await res.json()
       setStatus(json)
+      // If status came from S3 snapshot, it includes positions + orders.
+      // Use those instead of separate API calls (App Runner has no Gateway).
+      if (json?.data_source === 's3_snapshot') {
+        if (Array.isArray(json.positions)) setPositions(json.positions)
+        if (Array.isArray(json.open_orders) || Array.isArray(json.recent_orders)) {
+          setOrders({
+            open_orders: json.open_orders || [],
+            order_log: json.recent_orders || [],
+          })
+        }
+      }
+      return json
     } catch {
       setStatus(null)
+      return null
     }
   }, [])
 
-  const fetchPositions = useCallback(async () => {
+  const fetchPositions = useCallback(async (skip = false) => {
+    if (skip) return
     try {
       const res = await fetch('/api/ibkr/positions')
       const json = await res.json()
@@ -28,7 +42,8 @@ export default function IBKRDashboard() {
     }
   }, [])
 
-  const fetchOrders = useCallback(async () => {
+  const fetchOrders = useCallback(async (skip = false) => {
+    if (skip) return
     try {
       const res = await fetch('/api/ibkr/orders')
       const json = await res.json()
@@ -40,7 +55,11 @@ export default function IBKRDashboard() {
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
-    await Promise.all([fetchStatus(), fetchPositions(), fetchOrders()])
+    // Fetch status first — it tells us if we're in snapshot mode (data already included)
+    const statusJson = await fetchStatus()
+    const usingSnapshot = statusJson?.data_source === 's3_snapshot'
+    // Skip separate position/order calls when snapshot already has them
+    await Promise.all([fetchPositions(usingSnapshot), fetchOrders(usingSnapshot)])
     setLoading(false)
   }, [fetchStatus, fetchPositions, fetchOrders])
 
@@ -98,6 +117,10 @@ export default function IBKRDashboard() {
   const isEnabled = s.enabled
   const isHalted = s.trading_halted
   const mode = s.mode || 'PAPER'
+  const dataSource = status?.data_source
+  const fromSnapshot = dataSource === 's3_snapshot'
+  const snapshotAge = status?.snapshot_age_seconds
+  const snapshotStale = status?.snapshot_stale
 
   return (
     <div className="min-h-screen bg-gray-950 text-white p-4 md:p-8">
@@ -123,6 +146,31 @@ export default function IBKRDashboard() {
               </span>
             </h1>
             <p className="text-gray-400 mt-1">Dual-track execution — paper trades always run alongside IBKR</p>
+            {dataSource && (
+              <p className="text-xs mt-2">
+                {dataSource === 'live_gateway' && (
+                  <span className="text-green-400">Live data — direct Gateway connection</span>
+                )}
+                {dataSource === 's3_snapshot' && !snapshotStale && (
+                  <span className="text-cyan-400">
+                    Live mirror via S3 snapshot ({snapshotAge != null ? `${snapshotAge}s old` : 'fresh'})
+                  </span>
+                )}
+                {dataSource === 's3_snapshot' && snapshotStale && (
+                  <span className="text-orange-400">
+                    Stale snapshot ({snapshotAge}s old) — EC2 pusher may be down
+                  </span>
+                )}
+                {dataSource === 'no_connection' && (
+                  <span className="text-gray-500">
+                    No IBKR connection here. Set up EC2 with IBKR_PUSH_SNAPSHOT=true to mirror.
+                  </span>
+                )}
+                {dataSource === 'error' && (
+                  <span className="text-red-400">Error fetching IBKR data</span>
+                )}
+              </p>
+            )}
           </div>
           <button
             onClick={fetchAll}

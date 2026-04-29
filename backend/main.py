@@ -1412,6 +1412,21 @@ auto_trade_stats["status"] = "running"
 logger.warning("AUTONOMOUS TRADING SCHEDULER STARTED — the computer is now the hedge fund manager")
 
 
+# --- IBKR S3 SNAPSHOT PUSHER (only runs on EC2) ---
+# When IBKR_PUSH_SNAPSHOT=true, start a background thread that uploads the
+# IBKR account state to S3 every N seconds. App Runner reads from that S3
+# location to display real account data on the dashboard without needing
+# direct Gateway access. EC2 sets this env var; App Runner does not.
+if os.getenv("IBKR_PUSH_SNAPSHOT", "").lower() in ("true", "1", "yes"):
+    try:
+        from predictions.ibkr_snapshot import start_snapshot_pusher_thread
+        _snapshot_interval = int(os.getenv("IBKR_SNAPSHOT_INTERVAL_SECONDS", "30"))
+        start_snapshot_pusher_thread(interval_seconds=_snapshot_interval)
+        logger.warning(f"IBKR S3 SNAPSHOT PUSHER ACTIVE — pushing every {_snapshot_interval}s")
+    except Exception as _e:
+        logger.error(f"Failed to start IBKR snapshot pusher: {_e}")
+
+
 # --- FIX EXISTING BROKEN STOP/TARGET PRICES ON STARTUP ---
 # Previous code used quant pick values that produced insane stops
 # (e.g., COIN short: stop $419, target -$214). Fix all open positions.
@@ -2272,20 +2287,66 @@ def ensemble_signal_endpoint(ticker: str, request: Request):
 def ibkr_status_endpoint(request: Request, refresh: bool = False):
     """IBKR connection status, account summary, and trading mode.
 
+    Behavior:
+        - If THIS backend has direct Gateway access (e.g., EC2), returns live data.
+        - If NOT directly connected (e.g., App Runner), auto-falls back to the
+          S3 snapshot uploaded by EC2. Frontend gets unified data either way.
+
     Query params:
-        refresh: If true, bypass the 10s account cache for live values.
-            Use for dashboard refresh button.
+        refresh: bypass caches for live values.
     """
     check_rate_limit(request.client.host)
     try:
         from predictions.ibkr_adapter import ibkr_get_status, ibkr_get_account, get_order_log
         status = ibkr_get_status()
-        account = ibkr_get_account(force_refresh=refresh)
-        recent_orders = get_order_log(limit=20)
+        directly_connected = status.get("connected", False)
+
+        if directly_connected:
+            # We have a real Gateway here — return live data.
+            account = ibkr_get_account(force_refresh=refresh)
+            recent_orders = get_order_log(limit=20)
+            return {
+                "status": status,
+                "account": account,
+                "recent_orders": recent_orders,
+                "data_source": "live_gateway",
+            }
+
+        # Not directly connected — try S3 snapshot fallback.
+        try:
+            from predictions.ibkr_snapshot import pull_ibkr_snapshot
+            snapshot = pull_ibkr_snapshot(force_refresh=refresh)
+            if snapshot.get("available"):
+                # Return snapshot data formatted like a normal status response.
+                return {
+                    "status": {
+                        "connected": snapshot.get("connected", False),
+                        "enabled": True,
+                        "mode": snapshot.get("account", {}).get("mode", "LIVE"),
+                        "from_snapshot": True,
+                        "snapshot_age_seconds": snapshot.get("snapshot_age_seconds"),
+                        "snapshot_stale": snapshot.get("snapshot_stale", False),
+                        "pushed_at": snapshot.get("pushed_at"),
+                    },
+                    "account": snapshot.get("account", {}),
+                    "recent_orders": snapshot.get("recent_order_log", []),
+                    "positions": snapshot.get("positions", []),
+                    "open_orders": snapshot.get("open_orders", []),
+                    "data_source": "s3_snapshot",
+                    "snapshot_age_seconds": snapshot.get("snapshot_age_seconds"),
+                    "snapshot_stale": snapshot.get("snapshot_stale", False),
+                }
+        except Exception as _snap_err:
+            logger.debug(f"Snapshot fallback failed: {_snap_err}")
+
+        # No snapshot available either — return disconnected status.
         return {
             "status": status,
-            "account": account,
-            "recent_orders": recent_orders,
+            "account": ibkr_get_account(force_refresh=refresh),
+            "recent_orders": get_order_log(limit=20),
+            "data_source": "no_connection",
+            "message": ("IBKR not connected on this backend and no S3 snapshot "
+                        "available. Start IB Gateway or wait for EC2 to push a snapshot."),
         }
     except Exception as e:
         logger.error(f"IBKR status error: {e}")
@@ -2294,7 +2355,38 @@ def ibkr_status_endpoint(request: Request, refresh: bool = False):
                        "error": str(e)},
             "account": {},
             "recent_orders": [],
+            "data_source": "error",
         }
+
+
+@app.get("/api/ibkr/snapshot")
+def ibkr_snapshot_endpoint(request: Request, refresh: bool = False):
+    """Get the latest IBKR snapshot from S3.
+
+    The EC2 backend pushes account state to S3 every 30s. This endpoint
+    reads from S3 so the dashboard can display real IBKR data without
+    needing direct Gateway access.
+
+    Query params:
+        refresh: bypass 10s local cache and fetch fresh from S3.
+
+    Returns:
+        - {"available": True, "account": {...}, "positions": [...], ...} if snapshot exists
+        - {"available": False, "reason": "..."} if EC2 hasn't pushed yet
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.ibkr_snapshot import pull_ibkr_snapshot, get_pusher_state
+        snapshot = pull_ibkr_snapshot(force_refresh=refresh)
+        # If we're the EC2 backend (running the pusher), include pusher diagnostics
+        try:
+            snapshot["pusher_state"] = get_pusher_state()
+        except Exception:
+            pass
+        return snapshot
+    except Exception as e:
+        logger.error(f"IBKR snapshot endpoint error: {e}")
+        return {"available": False, "error": str(e)}
 
 
 @app.post("/api/ibkr/kill-switch")

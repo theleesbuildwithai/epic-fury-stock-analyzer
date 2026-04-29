@@ -56,8 +56,17 @@ Open: https://us-east-1.console.aws.amazon.com/ec2/home?region=us-east-1#LaunchI
 | Storage                         | 30 GiB gp3                             |
 | File systems                    | Skip (don't check anything)            |
 
-(Optional: under Advanced details → IAM instance profile → create or attach a
-role with AmazonS3FullAccess so the VM can sync the portfolio DB.)
+**REQUIRED for IBKR cross-pollination**: under **Advanced details → IAM instance profile**, attach a role with **AmazonS3FullAccess** (or scoped to `s3://epic-fury-portfolio-db/*`).
+Without this:
+  - VM can't sync portfolio DB to S3 (positions reset on restart)
+  - VM can't push IBKR snapshots to S3 (App Runner dashboard won't show your real account)
+
+How to create the role:
+  1. Open AWS IAM Console → Roles → Create role
+  2. Trusted entity: AWS service → EC2
+  3. Permissions: search & attach `AmazonS3FullAccess`
+  4. Name it `ec2-epic-fury-role`
+  5. Back in EC2 launch, select it from the IAM instance profile dropdown
 
 Click **Launch instance**. Wait 2 min for "Running" + "2/2 checks passed".
 
