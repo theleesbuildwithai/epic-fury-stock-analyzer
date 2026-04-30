@@ -1628,6 +1628,15 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         logger.info(f"STREAK CALIBRATION: {streak['streak_type']} streak x{streak['streak_length']} — "
                     f"size {streak_size_mod:.2f}x, confidence shift {streak_conf_shift:+d}")
 
+    # DIAGNOSTIC: log entry-guard state so we can see why trades aren't firing
+    logger.warning(
+        f"TRADE EXECUTION ENTRY: available_slots={available_slots}, "
+        f"cash=${cash:.2f}, timing.window={timing.get('window')}, "
+        f"timing.can_trade={timing.get('can_trade')}, regime={regime}, "
+        f"long_picks_in={len(quant_picks.get('long_picks', []))}, "
+        f"short_picks_in={len(quant_picks.get('short_picks', []))}"
+    )
+
     if available_slots > 0 and cash > 1000 and timing.get("can_trade", True):
         # REGIME-AWARE PICK SELECTION
         # In BEAR: prioritize shorts heavily, limit longs
@@ -1715,6 +1724,27 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             for p in short_candidates:
                 p["_adj_confidence"] = p["confidence"]
                 all_picks.append(p)
+
+        # DIAGNOSTIC: log filtering stats so we can see why all_picks may be empty
+        logger.warning(
+            f"PICK FILTERING: min_conf={min_conf}, min_score={min_score}, "
+            f"long_candidates={len(long_candidates)}, "
+            f"short_candidates={len(short_candidates)}, "
+            f"all_picks_built={len(all_picks)}"
+        )
+        if not all_picks:
+            # Record a diagnostic skipped entry so we can see this in API output
+            results["skipped"].append({
+                "symbol": "DIAGNOSTIC",
+                "reason": (
+                    f"all_picks empty after regime={regime} filter — "
+                    f"long_candidates={len(long_candidates)}, "
+                    f"short_candidates={len(short_candidates)}, "
+                    f"min_conf={min_conf}, min_score={min_score}, "
+                    f"long_picks_in={len(quant_picks.get('long_picks', []))}, "
+                    f"short_picks_in={len(quant_picks.get('short_picks', []))}"
+                ),
+            })
 
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
@@ -2202,6 +2232,29 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
             except Exception as e:
                 results["errors"].append(f"Failed to open {symbol}: {str(e)}")
+
+    # DIAGNOSTIC: if cycle finished with 0 opened AND 0 skipped, the user
+    # has no visibility into WHY. Record an entry guard diagnostic so the
+    # /api/auto-trading-status response shows a reason.
+    if not results["opened"] and not results["skipped"]:
+        results["skipped"].append({
+            "symbol": "ENTRY_GUARD",
+            "reason": (
+                f"Entry guard or pick filter blocked all trades: "
+                f"available_slots={available_slots}, "
+                f"cash=${cash:.2f}, "
+                f"timing.can_trade={timing.get('can_trade')}, "
+                f"timing.window={timing.get('window')}, "
+                f"regime={regime}, "
+                f"long_picks_in={len(quant_picks.get('long_picks', []))}, "
+                f"short_picks_in={len(quant_picks.get('short_picks', []))}"
+            ),
+        })
+        logger.warning(
+            f"TRADE EXECUTION: 0 opened, 0 skipped — diagnostic recorded. "
+            f"slots={available_slots} cash=${cash:.2f} can_trade={timing.get('can_trade')} "
+            f"window={timing.get('window')} regime={regime}"
+        )
 
     # --- Step 3: Save portfolio snapshot ---
     try:

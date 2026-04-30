@@ -625,10 +625,27 @@ def _should_trade_now() -> dict:
     if _geo_risk_state.get("level") in ("ELEVATED", "CRITICAL"):
         reasons.append(f"GEO-RISK {_geo_risk_state['level']} (score {_geo_risk_state.get('score', 0)}) — defensive rebalance needed")
 
-    # --- TRIGGER 8: Periodic full scan every 15 min during market hours ---
-    # System is ALWAYS trading during hours — subconsciously watching the market
-    if 9 <= hour <= 16 and minute in (0, 1, 15, 16, 30, 31, 45, 46) and not reasons:
-        reasons.append("PERIODIC SCAN — 15-min market check (always trading)")
+    # --- TRIGGER 8: Periodic / catch-up scan during market hours ---
+    # Fires on either condition (whichever comes first):
+    #   (a) APScheduler lands on a clean 15-min minute mark (0/15/30/45 +/-1)
+    #   (b) >= 15 minutes have elapsed since the last cycle (catch-up)
+    # The catch-up branch is critical: APScheduler can drift off the
+    # clean minute marks, leaving long gaps with no cycles. The elapsed
+    # check guarantees a periodic scan no matter when the scheduler runs.
+    if 9 <= hour <= 16 and not reasons:
+        try:
+            if _last_trade_time["value"]:
+                elapsed_min = (dt.now() - _last_trade_time["value"]).total_seconds() / 60
+            else:
+                elapsed_min = 9999  # never traded — definitely run now
+        except Exception:
+            elapsed_min = 9999
+        minute_mark_hit = minute in (0, 1, 15, 16, 30, 31, 45, 46)
+        if elapsed_min >= 15 or minute_mark_hit:
+            reasons.append(
+                f"PERIODIC SCAN — {elapsed_min:.0f}min since last cycle "
+                f"(market hours, always trading)"
+            )
 
     should_trade = len(reasons) > 0
     return {"should_trade": should_trade, "reasons": reasons}
