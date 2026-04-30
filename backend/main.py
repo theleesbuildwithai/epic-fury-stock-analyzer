@@ -434,6 +434,115 @@ except Exception as e:
     logger.warning(f"S&P backfill v1: {e}")
 
 # ============================================================
+#  ONE-TIME CASH RECOVERY V1
+#  Repairs the cash-inflation incident: trades got opened at option-premium
+#  prices ($2-$8) but closed at equity prices ($120-$300), generating
+#  4000-6000% pnl that inflated cash by ~$2M. This migration:
+#    1. Identifies corrupted closed trades (|pnl_pct| > 100% AND equity)
+#    2. Reverses the bogus cash credit they added
+#    3. Marks them as 'closed_corrupted' so they're excluded from stats
+#    4. Recomputes cash to a verifiable value
+# Uses a flag file so it only runs ONCE per deploy.
+# ============================================================
+try:
+    import os as _os_recov
+    _recov_flag = _os_recov.path.join(_os_recov.path.dirname(__file__), ".cash_recovery_v1_done")
+    if not _os_recov.path.exists(_recov_flag):
+        from predictions.models import (
+            get_db as _get_db_recov,
+            get_cash as _get_cash_recov,
+            set_cash as _set_cash_recov,
+        )
+        _conn_recov = _get_db_recov()
+        # Find corrupted closed trades: equity (or default), |pnl_pct| > 100
+        _corrupted = _conn_recov.execute(
+            """SELECT id, ticker, direction, entry_price, exit_price, shares,
+                      pnl_dollars, pnl_pct, instrument_type, status
+               FROM paper_trades
+               WHERE status='closed'
+                 AND (instrument_type IS NULL OR instrument_type='equity')
+                 AND ABS(pnl_pct) > 100"""
+        ).fetchall()
+
+        _bogus_cash = 0.0
+        _corrupt_count = 0
+        for _t in _corrupted:
+            try:
+                _entry = float(_t["entry_price"] or 0)
+                _exit = float(_t["exit_price"] or 0)
+                _shares = float(_t["shares"] or 0)
+                _direction = _t["direction"]
+                _pnl_d = float(_t["pnl_dollars"] or 0)
+                # Compute the cash that was credited (matches close_paper_trade equity logic)
+                if _direction == "long":
+                    _cash_credited = _exit * _shares
+                else:  # short
+                    _cash_credited = _entry * _shares + _pnl_d
+                # The cost originally deducted at open was entry * shares.
+                # Net bogus impact = cash_credited - cost_at_open
+                _cost_at_open = _entry * _shares
+                _bogus_impact = _cash_credited - _cost_at_open
+                _bogus_cash += _bogus_impact
+                # Mark the trade as corrupted, zero out pnl
+                _conn_recov.execute(
+                    """UPDATE paper_trades
+                       SET pnl_dollars=0, pnl_pct=0, status='closed_corrupted'
+                       WHERE id=?""",
+                    (_t["id"],)
+                )
+                _corrupt_count += 1
+            except Exception as _ce:
+                logger.warning(f"Cash recovery: skipped trade {_t['id']}: {_ce}")
+                continue
+
+        _conn_recov.commit()
+        _conn_recov.close()
+
+        if _corrupt_count > 0:
+            # Subtract the bogus cash that was credited
+            _cur_cash = _get_cash_recov()
+            _new_cash = round(_cur_cash - _bogus_cash, 2)
+            # Sanity guard: never let recovery push cash negative or above $5M
+            if 0 < _new_cash < 5_000_000:
+                _set_cash_recov(_new_cash)
+                logger.warning(
+                    f"CASH RECOVERY V1: marked {_corrupt_count} corrupted trades, "
+                    f"reversed ${_bogus_cash:,.2f} bogus cash. "
+                    f"Cash: ${_cur_cash:,.2f} -> ${_new_cash:,.2f}"
+                )
+
+                # Also nuke today's portfolio_snapshot so the equity curve
+                # doesn't show the inflated value. The next trade cycle will
+                # write a fresh snapshot with the correct cash.
+                try:
+                    _conn_snap = _get_db_recov()
+                    _today = datetime.now().strftime("%Y-%m-%d")
+                    _conn_snap.execute(
+                        "DELETE FROM portfolio_snapshots WHERE snapshot_date=?",
+                        (_today,)
+                    )
+                    _conn_snap.commit()
+                    _conn_snap.close()
+                    logger.warning(f"CASH RECOVERY V1: deleted today's ({_today}) snapshot — equity curve will be clean on next cycle")
+                except Exception as _se:
+                    logger.warning(f"Snapshot cleanup failed (non-fatal): {_se}")
+            else:
+                logger.error(
+                    f"CASH RECOVERY V1: refused to set cash to ${_new_cash:,.2f} "
+                    f"(out of safety bounds). No change made. Investigate."
+                )
+        else:
+            logger.info("CASH RECOVERY V1: no corrupted trades found — nothing to do")
+
+        with open(_recov_flag, "w") as _f:
+            _f.write(f"recovered {_corrupt_count} trades, ${_bogus_cash:.2f} reversed on {datetime.now().isoformat()}")
+    else:
+        logger.info("Cash recovery v1 already done — skipping")
+except Exception as e:
+    logger.error(f"Cash recovery v1 FAILED (non-fatal — system continues): {e}")
+
+
+# ============================================================
 #  AUTONOMOUS TRADING SCHEDULER
 #  Runs server-side on App Runner — works 24/7, no human needed.
 #  The computer IS the hedge fund manager.

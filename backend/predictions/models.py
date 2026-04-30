@@ -405,7 +405,17 @@ def close_paper_trade(trade_id: int, exit_price: float):
     For options: exit_price is the exit premium per share.
     P&L = (exit_premium - entry_premium) * contracts * 100.
     Cash returned = exit_premium * contracts * 100.
+
+    SAFETY VALIDATOR (added after the cash-inflation incident):
+    Rejects impossible price ratios (>15x or <1/15) which indicate a
+    units mismatch (e.g., entry stored as option premium but exit passed
+    as equity price). Without this guard, a trade can credit thousands
+    of dollars in bogus cash. When the validator triggers, the trade is
+    closed at the entry price (zero pnl) and an error is logged so the
+    bug can be diagnosed without blowing up cash.
     """
+    import logging as _log
+    _logger = _log.getLogger("paper_trader.close")
     conn = get_db()
     trade = conn.execute(
         "SELECT * FROM paper_trades WHERE id = ?", (trade_id,)
@@ -415,6 +425,37 @@ def close_paper_trade(trade_id: int, exit_price: float):
         shares = trade["shares"]
         direction = trade["direction"]
         instrument_type = trade["instrument_type"] or "equity"
+
+        # ===== SAFETY VALIDATOR =====
+        # If the exit_price is wildly different from the entry price (>15x or
+        # <1/15), this is almost certainly a units mismatch — e.g., entry
+        # stored as $2.53 (option premium) but exit passed as $128 (equity).
+        # In that case, close the trade FLAT (no pnl, no cash credit) so the
+        # database isn't corrupted, and log the incident loudly.
+        try:
+            if entry and exit_price and entry > 0:
+                ratio = exit_price / entry
+                if ratio > 15 or ratio < (1 / 15):
+                    _logger.error(
+                        f"REJECTED IMPOSSIBLE PRICE RATIO on trade {trade_id} "
+                        f"({trade['ticker']} {direction} {instrument_type}): "
+                        f"entry=${entry:.4f} exit=${exit_price:.4f} ratio={ratio:.2f}x. "
+                        f"Closing FLAT (no pnl, no cash change) to prevent corruption."
+                    )
+                    # Close flat: pnl_dollars=0, pnl_pct=0, no cash change
+                    conn.execute(
+                        """UPDATE paper_trades
+                           SET exit_price=?, exit_date=?, pnl_dollars=0, pnl_pct=0,
+                               status='closed_flat_validator'
+                           WHERE id=?""",
+                        (entry, datetime.now().isoformat(), trade_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                    return
+        except Exception as _e:
+            # Validator must NEVER block a normal close — fall through
+            _logger.warning(f"Close validator error for trade {trade_id}: {_e}")
 
         if instrument_type in ("call", "put"):
             # Options P&L: based on premium change
