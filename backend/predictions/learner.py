@@ -41,9 +41,9 @@ def analyze_factor_performance() -> dict:
     Returns:
         dict of factor_name → performance metrics
     """
-    from predictions.models import get_closed
+    from predictions.models import get_closed_trades
 
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     if not closed:
         return {"message": "No closed trades to analyze", "factors": {}}
 
@@ -128,9 +128,9 @@ def analyze_factor_performance() -> dict:
 
 def analyze_sector_performance() -> dict:
     """Which sectors are we best at trading?"""
-    from predictions.models import get_closed
+    from predictions.models import get_closed_trades
 
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     if not closed:
         return {"sectors": {}}
 
@@ -174,9 +174,9 @@ def analyze_sector_performance_by_direction() -> dict:
     Returns separate stats for longs and shorts in each sector so the system
     can block bad-short sectors without blocking good-long sectors (and vice versa).
     """
-    from predictions.models import get_closed
+    from predictions.models import get_closed_trades
 
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     if not closed:
         return {"long_sectors": {}, "short_sectors": {}}
 
@@ -215,9 +215,9 @@ def analyze_sector_performance_by_direction() -> dict:
 
 def analyze_regime_performance() -> dict:
     """How do we perform in different market regimes?"""
-    from predictions.models import get_closed
+    from predictions.models import get_closed_trades
 
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     if not closed:
         return {"regimes": {}}
 
@@ -260,9 +260,9 @@ def auto_adjust_weights() -> dict:
 
     This is the core of the self-learning system.
     """
-    from predictions.models import get_signal_weights, update_signal_weight, get_closed
+    from predictions.models import get_signal_weights, update_signal_weight, get_closed_trades
 
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     if len(closed) < MIN_TRADES_FOR_UPDATE:
         return {
             "updated": False,
@@ -339,9 +339,9 @@ def analyze_mistakes() -> dict:
 
     Returns specific rules the system should follow to avoid repeating mistakes.
     """
-    from predictions.models import get_closed
+    from predictions.models import get_closed_trades
 
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     if not closed:
         return {"lessons": [], "mistake_patterns": {}, "total_losses": 0}
 
@@ -538,7 +538,7 @@ def generate_intelligence_report() -> dict:
 
     This is the "brain scan" of the hedge fund.
     """
-    from predictions.models import get_signal_weights, get_closed
+    from predictions.models import get_signal_weights, get_closed_trades
 
     report = {
         "generated_at": datetime.now().isoformat(),
@@ -562,7 +562,7 @@ def generate_intelligence_report() -> dict:
     report["current_weights"] = weights
 
     # Closed trades count
-    closed = get_closed(limit=500)
+    closed = get_closed_trades(limit=500)
     report["total_closed"] = len(closed)
 
     # --- Generate insights (human-readable) ---
