@@ -237,11 +237,26 @@ def get_banner_data():
                 except Exception:
                     continue
 
-        # 2) SAFETY NET: For any symbol Yahoo dropped, try CNBC
+        # 2) SAFETY NET: For any symbol Yahoo dropped, try CNBC.
+        # CNBC uses different symbol formats than Yahoo for indices/commodities/share-classes.
+        # Translate Yahoo → CNBC, fetch, then translate back to canonical Yahoo symbols.
+        YAHOO_TO_CNBC = {
+            "^GSPC": ".SPX",
+            "^IXIC": ".IXIC",
+            "^DJI": ".DJI",
+            "^TNX": "US10Y",
+            "GC=F": "@GC.1",
+            "CL=F": "@CL.1",
+            "BRK-B": "BRK.B",
+        }
         missing = [s for s in symbols if s not in results_by_symbol]
         if missing:
+            cnbc_request = [YAHOO_TO_CNBC.get(s, s) for s in missing]
+            cnbc_to_yahoo = {YAHOO_TO_CNBC.get(s, s): s for s in missing}
             try:
-                cnbc_data = cnbc_quote_batch(missing)
+                cnbc_data = cnbc_quote_batch(cnbc_request)
+                # Map CNBC-format keys back to Yahoo-format symbols
+                cnbc_data = {cnbc_to_yahoo.get(k, k): v for k, v in cnbc_data.items()}
                 for sym, val in cnbc_data.items():
                     # CNBC gives us price + change_pct directly. Compute "change"
                     # in dollars from those: change = price - (price / (1 + pct/100)).
