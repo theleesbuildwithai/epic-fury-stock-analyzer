@@ -28,15 +28,128 @@ MAX_WEIGHT = 0.40  # No factor can go above 40%
 RECENCY_DECAY = 0.95  # Recent trades matter more: each older trade has 5% less influence
 
 
+FACTOR_NAMES = [
+    "momentum", "value", "quality", "low_vol", "rsi2", "volume",
+    "smart_money", "relative_strength", "bb_squeeze", "vwap",
+    "hurst", "autocorr", "stat_arb", "kurtosis",
+    "vol_compression", "mtf_alignment",
+    "earnings_drift", "vpoc", "ichimoku", "sector_rotation",
+    "candlestick",
+]
+
+
+def _compute_factor_stats(trades: list) -> dict:
+    """Compute per-factor performance stats with TIME-DECAY WEIGHTED SHARPE.
+
+    Same algorithm used by both analyze_factor_performance (overall) and
+    analyze_factor_performance_by_regime (per-regime subset).
+
+    Recent trades count more heavily (RECENCY_DECAY = 0.95 per step back).
+    The weighted Sharpe uses weighted mean and weighted std so a factor
+    that worked great 6 months ago but stopped working last month gets
+    a properly low Sharpe — instead of being inflated by old wins.
+
+    SAFETY: returns empty per-factor stats for any factor with 0 trades
+    or any computation error. Never raises.
+    """
+    if not trades:
+        return {f: {"total_trades": 0, "win_rate": 0, "avg_return": 0, "sharpe": 0}
+                for f in FACTOR_NAMES}
+
+    n_trades = len(trades)
+    recency_weights = [RECENCY_DECAY ** (n_trades - 1 - i) for i in range(n_trades)]
+    factor_perf = {
+        f: {"wins": 0.0, "losses": 0.0, "returns": [], "weights": [], "contributions": []}
+        for f in FACTOR_NAMES
+    }
+
+    for i, trade in enumerate(trades):
+        try:
+            pnl_pct = float(trade.get("pnl_pct", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        is_win = pnl_pct > 0
+        w = recency_weights[i]
+
+        try:
+            factors = json.loads(trade.get("factors_used", "{}") or "{}")
+        except Exception:
+            factors = {}
+        if not factors:
+            continue
+
+        for factor_name in FACTOR_NAMES:
+            factor_data = factors.get(factor_name, {})
+            contribution = factor_data.get("contribution", 0) or 0
+            factor_perf[factor_name]["contributions"].append(contribution)
+            factor_perf[factor_name]["returns"].append(pnl_pct)
+            factor_perf[factor_name]["weights"].append(w)
+            if is_win:
+                factor_perf[factor_name]["wins"] += w
+            else:
+                factor_perf[factor_name]["losses"] += w
+
+    results = {}
+    for factor_name, data in factor_perf.items():
+        total_w = data["wins"] + data["losses"]
+        if total_w == 0 or not data["returns"]:
+            results[factor_name] = {
+                "total_trades": 0,
+                "win_rate": 0,
+                "avg_return": 0,
+                "sharpe": 0,
+            }
+            continue
+
+        try:
+            returns = np.array(data["returns"], dtype=float)
+            weights = np.array(data["weights"], dtype=float)
+            sum_w = float(np.sum(weights))
+            if sum_w <= 0:
+                # All zero weights (impossible but defensive)
+                weighted_avg = float(np.mean(returns))
+                weighted_std = float(np.std(returns)) if len(returns) > 1 else 1.0
+            else:
+                # Time-decay weighted mean and std
+                weighted_avg = float(np.sum(weights * returns) / sum_w)
+                if len(returns) > 1:
+                    weighted_var = float(np.sum(weights * (returns - weighted_avg) ** 2) / sum_w)
+                    weighted_std = float(np.sqrt(max(0.0, weighted_var)))
+                else:
+                    weighted_std = 1.0
+
+            # Sharpe (annualized assuming ~20 trades per year)
+            sharpe = (weighted_avg / (weighted_std + 1e-10)) * np.sqrt(20)
+            win_rate = (data["wins"] / total_w) * 100 if total_w > 0 else 0
+
+            results[factor_name] = {
+                "total_trades": int(round(total_w)),
+                "win_rate": round(win_rate, 1),
+                "avg_return": round(weighted_avg, 2),
+                "sharpe": round(sharpe, 2),
+                "avg_contribution": round(float(np.mean(data["contributions"])), 4)
+                    if data["contributions"] else 0,
+            }
+        except Exception:
+            # Defensive: any per-factor numeric error gets zeroed out, doesn't crash the whole thing
+            results[factor_name] = {
+                "total_trades": 0, "win_rate": 0, "avg_return": 0, "sharpe": 0,
+            }
+    return results
+
+
 def analyze_factor_performance() -> dict:
     """
     Analyze how each scoring factor has performed in actual trades.
 
-    For each factor (momentum, value, quality, low_vol, rsi2, volume):
-      - Win rate: % of trades where the factor's contribution was
-        positive and the trade was profitable
-      - Average return when factor was the dominant driver
-      - Sharpe ratio of returns attributed to the factor
+    For each factor (momentum, value, quality, low_vol, rsi2, volume, ...):
+      - Win rate (time-decay weighted: recent wins count more)
+      - Average return (time-decay weighted)
+      - Sharpe ratio of returns (time-decay weighted — both mean and std)
+
+    The Sharpe is annualized assuming ~20 trades per year. Time-decay
+    means a factor that's stopped working in the last month will show
+    a low Sharpe even if it had years of good history before that.
 
     Returns:
         dict of factor_name → performance metrics
@@ -47,83 +160,45 @@ def analyze_factor_performance() -> dict:
     if not closed:
         return {"message": "No closed trades to analyze", "factors": {}}
 
-    factor_names = [
-        "momentum", "value", "quality", "low_vol", "rsi2", "volume",
-        "smart_money", "relative_strength", "bb_squeeze", "vwap",
-        "hurst", "autocorr", "stat_arb", "kurtosis",
-        "vol_compression", "mtf_alignment",
-        "earnings_drift", "vpoc", "ichimoku", "sector_rotation",
-        "candlestick",
-    ]
-
-    # Apply recency weighting — recent trades matter MORE than old ones
-    # This makes the system adapt faster to changing market conditions
-    n_trades = len(closed)
-    recency_weights = [RECENCY_DECAY ** (n_trades - 1 - i) for i in range(n_trades)]
-    factor_perf = {f: {"wins": 0, "losses": 0, "returns": [], "contributions": []}
-                   for f in factor_names}
-
-    for i, trade in enumerate(closed):
-        pnl_pct = trade.get("pnl_pct", 0) or 0
-        is_win = pnl_pct > 0
-        w = recency_weights[i]
-
-        # Parse factors_used JSON
-        try:
-            factors = json.loads(trade.get("factors_used", "{}") or "{}")
-        except Exception:
-            factors = {}
-
-        if not factors:
-            continue
-
-        for factor_name in factor_names:
-            factor_data = factors.get(factor_name, {})
-            contribution = factor_data.get("contribution", 0)
-
-            factor_perf[factor_name]["contributions"].append(contribution)
-            factor_perf[factor_name]["returns"].append(pnl_pct)
-
-            if is_win:
-                factor_perf[factor_name]["wins"] += w
-            else:
-                factor_perf[factor_name]["losses"] += w
-
-    # Calculate metrics
-    results = {}
-    for factor_name, data in factor_perf.items():
-        total = data["wins"] + data["losses"]
-        if total == 0:
-            results[factor_name] = {
-                "total_trades": 0,
-                "win_rate": 0,
-                "avg_return": 0,
-                "sharpe": 0,
-            }
-            continue
-
-        returns = data["returns"]
-        win_rate = data["wins"] / total * 100
-        avg_return = float(np.mean(returns))
-        std_return = float(np.std(returns)) if len(returns) > 1 else 1
-
-        # Sharpe (annualized assuming ~20 trades per year)
-        sharpe = (avg_return / (std_return + 1e-10)) * np.sqrt(20)
-
-        results[factor_name] = {
-            "total_trades": total,
-            "win_rate": round(win_rate, 1),
-            "avg_return": round(avg_return, 2),
-            "sharpe": round(sharpe, 2),
-            "avg_contribution": round(float(np.mean(data["contributions"])), 4)
-                if data["contributions"] else 0,
-        }
-
+    results = _compute_factor_stats(closed)
     return {
         "factors": results,
         "total_trades_analyzed": len(closed),
         "timestamp": datetime.now().isoformat(),
     }
+
+
+def analyze_factor_performance_by_regime() -> dict:
+    """Per-regime factor performance — used to compute regime-specific weights.
+
+    Splits closed trades by regime_at_entry (BULL / BEAR / SIDEWAYS / etc.)
+    and computes time-decay weighted factor stats separately for each regime.
+
+    Only regimes with >= MIN_TRADES_FOR_UPDATE trades are included — others
+    don't have enough sample to learn from yet.
+
+    Returns: {regime: {factor_name: {sharpe, win_rate, ...}}}
+    Empty dict if no closed trades.
+    """
+    from predictions.models import get_closed_trades
+
+    closed = get_closed_trades(limit=500)
+    if not closed:
+        return {}
+
+    by_regime = {}
+    for t in closed:
+        regime = (t.get("regime_at_entry") or "Unknown").upper()
+        if regime not in by_regime:
+            by_regime[regime] = []
+        by_regime[regime].append(t)
+
+    result = {}
+    for regime, trades in by_regime.items():
+        if len(trades) < MIN_TRADES_FOR_UPDATE:
+            continue  # Need minimum sample per regime
+        result[regime] = _compute_factor_stats(trades)
+    return result
 
 
 def analyze_sector_performance() -> dict:
@@ -246,21 +321,91 @@ def analyze_regime_performance() -> dict:
     return {"regimes": results}
 
 
+def _compute_target_weights_from_factors(current_weights: dict, factor_stats: dict) -> tuple:
+    """Compute target weights from factor Sharpe ratios. Pure function — no DB writes.
+
+    Returns: (target_weights dict, sharpes dict used for the computation)
+    """
+    sharpes = {}
+    for name in current_weights:
+        if name in factor_stats and factor_stats[name].get("total_trades", 0) >= 5:
+            sharpes[name] = max(0, factor_stats[name].get("sharpe", 0))
+        else:
+            sharpes[name] = 0.5  # Default for factors with insufficient data
+    total_sharpe = sum(sharpes.values()) + 1e-10
+    target_weights = {name: sharpe / total_sharpe for name, sharpe in sharpes.items()}
+    return target_weights, sharpes
+
+
+def _walk_forward_unstable_factors(closed_trades: list) -> set:
+    """WALK-FORWARD VALIDATION — flag factors whose recent performance
+    contradicts their historical performance.
+
+    Algorithm:
+      - Split closed trades into TRAIN (older 70%) and TEST (newer 30%)
+      - Compute factor Sharpe on each set independently
+      - A factor is UNSTABLE if both Sharpes are meaningful (>0.5 in magnitude)
+        but disagree in sign (one positive, one negative)
+      - Unstable factors should NOT have their weights bumped — keep them flat
+
+    This is the safety gate that prevents fitting to noise. A factor that
+    won big in TRAIN but lost in TEST is overfit and shouldn't drive trades.
+
+    Returns: set of factor_name strings that should be held at current weight.
+    Returns empty set if there's not enough data to validate (fail-safe — don't
+    block updates when we can't validate).
+    """
+    n = len(closed_trades)
+    if n < 30:
+        # Not enough data to do meaningful walk-forward — don't block any updates
+        return set()
+
+    split = max(20, int(n * 0.7))
+    train_trades = closed_trades[:split]   # older — already-known patterns
+    test_trades = closed_trades[split:]    # newer — out-of-sample test
+    if len(test_trades) < 10:
+        return set()
+
+    try:
+        train_stats = _compute_factor_stats(train_trades)
+        test_stats = _compute_factor_stats(test_trades)
+    except Exception as e:
+        logger.warning(f"Walk-forward stats computation failed: {e}")
+        return set()
+
+    unstable = set()
+    for fname in FACTOR_NAMES:
+        train_s = train_stats.get(fname, {}).get("sharpe", 0)
+        test_s = test_stats.get(fname, {}).get("sharpe", 0)
+        # Both Sharpes meaningful AND directionally disagree → unstable
+        if abs(train_s) > 0.5 and abs(test_s) > 0.5:
+            if (train_s > 0) != (test_s > 0):
+                unstable.add(fname)
+    return unstable
+
+
 def auto_adjust_weights() -> dict:
     """
     Auto-adjust factor weights based on actual performance.
 
     Algorithm:
-      1. Calculate Sharpe ratio for each factor
-      2. Factors with higher Sharpe get more weight
-      3. Weights shift by WEIGHT_ADJUSTMENT_RATE (15%) per cycle
-      4. Enforce MIN_WEIGHT (5%) and MAX_WEIGHT (40%) bounds
-      5. Normalize to sum = 1.0
-      6. Only run after MIN_TRADES_FOR_UPDATE (20) trades
+      1. Calculate time-decay weighted Sharpe for each factor (recent trades count more)
+      2. WALK-FORWARD VALIDATION: flag factors whose train and test Sharpe disagree
+      3. Factors with higher Sharpe get more weight (target_weight ~ Sharpe)
+      4. STABLE factors: shift WEIGHT_ADJUSTMENT_RATE toward target
+      5. UNSTABLE factors (failed walk-forward): keep current weight (no change)
+      6. Enforce MIN_WEIGHT / MAX_WEIGHT bounds, normalize to sum = 1.0
+      7. ALSO compute per-regime weights and store them (NOT consumed by picks
+         tonight — wired into picks generation in a future deploy)
 
-    This is the core of the self-learning system.
+    This is the core of the self-learning system. The walk-forward gate prevents
+    overfitting to noise; per-regime tracking lets future weights adapt to the
+    market state.
     """
-    from predictions.models import get_signal_weights, update_signal_weight, get_closed_trades
+    from predictions.models import (
+        get_signal_weights, update_signal_weight, get_closed_trades,
+        update_regime_factor_weight,
+    )
 
     closed = get_closed_trades(limit=500)
     if len(closed) < MIN_TRADES_FOR_UPDATE:
@@ -269,34 +414,36 @@ def auto_adjust_weights() -> dict:
             "reason": f"Need {MIN_TRADES_FOR_UPDATE} trades, have {len(closed)}",
         }
 
-    # Get current weights
+    # ============================================================
+    # GLOBAL (cross-regime) factor weight update — what picks USE today
+    # ============================================================
     current_weights = get_signal_weights()
     factor_perf = analyze_factor_performance()
 
     if not factor_perf.get("factors"):
         return {"updated": False, "reason": "No factor data available"}
 
-    # Calculate target weights based on Sharpe ratios
     factors = factor_perf["factors"]
-    sharpes = {}
-    for name in current_weights:
-        if name in factors and factors[name]["total_trades"] >= 5:
-            sharpes[name] = max(0, factors[name]["sharpe"])  # Floor at 0
-        else:
-            sharpes[name] = 0.5  # Default for unknown factors
+    target_weights, sharpes = _compute_target_weights_from_factors(current_weights, factors)
 
-    # Normalize Sharpe to get target weight allocation
-    total_sharpe = sum(sharpes.values()) + 1e-10
-    target_weights = {name: sharpe / total_sharpe for name, sharpe in sharpes.items()}
+    # WALK-FORWARD VALIDATION — identify unstable factors (whose recent and
+    # historical performance disagree). These keep their current weight.
+    unstable = _walk_forward_unstable_factors(closed)
+    if unstable:
+        logger.warning(
+            f"WALK-FORWARD GATE: {len(unstable)} factors flagged as unstable "
+            f"(train/test Sharpe sign disagree): {sorted(unstable)}"
+        )
 
-    # Blend current weights toward target weights (gradual adjustment)
+    # Blend current weights toward target — but UNSTABLE factors stay flat
     new_weights = {}
     for name in current_weights:
         current = current_weights[name]
+        if name in unstable:
+            new_weights[name] = current  # walk-forward gate: hold steady
+            continue
         target = target_weights.get(name, current)
-        # Move WEIGHT_ADJUSTMENT_RATE toward target
         new = current + WEIGHT_ADJUSTMENT_RATE * (target - current)
-        # Enforce bounds
         new = max(MIN_WEIGHT, min(MAX_WEIGHT, new))
         new_weights[name] = new
 
@@ -304,7 +451,7 @@ def auto_adjust_weights() -> dict:
     total = sum(new_weights.values())
     new_weights = {k: round(v / total, 4) for k, v in new_weights.items()}
 
-    # Save updated weights
+    # Save updated GLOBAL weights (these are what picks consume)
     for name, weight in new_weights.items():
         perf = factors.get(name, {})
         update_signal_weight(
@@ -316,13 +463,65 @@ def auto_adjust_weights() -> dict:
             total_trades=perf.get("total_trades", 0),
         )
 
+    # ============================================================
+    # PER-REGIME factor weights — COMPUTED AND STORED ONLY.
+    # NOT consumed by picks generation yet. This lets data accumulate
+    # so a future deploy can switch to regime-aware picks safely.
+    # Wrapped in try/except so per-regime failure cannot break the
+    # global weight update above.
+    # ============================================================
+    regimes_updated = []
+    try:
+        regime_perf = analyze_factor_performance_by_regime()
+        for regime, regime_factors in regime_perf.items():
+            try:
+                # Compute target weights for this regime independently
+                regime_targets, _ = _compute_target_weights_from_factors(
+                    current_weights, regime_factors
+                )
+                # Blend toward target (slower adjustment for per-regime since
+                # the per-regime sample is smaller)
+                regime_new = {}
+                for name in current_weights:
+                    cur = current_weights[name]
+                    target = regime_targets.get(name, cur)
+                    new = cur + (WEIGHT_ADJUSTMENT_RATE * 0.5) * (target - cur)
+                    new = max(MIN_WEIGHT, min(MAX_WEIGHT, new))
+                    regime_new[name] = new
+                # Normalize
+                rt = sum(regime_new.values())
+                if rt > 0:
+                    regime_new = {k: round(v / rt, 4) for k, v in regime_new.items()}
+                # Persist
+                for name, weight in regime_new.items():
+                    perf = regime_factors.get(name, {})
+                    update_regime_factor_weight(
+                        regime=regime,
+                        factor_name=name,
+                        weight=weight,
+                        win_rate=perf.get("win_rate", 0),
+                        sharpe=perf.get("sharpe", 0),
+                        total_trades=perf.get("total_trades", 0),
+                    )
+                regimes_updated.append({
+                    "regime": regime,
+                    "trades": sum(f.get("total_trades", 0) for f in regime_factors.values()) // max(1, len(regime_factors)),
+                })
+            except Exception as e:
+                logger.debug(f"Per-regime weight update failed for {regime}: {e}")
+    except Exception as e:
+        logger.warning(f"Per-regime learning cycle failed (non-fatal): {e}")
+
     return {
         "updated": True,
         "previous_weights": current_weights,
         "new_weights": new_weights,
         "sharpe_scores": {k: round(v, 2) for k, v in sharpes.items()},
         "trades_analyzed": len(closed),
+        "walk_forward_unstable": sorted(unstable),
+        "regimes_updated": regimes_updated,
         "timestamp": datetime.now().isoformat(),
+        "_note_per_regime": "Per-regime weights computed and stored but NOT yet consumed by picks generation",
     }
 
 

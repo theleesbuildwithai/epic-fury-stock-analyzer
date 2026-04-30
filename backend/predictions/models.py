@@ -111,6 +111,17 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS regime_factor_weights (
+            regime TEXT NOT NULL,
+            factor_name TEXT NOT NULL,
+            weight REAL NOT NULL,
+            win_rate REAL DEFAULT 0,
+            sharpe REAL DEFAULT 0,
+            total_trades INTEGER DEFAULT 0,
+            last_updated TEXT,
+            PRIMARY KEY (regime, factor_name)
+        );
+
         CREATE TABLE IF NOT EXISTS geo_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_key TEXT NOT NULL UNIQUE,
@@ -657,6 +668,65 @@ def get_all_geo_events(limit: int = 50) -> list:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_regime_factor_weights(regime: str) -> dict:
+    """Get per-regime factor weights. Returns {} if regime has no learned weights yet.
+
+    SAFETY: Always returns a dict (possibly empty). Never raises. Callers should
+    fall back to global weights from get_signal_weights() when this returns {}.
+    """
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT factor_name, weight FROM regime_factor_weights WHERE regime=?",
+            (regime,)
+        ).fetchall()
+        conn.close()
+        return {row["factor_name"]: row["weight"] for row in rows}
+    except Exception:
+        return {}
+
+
+def update_regime_factor_weight(regime: str, factor_name: str, weight: float,
+                                win_rate: float = 0, sharpe: float = 0,
+                                total_trades: int = 0):
+    """Update or insert a per-regime factor weight. Never raises (logs and continues)."""
+    try:
+        conn = get_db()
+        conn.execute(
+            """INSERT OR REPLACE INTO regime_factor_weights
+               (regime, factor_name, weight, win_rate, sharpe, total_trades, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (regime, factor_name, weight, win_rate, sharpe, total_trades,
+             datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Per-regime learning failure must never break the main learner cycle
+
+
+def get_all_regime_factor_weights() -> dict:
+    """Get all learned per-regime weights as a nested dict for diagnostics.
+
+    Returns: {regime: {factor_name: weight}}. Empty dict on failure.
+    """
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT regime, factor_name, weight FROM regime_factor_weights"
+        ).fetchall()
+        conn.close()
+        out = {}
+        for row in rows:
+            r = row["regime"]
+            if r not in out:
+                out[r] = {}
+            out[r][row["factor_name"]] = row["weight"]
+        return out
+    except Exception:
+        return {}
 
 
 def update_signal_weight(factor_name: str, weight: float, win_rate: float = 0,
