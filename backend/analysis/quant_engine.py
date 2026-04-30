@@ -3669,7 +3669,96 @@ def generate_quant_picks() -> dict:
             ),
         }
 
-    return _get_cached("quant_picks", fetch, ttl=900)  # 15 min cache
+    result = _get_cached("quant_picks", fetch, ttl=900)  # 15 min cache
+
+    # ============================================================
+    # PERSISTENT DISK CACHE FALLBACK — survives Yahoo outages
+    # ============================================================
+    # If picks generation failed (Yahoo rate-limited, network down, etc.),
+    # serve yesterday's picks from disk instead of returning 0 picks.
+    # If picks generation succeeded, save to disk as a backup for next outage.
+    # Same pattern as .sp500_disk_cache.json (proven in production).
+    import os as _os_pc, json as _json_pc
+    _picks_cache_path = _os_pc.path.join(_os_pc.path.dirname(__file__), ".picks_disk_cache.json")
+
+    def _picks_are_empty(r):
+        if not isinstance(r, dict):
+            return True
+        if r.get("error"):
+            return True
+        return not r.get("long_picks") and not r.get("short_picks")
+
+    if _picks_are_empty(result):
+        # Live picks failed — try yesterday's snapshot
+        try:
+            if _os_pc.path.exists(_picks_cache_path):
+                # Read with explicit context manager — never holds file lock
+                with open(_picks_cache_path, "r") as _f:
+                    cached = _json_pc.load(_f)
+
+                # SAFETY: validate cache shape before trusting it
+                # If cache is corrupt or unexpected, fall through to empty result
+                # rather than serve garbage to the trade engine.
+                if not isinstance(cached, dict):
+                    logger.warning("PICKS DISK CACHE: cache file is not a dict, ignoring")
+                elif "_saved_at" not in cached:
+                    logger.warning("PICKS DISK CACHE: missing _saved_at timestamp, ignoring")
+                elif not isinstance(cached.get("long_picks"), list) or not isinstance(cached.get("short_picks"), list):
+                    logger.warning("PICKS DISK CACHE: long_picks/short_picks malformed, ignoring")
+                else:
+                    age_hours = (time.time() - float(cached.get("_saved_at", 0))) / 3600.0
+                    if 0 <= age_hours <= 48:
+                        cached["_cache_source"] = "disk_stale"
+                        cached["_cache_age_hours"] = round(age_hours, 1)
+                        logger.warning(
+                            f"PICKS DISK CACHE: live generation failed — "
+                            f"serving stale picks from {age_hours:.1f}h ago "
+                            f"({len(cached.get('long_picks', []))} longs, "
+                            f"{len(cached.get('short_picks', []))} shorts)"
+                        )
+                        return cached
+                    else:
+                        logger.warning(
+                            f"PICKS DISK CACHE: cache is {age_hours:.1f}h old — "
+                            f"too stale (max 48h), returning empty result"
+                        )
+        except (OSError, ValueError, _json_pc.JSONDecodeError) as _e:
+            # File permission, JSON parse, or unicode errors. Log and continue.
+            logger.warning(f"Picks disk cache load failed: {_e}")
+        except Exception as _e:
+            # Catch-all. Never let cache load break the trading engine.
+            logger.warning(f"Picks disk cache unexpected error on load: {_e}")
+    else:
+        # Live picks succeeded — save snapshot for the next outage.
+        # ATOMIC WRITE: write to .tmp first, then rename. Prevents serving a
+        # half-written corrupt cache if the container is killed mid-write.
+        try:
+            # Strip _price_data (DataFrames not JSON-serializable; correlation check
+            # in paper_trader has a guard for missing _price_data so this is safe)
+            to_save = {k: v for k, v in result.items() if k != "_price_data"}
+            to_save["_saved_at"] = time.time()
+            _tmp_path = _picks_cache_path + ".tmp"
+            with open(_tmp_path, "w") as _f:
+                _json_pc.dump(to_save, _f, default=str)
+                # Force write to disk before rename so partial writes can't survive a crash
+                try:
+                    _f.flush()
+                    _os_pc.fsync(_f.fileno())
+                except Exception:
+                    pass  # fsync may not be available on all filesystems
+            # Atomic rename — POSIX guarantees this is all-or-nothing
+            _os_pc.replace(_tmp_path, _picks_cache_path)
+        except Exception as _e:
+            # Disk cache failure must NEVER crash live picks generation
+            logger.debug(f"Picks disk cache save failed (non-fatal): {_e}")
+            # Best-effort cleanup of orphan .tmp file
+            try:
+                if _os_pc.path.exists(_picks_cache_path + ".tmp"):
+                    _os_pc.remove(_picks_cache_path + ".tmp")
+            except Exception:
+                pass
+
+    return result
 
 
 def analyze_watchlist_stock(symbol: str) -> dict:

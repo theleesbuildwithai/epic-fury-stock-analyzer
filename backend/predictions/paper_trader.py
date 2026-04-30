@@ -1180,13 +1180,25 @@ def get_portfolio_state() -> dict:
 
 
 def _get_current_prices(symbols: list) -> dict:
-    """Get current prices for a list of symbols (batch download)."""
+    """Get current prices for a list of symbols (batch download).
+
+    Source priority:
+      1. Yahoo Finance batch (primary — gives close prices)
+      2. CNBC quote API (fallback — fills any symbols Yahoo dropped)
+
+    This is the SINGLE chokepoint for ALL portfolio price lookups
+    (called from portfolio state, exit checks, stop-loss checks, win-lock).
+    A Yahoo outage here would break stop-losses and show wrong P&L,
+    so the CNBC fallback is critical safety infrastructure.
+    """
     if not symbols:
         return {}
+    prices = {}
+
+    # PRIMARY: Yahoo Finance
     _throttle()
     try:
         df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
-        prices = {}
         if df is not None and not df.empty:
             for sym in symbols:
                 try:
@@ -1201,9 +1213,32 @@ def _get_current_prices(symbols: list) -> dict:
                             prices[sym] = float(close.iloc[-1])
                 except Exception:
                     continue
-        return prices
+    except Exception as e:
+        logger.warning(f"Yahoo price batch failed for {len(symbols)} symbols: {e}")
+
+    # FALLBACK: CNBC for any symbol Yahoo dropped.
+    # cnbc_get_prices() is hardened: returns {} on any error, filters bad data,
+    # and never raises — so we cannot accidentally crash portfolio valuation.
+    try:
+        missing = [s for s in symbols if s not in prices]
+        if missing:
+            try:
+                from analysis.extras import cnbc_get_prices
+                cnbc_prices = cnbc_get_prices(missing)
+                if cnbc_prices:
+                    prices.update(cnbc_prices)
+                    logger.info(
+                        f"CNBC PRICE FALLBACK: filled {len(cnbc_prices)}/{len(missing)} "
+                        f"symbols Yahoo missed: {list(cnbc_prices.keys())}"
+                    )
+            except Exception as e:
+                # Even though cnbc_get_prices is wrapped, double-guard at call site
+                logger.debug(f"CNBC price fallback failed (non-fatal): {e}")
     except Exception:
-        return {}
+        # Last-resort guard: never let fallback bookkeeping break primary prices
+        pass
+
+    return prices
 
 
 # ============================================================

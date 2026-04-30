@@ -132,6 +132,77 @@ def _get_cached(key, fetch_fn, ttl=None):
     return data
 
 
+# --- Yahoo → CNBC symbol translation ---
+# CNBC's quote API uses different symbol formats than Yahoo for indices,
+# commodities, and share-class tickers. This map covers the most common
+# ones in our universe; regular stock tickers (AAPL, NVDA, etc.) pass
+# through unchanged on both APIs.
+YAHOO_TO_CNBC_SYMBOL_MAP = {
+    "^GSPC": ".SPX",
+    "^IXIC": ".IXIC",
+    "^DJI": ".DJI",
+    "^TNX": "US10Y",
+    "GC=F": "@GC.1",
+    "CL=F": "@CL.1",
+    "BRK-B": "BRK.B",
+}
+
+
+def cnbc_get_prices(yahoo_symbols):
+    """Fetch current prices from CNBC for a list of Yahoo-format symbols.
+
+    Translates Yahoo → CNBC, fetches via cnbc_quote_batch(), then translates
+    the response keys back to canonical Yahoo symbols so callers don't need
+    to know about CNBC's symbol conventions.
+
+    SAFETY GUARANTEES (designed to never crash the trading engine):
+      - Returns empty dict on ANY failure (network, parse, type errors)
+      - Filters out None, NaN, zero, and negative prices (junk data guard)
+      - Filters out unrealistic prices (>$1M per share, likely parse error)
+      - Each symbol's parse is independent — one bad symbol can't poison the rest
+
+    Returns dict {yahoo_symbol: float_price}. Missing/failed symbols are
+    simply absent from the dict — caller decides how to handle gaps.
+    """
+    if not yahoo_symbols:
+        return {}
+    try:
+        cnbc_request = [YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s) for s in yahoo_symbols]
+        cnbc_to_yahoo = {YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s): s for s in yahoo_symbols}
+    except Exception:
+        # Defensive: malformed input shouldn't crash callers
+        return {}
+
+    out = {}
+    try:
+        cnbc_data = cnbc_quote_batch(cnbc_request)
+        if not isinstance(cnbc_data, dict):
+            return {}
+        for cnbc_sym, val in cnbc_data.items():
+            try:
+                if not isinstance(val, dict):
+                    continue
+                yahoo_sym = cnbc_to_yahoo.get(cnbc_sym, cnbc_sym)
+                raw_price = val.get("price")
+                if raw_price is None:
+                    continue
+                price = float(raw_price)
+                # Sanity bounds: reject NaN, inf, zero/negative, and absurdly large
+                # values that would indicate a parse error rather than a real price.
+                if price != price:  # NaN check (NaN != NaN)
+                    continue
+                if price <= 0 or price > 1_000_000:
+                    continue
+                out[yahoo_sym] = price
+            except (TypeError, ValueError):
+                # Skip individual bad entries — keep collecting good ones
+                continue
+    except Exception:
+        # Network failure, JSON error, anything — return what we have so far
+        pass
+    return out
+
+
 # --- Banner tickers ---
 
 BANNER_SYMBOLS = [
@@ -238,21 +309,11 @@ def get_banner_data():
                     continue
 
         # 2) SAFETY NET: For any symbol Yahoo dropped, try CNBC.
-        # CNBC uses different symbol formats than Yahoo for indices/commodities/share-classes.
-        # Translate Yahoo → CNBC, fetch, then translate back to canonical Yahoo symbols.
-        YAHOO_TO_CNBC = {
-            "^GSPC": ".SPX",
-            "^IXIC": ".IXIC",
-            "^DJI": ".DJI",
-            "^TNX": "US10Y",
-            "GC=F": "@GC.1",
-            "CL=F": "@CL.1",
-            "BRK-B": "BRK.B",
-        }
+        # Uses YAHOO_TO_CNBC_SYMBOL_MAP for indices/commodities/share-classes.
         missing = [s for s in symbols if s not in results_by_symbol]
         if missing:
-            cnbc_request = [YAHOO_TO_CNBC.get(s, s) for s in missing]
-            cnbc_to_yahoo = {YAHOO_TO_CNBC.get(s, s): s for s in missing}
+            cnbc_request = [YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s) for s in missing]
+            cnbc_to_yahoo = {YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s): s for s in missing}
             try:
                 cnbc_data = cnbc_quote_batch(cnbc_request)
                 # Map CNBC-format keys back to Yahoo-format symbols
