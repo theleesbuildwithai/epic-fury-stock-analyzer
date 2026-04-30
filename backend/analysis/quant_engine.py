@@ -1775,8 +1775,66 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     """
     from predictions.models import get_signal_weights
 
-    # Get adaptive weights (learned from past performance)
+    # Get adaptive weights (learned from past performance) — GLOBAL baseline
+    # This is the proven, default path. Always succeeds.
     weights = get_signal_weights()
+    weights_source = "global"
+
+    # ============================================================
+    # REGIME-AWARE WEIGHTS — use per-regime tuned weights when we
+    # have enough sample size to trust them. Falls back to global
+    # weights on any failure or insufficient data. Multi-layer safety:
+    #   1. regime must be a dict with a recognized regime string
+    #   2. per-regime weights must exist in DB
+    #   3. regime must have at least REGIME_WEIGHTS_MIN_TRADES samples
+    #   4. weights must cover at least REGIME_WEIGHTS_MIN_FACTORS factors
+    #   5. weight sum must be plausible (0.85 - 1.15)
+    #   6. ANY error → fall back to global (logged but non-fatal)
+    # ============================================================
+    REGIME_WEIGHTS_MIN_TRADES = 50      # need solid sample for regime to override global
+    REGIME_WEIGHTS_MIN_FACTORS = 18     # at least 18 of 22 factors must be covered
+    try:
+        if isinstance(regime, dict):
+            regime_str = (regime.get("regime") or "").upper()
+            if regime_str in ("BULL", "BEAR", "SIDEWAYS"):
+                from predictions.models import get_regime_factor_weights
+                regime_weights = get_regime_factor_weights(
+                    regime_str, min_trades=REGIME_WEIGHTS_MIN_TRADES
+                )
+                if regime_weights and len(regime_weights) >= REGIME_WEIGHTS_MIN_FACTORS:
+                    rw_sum = sum(regime_weights.values())
+                    if 0.85 <= rw_sum <= 1.15:
+                        # All safety checks passed — use regime-specific weights
+                        # Merge over global (global supplies any factor missing
+                        # from regime weights, ensuring no factor is lost)
+                        merged = dict(weights)  # start from global
+                        merged.update(regime_weights)  # override with regime
+                        weights = merged
+                        weights_source = f"regime:{regime_str}"
+                        logger.info(
+                            f"REGIME WEIGHTS ACTIVE: using {regime_str}-specific "
+                            f"factor weights ({len(regime_weights)} factors, "
+                            f"sum={rw_sum:.3f})"
+                        )
+                    else:
+                        logger.warning(
+                            f"REGIME WEIGHTS REJECTED: {regime_str} weights sum "
+                            f"to {rw_sum:.3f} (out of bounds 0.85-1.15) — "
+                            f"falling back to global"
+                        )
+                else:
+                    logger.info(
+                        f"REGIME WEIGHTS UNAVAILABLE: {regime_str} has "
+                        f"{len(regime_weights)} factors / needs {REGIME_WEIGHTS_MIN_FACTORS} "
+                        f"or insufficient sample (min {REGIME_WEIGHTS_MIN_TRADES} trades) "
+                        f"— using global"
+                    )
+    except Exception as e:
+        # Regime weight lookup failure is NEVER fatal — global weights are battle-tested
+        logger.warning(f"Regime weight lookup failed (using global): {e}")
+        weights_source = "global_fallback"
+
+    logger.debug(f"calculate_multi_factor_scores: weights_source={weights_source}")
 
     # Pre-fetch fundamentals for all symbols (cached 24h, minimal API calls)
     all_symbols = list(price_data.keys())

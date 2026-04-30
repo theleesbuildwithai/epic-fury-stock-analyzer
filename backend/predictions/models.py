@@ -670,8 +670,13 @@ def get_all_geo_events(limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
-def get_regime_factor_weights(regime: str) -> dict:
-    """Get per-regime factor weights. Returns {} if regime has no learned weights yet.
+def get_regime_factor_weights(regime: str, min_trades: int = 0) -> dict:
+    """Get per-regime factor weights. Returns {} if regime has no learned weights
+    yet OR if the maximum trade count across factors is below min_trades.
+
+    The min_trades guard is critical for safety — using regime weights based on
+    very small samples (e.g., 10-20 trades) would be worse than using the
+    global blended weights. Production callers should set min_trades >= 50.
 
     SAFETY: Always returns a dict (possibly empty). Never raises. Callers should
     fall back to global weights from get_signal_weights() when this returns {}.
@@ -679,10 +684,19 @@ def get_regime_factor_weights(regime: str) -> dict:
     try:
         conn = get_db()
         rows = conn.execute(
-            "SELECT factor_name, weight FROM regime_factor_weights WHERE regime=?",
+            "SELECT factor_name, weight, total_trades FROM regime_factor_weights WHERE regime=?",
             (regime,)
         ).fetchall()
         conn.close()
+        if not rows:
+            return {}
+        if min_trades > 0:
+            # Use MAX trade count across factors as the regime sample size
+            # (different factors may have different counts; max is the best proxy
+            # for "how much data does this regime have to learn from")
+            max_trades = max((r["total_trades"] or 0) for r in rows)
+            if max_trades < min_trades:
+                return {}
         return {row["factor_name"]: row["weight"] for row in rows}
     except Exception:
         return {}
