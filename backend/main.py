@@ -2570,6 +2570,108 @@ def ibkr_snapshot_endpoint(request: Request, refresh: bool = False):
         return {"available": False, "error": str(e)}
 
 
+@app.post("/api/admin/cash-recovery")
+def admin_cash_recovery(request: Request):
+    """Run the cash-inflation recovery on demand. Idempotent — safe to call
+    multiple times. Finds equity trades with |pnl_pct| > 100% (the units-mismatch
+    bug from the cash-inflation incident), reverses their bogus cash credit,
+    marks them 'closed_corrupted' so stats exclude them, and deletes today's
+    snapshot so the equity curve is clean. ADMIN-ONLY.
+
+    Returns a detailed summary so the operator can verify the recovery.
+    """
+    check_rate_limit(request.client.host)
+    require_admin(request)
+    try:
+        from predictions.models import get_db, get_cash, set_cash
+        conn = get_db()
+        corrupted = conn.execute(
+            """SELECT id, ticker, direction, entry_price, exit_price, shares,
+                      pnl_dollars, pnl_pct, instrument_type, status
+               FROM paper_trades
+               WHERE status='closed'
+                 AND (instrument_type IS NULL OR instrument_type='equity')
+                 AND ABS(pnl_pct) > 100"""
+        ).fetchall()
+
+        bogus_cash = 0.0
+        corrupt_count = 0
+        per_trade_log = []
+        for t in corrupted:
+            try:
+                entry = float(t["entry_price"] or 0)
+                exit_p = float(t["exit_price"] or 0)
+                shares = float(t["shares"] or 0)
+                direction = t["direction"]
+                pnl_d = float(t["pnl_dollars"] or 0)
+                if direction == "long":
+                    cash_credited = exit_p * shares
+                else:
+                    cash_credited = entry * shares + pnl_d
+                cost_at_open = entry * shares
+                bogus_impact = cash_credited - cost_at_open
+                bogus_cash += bogus_impact
+                conn.execute(
+                    """UPDATE paper_trades
+                       SET pnl_dollars=0, pnl_pct=0, status='closed_corrupted'
+                       WHERE id=?""",
+                    (t["id"],)
+                )
+                corrupt_count += 1
+                per_trade_log.append({
+                    "id": t["id"], "ticker": t["ticker"],
+                    "entry": entry, "exit": exit_p, "shares": shares,
+                    "bogus_impact": round(bogus_impact, 2),
+                })
+            except Exception as ce:
+                logger.warning(f"Manual recovery: skipped trade {t['id']}: {ce}")
+                continue
+
+        conn.commit()
+        conn.close()
+
+        cur_cash = get_cash()
+        new_cash = round(cur_cash - bogus_cash, 2)
+        cash_action = "no_change"
+        # Sanity guard
+        if corrupt_count > 0 and 0 < new_cash < 5_000_000:
+            set_cash(new_cash)
+            cash_action = "set"
+        elif corrupt_count > 0:
+            cash_action = f"refused_safety_guard (would have set ${new_cash:.2f})"
+
+        # Always delete today's portfolio_snapshot so equity curve is clean
+        snapshot_action = "no_change"
+        try:
+            conn2 = get_db()
+            today_str = dt.now().strftime("%Y-%m-%d")
+            conn2.execute("DELETE FROM portfolio_snapshots WHERE snapshot_date=?", (today_str,))
+            conn2.commit()
+            conn2.close()
+            snapshot_action = f"deleted today's ({today_str}) snapshot"
+        except Exception as se:
+            snapshot_action = f"snapshot delete failed: {se}"
+
+        result = {
+            "ok": True,
+            "corrupted_trades_marked": corrupt_count,
+            "bogus_cash_reversed_dollars": round(bogus_cash, 2),
+            "cash_before": round(cur_cash, 2),
+            "cash_after": get_cash(),
+            "cash_action": cash_action,
+            "snapshot_action": snapshot_action,
+            "per_trade_log": per_trade_log,
+        }
+        admin_audit(request, "CASH_RECOVERY", True,
+                    f"marked {corrupt_count} trades, reversed ${bogus_cash:.2f}, action={cash_action}")
+        logger.warning(f"MANUAL CASH RECOVERY: {result}")
+        return result
+    except Exception as e:
+        admin_audit(request, "CASH_RECOVERY", False, f"Error: {e}")
+        logger.error(f"Cash recovery endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/ibkr/kill-switch")
 def ibkr_kill_switch(request: Request):
     """EMERGENCY: Flatten all IBKR positions immediately. ADMIN-ONLY."""
