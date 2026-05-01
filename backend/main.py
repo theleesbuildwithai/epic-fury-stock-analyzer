@@ -2570,6 +2570,114 @@ def ibkr_snapshot_endpoint(request: Request, refresh: bool = False):
         return {"available": False, "error": str(e)}
 
 
+@app.post("/api/admin/cash-recovery-oneshot-v2")
+def admin_cash_recovery_oneshot_v2(request: Request):
+    """One-shot recovery v2 — broader query that catches BOTH equity AND options
+    trades with absurd pnl. The v1 endpoint missed corrupted trades because they
+    were stored with instrument_type 'call'/'put' (not 'equity'). v2 drops the
+    instrument_type filter and uses |pnl_pct| > 200 as the sole detection.
+
+    Bogus cash impact = pnl_dollars (the net cash effect of open+close cycle
+    when pnl is the inflated amount). This works regardless of equity vs options
+    because: equity long: net = (exit-entry)*shares = pnl; options long: net =
+    (exit-entry)*contracts*100 = pnl. Same identity in both cases.
+
+    Self-disables after first call (separate flag from v1). No auth.
+    """
+    import os as _os_v2
+    _flag_v2 = _os_v2.path.join(
+        _os_v2.path.dirname(__file__),
+        ".cash_recovery_oneshot_v2_done"
+    )
+    if _os_v2.path.exists(_flag_v2):
+        return {"ok": False, "reason": "already_used", "message": "v2 already used"}
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_db, get_cash, set_cash
+        conn = get_db()
+        corrupted = conn.execute(
+            """SELECT id, ticker, direction, entry_price, exit_price, shares,
+                      pnl_dollars, pnl_pct, instrument_type, status,
+                      contracts, premium_per_contract
+               FROM paper_trades
+               WHERE status='closed'
+                 AND ABS(pnl_pct) > 200"""
+        ).fetchall()
+
+        bogus_cash_total = 0.0
+        corrupt_count = 0
+        per_trade_log = []
+        for t in corrupted:
+            try:
+                pnl_d = float(t["pnl_dollars"] or 0)
+                bogus_cash_total += pnl_d
+                conn.execute(
+                    """UPDATE paper_trades
+                       SET pnl_dollars=0, pnl_pct=0, status='closed_corrupted'
+                       WHERE id=?""",
+                    (t["id"],)
+                )
+                corrupt_count += 1
+                per_trade_log.append({
+                    "id": t["id"], "ticker": t["ticker"],
+                    "instrument_type": t["instrument_type"],
+                    "direction": t["direction"],
+                    "entry": t["entry_price"], "exit": t["exit_price"],
+                    "pnl_dollars": pnl_d, "pnl_pct": t["pnl_pct"],
+                })
+            except Exception as ce:
+                logger.warning(f"v2 recovery: skipped trade {t['id']}: {ce}")
+                continue
+
+        conn.commit()
+        conn.close()
+
+        cur_cash = get_cash()
+        new_cash = round(cur_cash - bogus_cash_total, 2)
+        cash_action = "no_change"
+        if corrupt_count > 0 and 0 < new_cash < 5_000_000:
+            set_cash(new_cash)
+            cash_action = "set"
+        elif corrupt_count > 0:
+            cash_action = f"refused_safety_guard (would have set ${new_cash:.2f})"
+
+        snapshot_action = "no_change"
+        try:
+            conn2 = get_db()
+            for _offset in range(3):
+                _d = (dt.now() - timedelta(days=_offset)).strftime("%Y-%m-%d")
+                conn2.execute("DELETE FROM portfolio_snapshots WHERE snapshot_date=?", (_d,))
+            conn2.commit()
+            conn2.close()
+            snapshot_action = "deleted last 3 days of snapshots"
+        except Exception as se:
+            snapshot_action = f"snapshot delete failed: {se}"
+
+        try:
+            with open(_flag_v2, "w") as _f:
+                _f.write(f"used at {dt.now().isoformat()} marked={corrupt_count} reversed={bogus_cash_total:.2f}")
+        except Exception:
+            pass
+
+        result = {
+            "ok": True,
+            "endpoint": "/api/admin/cash-recovery-oneshot-v2",
+            "corrupted_trades_marked": corrupt_count,
+            "bogus_cash_reversed_dollars": round(bogus_cash_total, 2),
+            "cash_before": round(cur_cash, 2),
+            "cash_after": get_cash(),
+            "cash_action": cash_action,
+            "snapshot_action": snapshot_action,
+            "per_trade_log": per_trade_log,
+            "endpoint_status": "DISABLED — self-locked",
+        }
+        logger.warning(f"V2 ONE-SHOT CASH RECOVERY: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"v2 cash recovery error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/admin/cash-recovery-oneshot")
 def admin_cash_recovery_oneshot(request: Request):
     """ONE-SHOT no-auth recovery — self-disables after first call.
