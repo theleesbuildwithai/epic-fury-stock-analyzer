@@ -432,17 +432,38 @@ def close_paper_trade(trade_id: int, exit_price: float):
         # stored as $2.53 (option premium) but exit passed as $128 (equity).
         # In that case, close the trade FLAT (no pnl, no cash credit) so the
         # database isn't corrupted, and log the incident loudly.
+        # Thresholds chosen to:
+        #   - CATCH the bug (observed at 50-64x ratio)
+        #   - ALLOW legitimate big moves (options can move 10-30x legitimately)
+        #   - ALLOW options expiring near-worthless (premium drops to pennies)
+        # HIGH-RATIO (>30x): always rejected. No legitimate trade should ever
+        #   close 30x+ its entry.
+        # LOW-RATIO (<1/30): allowed for OPTIONS (legit when expiring worthless),
+        #   rejected for EQUITY (a stock dropping 97%+ in a single trade is
+        #   essentially always a units mismatch).
         try:
             if entry and exit_price and entry > 0:
                 ratio = exit_price / entry
-                if ratio > 15 or ratio < (1 / 15):
+                _is_option = instrument_type in ("call", "put")
+                _reject = False
+                _reject_reason = ""
+                if ratio > 30:
+                    _reject = True
+                    _reject_reason = f"exit/entry ratio {ratio:.2f}x exceeds 30x ceiling"
+                elif ratio < (1 / 30) and not _is_option:
+                    _reject = True
+                    _reject_reason = (
+                        f"exit/entry ratio {ratio:.4f} below 1/30 floor "
+                        f"for non-options (likely units mismatch)"
+                    )
+
+                if _reject:
                     _logger.error(
                         f"REJECTED IMPOSSIBLE PRICE RATIO on trade {trade_id} "
                         f"({trade['ticker']} {direction} {instrument_type}): "
-                        f"entry=${entry:.4f} exit=${exit_price:.4f} ratio={ratio:.2f}x. "
+                        f"entry=${entry:.4f} exit=${exit_price:.4f} — {_reject_reason}. "
                         f"Closing FLAT (no pnl, no cash change) to prevent corruption."
                     )
-                    # Close flat: pnl_dollars=0, pnl_pct=0, no cash change
                     conn.execute(
                         """UPDATE paper_trades
                            SET exit_price=?, exit_date=?, pnl_dollars=0, pnl_pct=0,
