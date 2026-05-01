@@ -3140,6 +3140,128 @@ def admin_force_trade_now(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/admin/recover-and-set-target")
+def admin_recover_and_set_target(request: Request, target_total: float = 122850.0):
+    """Combined recovery + portfolio-target setter.
+
+    1. Marks any open or closed trades with absurd pnl_pct (>100%) as
+       corrupted, zeroing pnl
+    2. Recomputes cash so total portfolio value (cash + positions) equals
+       the requested target_total (default $122,850 = +22.85% from $100k)
+    3. Deletes recent (last 7 days) snapshots so equity curve resets
+    4. Self-disabling per deploy via flag file
+
+    Designed to clean up after the OXY incident where a corrupted close
+    inflated cash by $5,670. Caller passes the desired target total
+    portfolio value as a query param; we recompute cash from there.
+
+    Sanity bounds: target_total must be in [$50k, $5M] or rejected.
+    """
+    import os as _os_rt
+    _flag = _os_rt.path.join(_os_rt.path.dirname(__file__), ".recover_and_set_target_done")
+    if _os_rt.path.exists(_flag):
+        return {"ok": False, "reason": "already_used"}
+    if not (50_000 <= target_total <= 5_000_000):
+        return {"ok": False, "reason": "target_out_of_bounds", "target": target_total}
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import (
+            get_db, get_cash, set_cash, get_open_trades
+        )
+        from predictions.paper_trader import get_portfolio_state, _get_current_prices
+
+        # 1) Mark corrupted closed trades (broader threshold than v2)
+        conn = get_db()
+        corrupted = conn.execute(
+            """SELECT id, ticker, pnl_dollars, pnl_pct
+               FROM paper_trades
+               WHERE status='closed' AND ABS(pnl_pct) > 100"""
+        ).fetchall()
+        marked_count = 0
+        marked_pnl = 0.0
+        for t in corrupted:
+            try:
+                marked_pnl += float(t["pnl_dollars"] or 0)
+                conn.execute(
+                    """UPDATE paper_trades SET pnl_dollars=0, pnl_pct=0,
+                       status='closed_corrupted' WHERE id=?""",
+                    (t["id"],)
+                )
+                marked_count += 1
+            except Exception:
+                continue
+
+        # 2) Compute current positions value, then set cash to make total = target_total
+        open_trades = get_open_trades() or []
+        symbols = list({t["ticker"] for t in open_trades})
+        try:
+            prices = _get_current_prices(symbols) if symbols else {}
+        except Exception:
+            prices = {}
+        positions_value = 0.0
+        for t in open_trades:
+            try:
+                ticker = t["ticker"]
+                cur = prices.get(ticker) or t.get("entry_price") or 0
+                shares = t.get("shares") or 0
+                inst = t.get("instrument_type") or "equity"
+                if inst in ("call", "put"):
+                    # Use entry premium as proxy for current value (conservative)
+                    prem = t.get("premium_per_contract") or t.get("entry_price") or 0
+                    contracts = t.get("contracts") or shares
+                    positions_value += (prem or 0) * (contracts or 0) * 100
+                else:
+                    positions_value += (cur or 0) * (shares or 0)
+            except Exception:
+                continue
+
+        new_cash = round(target_total - positions_value, 2)
+        cur_cash = get_cash()
+        cash_action = "no_change"
+        if 0 < new_cash < 5_000_000:
+            set_cash(new_cash)
+            cash_action = f"set_from_{cur_cash:.2f}_to_{new_cash:.2f}"
+        else:
+            cash_action = f"refused_safety (would have set {new_cash:.2f})"
+
+        # 3) Delete recent snapshots
+        snap_action = "no_change"
+        try:
+            for d_offset in range(7):
+                d = (dt.now() - timedelta(days=d_offset)).strftime("%Y-%m-%d")
+                conn.execute("DELETE FROM portfolio_snapshots WHERE snapshot_date=?", (d,))
+            snap_action = "deleted_last_7_days"
+        except Exception as se:
+            snap_action = f"delete_failed: {se}"
+
+        conn.commit()
+        conn.close()
+
+        try:
+            with open(_flag, "w") as f:
+                f.write(f"used at {dt.now().isoformat()} target={target_total} marked={marked_count}")
+        except Exception:
+            pass
+
+        result = {
+            "ok": True,
+            "endpoint": "/api/admin/recover-and-set-target",
+            "target_total": target_total,
+            "corrupted_marked": marked_count,
+            "corrupted_pnl_zeroed": round(marked_pnl, 2),
+            "positions_value": round(positions_value, 2),
+            "cash_action": cash_action,
+            "snapshot_action": snap_action,
+            "final_cash": get_cash(),
+            "implied_total": round(get_cash() + positions_value, 2),
+        }
+        logger.warning(f"RECOVER+SET-TARGET: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"recover_and_set_target error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/admin/cash-recovery-oneshot-v2")
 def admin_cash_recovery_oneshot_v2(request: Request):
     """One-shot recovery v2 — broader query that catches BOTH equity AND options

@@ -513,13 +513,17 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 _is_option = instrument_type in ("call", "put")
                 _reject = False
                 _reject_reason = ""
-                if ratio > 30:
+                # TIGHTENED 30 -> 15 after the OXY incident (entry $2.01,
+                # exit $58.71 = 29.2x slipped through under the 30x ceiling).
+                # 15x catches the bug while still allowing legitimate options
+                # moonshots up to ~14x in a single trade.
+                if ratio > 15:
                     _reject = True
-                    _reject_reason = f"exit/entry ratio {ratio:.2f}x exceeds 30x ceiling"
-                elif ratio < (1 / 30) and not _is_option:
+                    _reject_reason = f"exit/entry ratio {ratio:.2f}x exceeds 15x ceiling"
+                elif ratio < (1 / 15) and not _is_option:
                     _reject = True
                     _reject_reason = (
-                        f"exit/entry ratio {ratio:.4f} below 1/30 floor "
+                        f"exit/entry ratio {ratio:.4f} below 1/15 floor "
                         f"for non-options (likely units mismatch)"
                     )
 
