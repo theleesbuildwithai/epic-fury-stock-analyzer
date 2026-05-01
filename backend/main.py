@@ -2668,6 +2668,144 @@ def ibkr_snapshot_endpoint(request: Request, refresh: bool = False):
         return {"available": False, "error": str(e)}
 
 
+@app.post("/api/admin/force-trade-now")
+def admin_force_trade_now(request: Request):
+    """ONE-SHOT no-auth endpoint that fires a trade cycle RIGHT NOW with
+    excellence filters, bypassing all time gates (off-hours / weekend).
+
+    Designed for paper-trading weekend/after-hours gap bets where you want
+    to lock in positions at the last available prices and ride them to
+    Monday open.
+
+    EXCELLENCE FILTER (only the BEST picks fire):
+      - Confidence must be >= 75 (vs default 35)
+      - |Composite score| must be >= 3.0 (vs default 1.5)
+      - Limited to top 15 picks across longs + shorts
+      - Position size halved (0.5x) via force_anytime
+      - Confidence threshold +10 to compensate for off-hours risk
+
+    Self-disables after first call via flag file.
+    """
+    import os as _os_force
+    _flag_force = _os_force.path.join(
+        _os_force.path.dirname(__file__),
+        ".force_trade_now_done"
+    )
+    if _os_force.path.exists(_flag_force):
+        return {
+            "ok": False,
+            "reason": "already_used",
+            "message": "force-trade-now already used this deploy. Re-deploy to reset."
+        }
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.paper_trader import execute_trades_from_signals
+        from analysis.quant_engine import generate_quant_picks
+
+        # 1) Generate fresh picks
+        picks = generate_quant_picks()
+        if not isinstance(picks, dict):
+            return {"ok": False, "reason": "picks_gen_failed"}
+
+        original_long = len(picks.get("long_picks", []))
+        original_short = len(picks.get("short_picks", []))
+
+        # 2) EXCELLENCE FILTER — only the very best picks
+        EXCELLENCE_MIN_CONF = 75
+        EXCELLENCE_MIN_SCORE = 3.0
+        EXCELLENCE_TOP_N = 15
+
+        def _is_excellent(p):
+            try:
+                return (
+                    p.get("confidence", 0) >= EXCELLENCE_MIN_CONF
+                    and abs(p.get("composite_score", 0)) >= EXCELLENCE_MIN_SCORE
+                )
+            except Exception:
+                return False
+
+        excellent_longs = sorted(
+            [p for p in picks.get("long_picks", []) if _is_excellent(p)],
+            key=lambda x: x.get("confidence", 0), reverse=True
+        )
+        excellent_shorts = sorted(
+            [p for p in picks.get("short_picks", []) if _is_excellent(p)],
+            key=lambda x: x.get("confidence", 0), reverse=True
+        )
+
+        # Cap total picks at EXCELLENCE_TOP_N
+        total_excellent = len(excellent_longs) + len(excellent_shorts)
+        if total_excellent > EXCELLENCE_TOP_N:
+            long_share = max(1, int(EXCELLENCE_TOP_N * len(excellent_longs) / max(1, total_excellent)))
+            short_share = EXCELLENCE_TOP_N - long_share
+            excellent_longs = excellent_longs[:long_share]
+            excellent_shorts = excellent_shorts[:short_share]
+
+        # 3) Replace picks with the excellent subset
+        picks["long_picks"] = excellent_longs
+        picks["short_picks"] = excellent_shorts
+
+        # 4) Set both override flags
+        picks["force_market_open"] = True
+        picks["force_anytime"] = True
+
+        # 5) Execute
+        result = execute_trades_from_signals(picks)
+
+        opened_count = len(result.get("opened", []))
+        closed_count = len(result.get("closed", []))
+        skipped_count = len(result.get("skipped", []))
+
+        # Self-lock the endpoint
+        try:
+            with open(_flag_force, "w") as _f:
+                _f.write(f"used at {dt.now().isoformat()} opened={opened_count}")
+        except Exception:
+            pass
+
+        # Update stats so dashboard shows this cycle
+        try:
+            auto_trade_stats["total_cycles"] += 1
+            auto_trade_stats["last_run"] = dt.now().isoformat()
+            auto_trade_stats["total_trades_opened"] += opened_count
+            auto_trade_stats["total_trades_closed"] += closed_count
+            auto_trade_stats["last_result"] = {
+                "opened": opened_count, "closed": closed_count,
+                "skipped": skipped_count,
+                "regime": result.get("portfolio_after", {}).get("regime", "unknown"),
+                "cash": result.get("portfolio_after", {}).get("cash", 0),
+                "positions": result.get("portfolio_after", {}).get("num_positions", 0),
+                "trigger_reasons": ["FORCE-TRADE-NOW (excellence-filtered)"],
+            }
+        except Exception:
+            pass
+
+        logger.warning(
+            f"FORCE-TRADE-NOW: filtered {original_long}+{original_short} -> "
+            f"{len(excellent_longs)}+{len(excellent_shorts)} excellent. "
+            f"Opened: {opened_count}, Closed: {closed_count}, Skipped: {skipped_count}"
+        )
+
+        return {
+            "ok": True,
+            "endpoint": "/api/admin/force-trade-now",
+            "original_picks": {"longs": original_long, "shorts": original_short},
+            "excellence_filtered": {
+                "longs": len(excellent_longs), "shorts": len(excellent_shorts),
+                "min_conf": EXCELLENCE_MIN_CONF, "min_score": EXCELLENCE_MIN_SCORE,
+            },
+            "opened": opened_count,
+            "closed": closed_count,
+            "skipped": skipped_count,
+            "opened_tickers": [o.get("symbol") for o in result.get("opened", [])][:30],
+            "skipped_first_5": [s.get("reason", "")[:120] for s in result.get("skipped", [])][:5],
+            "endpoint_status": "DISABLED — self-locked",
+        }
+    except Exception as e:
+        logger.error(f"Force-trade-now error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/admin/cash-recovery-oneshot-v2")
 def admin_cash_recovery_oneshot_v2(request: Request):
     """One-shot recovery v2 — broader query that catches BOTH equity AND options

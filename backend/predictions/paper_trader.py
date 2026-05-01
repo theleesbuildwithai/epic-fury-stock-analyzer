@@ -395,7 +395,7 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
 # First 15 min = noise. Power hour (3-4 PM) = institutional flow.
 # Avoid bad entry timing, prefer high-quality windows.
 
-def _is_good_entry_time(force_market_open: bool = False):
+def _is_good_entry_time(force_market_open: bool = False, force_anytime: bool = False):
     """
     Check current ET time and classify the trading window.
 
@@ -403,6 +403,10 @@ def _is_good_entry_time(force_market_open: bool = False):
         force_market_open: If True, allows trading during the 9:30-9:45 avoid window.
             Used when MARKET OPEN trigger fires so we capture the open instead of
             waiting until 9:45. Weekend and off-hours blocks are NEVER overridden.
+        force_anytime: If True, bypasses ALL time gates including weekend and
+            off-hours. Used by the admin force-trade-now endpoint for paper-trading
+            weekend gap bets. Higher confidence threshold (+10) and smaller size
+            (0.5x) to compensate for stale/illiquid pricing data.
 
     Returns dict with:
         can_trade (bool): whether to allow new entries
@@ -417,8 +421,10 @@ def _is_good_entry_time(force_market_open: bool = False):
         t = hour * 60 + minute  # minutes since midnight
 
         # WEEKEND CHECK: No trading on Saturday/Sunday — prices are stale
-        # Never overridable — there's no real market.
+        # OVERRIDABLE only via force_anytime (admin force-trade-now)
         if et.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            if force_anytime:
+                return {"can_trade": True, "window": "weekend_force", "size_modifier": 0.5, "confidence_shift": 10}
             return {"can_trade": False, "window": "weekend", "size_modifier": 0.0, "confidence_shift": 0}
 
         market_open = 9 * 60 + 30   # 9:30 AM
@@ -428,8 +434,10 @@ def _is_good_entry_time(force_market_open: bool = False):
         market_close = 16 * 60      # 4:00 PM
 
         if t < market_open or t >= market_close:
-            # Outside market hours — block new entries, prices are stale
-            # Never overridable — markets are closed.
+            # Outside market hours — prices are stale.
+            # OVERRIDABLE only via force_anytime (paper-trading weekend gap bet).
+            if force_anytime:
+                return {"can_trade": True, "window": "off_hours_force", "size_modifier": 0.5, "confidence_shift": 10}
             return {"can_trade": False, "window": "off_hours", "size_modifier": 0.0, "confidence_shift": 0}
         elif t < avoid_end:
             # First 15 minutes — normally avoid new entries (noise, spread is wide)
@@ -1682,8 +1690,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     # --- SMART ORDER TIMING: Check if this is a good entry window ---
     # Allow MARKET OPEN trigger to override the 9:30-9:45 avoid window so we
     # capture the open instead of waiting until 9:45 (which delays everything).
+    # force_anytime overrides EVERYTHING (weekend/off-hours) — used by the
+    # admin force-trade-now endpoint for paper-trading weekend gap bets.
     force_market_open = bool(quant_picks.get("force_market_open", False))
-    timing = _is_good_entry_time(force_market_open=force_market_open)
+    force_anytime = bool(quant_picks.get("force_anytime", False))
+    timing = _is_good_entry_time(force_market_open=force_market_open, force_anytime=force_anytime)
     timing_size_mod = timing["size_modifier"]
     timing_conf_shift = timing["confidence_shift"]
     if timing["window"] == "avoid":
@@ -1691,6 +1702,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                        f"Pass force_market_open=True to override.")
     elif timing["window"] == "market_open_force":
         logger.warning(f"SMART TIMING: MARKET OPEN FORCE — trading the 9:30 open with reduced size (0.6x)")
+    elif timing["window"] in ("off_hours_force", "weekend_force"):
+        logger.warning(f"SMART TIMING: FORCE-ANYTIME ACTIVE ({timing['window']}) — paper-trade weekend gap bet, 0.5x size, +10 conf threshold")
     elif timing["window"] == "power_hour":
         logger.info(f"SMART TIMING: Power hour active — institutional flow window")
     elif timing["window"] == "caution":
