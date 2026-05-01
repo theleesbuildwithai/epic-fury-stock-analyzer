@@ -175,6 +175,30 @@ def init_db():
             except Exception:
                 pass
 
+    # ===== DUPLICATE PREVENTION (DB-level) =====
+    # Partial UNIQUE index — guarantees only ONE open position can exist per
+    # (ticker, direction, instrument_type, strike, expiry) combination at any
+    # time. WHERE status='open' makes it only enforced for live trades.
+    # MUST RUN AFTER the column migrations above so instrument_type and
+    # strike_price columns exist (otherwise the COALESCE refs fail).
+    # If creation fails because of existing dups in DB, the consolidation
+    # migration in main.py startup will dedupe first, then a subsequent
+    # startup will be able to enforce the constraint.
+    try:
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_open_position
+            ON paper_trades(
+                ticker,
+                direction,
+                COALESCE(instrument_type, 'equity'),
+                COALESCE(strike_price, 0),
+                COALESCE(expiration_date, '')
+            )
+            WHERE status = 'open'
+        """)
+    except Exception:
+        pass
+
     # Initialize paper_cash if empty
     existing = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
     if not existing:
@@ -326,12 +350,54 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
     """Save a new paper trade and atomically deduct cash.
     For options: cost = premium_per_contract * contracts * 100 (total premium).
     For equity: cost = entry_price * shares (as before).
+
+    DUPLICATE PREVENTION (added after the parallel-cycle dup incident):
+    If an open trade already exists for the same ticker+direction
+    (and same instrument_type for options), refuse to insert and return
+    the existing trade's id. Prevents the case where two scheduler
+    threads (max_instances=2) each see open_tickers as empty and both
+    open the same position.
     """
+    import logging as _log_save
+    _logger_save = _log_save.getLogger("paper_trader.save")
+
     if instrument_type in ("call", "put") and contracts and premium_per_contract:
         cost = round(premium_per_contract * contracts * 100, 2)
     else:
         cost = round(entry_price * shares, 2)
     conn = get_db()
+
+    # ===== DUPLICATE GUARD =====
+    # Same ticker + direction + instrument_type already open? Skip insert.
+    # For options, also match strike+expiry (same contract).
+    try:
+        if instrument_type in ("call", "put"):
+            existing = conn.execute(
+                """SELECT id FROM paper_trades
+                   WHERE status='open' AND ticker=? AND direction=?
+                     AND instrument_type=? AND strike_price=? AND expiration_date=?""",
+                (ticker.upper(), direction, instrument_type, strike_price, expiration_date)
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                """SELECT id FROM paper_trades
+                   WHERE status='open' AND ticker=? AND direction=?
+                     AND (instrument_type IS NULL OR instrument_type='equity')""",
+                (ticker.upper(), direction)
+            ).fetchone()
+        if existing:
+            existing_id = existing["id"]
+            conn.close()
+            _logger_save.warning(
+                f"DUPLICATE BLOCKED: open {direction} {instrument_type} on "
+                f"{ticker.upper()} already exists (id={existing_id}). "
+                f"Skipping new save_paper_trade call to prevent duplicate position."
+            )
+            return existing_id
+    except Exception as _e:
+        # Duplicate guard failure must NEVER block a legitimate save
+        _logger_save.warning(f"Duplicate guard error (proceeding with save): {_e}")
+
     # Atomically: insert trade AND deduct cash in same transaction
     cursor = conn.execute(
         """INSERT INTO paper_trades

@@ -361,31 +361,48 @@ except Exception as e:
     logger.warning(f"Cash adjustment: {e}")
 
 # --- ONE-TIME PORTFOLIO RESET: Close all positions, set 12.07% return ---
-# Closes all open trades and resets cash to $122,156.30
-# Uses flag file so it only runs ONCE per deployment
+# This was a one-time fix for an old corruption issue. The flag was on
+# ephemeral disk which made it run on EVERY container restart, nuking
+# whatever positions were open. Moved the flag to the DB (trading_state
+# table) which persists across deploys via S3 backup so this truly only
+# runs once forever.
 try:
-    import os as _os2
-    _reset_flag = _os2.path.join(_os2.path.dirname(__file__), ".portfolio_reset_v3_done")
-    if not _os2.path.exists(_reset_flag):
-        from predictions.models import get_open_trades as _get_open, close_paper_trade as _close_trade, set_cash as _set_cash2
-        _open_trades = _get_open()
+    from predictions.models import (
+        get_trading_state as _get_state_v3,
+        set_trading_state as _set_state_v3,
+        get_open_trades as _get_open_v3,
+    )
+    _v3_done = _get_state_v3("portfolio_reset_v3_done", "0")
+    _open_trades_now = _get_open_v3()
+    if _v3_done == "1":
+        logger.info("Portfolio reset v3 already done in DB — skipping permanently")
+    elif _open_trades_now:
+        # SAFETY: if positions exist, the user's running portfolio is live.
+        # Don't nuke their positions. Mark V3 as done so it never runs.
+        # (V3 was a one-time fix; if positions exist, V3 was either done
+        # already or no longer needed.)
+        _set_state_v3("portfolio_reset_v3_done", "1")
+        logger.warning(
+            f"PORTFOLIO RESET V3: SKIPPED because {len(_open_trades_now)} open positions exist. "
+            f"Marking V3 done permanently to protect future positions on deploy."
+        )
+    else:
+        # Truly fresh state — no positions, no flag. Run the reset.
+        from predictions.models import close_paper_trade as _close_trade, set_cash as _set_cash2
         _reset_closed = 0
-        for _t in _open_trades:
+        for _t in _open_trades_now:  # will be empty here, kept for parity
             try:
                 _inst = _t.get("instrument_type") or "equity"
                 if _inst in ("call", "put"):
                     _close_trade(_t["id"], 0.01)
                 else:
-                    _close_trade(_t["id"], _t["entry_price"])  # close at entry (flat)
+                    _close_trade(_t["id"], _t["entry_price"])
                 _reset_closed += 1
             except Exception:
                 pass
-        _set_cash2(122156.30)  # $109,000 * 1.1207 = 12.07% return
-        logger.warning(f"PORTFOLIO RESET V3: Closed {_reset_closed} positions, cash set to $122,156.30 (12.07%)")
-        with open(_reset_flag, "w") as _f:
-            _f.write(f"reset {_reset_closed} positions on {datetime.now().isoformat()}")
-    else:
-        logger.info("Portfolio reset v3 already done — skipping")
+        _set_cash2(122156.30)
+        logger.warning(f"PORTFOLIO RESET V3 (one-time, fresh state): cash set to $122,156.30")
+        _set_state_v3("portfolio_reset_v3_done", "1")
 except Exception as e:
     logger.warning(f"Portfolio reset v3: {e}")
 
@@ -432,6 +449,87 @@ try:
         logger.info("S&P backfill v1 already done — skipping")
 except Exception as e:
     logger.warning(f"S&P backfill v1: {e}")
+
+# ============================================================
+#  DUPLICATE POSITION CONSOLIDATION
+#  When two scheduler threads ran in parallel (max_instances=2), each
+#  saw open_tickers as empty and both opened the same position. This
+#  migration finds and merges duplicate open positions on every startup.
+#  IDEMPOTENT — safe to run on every container start (no flag needed).
+#  Always runs to catch any duplicates that slip through the new
+#  save_paper_trade DUPLICATE GUARD (defense in depth).
+# ============================================================
+try:
+    from predictions.models import get_db as _gdb_dup
+    _conn_dup = _gdb_dup()
+    # Find groups of open trades sharing (ticker, direction, instrument_type,
+    # strike, expiry) — i.e., true duplicates.
+    _dup_groups = _conn_dup.execute("""
+        SELECT
+            ticker, direction,
+            COALESCE(instrument_type, 'equity') AS itype,
+            COALESCE(strike_price, 0) AS strike,
+            COALESCE(expiration_date, '') AS expiry,
+            COUNT(*) AS dup_count,
+            GROUP_CONCAT(id) AS ids,
+            SUM(shares) AS total_shares,
+            MIN(entry_price) AS min_entry,
+            MAX(entry_price) AS max_entry
+        FROM paper_trades
+        WHERE status = 'open'
+        GROUP BY ticker, direction, COALESCE(instrument_type, 'equity'),
+                 COALESCE(strike_price, 0), COALESCE(expiration_date, '')
+        HAVING COUNT(*) > 1
+    """).fetchall()
+
+    _dup_consolidated = 0
+    for _g in _dup_groups:
+        try:
+            _ids = [int(x) for x in _g["ids"].split(",")]
+            _ids.sort()  # keep the oldest (lowest id), close the rest
+            _keeper_id = _ids[0]
+            _losers = _ids[1:]
+            _total_shares = float(_g["total_shares"])
+
+            # Compute weighted-average entry price across all dups
+            _wavg_rows = _conn_dup.execute(
+                f"SELECT entry_price, shares FROM paper_trades WHERE id IN ({','.join('?' * len(_ids))})",
+                tuple(_ids)
+            ).fetchall()
+            _wavg_num = sum(float(r["entry_price"]) * float(r["shares"]) for r in _wavg_rows)
+            _wavg_den = sum(float(r["shares"]) for r in _wavg_rows) or 1
+            _wavg_entry = round(_wavg_num / _wavg_den, 4)
+
+            # Update keeper to combined shares + weighted avg entry
+            _conn_dup.execute(
+                "UPDATE paper_trades SET shares = ?, entry_price = ? WHERE id = ?",
+                (round(_total_shares, 6), _wavg_entry, _keeper_id)
+            )
+            # Mark losers as 'merged' (not closed — preserves history)
+            for _lid in _losers:
+                _conn_dup.execute(
+                    "UPDATE paper_trades SET status = 'merged' WHERE id = ?",
+                    (_lid,)
+                )
+            _dup_consolidated += len(_losers)
+            logger.warning(
+                f"DUP CONSOLIDATION: merged {len(_losers)} duplicate(s) of "
+                f"{_g['ticker']} {_g['direction']} {_g['itype']} into id={_keeper_id} "
+                f"(combined shares={_total_shares:.4f}, wavg entry=${_wavg_entry:.4f})"
+            )
+        except Exception as _ce:
+            logger.warning(f"Dup consolidation error for group {_g['ticker']}: {_ce}")
+            continue
+
+    _conn_dup.commit()
+    _conn_dup.close()
+    if _dup_consolidated > 0:
+        logger.warning(f"DUP CONSOLIDATION: total {_dup_consolidated} duplicate trades merged")
+    else:
+        logger.info("DUP CONSOLIDATION: no duplicates found (clean state)")
+except Exception as e:
+    logger.warning(f"Dup consolidation: {e}")
+
 
 # ============================================================
 #  ONE-TIME CASH RECOVERY V1
