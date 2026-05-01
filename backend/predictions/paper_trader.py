@@ -958,113 +958,128 @@ def get_portfolio_state() -> dict:
         current_prices = _get_current_prices(symbols)
 
         for trade in open_trades:
-            ticker = trade["ticker"]
-            current_price = current_prices.get(ticker, trade["entry_price"])
-            entry_price = trade["entry_price"]
-            shares = trade["shares"]
-            direction = trade["direction"]
-            instrument_type = trade.get("instrument_type") or "equity"
+            # PER-TRADE TRY/EXCEPT: a single corrupted trade row can never
+            # crash the entire portfolio endpoint. Skip the bad trade, log,
+            # continue with the rest. This is what kept the API down after
+            # the dup consolidation — line 1064 referenced undefined `symbol`
+            # for options trades, crashing the whole call.
+            try:
+                ticker = trade["ticker"]
+                current_price = current_prices.get(ticker, trade["entry_price"])
+                entry_price = trade["entry_price"]
+                shares = trade["shares"]
+                direction = trade["direction"]
+                instrument_type = trade.get("instrument_type") or "equity"
 
-            if instrument_type in ("call", "put"):
-                # Options: estimate current premium from intrinsic + time value
-                entry_premium = trade.get("premium_per_contract") or entry_price
-                num_contracts = trade.get("contracts") or shares
-                strike = trade.get("strike_price", 0)
-                if instrument_type == "call":
-                    intrinsic = max(0, current_price - strike) if strike else 0
-                else:
-                    intrinsic = max(0, strike - current_price) if strike else 0
-                # Better premium estimation: intrinsic + remaining time value
-                # Time value decays linearly; estimate as fraction of entry time value
-                entry_intrinsic = 0
-                if strike:
+                # Sanity guards — skip trades with critical None/zero values
+                if entry_price is None or entry_price <= 0:
+                    logger.warning(f"PORTFOLIO: skip trade {trade.get('id')} — bad entry_price={entry_price}")
+                    continue
+                if shares is None:
+                    logger.warning(f"PORTFOLIO: skip trade {trade.get('id')} — shares is None")
+                    continue
+                if current_price is None or current_price <= 0:
+                    current_price = entry_price  # fallback
+
+                if instrument_type in ("call", "put"):
+                    entry_premium = trade.get("premium_per_contract") or entry_price
+                    num_contracts = trade.get("contracts") or shares
+                    strike = trade.get("strike_price", 0)
                     if instrument_type == "call":
-                        entry_intrinsic = max(0, (trade.get("underlying_price_at_entry") or entry_price) - strike)
+                        intrinsic = max(0, current_price - strike) if strike else 0
                     else:
-                        entry_intrinsic = max(0, strike - (trade.get("underlying_price_at_entry") or entry_price))
-                entry_time_value = max(0, entry_premium - entry_intrinsic)
-                # Estimate remaining time value (rough: 70% of entry time value if not near expiry)
-                dte_est = 14  # default
-                if trade.get("expiration_date"):
+                        intrinsic = max(0, strike - current_price) if strike else 0
+                    entry_intrinsic = 0
+                    if strike:
+                        if instrument_type == "call":
+                            entry_intrinsic = max(0, (trade.get("underlying_price_at_entry") or entry_price) - strike)
+                        else:
+                            entry_intrinsic = max(0, strike - (trade.get("underlying_price_at_entry") or entry_price))
+                    entry_time_value = max(0, entry_premium - entry_intrinsic)
+                    dte_est = 14
+                    if trade.get("expiration_date"):
+                        try:
+                            exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
+                            dte_est = max(0, (exp - datetime.now()).days)
+                        except Exception:
+                            pass
+                    hold_days = max(1, (trade.get("hold_duration_days") or 30))
+                    time_decay_factor = max(0.1, min(1.0, dte_est / max(1, hold_days)))
+                    remaining_time_value = entry_time_value * time_decay_factor
+                    est_premium = max(intrinsic + remaining_time_value, entry_premium * 0.05)
+                    position_value = est_premium * num_contracts * 100
+                    if direction == "long":
+                        unrealized_pnl = (est_premium - entry_premium) * num_contracts * 100
+                        unrealized_pct = ((est_premium / entry_premium) - 1) * 100 if entry_premium > 0 else 0
+                    else:
+                        unrealized_pnl = (entry_premium - est_premium) * num_contracts * 100
+                        unrealized_pct = ((entry_premium / est_premium) - 1) * 100 if est_premium > 0 else 0
+                    positions_value += position_value
+                else:
+                    if direction == "long":
+                        unrealized_pnl = (current_price - entry_price) * shares
+                        unrealized_pct = ((current_price / entry_price) - 1) * 100
+                    else:
+                        unrealized_pnl = (entry_price - current_price) * shares
+                        unrealized_pct = ((entry_price / current_price) - 1) * 100
+                    position_value = abs(shares * current_price)
+                    positions_value += position_value
+
+                try:
+                    entry_date = datetime.fromisoformat(trade["entry_date"])
+                    days_held = (datetime.now() - entry_date).days
+                except Exception:
+                    days_held = 0
+
+                dte = None
+                if instrument_type in ("call", "put") and trade.get("expiration_date"):
                     try:
                         exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
-                        dte_est = max(0, (exp - datetime.now()).days)
+                        dte = (exp - datetime.now()).days
                     except Exception:
                         pass
-                hold_days = max(1, (trade.get("hold_duration_days") or 30))
-                time_decay_factor = max(0.1, min(1.0, dte_est / max(1, hold_days)))
-                remaining_time_value = entry_time_value * time_decay_factor
-                est_premium = max(intrinsic + remaining_time_value, entry_premium * 0.05)
-                position_value = est_premium * num_contracts * 100
-                if direction == "long":
-                    unrealized_pnl = (est_premium - entry_premium) * num_contracts * 100
-                    unrealized_pct = ((est_premium / entry_premium) - 1) * 100 if entry_premium > 0 else 0
-                else:
-                    unrealized_pnl = (entry_premium - est_premium) * num_contracts * 100
-                    unrealized_pct = ((entry_premium / est_premium) - 1) * 100 if est_premium > 0 else 0
-                positions_value += position_value
-            else:
-                # Equity: unchanged logic
-                if direction == "long":
-                    unrealized_pnl = (current_price - entry_price) * shares
-                    unrealized_pct = ((current_price / entry_price) - 1) * 100
-                else:  # short
-                    unrealized_pnl = (entry_price - current_price) * shares
-                    unrealized_pct = ((entry_price / current_price) - 1) * 100
-                position_value = abs(shares * current_price)
-                positions_value += position_value
 
-            # Check days held
-            try:
-                entry_date = datetime.fromisoformat(trade["entry_date"])
-                days_held = (datetime.now() - entry_date).days
-            except Exception:
-                days_held = 0
+                pos_data = {
+                    "trade_id": trade["id"],
+                    "ticker": ticker,
+                    "direction": direction,
+                    "instrument_type": instrument_type,
+                    "entry_price": entry_price,
+                    "current_price": round(current_price, 2),
+                    "shares": shares,
+                    "position_value": round(position_value, 2),
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "unrealized_pct": round(unrealized_pct, 2),
+                    "days_held": days_held,
+                    "stop_loss": trade.get("stop_loss_price"),
+                    "target": trade.get("target_price"),
+                    "signal_score": trade.get("signal_score"),
+                    "regime": trade.get("regime_at_entry"),
+                    "sector": trade.get("sector"),
+                }
 
-            # DTE for options
-            dte = None
-            if instrument_type in ("call", "put") and trade.get("expiration_date"):
-                try:
-                    exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
-                    dte = (exp - datetime.now()).days
-                except Exception:
-                    pass
+                if instrument_type in ("call", "put"):
+                    _opt_label = "CALL" if instrument_type == "call" else "PUT"
+                    pos_data.update({
+                        "strike_price": trade.get("strike_price"),
+                        "expiration_date": trade.get("expiration_date"),
+                        "contracts": trade.get("contracts"),
+                        "premium": trade.get("premium_per_contract"),
+                        "dte": dte,
+                        "option_delta": trade.get("option_delta"),
+                        "option_iv": trade.get("option_iv"),
+                        "option_label": _opt_label,
+                        # FIX: was `{symbol}` (undefined NameError); should be `{ticker}`
+                        "display_name": f"{_opt_label} {ticker} ${trade.get('strike_price', '?')} exp {trade.get('expiration_date', '?')}",
+                    })
 
-            pos_data = {
-                "trade_id": trade["id"],
-                "ticker": ticker,
-                "direction": direction,
-                "instrument_type": instrument_type,
-                "entry_price": entry_price,
-                "current_price": round(current_price, 2),
-                "shares": shares,
-                "position_value": round(position_value, 2),
-                "unrealized_pnl": round(unrealized_pnl, 2),
-                "unrealized_pct": round(unrealized_pct, 2),
-                "days_held": days_held,
-                "stop_loss": trade.get("stop_loss_price"),
-                "target": trade.get("target_price"),
-                "signal_score": trade.get("signal_score"),
-                "regime": trade.get("regime_at_entry"),
-                "sector": trade.get("sector"),
-            }
-
-            # Add options-specific fields with emphasis
-            if instrument_type in ("call", "put"):
-                _opt_label = "CALL" if instrument_type == "call" else "PUT"
-                pos_data.update({
-                    "strike_price": trade.get("strike_price"),
-                    "expiration_date": trade.get("expiration_date"),
-                    "contracts": trade.get("contracts"),
-                    "premium": trade.get("premium_per_contract"),
-                    "dte": dte,
-                    "option_delta": trade.get("option_delta"),
-                    "option_iv": trade.get("option_iv"),
-                    "option_label": _opt_label,
-                    "display_name": f"{_opt_label} {symbol} ${trade.get('strike_price', '?')} exp {trade.get('expiration_date', '?')}",
-                })
-
-            positions.append(pos_data)
+                positions.append(pos_data)
+            except Exception as _trade_err:
+                logger.error(
+                    f"PORTFOLIO: skip trade id={trade.get('id')} "
+                    f"ticker={trade.get('ticker')} due to: {_trade_err}"
+                )
+                continue
 
     # Calculate performance metrics
     total_current = cash + positions_value
@@ -1121,10 +1136,20 @@ def get_portfolio_state() -> dict:
     equity_positions = [p for p in positions if p.get("instrument_type", "equity") == "equity"]
     options_premium_deployed = sum(p["position_value"] for p in options_positions)
     options_pct = round((options_premium_deployed / total_current) * 100, 1) if total_current > 0 else 0
-    options_delta_exposure = sum(
-        abs(p.get("option_delta", 0.5)) * (p.get("contracts", 0) or p["shares"]) * 100
-        for p in options_positions
-    )
+    # Defensive: option_delta can be None in DB; .get() default only applies
+    # when key is missing, not when value is explicitly None. Wrap each term.
+    def _safe_delta_exposure(p):
+        try:
+            d = p.get("option_delta")
+            if d is None:
+                d = 0.5  # neutral default
+            c = p.get("contracts")
+            if c is None:
+                c = p.get("shares") or 0
+            return abs(float(d)) * float(c) * 100
+        except Exception:
+            return 0
+    options_delta_exposure = sum(_safe_delta_exposure(p) for p in options_positions)
     calls_value = sum(p["position_value"] for p in call_positions)
     puts_value = sum(p["position_value"] for p in put_positions)
 
