@@ -2766,6 +2766,150 @@ def ibkr_snapshot_endpoint(request: Request, refresh: bool = False):
         return {"available": False, "error": str(e)}
 
 
+@app.get("/api/system-thinking")
+def system_thinking(request: Request):
+    """Single endpoint that returns everything the algorithm is "thinking"
+    right now. READ-ONLY. Designed for the user to see all autonomous
+    decisions in one view without diving into 5+ separate endpoints.
+
+    Returns:
+      dynamic_exposure: current exposure target + reasoning breakdown
+      taco_signal: TACO reversal pattern detection state
+      active_geo_events: events influencing picks
+      regime: current market regime
+      portfolio_summary: cash, positions, return
+      learner: factor weights + recent adjustments
+      recent_picks_summary: distribution of confidence + scores
+      scheduler_health: heartbeat + cycle counts
+      flags: any system flags currently active
+
+    SAFETY: every section wrapped in try/except. A failure in one
+    section returns a placeholder for that section without breaking
+    the overall response. Never raises.
+    """
+    check_rate_limit(request.client.host)
+    result = {"generated_at": dt.now().isoformat()}
+
+    # ----- Dynamic exposure + TACO (run live to compute now) -----
+    try:
+        from predictions.paper_trader import (
+            _compute_dynamic_exposure_target,
+            _detect_taco_reversal_event,
+            get_portfolio_state,
+            _is_good_entry_time,
+        )
+        # Need current VIX from the regime cache
+        try:
+            regime_data = detect_market_regime()
+            vix_now = regime_data.get("vix_level")
+            regime_now = regime_data.get("regime", "UNKNOWN")
+        except Exception:
+            vix_now = None
+            regime_now = "UNKNOWN"
+
+        # Need drawdown from portfolio
+        try:
+            pstate = get_portfolio_state()
+            total_return_now = pstate.get("total_return_pct")
+            cash_now = pstate.get("cash")
+            num_pos = pstate.get("num_positions")
+        except Exception:
+            total_return_now = None
+            cash_now = None
+            num_pos = None
+
+        dyn = _compute_dynamic_exposure_target(vix_level=vix_now, drawdown_pct=total_return_now)
+        result["dynamic_exposure"] = dyn
+
+        # TACO needs a quant_picks-shaped dict — use CACHED picks only.
+        # Don't trigger a fresh generate_quant_picks (5-10 min yfinance run
+        # would time out at App Runner's 120s gateway). If cache is empty,
+        # build a minimal stub from current regime data.
+        picks_for_taco = {}
+        try:
+            from analysis.quant_engine import _quant_cache
+            cached = _quant_cache.get("quant_picks")
+            if cached and isinstance(cached.get("data"), dict):
+                picks_for_taco = cached["data"]
+        except Exception:
+            pass
+        if not picks_for_taco:
+            picks_for_taco = {"regime": {"vix_level": vix_now}, "macro": {}}
+        taco = _detect_taco_reversal_event(picks_for_taco)
+        # Convert sets to lists for JSON
+        taco["veto_shorts_in"] = sorted(list(taco.get("veto_shorts_in", set())))
+        result["taco_signal"] = taco
+
+        # Trading window
+        try:
+            window = _is_good_entry_time()
+            result["trading_window"] = window
+        except Exception:
+            result["trading_window"] = {"error": "computation_failed"}
+
+        result["regime"] = regime_now
+        result["vix_now"] = vix_now
+        result["portfolio_summary"] = {
+            "cash": cash_now,
+            "total_return_pct": total_return_now,
+            "num_positions": num_pos,
+        }
+    except Exception as _e:
+        result["dynamic_exposure"] = {"error": str(_e)}
+
+    # ----- Active geo events -----
+    try:
+        from predictions.models import get_active_geo_events, get_upcoming_geo_events
+        result["geo_events"] = {
+            "active": get_active_geo_events() or [],
+            "upcoming_30d": get_upcoming_geo_events(days_ahead=30) or [],
+        }
+    except Exception as _e:
+        result["geo_events"] = {"error": str(_e)}
+
+    # ----- Learner state -----
+    try:
+        from predictions.models import get_signal_weights, get_all_regime_factor_weights
+        result["learner"] = {
+            "global_weights": get_signal_weights(),
+            "regime_weights": get_all_regime_factor_weights(),
+        }
+    except Exception as _e:
+        result["learner"] = {"error": str(_e)}
+
+    # ----- Mistake adjustments -----
+    try:
+        from predictions.learner import get_mistake_adjustments
+        result["mistake_adjustments"] = get_mistake_adjustments()
+    except Exception as _e:
+        result["mistake_adjustments"] = {"error": str(_e)}
+
+    # ----- Scheduler health -----
+    try:
+        result["scheduler_health"] = {
+            "running": scheduler.running,
+            "jobs": [j.id for j in scheduler.get_jobs()],
+            "total_cycles": auto_trade_stats.get("total_cycles"),
+            "errors": auto_trade_stats.get("errors"),
+            "last_run": auto_trade_stats.get("last_run"),
+            "last_scan_attempted": auto_trade_stats.get("last_scan_attempted"),
+            "status": auto_trade_stats.get("status"),
+        }
+    except Exception as _e:
+        result["scheduler_health"] = {"error": str(_e)}
+
+    # ----- Flags -----
+    try:
+        result["flags"] = {
+            "daily_paused": _daily_paused,
+            "geo_risk": _geo_risk_state,
+        }
+    except Exception as _e:
+        result["flags"] = {"error": str(_e)}
+
+    return result
+
+
 @app.post("/api/admin/force-trade-now-v2")
 def admin_force_trade_now_v2(request: Request):
     """v2: looser excellence thresholds (70/2.5) so picks actually qualify

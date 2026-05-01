@@ -292,7 +292,465 @@ def _get_min_composite_score() -> float:
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
+
+
+# ============================================================
+#  DYNAMIC EXPOSURE CONTROLLER (the "thinking" layer)
+# ============================================================
+# Auto-adjusts the gross-exposure cap on every trade cycle so the user
+# never has to manually say "increase exposure" or "decrease exposure".
+# The system reads market conditions and its own recent performance, then
+# decides how aggressive to be. Result is clamped to safety bounds so it
+# can never hit 100% (always keeps a cash buffer) and never collapses
+# below the minimum trading level.
+
+DYNAMIC_EXPOSURE_MIN = 0.50  # Hard floor — always trade at least 50%
+DYNAMIC_EXPOSURE_MAX = 0.95  # Hard ceiling — always keep 5% cash buffer
+DYNAMIC_EXPOSURE_BASE = 0.85  # Starting point before adjustments
+DYNAMIC_EXPOSURE_SAFE_DEFAULT = 0.85  # Used if calculation fails
+
+
+# ============================================================
+#  MACRO EVENT REACTOR — TACO TRADE / SHOCK REVERSAL DETECTOR
+# ============================================================
+# Recognizes patterns where market panic on policy/political news tends
+# to REVERSE rather than persist (the "TACO" pattern: Trump Always
+# Chickens Out — tariff threat -> sell-off -> threat softened -> rally).
+#
+# Same dynamic for: Fed jawboning, OPEC threats, sanctions deadlines,
+# ultimatum-style geopolitical announcements. The signal is "panic
+# without fundamental damage." When detected:
+#   - boost LONG confidence on quality names (+10)
+#   - veto NEW SHORTS in safe-haven sectors (Tech, Healthcare, Financials)
+#   - bias exposure higher (+0.05 on dynamic exposure target)
+#
+# Detection logic:
+#   1. Active geo event with type in TACO_REVERSAL_EVENT_TYPES
+#   2. AND VIX showing stress (>20) but not crisis (<35)
+#   3. Returns boolean + reason string for transparency
+
+TACO_REVERSAL_EVENT_TYPES = {
+    "tariff", "sanction", "ultimatum", "deadline", "threat",
+    "trade war", "negotiation", "summit",
+}
+
+TACO_PROTECTED_SECTORS = {
+    "Technology", "Healthcare", "Financials", "Consumer Discretionary"
+}
+
+
+def _detect_taco_reversal_event(quant_picks: dict) -> dict:
+    """Detect a TACO/shock-reversal signal from active macro state.
+
+    Reads:
+      - quant_picks.regime.vix_level (current VIX)
+      - DB: get_active_geo_events() (active policy/political events)
+      - quant_picks.macro.ceasefire_ending_overlay (existing flag)
+
+    Returns dict:
+      active (bool): is the TACO signal firing?
+      reason (str): human-readable explanation
+      confidence_boost (int): how much to bump long confidence (0-15)
+      veto_shorts_in (set): sectors where new shorts should be vetoed
+      exposure_boost (float): adjustment to dynamic exposure target
+
+    SAFETY: never raises, always returns a dict with active=False on error.
+    """
+    try:
+        result = {
+            "active": False,
+            "reason": "no_signal",
+            "confidence_boost": 0,
+            "veto_shorts_in": set(),
+            "exposure_boost": 0.0,
+        }
+
+        # Get VIX
+        try:
+            vix = float(quant_picks.get("regime", {}).get("vix_level") or 0)
+        except Exception:
+            vix = 0
+
+        # Need stress but not crisis to call it TACO
+        if not (20 <= vix <= 35):
+            return result
+
+        # Look for active reversal-pattern events in DB
+        try:
+            from predictions.models import get_active_geo_events
+            active_events = get_active_geo_events() or []
+        except Exception:
+            active_events = []
+
+        # Match against TACO event types
+        matching = []
+        for ev in active_events:
+            ev_type = (ev.get("event_type") or "").lower()
+            ev_desc = (ev.get("description") or "").lower()
+            ev_headline = (ev.get("source_headline") or "").lower()
+            for taco_type in TACO_REVERSAL_EVENT_TYPES:
+                if taco_type in ev_type or taco_type in ev_desc or taco_type in ev_headline:
+                    matching.append({
+                        "event_key": ev.get("event_key"),
+                        "type": ev_type,
+                        "match": taco_type,
+                    })
+                    break
+
+        # Also check macro overlay flags
+        macro = quant_picks.get("macro") or {}
+        ceasefire_ending = bool(macro.get("ceasefire_ending_overlay"))
+
+        if matching or ceasefire_ending:
+            triggers = []
+            if matching:
+                triggers.append(f"{len(matching)} TACO-pattern event(s): {[m['match'] for m in matching][:3]}")
+            if ceasefire_ending:
+                triggers.append("ceasefire_ending overlay active")
+            result.update({
+                "active": True,
+                "reason": f"TACO REVERSAL detected — {' + '.join(triggers)} (VIX {vix:.1f} = stress, not crisis)",
+                "confidence_boost": 10,
+                "veto_shorts_in": set(TACO_PROTECTED_SECTORS),
+                "exposure_boost": 0.05,
+            })
+        return result
+    except Exception as _e:
+        logger.warning(f"_detect_taco_reversal_event error (returning inactive): {_e}")
+        return {
+            "active": False,
+            "reason": f"detector_error: {_e}",
+            "confidence_boost": 0,
+            "veto_shorts_in": set(),
+            "exposure_boost": 0.0,
+        }
+
+
+def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
+    """Compute target gross exposure (0.50 - 0.95) from market conditions.
+
+    Inputs (all optional — function returns safe default if anything missing):
+      vix_level: current VIX from regime detection
+      drawdown_pct: current portfolio return (from peak)
+
+    Reads from DB internally:
+      - Recent 30-day Sharpe ratio (from closed trades)
+      - Days since last losing day (from closed trades)
+
+    Returns dict with:
+      target (float): exposure cap to use (0.50 - 0.95)
+      base (float): starting value before adjustments
+      adjustments (list): factor-by-factor reasoning for transparency
+      reasoning (str): one-line summary
+
+    SAFETY: Never returns target outside [DYNAMIC_EXPOSURE_MIN, MAX].
+    Wrapped in try/except — any error returns DYNAMIC_EXPOSURE_SAFE_DEFAULT.
+    """
+    try:
+        target = DYNAMIC_EXPOSURE_BASE
+        adjustments = []
+        closed_trades_list = []  # initialize so days_since_loss check can access it safely
+
+        # ----- Factor 1: Recent 30-day Sharpe -----
+        # High Sharpe = system is reading the market well = press the bet
+        # Low/negative Sharpe = system is wrong = pull back
+        recent_sharpe = None
+        try:
+            from predictions.models import get_closed_trades
+            from datetime import timedelta as _td_dyn
+            closed_trades_list = get_closed_trades(limit=200) or []
+            if len(closed_trades_list) >= 10:
+                cutoff = datetime.now() - _td_dyn(days=30)
+                recent = []
+                for t in closed_trades_list:
+                    try:
+                        exit_d = datetime.fromisoformat(t.get("exit_date", ""))
+                        if exit_d >= cutoff:
+                            recent.append(t)
+                    except Exception:
+                        continue
+                if len(recent) >= 5:
+                    rets = [float(t.get("pnl_pct", 0) or 0) for t in recent]
+                    mean_r = float(np.mean(rets))
+                    std_r = float(np.std(rets)) or 1.0
+                    # Annualized Sharpe approximation (assume ~10 trades/wk)
+                    recent_sharpe = (mean_r / std_r) * np.sqrt(40)
+        except Exception:
+            recent_sharpe = None
+
+        if recent_sharpe is not None:
+            if recent_sharpe >= 2.0:
+                target += 0.08
+                adjustments.append(f"sharpe={recent_sharpe:.2f} (hot) +0.08")
+            elif recent_sharpe >= 1.0:
+                target += 0.04
+                adjustments.append(f"sharpe={recent_sharpe:.2f} (good) +0.04")
+            elif recent_sharpe < 0:
+                target -= 0.15
+                adjustments.append(f"sharpe={recent_sharpe:.2f} (negative) -0.15")
+            elif recent_sharpe < 0.5:
+                target -= 0.05
+                adjustments.append(f"sharpe={recent_sharpe:.2f} (weak) -0.05")
+            else:
+                adjustments.append(f"sharpe={recent_sharpe:.2f} (neutral) +0.00")
+        else:
+            adjustments.append("sharpe=insufficient_data +0.00")
+
+        # ----- Factor 2: VIX level -----
+        # Low VIX = calm market = safer to deploy more
+        # High VIX = panic = pull back hard
+        if vix_level is not None and 0 < float(vix_level) < 100:
+            v = float(vix_level)
+            if v < 13:
+                target += 0.05
+                adjustments.append(f"vix={v:.1f} (calm) +0.05")
+            elif v < 18:
+                target += 0.02
+                adjustments.append(f"vix={v:.1f} (normal) +0.02")
+            elif v < 25:
+                adjustments.append(f"vix={v:.1f} (elevated) +0.00")
+            elif v < 35:
+                target -= 0.10
+                adjustments.append(f"vix={v:.1f} (high) -0.10")
+            else:
+                target -= 0.20
+                adjustments.append(f"vix={v:.1f} (crisis) -0.20")
+        else:
+            adjustments.append("vix=unavailable +0.00")
+
+        # ----- Factor 3: Days since last loss -----
+        # Recent loss = system might be off — be more cautious
+        # No loss in a while = ride the streak
+        days_since_loss = None
+        try:
+            if closed_trades_list:
+                losses = [t for t in closed_trades_list if (t.get("pnl_pct") or 0) < 0]
+                if losses:
+                    losses.sort(key=lambda t: t.get("exit_date", "") or "", reverse=True)
+                    last_loss_date_str = losses[0].get("exit_date", "")
+                    if last_loss_date_str:
+                        last_loss_date = datetime.fromisoformat(last_loss_date_str)
+                        days_since_loss = (datetime.now() - last_loss_date).days
+        except Exception:
+            days_since_loss = None
+
+        if days_since_loss is not None:
+            if days_since_loss == 0:
+                target -= 0.05
+                adjustments.append(f"loss_today -0.05")
+            elif days_since_loss <= 1:
+                target -= 0.02
+                adjustments.append(f"loss_yesterday -0.02")
+            elif days_since_loss >= 7:
+                target += 0.03
+                adjustments.append(f"days_since_loss={days_since_loss} +0.03")
+            else:
+                adjustments.append(f"days_since_loss={days_since_loss} +0.00")
+        else:
+            adjustments.append("loss_history=unavailable +0.00")
+
+        # ----- Factor 4: Portfolio drawdown -----
+        # Deeper drawdown = pull exposure way back to preserve remaining capital
+        if drawdown_pct is not None:
+            d = float(drawdown_pct)
+            # drawdown_pct is computed elsewhere as total_return_now
+            # If positive, we're up — no drawdown adjustment.
+            # If negative, we're in drawdown.
+            if d <= -10:
+                target -= 0.25
+                adjustments.append(f"drawdown={d:.1f}% (deep) -0.25")
+            elif d <= -5:
+                target -= 0.10
+                adjustments.append(f"drawdown={d:.1f}% (mild) -0.10")
+            elif d <= -2:
+                target -= 0.03
+                adjustments.append(f"drawdown={d:.1f}% (small) -0.03")
+            else:
+                adjustments.append(f"return={d:+.1f}% (no drawdown) +0.00")
+        else:
+            adjustments.append("drawdown=unavailable +0.00")
+
+        # ----- Clamp to safety bounds -----
+        target = max(DYNAMIC_EXPOSURE_MIN, min(DYNAMIC_EXPOSURE_MAX, target))
+        target = round(target, 3)
+
+        return {
+            "target": target,
+            "base": DYNAMIC_EXPOSURE_BASE,
+            "adjustments": adjustments,
+            "reasoning": " | ".join(adjustments),
+        }
+    except Exception as _e:
+        logger.warning(f"_compute_dynamic_exposure_target error (using safe default): {_e}")
+        return {
+            "target": DYNAMIC_EXPOSURE_SAFE_DEFAULT,
+            "base": DYNAMIC_EXPOSURE_BASE,
+            "adjustments": [f"ERROR: {_e}"],
+            "reasoning": f"computation_failed_safe_default={DYNAMIC_EXPOSURE_SAFE_DEFAULT}",
+        }
 MIN_COMPOSITE_SCORE = 2.0  # Default — overridden by _get_min_composite_score() at trade time
+
+
+def _dedupe_contradictory_picks(quant_picks: dict) -> dict:
+    """Remove tickers that appear in BOTH long_picks and short_picks.
+
+    The picks engine occasionally returns the same ticker on both sides
+    (we saw RBLX with conf=91% appearing as both long and short). That's
+    a contradictory signal — the engine has no clear edge.
+
+    Resolution rules:
+      - If LONG conf > SHORT conf → keep LONG, drop SHORT
+      - If SHORT conf > LONG conf → keep SHORT, drop LONG
+      - If conf TIES → drop from BOTH (no clear edge, safest path)
+
+    Returns NEW dict (does not mutate input). Adds "_dedup_log" field
+    listing each contradiction resolved. Never raises — returns the
+    original picks unchanged on any error.
+    """
+    try:
+        longs = list(quant_picks.get("long_picks", []) or [])
+        shorts = list(quant_picks.get("short_picks", []) or [])
+        long_syms = {p.get("symbol"): p for p in longs if p.get("symbol")}
+        short_syms = {p.get("symbol"): p for p in shorts if p.get("symbol")}
+        contradictions = set(long_syms.keys()) & set(short_syms.keys())
+        if not contradictions:
+            return quant_picks
+
+        drop_long = set()
+        drop_short = set()
+        dedup_log = []
+        for sym in contradictions:
+            lconf = long_syms[sym].get("confidence", 0) or 0
+            sconf = short_syms[sym].get("confidence", 0) or 0
+            if lconf > sconf:
+                drop_short.add(sym)
+                dedup_log.append(f"{sym}: keep LONG ({lconf}%) drop SHORT ({sconf}%)")
+            elif sconf > lconf:
+                drop_long.add(sym)
+                dedup_log.append(f"{sym}: keep SHORT ({sconf}%) drop LONG ({lconf}%)")
+            else:
+                drop_long.add(sym)
+                drop_short.add(sym)
+                dedup_log.append(f"{sym}: TIE ({lconf}%) — drop from BOTH (no edge)")
+
+        new_picks = dict(quant_picks)
+        new_picks["long_picks"] = [p for p in longs if p.get("symbol") not in drop_long]
+        new_picks["short_picks"] = [p for p in shorts if p.get("symbol") not in drop_short]
+        new_picks["_dedup_log"] = dedup_log
+        logger.warning(f"PICK DEDUP: removed {len(contradictions)} contradictions: {dedup_log[:3]}")
+        return new_picks
+    except Exception as _e:
+        logger.warning(f"_dedupe_contradictory_picks error (returning original): {_e}")
+        return quant_picks
+
+
+def _auto_tighten_stops(open_trades: list, drawdown_pct) -> dict:
+    """Auto-tighten stop losses on open positions during portfolio drawdown.
+
+    Ratchet ONE DIRECTION ONLY (tighter, never looser). Never relaxes
+    an existing stop. Skips options trades (different stop scale).
+
+    Drawdown thresholds (drawdown_pct = total return from inception):
+      drawdown > -3%: no action (not in real drawdown)
+      -5% to -3%: tighten 30% of way toward current price
+      -10% to -5%: tighten 50% of way toward current price
+      -10%+: tighten 70% of way toward current price (emergency)
+
+    Returns dict: {tightened: int, details: list}.
+    Never raises — per-trade try/except + outer try/except.
+    """
+    result = {"tightened": 0, "details": [], "severity": "none"}
+    try:
+        if drawdown_pct is None:
+            return result
+        d = float(drawdown_pct)
+        if d > -3:
+            return result  # not really in drawdown
+
+        if d <= -10:
+            factor = 0.70
+            severity = "emergency"
+        elif d <= -5:
+            factor = 0.50
+            severity = "high"
+        else:
+            factor = 0.30
+            severity = "mild"
+        result["severity"] = severity
+
+        if not open_trades:
+            return result
+        symbols = list({t["ticker"] for t in open_trades})
+        try:
+            prices = _get_current_prices(symbols)
+        except Exception:
+            prices = {}
+
+        from predictions.models import get_db
+        conn = get_db()
+        try:
+            for trade in open_trades:
+                try:
+                    instrument_type = trade.get("instrument_type") or "equity"
+                    if instrument_type in ("call", "put"):
+                        continue  # options stops use premium scale, skip
+                    ticker = trade.get("ticker")
+                    cur_price = prices.get(ticker)
+                    if cur_price is None or cur_price <= 0:
+                        continue
+                    entry = trade.get("entry_price")
+                    direction = trade.get("direction")
+                    existing_stop = trade.get("stop_loss_price") or 0
+                    if entry is None or entry <= 0:
+                        continue
+
+                    if direction == "long":
+                        if existing_stop <= 0:
+                            new_stop = entry * (1 - 0.05 * (1 - factor))
+                        else:
+                            new_stop = existing_stop + (cur_price - existing_stop) * factor
+                        # Only ratchet tighter (HIGHER stop for long)
+                        if existing_stop > 0 and new_stop <= existing_stop:
+                            continue
+                    else:  # short
+                        if existing_stop <= 0:
+                            new_stop = entry * (1 + 0.05 * (1 - factor))
+                        else:
+                            new_stop = existing_stop - (existing_stop - cur_price) * factor
+                        # Only ratchet tighter (LOWER stop for short)
+                        if existing_stop > 0 and new_stop >= existing_stop:
+                            continue
+
+                    new_stop = round(new_stop, 2)
+                    if new_stop <= 0:
+                        continue
+                    conn.execute(
+                        "UPDATE paper_trades SET stop_loss_price = ? WHERE id = ?",
+                        (new_stop, trade["id"])
+                    )
+                    result["tightened"] += 1
+                    result["details"].append({
+                        "ticker": ticker, "direction": direction,
+                        "old_stop": round(existing_stop, 2),
+                        "new_stop": new_stop,
+                        "current_price": round(cur_price, 2),
+                    })
+                except Exception as _ie:
+                    logger.debug(f"_auto_tighten_stops: skip trade {trade.get('id')}: {_ie}")
+                    continue
+            conn.commit()
+        finally:
+            conn.close()
+
+        if result["tightened"] > 0:
+            logger.warning(
+                f"AUTO STOP TIGHTEN ({severity}, drawdown {d:+.1f}%): "
+                f"tightened {result['tightened']} stop(s) by factor {factor}"
+            )
+        return result
+    except Exception as _e:
+        logger.warning(f"_auto_tighten_stops error: {_e}")
+        return result
 
 
 # ============================================================
@@ -1397,6 +1855,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         "errors": [],
     }
 
+    # ----- PICK DEDUPE: remove tickers in BOTH long and short lists -----
+    # Prevents the contradictory-signal bug (e.g., RBLX in both long & short).
+    # Mutates a NEW dict; original quant_picks unchanged.
+    try:
+        quant_picks = _dedupe_contradictory_picks(quant_picks)
+        if quant_picks.get("_dedup_log"):
+            results["pick_dedup_log"] = quant_picks["_dedup_log"]
+    except Exception as _dde:
+        logger.warning(f"Pick dedup wrapper error (proceeding with original picks): {_dde}")
+
     open_trades = get_open_trades()
     open_tickers = set(t["ticker"] for t in open_trades)
     snapshots = get_portfolio_snapshots(days=5)
@@ -1620,6 +2088,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     total_current_value = cash + positions_value_now
     total_return_now = ((total_current_value / ORIGINAL_CAPITAL) - 1) * 100
 
+    # ----- AUTO STOP-LOSS TIGHTENING -----
+    # When portfolio is in drawdown (>3%), auto-tightens stops on ALL
+    # open equity positions to lock in remaining gains. Ratchet ONLY
+    # tighter, never looser. Skips options. Logs each tightening.
+    try:
+        _tight_result = _auto_tighten_stops(get_open_trades(), total_return_now)
+        if _tight_result.get("tightened", 0) > 0:
+            results["auto_stop_tighten"] = _tight_result
+    except Exception as _ate:
+        logger.warning(f"Auto-tighten wrapper error (no stops changed): {_ate}")
+
     # Compare to yesterday's snapshot to get TODAY's gain
     daily_gain = 0
     if snapshots:
@@ -1737,6 +2216,67 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         logger.warning(f"SMART TIMING: BLOCKED — outside market hours (9:30-16:00 ET)")
     elif timing["window"] == "weekend":
         logger.warning(f"SMART TIMING: BLOCKED — weekend, market closed")
+
+    # --- DYNAMIC EXPOSURE CONTROLLER (the "thinking" layer) ---
+    # Auto-decides how much of the portfolio to deploy based on:
+    #   - recent 30-day Sharpe (win rate signal)
+    #   - VIX level (calm vs panic)
+    #   - days since last losing day (recency)
+    #   - portfolio drawdown from peak
+    # No human input needed — eliminates the need to manually say "increase
+    # exposure". Result is clamped to [0.50, 0.95]. Falls back to 0.85 on
+    # any error.
+    try:
+        _dyn_exposure = _compute_dynamic_exposure_target(
+            vix_level=vix_level,
+            drawdown_pct=total_return_now,
+        )
+        dynamic_max_exposure_pct = _dyn_exposure.get("target", DYNAMIC_EXPOSURE_SAFE_DEFAULT)
+        logger.warning(
+            f"DYNAMIC EXPOSURE: target={dynamic_max_exposure_pct:.2%} | "
+            f"reasoning: {_dyn_exposure.get('reasoning', 'n/a')}"
+        )
+        results["dynamic_exposure"] = _dyn_exposure
+    except Exception as _e:
+        logger.warning(f"Dynamic exposure failed (using safe default 0.85): {_e}")
+        dynamic_max_exposure_pct = DYNAMIC_EXPOSURE_SAFE_DEFAULT
+        results["dynamic_exposure"] = {
+            "target": dynamic_max_exposure_pct,
+            "reasoning": f"error: {_e}",
+        }
+
+    # --- MACRO EVENT REACTOR — TACO TRADE DETECTOR ---
+    # Looks for shock-but-not-crisis market state where panic is likely
+    # to reverse rather than persist. When detected:
+    #   - boost long confidence (+10) so we capture the reversal
+    #   - veto new shorts in safe-haven sectors (don't fight the rally)
+    #   - bump exposure target up by +0.05 (lean in to the opportunity)
+    # All effects are captured in results["taco_signal"] for visibility.
+    try:
+        _taco = _detect_taco_reversal_event(quant_picks)
+        results["taco_signal"] = {
+            "active": _taco.get("active", False),
+            "reason": _taco.get("reason", "n/a"),
+            "confidence_boost": _taco.get("confidence_boost", 0),
+            "veto_shorts_in_sectors": list(_taco.get("veto_shorts_in", set())),
+            "exposure_boost": _taco.get("exposure_boost", 0.0),
+        }
+        if _taco.get("active"):
+            # Apply exposure bump (still respect the hard cap)
+            taco_exp_boost = float(_taco.get("exposure_boost", 0.0))
+            new_target = min(DYNAMIC_EXPOSURE_MAX, dynamic_max_exposure_pct + taco_exp_boost)
+            logger.warning(
+                f"TACO REVERSAL ACTIVE: {_taco.get('reason')} | "
+                f"exposure {dynamic_max_exposure_pct:.2%} -> {new_target:.2%} | "
+                f"+10 long conf, veto shorts in {sorted(_taco.get('veto_shorts_in', set()))}"
+            )
+            dynamic_max_exposure_pct = new_target
+            results["dynamic_exposure"]["target"] = new_target
+            results["dynamic_exposure"]["taco_boost"] = taco_exp_boost
+    except Exception as _te:
+        logger.warning(f"TACO detector failed (no boost applied): {_te}")
+        _taco = {"active": False, "confidence_boost": 0, "veto_shorts_in": set()}
+        results["taco_signal"] = {"active": False, "reason": f"error: {_te}"}
 
     # --- PORTFOLIO VaR BUDGET ---
     var_data = quant_picks.get("portfolio_var", {})
@@ -1897,18 +2437,44 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
 
-            # GROSS EXPOSURE LIMIT: Never invest more than 85% of portfolio
-            # Hedge funds always keep a cash buffer for opportunities and margin calls
+            # ----- TACO REVERSAL EFFECTS (per-pick application) -----
+            # If TACO signal is active:
+            #   - LONGS in any sector get a confidence boost (panic = opportunity)
+            #   - SHORTS in safe-haven sectors get vetoed (don't fight the rally)
+            try:
+                if _taco.get("active"):
+                    if direction == "long":
+                        _taco_boost = int(_taco.get("confidence_boost", 0))
+                        if _taco_boost > 0:
+                            pick["confidence"] = min(95, int(pick.get("confidence", 50)) + _taco_boost)
+                    elif direction == "short":
+                        _veto_set = _taco.get("veto_shorts_in", set())
+                        if pick.get("sector") in _veto_set:
+                            results["skipped"].append({
+                                "symbol": symbol,
+                                "reason": f"TACO VETO: shorts blocked in {pick.get('sector')} during reversal-pattern event",
+                            })
+                            continue
+            except Exception as _te2:
+                logger.debug(f"TACO per-pick effect skipped for {symbol}: {_te2}")
+
+            # GROSS EXPOSURE LIMIT: dynamic, decided per-cycle by the
+            # Dynamic Exposure Controller (Sharpe + VIX + drawdown + recency).
+            # In preservation mode, hard-cap at 75% regardless of dynamic value.
+            # Otherwise use the dynamic target (clamped 0.50-0.95).
             gross_exposure = sum(
                 t.get("shares", 0) * t.get("entry_price", 0)
                 for t in get_open_trades() if t["ticker"] in open_tickers
             )
-            max_exposure_pct = 0.75 if preservation else 0.92  # 75% in preservation, 92% normal
+            if preservation:
+                max_exposure_pct = 0.75
+            else:
+                max_exposure_pct = dynamic_max_exposure_pct
             max_exposure = total_current_value * max_exposure_pct
             if gross_exposure >= max_exposure:
                 results["skipped"].append({
                     "symbol": symbol,
-                    "reason": f"Gross exposure limit (92% of portfolio)",
+                    "reason": f"Gross exposure limit ({max_exposure_pct:.0%} of portfolio, dynamic)",
                 })
                 break  # Stop opening more positions
 
