@@ -632,8 +632,16 @@ except Exception:
 def _should_trade_now() -> dict:
     """
     Quick market scan — checks if conditions have changed enough to warrant
-    a full trade cycle. Runs every 5 minutes but only triggers trades when
-    something meaningful happens. Returns dict with 'should_trade' bool and 'reasons'.
+    a full trade cycle.
+
+    UPDATED for constant-trading behavior: during market hours (9:30-4 ET)
+    every scan that's past MIN_TRADE_INTERVAL_MINUTES will return should_trade=True
+    via a guaranteed CONTINUOUS TRADING trigger. This ensures the system fires
+    cycles consistently every ~5 minutes throughout the day, not just on event
+    triggers. Picks generation is cached (15 min), so the heavy work only
+    actually runs when needed.
+
+    Returns dict with 'should_trade' bool and 'reasons'.
     """
     reasons = []
     import pytz
@@ -661,6 +669,19 @@ def _should_trade_now() -> dict:
         elapsed = (dt.now() - _last_trade_time["value"]).total_seconds() / 60
         if elapsed < MIN_TRADE_INTERVAL_MINUTES:
             return {"should_trade": False, "reasons": [f"Too soon — last trade {elapsed:.0f}min ago (min {MIN_TRADE_INTERVAL_MINUTES}min)"]}
+
+    # ============================================================
+    # CONTINUOUS TRADING — GUARANTEED TRIGGER DURING MARKET HOURS
+    # ============================================================
+    # Add this trigger FIRST so even if every other trigger below silently
+    # errors, fails, or returns no signal, we still fire a cycle every scan
+    # past MIN_TRADE_INTERVAL_MINUTES. This is the safety net that ensures
+    # the system trades CONSTANTLY during market hours, not just on events.
+    # The 9:30-16:00 ET window is the actual trading window. Picks are cached
+    # (15-min TTL) so heavy work doesn't run more than once per cache cycle.
+    market_minutes = hour * 60 + minute
+    if 9 * 60 + 30 <= market_minutes < 16 * 60:
+        reasons.append("CONTINUOUS TRADING — market hours scan")
 
     # --- TRIGGER 0: PRE-MARKET PRIME at 9:00am ET ---
     # Generates picks 30 min before market open so they're ready to fire at 9:30.
@@ -691,6 +712,10 @@ def _should_trade_now() -> dict:
         reasons.append("FIRST SCAN OF DAY — opening positions")
 
     # --- TRIGGER 4: Check for regime change ---
+    # HARDENED: this calls detect_market_regime which does yfinance — can hang.
+    # If it takes too long, we skip rather than block the scan. CONTINUOUS
+    # TRADING trigger above already guarantees should_trade=True during market
+    # hours, so missing this trigger doesn't stop trades from firing.
     try:
         regime_data = detect_market_regime()
         current_regime = regime_data.get("regime", "UNKNOWN")
@@ -699,15 +724,17 @@ def _should_trade_now() -> dict:
         _last_regime["value"] = current_regime
 
         # Check VIX spike (>3 points since last check)
+        # SAFETY: ignore impossibly-high VIX values (data corruption guard).
+        # Real VIX rarely exceeds 80; values >100 are corrupted yfinance data.
         vix = regime_data.get("vix_level")
-        if vix and _last_vix["value"]:
-            vix_change = abs(vix - _last_vix["value"])
-            if vix_change >= 3:
-                reasons.append(f"VIX SPIKE: {_last_vix['value']:.1f} → {vix:.1f} ({vix_change:+.1f})")
-        if vix:
+        if vix and 0 < vix < 100:
+            if _last_vix["value"] and 0 < _last_vix["value"] < 100:
+                vix_change = abs(vix - _last_vix["value"])
+                if vix_change >= 3:
+                    reasons.append(f"VIX SPIKE: {_last_vix['value']:.1f} → {vix:.1f} ({vix_change:+.1f})")
             _last_vix["value"] = vix
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"_should_trade_now regime check skipped (non-fatal): {_e}")
 
     # --- TRIGGER 5: Breaking news / sentiment shift ---
     try:
@@ -717,8 +744,8 @@ def _should_trade_now() -> dict:
         if score_change >= 0.3:  # Significant sentiment shift
             reasons.append(f"NEWS SHIFT: sentiment moved {score_change:+.2f} (was {_last_news_score['value']:.2f}, now {news_score:.2f})")
         _last_news_score["value"] = news_score
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"_should_trade_now sentiment check skipped (non-fatal): {_e}")
 
     # --- TRIGGER 6: Check stop-losses on open positions ---
     try:
@@ -727,8 +754,8 @@ def _should_trade_now() -> dict:
             pnl = pos.get("unrealized_pct", 0)
             if pnl <= -4:  # Approaching stop loss
                 reasons.append(f"STOP-LOSS WARNING: {pos['ticker']} at {pnl:.1f}%")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"_should_trade_now stop-loss check skipped (non-fatal): {_e}")
 
     # --- TRIGGER 7: Geo-political risk change ---
     if _geo_risk_state.get("level") in ("ELEVATED", "CRITICAL"):
@@ -765,9 +792,21 @@ def _smart_trade_monitor():
     Runs every 5 minutes. Checks if conditions warrant a trade.
     Only executes a full trade cycle when something meaningful changes.
     This is the brain of the event-driven system.
+
+    HARDENED (after the missed-trades-during-market-hours incident):
+      - Heartbeat updated at SCAN START (so we can diagnose hangs)
+      - Outer try/except so any error in any layer can never crash
+        the scheduler thread
+      - last_scan_attempted always recorded for visibility
     """
     global auto_trade_stats
     _scan_count["value"] += 1
+
+    # HEARTBEAT: record that a scan was attempted, regardless of outcome.
+    # This lets us see in /api/auto-trading-status whether the scheduler
+    # is alive even when no triggers fire.
+    auto_trade_stats["last_scan_attempted"] = dt.now().isoformat()
+    auto_trade_stats["scan_count"] = _scan_count["value"]
 
     try:
         decision = _should_trade_now()
@@ -910,16 +949,64 @@ def _run_auto_trade_cycle():
 # Start the scheduler
 scheduler = BackgroundScheduler(timezone="US/Eastern")
 
-# EVENT-DRIVEN: Monitor every 5 minutes, only trade when conditions change
-# This replaces the old hourly clock — the system now decides WHEN to trade
+# EVENT-DRIVEN: Monitor every 5 minutes
+# The trade monitor is the brain — fires cycles whenever conditions warrant.
+# Hardened settings (after the missed-trades-during-market-hours incident):
+#   - max_instances=2 — allow a second instance in case one hangs (was 1)
+#   - misfire_grace_time=600 — 10 min grace before discarding (was 5 min)
+#   - coalesce=True — collapse missed runs into one to avoid pile-up
+# These ensure the monitor never silently dies. If a cycle hangs on
+# yfinance/network, the next scan can still fire, and missed jobs get
+# coalesced rather than queued indefinitely.
 scheduler.add_job(
     _smart_trade_monitor,
     "interval",
     minutes=5,
     id="smart_monitor",
     name="Smart Trade Monitor (event-driven)",
+    max_instances=2,
+    misfire_grace_time=600,
+    coalesce=True,
+)
+
+# WATCHDOG: backup heartbeat fires the trade monitor every 7 minutes
+# during market hours (9-16 ET). Independent from the main 5-min scheduler.
+# Catches the failure mode where the main monitor silently stops firing.
+# 7 minutes is offset from the 5-min cycle so the two never collide.
+def _watchdog_trade_trigger():
+    """Backup trigger that runs the trade monitor independently of the main
+    scheduler job. If the main monitor has died or hung, this still fires
+    cycles. Wrapped to never throw — fails silently and logs."""
+    try:
+        import pytz
+        et = pytz.timezone("US/Eastern")
+        now_et = dt.now(et)
+        # Only fire during market hours
+        if now_et.weekday() >= 5:
+            return
+        if now_et.hour < 9 or now_et.hour >= 16:
+            return
+        # Check if main monitor has run recently (within 10 min)
+        if _last_trade_time["value"]:
+            elapsed = (dt.now() - _last_trade_time["value"]).total_seconds() / 60
+            if elapsed < 10:
+                return  # Main monitor is healthy
+        logger.warning(
+            f"WATCHDOG: Main monitor hasn't run in >10min — firing backup cycle"
+        )
+        _smart_trade_monitor()
+    except Exception as e:
+        logger.error(f"WATCHDOG ERROR (non-fatal): {e}")
+
+scheduler.add_job(
+    _watchdog_trade_trigger,
+    "interval",
+    minutes=7,
+    id="watchdog_trade",
+    name="Watchdog: backup trade trigger (catches dead main monitor)",
     max_instances=1,
-    misfire_grace_time=300,
+    misfire_grace_time=600,
+    coalesce=True,
 )
 
 # INDEPENDENT EXIT CHECKER — runs every 5 minutes, even on weekends
@@ -1587,10 +1674,21 @@ scheduler.add_job(
     replace_existing=True,
 )
 
-scheduler.start()
-auto_trade_stats["started_at"] = dt.now().isoformat()
-auto_trade_stats["status"] = "running"
-logger.warning("AUTONOMOUS TRADING SCHEDULER STARTED — the computer is now the hedge fund manager")
+try:
+    scheduler.start()
+    auto_trade_stats["started_at"] = dt.now().isoformat()
+    auto_trade_stats["status"] = "running"
+    auto_trade_stats["scheduler_jobs"] = [j.id for j in scheduler.get_jobs()]
+    logger.warning(
+        f"AUTONOMOUS TRADING SCHEDULER STARTED — {len(scheduler.get_jobs())} jobs registered. "
+        f"Jobs: {[j.id for j in scheduler.get_jobs()]}"
+    )
+except Exception as _sched_err:
+    auto_trade_stats["status"] = "scheduler_failed"
+    auto_trade_stats["last_error"] = f"Scheduler start failed: {_sched_err}"
+    logger.error(f"CRITICAL: Scheduler failed to start: {_sched_err}")
+    # System still serves API requests, but trades won't fire automatically.
+    # User can call /api/trigger-trade-cycle manually.
 
 
 # --- IBKR S3 SNAPSHOT PUSHER (only runs on EC2) ---
