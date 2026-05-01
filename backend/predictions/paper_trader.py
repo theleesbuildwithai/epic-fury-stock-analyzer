@@ -1179,6 +1179,97 @@ def get_portfolio_state() -> dict:
     return result
 
 
+def _smart_close_trade(trade: dict, equity_price: float):
+    """Smart wrapper around close_paper_trade that auto-detects options
+    and converts the equity stock price to the correct option premium.
+
+    THIS IS THE ROOT-CAUSE FIX for the cash-inflation incident: most close
+    sites in the codebase were calling close_paper_trade(trade_id, current_price)
+    where current_price is the EQUITY stock price. For an OPTIONS trade
+    (instrument_type='call'/'put'), close_paper_trade then used that equity
+    price as the "exit_premium" in the options pnl formula, which produced
+    massively wrong pnl (4000-6000% on the production incident trades).
+
+    Behavior:
+      - For EQUITY trades: passes equity_price through unchanged (no behavior change)
+      - For OPTIONS trades:
+          1. First try get_current_premium() from the options engine (real fetch)
+          2. If unavailable, estimate premium from intrinsic + time-decay
+          3. Last resort: close at entry premium (flat trade, no pnl)
+        Never passes the equity stock price as exit_premium for options.
+
+    Args:
+        trade: dict-like (sqlite3.Row or dict) — must have 'id', 'instrument_type'
+        equity_price: current STOCK price (used directly for equity trades,
+                      ignored for options where premium is fetched separately)
+    """
+    from predictions.models import close_paper_trade as _close_db
+    try:
+        instrument_type = trade.get("instrument_type") if hasattr(trade, "get") else trade["instrument_type"]
+        instrument_type = instrument_type or "equity"
+    except Exception:
+        instrument_type = "equity"
+
+    trade_id = trade["id"]
+
+    # EQUITY trades: equity_price is correct as-is
+    if instrument_type not in ("call", "put"):
+        _close_db(trade_id, equity_price)
+        return
+
+    # OPTIONS trades: equity_price is WRONG — need the option premium
+    ticker = trade.get("ticker") if hasattr(trade, "get") else trade["ticker"]
+    try:
+        strike = trade.get("strike_price", 0) if hasattr(trade, "get") else trade["strike_price"]
+    except Exception:
+        strike = 0
+    try:
+        expiry = trade.get("expiration_date", "") if hasattr(trade, "get") else trade["expiration_date"]
+    except Exception:
+        expiry = ""
+    try:
+        entry_premium = trade.get("premium_per_contract", 0) if hasattr(trade, "get") else trade["premium_per_contract"]
+        entry_premium = entry_premium or 0
+    except Exception:
+        entry_premium = 0
+
+    # 1) Try the real premium fetch from the options engine
+    premium = None
+    try:
+        from predictions.options_engine import get_current_premium
+        premium = get_current_premium(ticker, strike, expiry, instrument_type)
+    except Exception as e:
+        logger.debug(f"_smart_close: get_current_premium failed for {ticker}: {e}")
+
+    # 2) Fallback: estimate from intrinsic + time-decay using equity_price
+    if not premium or premium <= 0:
+        try:
+            if instrument_type == "call":
+                intrinsic = max(0, equity_price - strike) if strike else 0
+            else:
+                intrinsic = max(0, strike - equity_price) if strike else 0
+            dte = 0
+            if expiry:
+                try:
+                    exp = datetime.strptime(expiry, "%Y-%m-%d")
+                    dte = max(0, (exp - datetime.now()).days)
+                except Exception:
+                    dte = 0
+            if intrinsic > 0:
+                time_value = max(0.05, entry_premium * 0.1) if dte > 5 else 0.01
+                premium = intrinsic + time_value
+            elif dte > 5 and entry_premium > 0:
+                decay = max(0.15, dte / 60.0)
+                premium = max(0.05, entry_premium * decay)
+            else:
+                premium = max(0.03, intrinsic + 0.02)
+        except Exception as e:
+            logger.warning(f"_smart_close: premium estimation failed for {ticker}: {e}")
+            premium = entry_premium  # 3) Last resort: close at entry (flat)
+
+    _close_db(trade_id, premium)
+
+
 def _get_current_prices(symbols: list) -> dict:
     """Get current prices for a list of symbols (batch download).
 
@@ -1462,7 +1553,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
             if should_close:
                 try:
-                    close_paper_trade(trade["id"], current_price)
+                    _smart_close_trade(trade, current_price)  # auto-handles options
                     # Cash is updated atomically in close_paper_trade()
                     open_tickers.discard(ticker)
                     results["closed"].append({
@@ -1537,7 +1628,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
             if should_sell:
                 try:
-                    close_paper_trade(trade["id"], t_price)
+                    _smart_close_trade(trade, t_price)  # auto-handles options
                     sold_count += 1
                     results["closed"].append({
                         "ticker": t_ticker, "direction": t_dir,
@@ -3095,7 +3186,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
 
             if should_sell:
                 try:
-                    close_paper_trade(trade["id"], price)
+                    _smart_close_trade(trade, price)  # auto-handles options
                     closed.append({
                         "ticker": ticker, "direction": direction,
                         "entry_price": entry_price, "exit_price": round(price, 2),
@@ -3355,7 +3446,7 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
 
         if should_close:
             try:
-                close_paper_trade(trade["id"], current_price)
+                _smart_close_trade(trade, current_price)  # auto-handles options
                 # Cash updated atomically in close_paper_trade()
                 closed.append({
                     "ticker": ticker,
