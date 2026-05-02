@@ -1877,6 +1877,48 @@ scheduler.add_job(
 )
 
 
+# ============================================================
+#  T-BILL YIELD ON IDLE CASH — eliminates simulation cash drag
+# ============================================================
+# Real hedge funds park idle cash in T-bills, money-market funds, or
+# sweep accounts. So even when 40% of capital is uninvested it still
+# earns ~3-5% annualized. Without this, a paper portfolio under-counts
+# real-world performance whenever it holds meaningful cash.
+# Idempotent — safe to call multiple times per day, only credits once.
+
+def _tbill_interest_job():
+    """Daily T-bill interest accrual on idle cash."""
+    try:
+        from predictions.tbill_yield import apply_tbill_interest
+        result = apply_tbill_interest()
+        if result.get("credited"):
+            logger.warning(
+                f"T-BILL daily accrual: +${result.get('interest_credited'):.2f} "
+                f"({result.get('days_accrued')}d) cash now ${result.get('ending_cash'):.2f}"
+            )
+        else:
+            logger.debug(f"T-BILL: not credited — {result.get('reason', 'unknown')}")
+    except Exception as e:
+        logger.error(f"T-BILL accrual job error: {e}")
+
+
+# Cron at 7:05am AND 7:05pm ET — first run of the day credits, second
+# is a no-op (idempotent). Two runs gives redundancy in case one is
+# missed during a deploy or container restart.
+scheduler.add_job(
+    _tbill_interest_job,
+    "cron",
+    hour="7,19",
+    minute=5,
+    id="tbill_interest",
+    name="T-Bill daily interest accrual (7am + 7pm ET)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=3600,
+    replace_existing=True,
+)
+
+
 try:
     scheduler.start()
     auto_trade_stats["started_at"] = dt.now().isoformat()
@@ -3094,6 +3136,50 @@ def api_alt_data_status(request: Request):
     try:
         from analysis.alt_data import get_alt_data_status
         return {"ok": True, "status": get_alt_data_status(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
+#  T-BILL YIELD ON IDLE CASH — endpoints
+# ============================================================
+
+@app.get("/api/tbill-status")
+def api_tbill_status(request: Request):
+    """Current T-bill yield config + accrual stats."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.tbill_yield import get_tbill_status
+        return {"ok": True, "status": get_tbill_status(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/tbill-accrue-now")
+def api_tbill_accrue_now(request: Request):
+    """Manually trigger one T-bill accrual cycle (idempotent — only credits
+    if a day has passed since last accrual). Useful for testing and for
+    backfilling missed days after a downtime."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.tbill_yield import apply_tbill_interest
+        return {"ok": True, "result": apply_tbill_interest(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/tbill-set-yield")
+def api_tbill_set_yield(request: Request, annual_yield_pct: float):
+    """Update the annual T-bill yield (e.g., 3.5 for 3.5%). Validated
+    bounds: -5% to +20%. Persisted to trading_state."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.tbill_yield import set_annual_yield
+        # Accept percent (e.g., 3.5) and convert to decimal (0.035)
+        return {"ok": True, "result": set_annual_yield(annual_yield_pct / 100.0),
                 "generated_at": dt.now().isoformat()}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}
