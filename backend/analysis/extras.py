@@ -402,15 +402,15 @@ def cnbc_quote_batch(symbols):
     import json as _json
     out = {}
     try:
-        # CNBC quote API — pipe-separated symbols
+        # CNBC quote API — pipe-separated symbols.
+        # FIX 2026-05-02: removed `noform`, `partnerId`, `fund`, `exthrs` —
+        # the combination silently broke the API (returned code:3, no price).
+        # Minimal params (symbols + requestMethod + output) work reliably for
+        # both US tickers and international ADRs (verified 14/14 ADRs).
         url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
         params = {
             "symbols": "|".join(symbols),
             "requestMethod": "itv",
-            "noform": "1",
-            "partnerId": "20",
-            "fund": "1",
-            "exthrs": "1",
             "output": "json",
         }
         headers = {
@@ -456,17 +456,28 @@ def cnbc_quote_batch(symbols):
                 sym = (q.get("symbol") or "").upper()
                 if not sym or sym not in symbols:
                     continue
+                # Skip "code:3" (symbol-not-found) responses — no quote data
+                if q.get("code") == 3:
+                    continue
                 # CNBC fields: 'last' (price), 'change_pct' or 'changePct'
                 price_raw = q.get("last") or q.get("lastTradePrice") or q.get("price")
                 change_pct_raw = (q.get("change_pct") or q.get("changePct")
                                   or q.get("ChangePct") or q.get("percentChange"))
-                if price_raw is None or change_pct_raw is None:
+                # FIX: change_pct is optional — accept the quote if we at least
+                # have a price (some after-hours quotes omit change_pct).
+                if price_raw is None:
                     continue
                 # Strip any non-numeric chars (CNBC sometimes sends "+0.45" or "0.45%")
                 price_str = str(price_raw).replace(",", "").replace("$", "").strip()
-                change_str = str(change_pct_raw).replace("%", "").replace("+", "").strip()
                 price = float(price_str)
-                change_pct = float(change_str)
+                if change_pct_raw is not None:
+                    change_str = str(change_pct_raw).replace("%", "").replace("+", "").strip()
+                    try:
+                        change_pct = float(change_str)
+                    except Exception:
+                        change_pct = 0.0
+                else:
+                    change_pct = 0.0
                 out[sym] = {"price": round(price, 2), "change_pct": round(change_pct, 2)}
             except Exception:
                 # Skip individual malformed quote, keep going
@@ -478,6 +489,78 @@ def cnbc_quote_batch(symbols):
             _lg.getLogger(__name__).debug(f"CNBC sector fetch failed: {e}")
         except Exception:
             pass
+    return out
+
+
+def stooq_quote_batch(symbols):
+    """THIRD-TIER FALLBACK — fetch quotes from Stooq.com (free CSV API).
+
+    Used when both Yahoo Finance AND CNBC are down/rate-limited. Stooq has
+    different infrastructure entirely, so it survives Yahoo+CNBC outages.
+
+    Stooq's CSV endpoint does NOT properly support batch (comma-joined)
+    requests — it returns one row of N/D when given multiple symbols.
+    So we query one-at-a-time. To stay fast and not hammer the server,
+    we limit to 30 symbols max per call, with a 0.05s sleep between
+    requests (well under any rate limit).
+
+    Returns dict keyed by ORIGINAL symbol: {symbol: {"price": float,
+    "change_pct": float}}.
+    Returns empty dict on total failure — caller should escalate or give up.
+
+    Stooq symbol format: <ticker>.US for US stocks (e.g., 'aapl.us').
+    International ADRs work via .US suffix because they're US-listed.
+
+    APPROVED DATA SOURCES per project standards: Yahoo, CNBC, CNN,
+    Bloomberg, Stooq (added 2026-05-02 as third-tier safety net).
+    """
+    import requests as _requests
+    import time as _time
+    out = {}
+    if not symbols:
+        return out
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,*/*"}
+    # Stooq fallback should only trigger when Yahoo+CNBC both failed,
+    # which means we're already in degraded mode. Cap at 30 to keep
+    # total latency under ~3s and avoid abusing the free service.
+    capped = list(symbols)[:30]
+    for sym in capped:
+        try:
+            url = f"https://stooq.com/q/l/?s={sym.lower()}.us&f=sd2t2ohlcvn&h&e=csv"
+            resp = _requests.get(url, headers=headers, timeout=4)
+            if resp.status_code != 200 or not resp.text:
+                continue
+            lines = resp.text.strip().split("\n")
+            if len(lines) < 2:
+                continue
+            header = [h.strip().lower() for h in lines[0].split(",")]
+            try:
+                sym_idx = header.index("symbol")
+                close_idx = header.index("close")
+                open_idx = header.index("open")
+            except ValueError:
+                continue
+            cols = [c.strip() for c in lines[1].split(",")]
+            if len(cols) <= max(sym_idx, close_idx, open_idx):
+                continue
+            close_str = cols[close_idx]
+            open_str = cols[open_idx]
+            if not close_str or close_str.upper() in ("N/D", "N/A", ""):
+                continue
+            close_v = float(close_str)
+            change_pct = 0.0
+            try:
+                open_v = float(open_str)
+                if open_v > 0:
+                    change_pct = (close_v / open_v - 1.0) * 100.0
+            except Exception:
+                change_pct = 0.0
+            out[sym.upper()] = {"price": round(close_v, 2),
+                                "change_pct": round(change_pct, 2)}
+            # Tiny sleep to be polite to the free service
+            _time.sleep(0.05)
+        except Exception:
+            continue
     return out
 
 

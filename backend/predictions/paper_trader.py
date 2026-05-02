@@ -1786,20 +1786,23 @@ def _smart_close_trade(trade: dict, equity_price: float):
 def _get_current_prices(symbols: list) -> dict:
     """Get current prices for a list of symbols (batch download).
 
-    Source priority:
-      1. Yahoo Finance batch (primary — gives close prices)
-      2. CNBC quote API (fallback — fills any symbols Yahoo dropped)
+    THREE-TIER SAFETY NET — separate infrastructure on every tier so a
+    single-vendor outage cannot blind the portfolio.
+
+      TIER 1: Yahoo Finance batch (primary — gives close prices)
+      TIER 2: CNBC quote API (fills any symbols Yahoo dropped)
+      TIER 3: Stooq CSV API (catches anything CNBC also missed)
 
     This is the SINGLE chokepoint for ALL portfolio price lookups
     (called from portfolio state, exit checks, stop-loss checks, win-lock).
-    A Yahoo outage here would break stop-losses and show wrong P&L,
-    so the CNBC fallback is critical safety infrastructure.
+    Loss of pricing here would break stop-losses and show wrong P&L —
+    the multi-tier fallback is critical safety infrastructure.
     """
     if not symbols:
         return {}
     prices = {}
 
-    # PRIMARY: Yahoo Finance
+    # TIER 1: Yahoo Finance
     _throttle()
     try:
         df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
@@ -1820,7 +1823,7 @@ def _get_current_prices(symbols: list) -> dict:
     except Exception as e:
         logger.warning(f"Yahoo price batch failed for {len(symbols)} symbols: {e}")
 
-    # FALLBACK: CNBC for any symbol Yahoo dropped.
+    # TIER 2: CNBC for any symbol Yahoo dropped.
     # cnbc_get_prices() is hardened: returns {} on any error, filters bad data,
     # and never raises — so we cannot accidentally crash portfolio valuation.
     try:
@@ -1832,7 +1835,7 @@ def _get_current_prices(symbols: list) -> dict:
                 if cnbc_prices:
                     prices.update(cnbc_prices)
                     logger.info(
-                        f"CNBC PRICE FALLBACK: filled {len(cnbc_prices)}/{len(missing)} "
+                        f"CNBC PRICE FALLBACK (T2): filled {len(cnbc_prices)}/{len(missing)} "
                         f"symbols Yahoo missed: {list(cnbc_prices.keys())}"
                     )
             except Exception as e:
@@ -1840,6 +1843,28 @@ def _get_current_prices(symbols: list) -> dict:
                 logger.debug(f"CNBC price fallback failed (non-fatal): {e}")
     except Exception:
         # Last-resort guard: never let fallback bookkeeping break primary prices
+        pass
+
+    # TIER 3: Stooq for anything CNBC ALSO missed (full-vendor outage).
+    # Stooq has separate infrastructure entirely — survives Yahoo+CNBC outage.
+    try:
+        still_missing = [s for s in symbols if s not in prices]
+        if still_missing:
+            try:
+                from analysis.extras import stooq_quote_batch
+                stooq_prices = stooq_quote_batch(still_missing)
+                if stooq_prices:
+                    # stooq returns {sym: {price, change_pct}} — extract price only
+                    for sym, q in stooq_prices.items():
+                        if isinstance(q, dict) and q.get("price") is not None:
+                            prices[sym] = float(q["price"])
+                    logger.warning(
+                        f"STOOQ PRICE FALLBACK (T3): filled {len(stooq_prices)}/{len(still_missing)} "
+                        f"symbols both Yahoo+CNBC missed: {list(stooq_prices.keys())}"
+                    )
+            except Exception as e:
+                logger.debug(f"Stooq price fallback failed (non-fatal): {e}")
+    except Exception:
         pass
 
     return prices

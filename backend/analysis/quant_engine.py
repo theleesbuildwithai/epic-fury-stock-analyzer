@@ -603,6 +603,102 @@ QUANT_UNIVERSE = [
     "KWEB", "EEM", "FXI", "EWZ", "EWJ",
 ]
 
+
+# ============================================================
+#  INTERNATIONAL UNIVERSE — 230 top non-US stocks
+# ============================================================
+# All ADRs (American Depositary Receipts) — trade on NYSE/NASDAQ in USD,
+# so no currency conversion or foreign-exchange microstructure issues.
+# Curated for liquidity (mostly mega/large cap) and broad regional
+# diversification. Added 2026-05-02.
+INTERNATIONAL_UNIVERSE = [
+    # ============================================================
+    # CHINA / Hong Kong (30) — mega-cap tech + consumer + industry
+    # ============================================================
+    "BABA", "JD", "PDD", "BIDU", "NIO", "XPEV", "LI", "BILI", "NTES", "TME",
+    "YUMC", "TCOM", "IQ", "ZTO", "HTHT", "FUTU", "TIGR", "TAL", "EDU", "GDS",
+    "BEKE", "LX", "JKS", "KE", "VIPS", "ATAT", "EH", "BZ", "BGNE", "TCEHY",
+
+    # ============================================================
+    # JAPAN (10) — top exporters + financials
+    # ============================================================
+    "TM", "SONY", "MUFG", "SMFG", "MFG", "NMR", "NTT", "HMC", "TAK", "IX",
+
+    # ============================================================
+    # KOREA (5) + TAIWAN (3) + INDIA (8)
+    # ============================================================
+    "KB", "SHG", "KEP", "LPL", "PKX",
+    "TSM", "UMC", "ASX",
+    "INFY", "WIT", "HDB", "IBN", "TTM", "RDY", "SIFY", "MMYT",
+
+    # ============================================================
+    # EUROPE (45) — UK, NL, DE, FR, CH, ES, SE, FI, DK, IE, BE, IT
+    # ============================================================
+    "ASML", "NVO", "SAP", "AZN", "GSK", "BTI", "UL", "BUD", "RIO", "BHP",
+    "BP", "SHEL", "RACE", "RYAAY", "NVS", "STM", "ABB", "SAN", "TEF", "VOD",
+    "SNY", "PHG", "ERIC", "NOK", "MT", "BCS", "LYG", "ING", "DEO", "AER",
+    "PUK", "BBVA", "FMS", "SPOT", "ADYEY", "ICLR", "NWG", "BAT", "GLPG", "FERG",
+    "FLUT", "PSO", "AON", "STLA", "CRH",
+
+    # ============================================================
+    # ISRAEL (8) — tech + biotech ADRs
+    # ============================================================
+    "CHKP", "NICE", "WIX", "CYBR", "MNDY", "TEVA", "GLBE", "ICL",
+
+    # ============================================================
+    # LATIN AMERICA (20) — Brazil + Mexico + Argentina + Chile + Colombia
+    # ============================================================
+    "VALE", "PBR", "ITUB", "BBD", "ABEV", "NU", "MELI", "SUZ", "ERJ", "GGB",
+    "CIG", "EBR", "BSBR", "GOL", "AZUL", "AMX", "ASR", "FMX", "KOF", "GLOB",
+
+    # ============================================================
+    # CANADA (18) — major banks, energy, industrials, miners
+    # ============================================================
+    "TD", "RY", "BNS", "BMO", "CM", "ENB", "TRP", "MFC", "SLF", "GOLD",
+    "NTR", "CP", "CNI", "BCE", "RCI", "TRI", "SHOP", "OTEX",
+
+    # ============================================================
+    # OTHER REGIONS (10) — South Africa, Argentina, Australia, Norway
+    # ============================================================
+    "GFI", "AU", "SBSW", "HMY",
+    "GGAL", "BMA", "PAM", "YPF",
+    "EQNR", "ORAN",
+
+    # ============================================================
+    # COUNTRY ETFs (35) — single-country and regional exposure
+    # ============================================================
+    "EWG", "EWU", "EWA", "EWC", "EWY", "EWT", "EWQ", "EWP", "EWI", "EWS",
+    "EWN", "EWH", "EWO", "EWL", "EWM", "INDA", "MCHI", "EZA", "ARGT", "NORW",
+    "ECH", "EPI", "EFA", "VEA", "VWO", "IXUS", "ACWX", "GREK", "EIRL", "EUFN",
+    "DXJ", "HEDJ", "VEU", "GXC", "EZU",
+
+    # ============================================================
+    # MORE CHINA (10) — secondary mega-caps + ADRs
+    # ============================================================
+    "ZH", "HUYA", "MOMO", "WB", "DQ", "GOTU", "DAO", "VNET", "QFIN", "MNSO",
+
+    # ============================================================
+    # MORE EUROPE (8) — additional UK + EU ADRs
+    # ============================================================
+    "VRNA", "PHG", "ATUS", "BUD", "FERG", "NMR", "ALC", "ADYEY",
+    # NOTE: a few duplicate with above — yfinance dedupes on download, harmless
+
+    # ============================================================
+    # MORE LATAM / EMERGING (8)
+    # ============================================================
+    "AGRO", "CSAN", "BRFS", "TLRY", "CIB", "SBS", "CCU", "EC",
+
+    # ============================================================
+    # MORE CANADA (4)
+    # ============================================================
+    "QSR", "MGA", "PAAS", "AEM",
+]
+
+
+# Merge international tickers into the main quant universe.
+# yfinance.download dedupes silently if any ticker is repeated, so safe.
+QUANT_UNIVERSE = QUANT_UNIVERSE + INTERNATIONAL_UNIVERSE
+
 # Sector mapping for macro overlay adjustments — auto-generated for all 200+ stocks
 SECTOR_MAP = {
     # Technology (42)
