@@ -658,11 +658,11 @@ INTERNATIONAL_UNIVERSE = [
     "NTR", "CP", "CNI", "BCE", "RCI", "TRI", "SHOP", "OTEX",
 
     # ============================================================
-    # OTHER REGIONS (10) — South Africa, Argentina, Australia, Norway
+    # OTHER REGIONS (9) — South Africa, Argentina, Norway
     # ============================================================
     "GFI", "AU", "SBSW", "HMY",
     "GGAL", "BMA", "PAM", "YPF",
-    "EQNR", "ORAN",
+    "EQNR",
 
     # ============================================================
     # COUNTRY ETFs (35) — single-country and regional exposure
@@ -678,15 +678,14 @@ INTERNATIONAL_UNIVERSE = [
     "ZH", "HUYA", "MOMO", "WB", "DQ", "GOTU", "DAO", "VNET", "QFIN", "MNSO",
 
     # ============================================================
-    # MORE EUROPE (8) — additional UK + EU ADRs
+    # MORE EUROPE / CROSS (4) — additional ADRs (deduped + removed delisted)
     # ============================================================
-    "VRNA", "PHG", "ATUS", "BUD", "FERG", "NMR", "ALC", "ADYEY",
-    # NOTE: a few duplicate with above — yfinance dedupes on download, harmless
+    "ALC", "ROIV", "RDDT", "GLBE",
 
     # ============================================================
-    # MORE LATAM / EMERGING (8)
+    # MORE LATAM / EMERGING (7) — removed delisted BRFS
     # ============================================================
-    "AGRO", "CSAN", "BRFS", "TLRY", "CIB", "SBS", "CCU", "EC",
+    "AGRO", "CSAN", "TLRY", "CIB", "SBS", "CCU", "EC",
 
     # ============================================================
     # MORE CANADA (4)
@@ -3371,8 +3370,13 @@ def generate_quant_picks() -> dict:
             macro["macro_v2"] = {"ok": False, "reason": str(_macro_v2_err)[:120]}
 
         # Step 3: Batch download price data
-        # Split universe into 4 batches to avoid Yahoo Finance limits (200+ stocks)
-        batch_size = len(QUANT_UNIVERSE) // 4 + 1
+        # 10 batches of ~72 tickers each — well below Yahoo Finance's silent
+        # ~150 cap. Smaller batches are slower per-cycle (~30s vs ~24s) but
+        # much more reliable than oversized ones (which silently drop tickers
+        # or return partial data). With ~720 ticker universe (US + 222
+        # international ADRs) this gives plenty of headroom.
+        N_BATCHES = 10
+        batch_size = (len(QUANT_UNIVERSE) + N_BATCHES - 1) // N_BATCHES
         batches = [QUANT_UNIVERSE[i:i+batch_size] for i in range(0, len(QUANT_UNIVERSE), batch_size)]
 
         price_data = {}
