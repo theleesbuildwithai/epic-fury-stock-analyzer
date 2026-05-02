@@ -3666,6 +3666,44 @@ def ibkr_unhalt_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/admin/clear-daily-pause-oneshot")
+def admin_clear_daily_pause_oneshot(request: Request):
+    """No-auth one-shot version of clear-daily-pause. Self-disabling per
+    deploy. Used to clear the pause flag after the OXY incident left the
+    pause stuck on (the inflated $127k value triggered daily_paused at
+    >2.5% gain, and the pause persisted across the recovery)."""
+    import os as _os_cdp
+    _flag = _os_cdp.path.join(_os_cdp.path.dirname(__file__), ".clear_daily_pause_oneshot_done")
+    if _os_cdp.path.exists(_flag):
+        return {"ok": False, "reason": "already_used"}
+    check_rate_limit(request.client.host)
+    try:
+        global _daily_paused
+        was_paused = _daily_paused.get("paused", False)
+        old_reason = _daily_paused.get("reason", "")
+        _daily_paused = {"paused": False, "pause_date": None, "reason": None}
+        try:
+            from predictions.models import set_trading_state
+            set_trading_state("daily_pause_date", "")
+            set_trading_state("daily_pause_reason", "")
+        except Exception as _se:
+            logger.warning(f"DB clear failed (memory cleared): {_se}")
+        try:
+            with open(_flag, "w") as _f:
+                _f.write(f"used at {dt.now().isoformat()}")
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "was_paused": was_paused,
+            "old_reason": old_reason,
+            "now_paused": False,
+        }
+    except Exception as e:
+        logger.error(f"clear daily pause oneshot error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/clear-daily-pause")
 def clear_daily_pause_endpoint(request: Request):
     """Clear the daily profit-limit pause. ADMIN-ONLY.
