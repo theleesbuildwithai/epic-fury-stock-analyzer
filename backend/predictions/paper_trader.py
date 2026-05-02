@@ -570,6 +570,28 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         else:
             adjustments.append("drawdown=unavailable +0.00")
 
+        # ----- Factor 5: Cross-asset macro regime modifier -----
+        # The macro engine returns an exposure_modifier in [0.5, 1.2] based
+        # on yield curve, credit stress, VIX term structure, dollar moves,
+        # and global equity flows. We apply it MULTIPLICATIVELY so it can
+        # only amplify or dampen — the absolute clamp below still applies.
+        # SAFE: any failure leaves target unchanged.
+        try:
+            from analysis.cross_asset_macro import get_macro_signals as _gms
+            macro = _gms()
+            mod = macro.get("exposure_modifier")
+            regime = macro.get("macro_regime", "?")
+            if mod is not None and 0.4 < float(mod) < 1.5:
+                old = target
+                target = float(target) * float(mod)
+                adjustments.append(
+                    f"macro={regime} mod={float(mod):.2f} ({old:.2f}->{target:.2f})"
+                )
+            else:
+                adjustments.append("macro=neutral mod=1.00")
+        except Exception as _macro_err:
+            adjustments.append(f"macro=unavailable +0.00")
+
         # ----- Clamp to safety bounds -----
         target = max(DYNAMIC_EXPOSURE_MIN, min(DYNAMIC_EXPOSURE_MAX, target))
         target = round(target, 3)

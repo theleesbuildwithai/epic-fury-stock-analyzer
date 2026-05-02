@@ -1772,6 +1772,95 @@ scheduler.add_job(
     replace_existing=True,
 )
 
+
+# ============================================================
+#  ADVANCED SIGNAL ENGINES — scheduled refresh jobs
+# ============================================================
+# These keep the in-memory caches warm so /api/* endpoints respond fast and
+# the picker can read recent macro/alt-data without blocking. Every job is
+# fully isolated in try/except so a single failure cannot affect anything
+# else (trading, learning, snapshots, etc.).
+
+def _pairs_engine_refresh():
+    """Refresh the pairs scanner cache (runs every 30 min)."""
+    try:
+        from analysis.pairs_engine import scan_pairs
+        signals = scan_pairs()
+        n = len(signals or [])
+        logger.warning(f"PAIRS ENGINE refresh — {n} actionable signals")
+    except Exception as e:
+        logger.error(f"Pairs engine refresh failed: {e}")
+
+
+def _macro_signals_refresh():
+    """Refresh the cross-asset macro cache (runs every 10 min)."""
+    try:
+        from analysis.cross_asset_macro import get_macro_signals
+        data = get_macro_signals()
+        regime = data.get("macro_regime") if isinstance(data, dict) else "?"
+        modifier = data.get("exposure_modifier") if isinstance(data, dict) else "?"
+        logger.warning(f"MACRO SIGNALS refresh — regime={regime} modifier={modifier}")
+    except Exception as e:
+        logger.error(f"Macro signals refresh failed: {e}")
+
+
+def _alt_data_refresh():
+    """Refresh alt-data for a small rotating set of high-interest tickers
+    (every 30 min). Keeping this small avoids hammering EDGAR/Reddit/etc.
+    """
+    try:
+        from analysis.alt_data import compute_alt_data_score
+        # Top tickers by mention frequency. These are the ones most likely
+        # to actually appear in picks — caching these speeds the picker.
+        WATCH = ["AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN",
+                 "TSLA", "JPM", "XOM", "SPY", "QQQ"]
+        for tkr in WATCH:
+            try:
+                compute_alt_data_score(tkr, all_tickers=WATCH)
+            except Exception as inner:
+                logger.debug(f"alt_data refresh inner {tkr}: {inner}")
+        logger.warning(f"ALT DATA refresh complete for {len(WATCH)} tickers")
+    except Exception as e:
+        logger.error(f"Alt data refresh failed: {e}")
+
+
+scheduler.add_job(
+    _pairs_engine_refresh,
+    "interval",
+    minutes=30,
+    id="pairs_engine_refresh",
+    name="Pairs engine refresh (30min)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=900,
+    replace_existing=True,
+)
+
+scheduler.add_job(
+    _macro_signals_refresh,
+    "interval",
+    minutes=10,
+    id="macro_signals_refresh",
+    name="Cross-asset macro refresh (10min)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=600,
+    replace_existing=True,
+)
+
+scheduler.add_job(
+    _alt_data_refresh,
+    "interval",
+    minutes=30,
+    id="alt_data_refresh",
+    name="Alt-data refresh (30min)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=900,
+    replace_existing=True,
+)
+
+
 try:
     scheduler.start()
     auto_trade_stats["started_at"] = dt.now().isoformat()
@@ -2908,6 +2997,90 @@ def system_thinking(request: Request):
         result["flags"] = {"error": str(_e)}
 
     return result
+
+
+# ============================================================
+#  ADVANCED SIGNAL ENGINES — pairs / macro / alt-data
+# ============================================================
+# READ-ONLY endpoints. Each one is wrapped so a failure in the underlying
+# engine never crashes the API. All three engines have their own caches
+# and last-known-good fallbacks, so these endpoints are cheap to call.
+
+@app.get("/api/pairs-engine")
+def api_pairs_engine(request: Request):
+    """Statistical-arbitrage pairs scanner. Returns the current actionable
+    pair signals plus engine status. Always returns a dict — never raises.
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from analysis.pairs_engine import scan_pairs, get_pairs_engine_status
+        signals = scan_pairs()
+        status = get_pairs_engine_status()
+        return {
+            "ok": True,
+            "engine": status.get("engine"),
+            "have_statsmodels": status.get("have_statsmodels"),
+            "universe_size": status.get("universe_size"),
+            "active_signals": len(signals or []),
+            "signals": signals or [],
+            "thresholds": status.get("thresholds"),
+            "cache_age_seconds": status.get("cache_age_seconds"),
+            "generated_at": dt.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"/api/pairs-engine failed: {e}")
+        return {"ok": False, "reason": str(e)[:200], "signals": []}
+
+
+@app.get("/api/macro-signals")
+def api_macro_signals(request: Request):
+    """Cross-asset macro engine. Returns regime, exposure modifier, sector
+    tilts, yield curve, credit stress, VIX term structure, dollar, etc.
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from analysis.cross_asset_macro import get_macro_signals, get_macro_status
+        data = get_macro_signals()
+        status = get_macro_status()
+        return {"ok": True, "data": data, "status": status,
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        logger.error(f"/api/macro-signals failed: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/alt-data/{ticker}")
+def api_alt_data(ticker: str, request: Request):
+    """Alternative-data composite for a single ticker.
+    Pulls from EDGAR / Reddit / Google Trends / Wikipedia / StockTwits.
+    """
+    check_rate_limit(request.client.host)
+    try:
+        clean_ticker = validate_ticker(ticker)
+        from analysis.alt_data import compute_alt_data_score, get_alt_data_status
+        data = compute_alt_data_score(clean_ticker)
+        status = get_alt_data_status()
+        return {"ok": True, "ticker": clean_ticker, "data": data,
+                "status": status, "generated_at": dt.now().isoformat()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/api/alt-data/{ticker} failed: {e}")
+        return {"ok": False, "reason": str(e)[:200], "ticker": ticker}
+
+
+@app.get("/api/alt-data-status")
+def api_alt_data_status(request: Request):
+    """Lightweight alt-data engine status (cache freshness per source).
+    Cheap to call — no external requests, just inspects in-memory caches.
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from analysis.alt_data import get_alt_data_status
+        return {"ok": True, "status": get_alt_data_status(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
 
 
 @app.post("/api/admin/force-trade-now-v2")

@@ -3250,6 +3250,30 @@ def generate_quant_picks() -> dict:
             else:
                 macro["sector_adjustments"][sector] = adj
 
+        # Step 2D: Cross-Asset Macro Engine v2 — yield curve, credit stress,
+        # VIX term structure, dollar, commodities, global equities. Outputs
+        # macro_regime, exposure_modifier, and sector_tilts. SAFE: never
+        # raises, returns neutral default on failure.
+        try:
+            from analysis.cross_asset_macro import get_macro_signals as _get_macro_v2
+            macro_v2 = _get_macro_v2()
+            macro["macro_v2"] = {
+                "regime": macro_v2.get("macro_regime"),
+                "exposure_modifier": macro_v2.get("exposure_modifier"),
+                "regime_score": macro_v2.get("regime_score"),
+                "ok": macro_v2.get("ok", False),
+            }
+            for sector, tilt in (macro_v2.get("sector_tilts") or {}).items():
+                if sector in macro.get("sector_adjustments", {}):
+                    macro["sector_adjustments"][sector] = round(
+                        macro["sector_adjustments"][sector] + float(tilt), 1
+                    )
+                else:
+                    macro["sector_adjustments"][sector] = round(float(tilt), 1)
+        except Exception as _macro_v2_err:
+            logger.debug(f"macro_v2 integration skipped: {_macro_v2_err}")
+            macro["macro_v2"] = {"ok": False, "reason": str(_macro_v2_err)[:120]}
+
         # Step 3: Batch download price data
         # Split universe into 4 batches to avoid Yahoo Finance limits (200+ stocks)
         batch_size = len(QUANT_UNIVERSE) // 4 + 1
