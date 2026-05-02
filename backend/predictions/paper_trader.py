@@ -304,10 +304,10 @@ MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade 
 # can never hit 100% (always keeps a cash buffer) and never collapses
 # below the minimum trading level.
 
-DYNAMIC_EXPOSURE_MIN = 0.50  # Hard floor — always trade at least 50%
-DYNAMIC_EXPOSURE_MAX = 0.95  # Hard ceiling — always keep 5% cash buffer
-DYNAMIC_EXPOSURE_BASE = 0.85  # Starting point before adjustments
-DYNAMIC_EXPOSURE_SAFE_DEFAULT = 0.85  # Used if calculation fails
+DYNAMIC_EXPOSURE_MIN = 0.45  # Hard floor — always trade at least 45%
+DYNAMIC_EXPOSURE_MAX = 0.70  # Hard ceiling — keep at least 30% cash buffer
+DYNAMIC_EXPOSURE_BASE = 0.60  # Starting point — targets ~40% cash after adjustments
+DYNAMIC_EXPOSURE_SAFE_DEFAULT = 0.60  # Used if calculation fails
 
 
 # ============================================================
@@ -2121,9 +2121,12 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     except Exception as _ate:
         logger.warning(f"Auto-tighten wrapper error (no stops changed): {_ate}")
 
-    # Compare to yesterday's snapshot to get TODAY's gain
+    # Compare to yesterday's snapshot to get TODAY's gain.
+    # ROOT-CAUSE GUARD: with 0 open positions any "gain" relative to a prior
+    # snapshot is mathematically synthetic (recovery script, manual cash
+    # adjustment, snapshot drift, etc.). Don't let it trigger WIN-LOCK.
     daily_gain = 0
-    if snapshots:
+    if snapshots and current_positions > 0:
         yesterday_val = snapshots[-1].get("total_value", INITIAL_CAPITAL)
         daily_gain = ((total_current_value / yesterday_val) - 1) * 100
 
