@@ -3170,28 +3170,35 @@ def admin_recover_and_set_target(request: Request, target_total: float = 122850.
         )
         from predictions.paper_trader import get_portfolio_state, _get_current_prices
 
-        # 1) Mark corrupted closed trades (broader threshold than v2)
+        # 1) Mark corrupted closed trades — commit and close BEFORE opening
+        # any other connections. The previous version held this conn open
+        # while calling get_open_trades() / get_cash() / set_cash() which
+        # each opens its own connection — guaranteed self-deadlock.
         conn = get_db()
-        corrupted = conn.execute(
-            """SELECT id, ticker, pnl_dollars, pnl_pct
-               FROM paper_trades
-               WHERE status='closed' AND ABS(pnl_pct) > 100"""
-        ).fetchall()
-        marked_count = 0
-        marked_pnl = 0.0
-        for t in corrupted:
-            try:
-                marked_pnl += float(t["pnl_dollars"] or 0)
-                conn.execute(
-                    """UPDATE paper_trades SET pnl_dollars=0, pnl_pct=0,
-                       status='closed_corrupted' WHERE id=?""",
-                    (t["id"],)
-                )
-                marked_count += 1
-            except Exception:
-                continue
+        try:
+            corrupted = conn.execute(
+                """SELECT id, ticker, pnl_dollars, pnl_pct
+                   FROM paper_trades
+                   WHERE status='closed' AND ABS(pnl_pct) > 100"""
+            ).fetchall()
+            marked_count = 0
+            marked_pnl = 0.0
+            for t in corrupted:
+                try:
+                    marked_pnl += float(t["pnl_dollars"] or 0)
+                    conn.execute(
+                        """UPDATE paper_trades SET pnl_dollars=0, pnl_pct=0,
+                           status='closed_corrupted' WHERE id=?""",
+                        (t["id"],)
+                    )
+                    marked_count += 1
+                except Exception:
+                    continue
+            conn.commit()
+        finally:
+            conn.close()
 
-        # 2) Compute current positions value, then set cash to make total = target_total
+        # 2) Compute current positions value (separate read connections)
         open_trades = get_open_trades() or []
         symbols = list({t["ticker"] for t in open_trades})
         try:
@@ -3206,7 +3213,6 @@ def admin_recover_and_set_target(request: Request, target_total: float = 122850.
                 shares = t.get("shares") or 0
                 inst = t.get("instrument_type") or "equity"
                 if inst in ("call", "put"):
-                    # Use entry premium as proxy for current value (conservative)
                     prem = t.get("premium_per_contract") or t.get("entry_price") or 0
                     contracts = t.get("contracts") or shares
                     positions_value += (prem or 0) * (contracts or 0) * 100
@@ -3215,6 +3221,7 @@ def admin_recover_and_set_target(request: Request, target_total: float = 122850.
             except Exception:
                 continue
 
+        # 3) Set cash to target (each get/set opens its own connection)
         new_cash = round(target_total - positions_value, 2)
         cur_cash = get_cash()
         cash_action = "no_change"
@@ -3224,18 +3231,20 @@ def admin_recover_and_set_target(request: Request, target_total: float = 122850.
         else:
             cash_action = f"refused_safety (would have set {new_cash:.2f})"
 
-        # 3) Delete recent snapshots
+        # 4) Delete recent snapshots — fresh connection
         snap_action = "no_change"
         try:
-            for d_offset in range(7):
-                d = (dt.now() - timedelta(days=d_offset)).strftime("%Y-%m-%d")
-                conn.execute("DELETE FROM portfolio_snapshots WHERE snapshot_date=?", (d,))
+            conn2 = get_db()
+            try:
+                for d_offset in range(7):
+                    d = (dt.now() - timedelta(days=d_offset)).strftime("%Y-%m-%d")
+                    conn2.execute("DELETE FROM portfolio_snapshots WHERE snapshot_date=?", (d,))
+                conn2.commit()
+            finally:
+                conn2.close()
             snap_action = "deleted_last_7_days"
         except Exception as se:
             snap_action = f"delete_failed: {se}"
-
-        conn.commit()
-        conn.close()
 
         try:
             with open(_flag, "w") as f:

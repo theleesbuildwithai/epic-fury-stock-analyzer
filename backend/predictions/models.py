@@ -15,19 +15,17 @@ DB_PATH = os.environ.get("DB_PATH", "predictions.db")
 def get_db():
     """Get a database connection.
 
-    HARDENED with:
-      - timeout=30: connection-level wait for lock to clear (was default 5s)
-      - PRAGMA busy_timeout=30000: SQLite-level wait (30 seconds)
-    Both layers needed: timeout is for sqlite3.connect itself, busy_timeout
-    is for queries on the connection. Without these, concurrent writes from
-    the trade scheduler can persistently block admin endpoints with
-    "database is locked" errors (we hit this trying to call the recovery
-    endpoint while picks generation was running a long write transaction).
+    HARDENED v2 (after persistent lock errors with 30s timeout):
+      - timeout=120: connection-level wait (2 minutes)
+      - PRAGMA busy_timeout=120000: SQLite-level wait (2 minutes)
+      - PRAGMA synchronous=NORMAL: with WAL, this is durable enough and
+        much less locky than FULL/EXTRA
     """
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=120)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA busy_timeout=120000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
