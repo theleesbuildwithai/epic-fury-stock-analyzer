@@ -330,7 +330,9 @@ try:
     if snapshots and abs(current_cash - 109000.0) < 1.0:
         # paper_cash was just initialized — sync to latest snapshot
         snap_cash = snapshots[-1]["cash"]
-        set_cash(snap_cash)
+        set_cash(snap_cash, caller="startup_snapshot_sync",
+                 reason="restore from latest portfolio_snapshot",
+                 bypass_sentinel=True)
         logger.warning(f"PAPER_CASH INIT: Synced to snapshot cash ${snap_cash:,.2f}")
     else:
         logger.info(f"PAPER_CASH: Already set at ${current_cash:,.2f}")
@@ -352,7 +354,9 @@ try:
         _target = ORIGINAL_CAPITAL * 1.1116  # 11.16% return = $111,160
         _delta = _target - _total
         if abs(_delta) > 1.0 and _delta > 0:
-            adjust_cash(_delta)
+            adjust_cash(_delta, caller="startup_one_time_adjust",
+                        reason="restore 11.16% return target after deployment gap",
+                        bypass_sentinel=True)
             logger.warning(f"CASH ADJUSTMENT: Added ${_delta:,.2f} to restore 11.16% return target")
         # Mark as done so it only runs once
         with open(_adj_flag, "w") as f:
@@ -1919,6 +1923,46 @@ scheduler.add_job(
 )
 
 
+# ============================================================
+#  SNAPSHOT DRIFT DETECTOR — eliminates synthetic-gain false triggers
+# ============================================================
+# When 0 positions are open, the daily snapshot can drift from live cash
+# (after recovery operations, manual adjustments, etc.). This drift has
+# triggered the daily_paused state multiple times in the past on a
+# false +10.77% gain. The check runs once daily before pre-market scan
+# and auto-corrects the snapshot if drift exceeds 5%.
+
+def _snapshot_drift_job():
+    """Run snapshot drift check + auto-correct if needed."""
+    try:
+        from predictions.sentinels import check_and_correct_snapshot_drift
+        result = check_and_correct_snapshot_drift()
+        if result.get("action") == "corrected":
+            logger.warning(
+                f"SNAPSHOT DRIFT auto-corrected: "
+                f"snap=${result.get('snap_value')} -> live=${result.get('live_value')} "
+                f"({result.get('drift_pct')}%)"
+            )
+    except Exception as e:
+        logger.error(f"snapshot_drift_job error: {e}")
+
+
+# Run at 6:00am ET — after overnight snapshots are written, BEFORE
+# the 6:30 pre-market scan + daily profit check.
+scheduler.add_job(
+    _snapshot_drift_job,
+    "cron",
+    hour=6,
+    minute=0,
+    id="snapshot_drift_check",
+    name="Snapshot drift detector + auto-correct (6am ET)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=3600,
+    replace_existing=True,
+)
+
+
 try:
     scheduler.start()
     auto_trade_stats["started_at"] = dt.now().isoformat()
@@ -2459,7 +2503,9 @@ def force_reset(request: Request):
 
         # Reset cash to target: $109,000 * 1.1207 = $122,156.30
         TARGET_CASH = 122156.30
-        set_cash(TARGET_CASH)
+        set_cash(TARGET_CASH, caller="admin_force_reset",
+                 reason="reset to TARGET_CASH after force-close",
+                 bypass_sentinel=True)
         final_cash = get_cash()
 
         return {
@@ -3185,6 +3231,136 @@ def api_tbill_set_yield(request: Request, annual_yield_pct: float):
         return {"ok": False, "reason": str(e)[:200]}
 
 
+# ============================================================
+#  RELIABILITY: deep health + sentinel admin endpoints
+# ============================================================
+
+@app.get("/api/health/deep")
+def api_health_deep(request: Request):
+    """Deep health check — runs subsystem probes and returns a
+    component-by-component status. Use this when you suspect something
+    is degraded but the basic /health is still 200.
+
+    Each subsystem check is wrapped in try/except so a single failure
+    cannot break the overall response.
+    """
+    check_rate_limit(request.client.host)
+    out = {"generated_at": dt.now().isoformat(), "subsystems": {}}
+
+    # 1. Database probe
+    try:
+        from predictions.models import get_db
+        import time as _t
+        t0 = _t.time()
+        conn = get_db()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+        out["subsystems"]["database"] = {"ok": True, "latency_ms": round((_t.time() - t0) * 1000, 1)}
+    except Exception as e:
+        out["subsystems"]["database"] = {"ok": False, "reason": str(e)[:200]}
+
+    # 2. Scheduler heartbeat
+    try:
+        out["subsystems"]["scheduler"] = {
+            "ok": scheduler.running,
+            "jobs": len(scheduler.get_jobs()),
+            "total_cycles": auto_trade_stats.get("total_cycles"),
+            "last_run": auto_trade_stats.get("last_run"),
+            "errors": auto_trade_stats.get("errors"),
+        }
+    except Exception as e:
+        out["subsystems"]["scheduler"] = {"ok": False, "reason": str(e)[:200]}
+
+    # 3. Daily pause flag
+    try:
+        out["subsystems"]["daily_paused"] = {
+            "ok": not _daily_paused.get("paused", False),
+            "paused": _daily_paused.get("paused", False),
+            "reason": _daily_paused.get("reason"),
+        }
+    except Exception as e:
+        out["subsystems"]["daily_paused"] = {"ok": False, "reason": str(e)[:200]}
+
+    # 4. Circuit breaker state
+    try:
+        from predictions.sentinels import get_circuit_status
+        cb = get_circuit_status()
+        out["subsystems"]["circuit_breaker"] = {"ok": not cb.get("open", False), **cb}
+    except Exception as e:
+        out["subsystems"]["circuit_breaker"] = {"ok": False, "reason": str(e)[:200]}
+
+    # 5. T-bill engine
+    try:
+        from predictions.tbill_yield import get_tbill_status
+        tb = get_tbill_status()
+        out["subsystems"]["tbill"] = {"ok": tb.get("ok", False),
+                                       "yield_pct": tb.get("annual_yield_pct"),
+                                       "last_accrual": tb.get("last_accrual_date")}
+    except Exception as e:
+        out["subsystems"]["tbill"] = {"ok": False, "reason": str(e)[:200]}
+
+    # 6. Audit log summary
+    try:
+        from predictions.audit import get_audit_summary
+        out["subsystems"]["audit_log"] = {"ok": True, **get_audit_summary()}
+    except Exception as e:
+        out["subsystems"]["audit_log"] = {"ok": False, "reason": str(e)[:200]}
+
+    # Overall pass/fail
+    failed = [k for k, v in out["subsystems"].items() if isinstance(v, dict) and not v.get("ok")]
+    out["overall_ok"] = len(failed) == 0
+    out["failed_subsystems"] = failed
+    return out
+
+
+@app.get("/api/audit/recent")
+def api_audit_recent(request: Request, limit: int = 50, mutation_type: str = None):
+    """Read recent audit log entries. Optional mutation_type filter."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.audit import get_recent_audit
+        return {"ok": True, "entries": get_recent_audit(min(int(limit), 500), mutation_type),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/sentinels/circuit-breaker")
+def api_circuit_breaker_status(request: Request):
+    """Trade execution circuit breaker status."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.sentinels import get_circuit_status
+        return {"ok": True, "status": get_circuit_status(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/circuit-breaker-reset")
+def api_circuit_breaker_reset(request: Request):
+    """Force-reset the trade circuit breaker (admin escape hatch)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.sentinels import reset_circuit_breaker
+        return {"ok": True, "result": reset_circuit_breaker(reason="admin_endpoint"),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/snapshot-drift-check")
+def api_snapshot_drift_check(request: Request):
+    """Manually trigger snapshot drift check + auto-correct."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.sentinels import check_and_correct_snapshot_drift
+        return {"ok": True, "result": check_and_correct_snapshot_drift(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 @app.post("/api/admin/force-trade-now-v2")
 def admin_force_trade_now_v2(request: Request):
     """v2: looser excellence thresholds (70/2.5) so picks actually qualify
@@ -3501,7 +3677,9 @@ def admin_recover_and_set_target(request: Request, target_total: float = 122850.
         cur_cash = get_cash()
         cash_action = "no_change"
         if 0 < new_cash < 5_000_000:
-            set_cash(new_cash)
+            set_cash(new_cash, caller="admin_recover_and_set_target",
+                     reason=f"recover-and-set-target -> ${new_cash:.2f}",
+                     bypass_sentinel=True)
             cash_action = f"set_from_{cur_cash:.2f}_to_{new_cash:.2f}"
         else:
             cash_action = f"refused_safety (would have set {new_cash:.2f})"
@@ -3612,7 +3790,9 @@ def admin_cash_recovery_oneshot_v2(request: Request):
         new_cash = round(cur_cash - bogus_cash_total, 2)
         cash_action = "no_change"
         if corrupt_count > 0 and 0 < new_cash < 5_000_000:
-            set_cash(new_cash)
+            set_cash(new_cash, caller="admin_cash_recovery",
+                     reason=f"cash-recovery: subtract ${bogus_cash_total:.2f} bogus",
+                     bypass_sentinel=True)
             cash_action = "set"
         elif corrupt_count > 0:
             cash_action = f"refused_safety_guard (would have set ${new_cash:.2f})"
@@ -3724,7 +3904,9 @@ def admin_cash_recovery_oneshot(request: Request):
         new_cash = round(cur_cash - bogus_cash, 2)
         cash_action = "no_change"
         if corrupt_count > 0 and 0 < new_cash < 5_000_000:
-            set_cash(new_cash)
+            set_cash(new_cash, caller="admin_cash_recovery_v1",
+                     reason=f"cash-recovery v1: subtract ${bogus_cash:.2f} bogus",
+                     bypass_sentinel=True)
             cash_action = "set"
         elif corrupt_count > 0:
             cash_action = f"refused_safety_guard (would have set ${new_cash:.2f})"
@@ -3827,7 +4009,9 @@ def admin_cash_recovery(request: Request):
         cash_action = "no_change"
         # Sanity guard
         if corrupt_count > 0 and 0 < new_cash < 5_000_000:
-            set_cash(new_cash)
+            set_cash(new_cash, caller="admin_cash_recovery_v2",
+                     reason=f"cash-recovery v2: subtract ${bogus_cash:.2f} bogus",
+                     bypass_sentinel=True)
             cash_action = "set"
         elif corrupt_count > 0:
             cash_action = f"refused_safety_guard (would have set ${new_cash:.2f})"

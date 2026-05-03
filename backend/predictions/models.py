@@ -215,6 +215,13 @@ def init_db():
     conn.commit()
     conn.close()
 
+    # Initialize audit table — separate connection to avoid lock conflicts
+    try:
+        from predictions.audit import init_audit_table
+        init_audit_table()
+    except Exception:
+        pass
+
 
 def get_trading_state(key: str, default: str = "0") -> str:
     """Get a persistent trading state value."""
@@ -243,20 +250,101 @@ def get_cash() -> float:
     return row["cash"] if row else 109000.0
 
 
-def set_cash(amount: float):
-    """Set cash to a specific amount (for resets)."""
+def _sentinel_check(current: float, delta: float = None, absolute: float = None,
+                    caller: str = "unknown") -> bool:
+    """Run cash mutation through the sentinel. Returns True if allowed.
+
+    On rejection: writes audit_log entry and logs a warning. Caller should
+    skip the mutation. Sentinel never raises — failures fail-open so we
+    never block legitimate cash changes due to a bug in the validator.
+
+    `bypass_sentinel=True` keyword (read from kwargs by the wrappers below)
+    skips the check — used for trusted recovery operations.
+    """
+    try:
+        from predictions.sentinels import validate_cash_mutation
+        from predictions.audit import audit_log
+        result = validate_cash_mutation(current, proposed_delta=delta,
+                                         proposed_absolute=absolute, caller=caller)
+        if result.get("rejected"):
+            try:
+                audit_log(
+                    "cash_sentinel",
+                    old_value=result.get("current"),
+                    new_value=result.get("result"),
+                    delta=result.get("delta"),
+                    caller=caller,
+                    reason=f"REJECTED: {result.get('reason')}",
+                )
+            except Exception:
+                pass
+            import logging as _lg
+            _lg.getLogger(__name__).error(
+                f"CASH SENTINEL REJECTED mutation by {caller}: {result.get('reason')} "
+                f"(current=${result.get('current')}, delta={result.get('delta')}, "
+                f"would_become=${result.get('result')})"
+            )
+            return False
+        return True
+    except Exception as _e:
+        # Fail open — never block a mutation due to a bug in the validator
+        import logging as _lg
+        _lg.getLogger(__name__).debug(f"_sentinel_check soft-fail: {_e}")
+        return True
+
+
+def _audit_cash_change(old: float, new: float, delta: float, caller: str, reason: str = None):
+    """Append an audit entry for a successful cash change. Never raises."""
+    try:
+        from predictions.audit import audit_log
+        audit_log(
+            "cash",
+            old_value=old,
+            new_value=new,
+            delta=delta,
+            caller=caller,
+            reason=reason,
+        )
+    except Exception:
+        pass
+
+
+def set_cash(amount: float, caller: str = "unknown", reason: str = None,
+             bypass_sentinel: bool = False):
+    """Set cash to a specific amount (for resets).
+
+    Sentinel-protected: a single set_cash call cannot move cash by more
+    than MAX_SINGLE_DELTA, set it below the floor, or above the ceiling.
+    Pass bypass_sentinel=True only for trusted recovery operations.
+    """
+    cur = get_cash()
+    if not bypass_sentinel:
+        if not _sentinel_check(cur, absolute=amount, caller=caller):
+            return  # Sentinel rejected — leave cash unchanged
     conn = get_db()
     conn.execute("INSERT OR REPLACE INTO paper_cash (id, cash) VALUES (1, ?)", (round(amount, 2),))
     conn.commit()
     conn.close()
+    _audit_cash_change(cur, amount, amount - cur, caller, reason)
 
 
-def adjust_cash(delta: float):
-    """Atomically add/subtract from cash. Positive = add, negative = subtract."""
+def adjust_cash(delta: float, caller: str = "unknown", reason: str = None,
+                bypass_sentinel: bool = False):
+    """Atomically add/subtract from cash. Positive = add, negative = subtract.
+
+    Sentinel-protected: a single adjust_cash call cannot move cash by more
+    than MAX_SINGLE_DELTA, drive it below the floor, or above the ceiling.
+    Pass bypass_sentinel=True only for trusted recovery operations.
+    """
+    cur = get_cash()
+    if not bypass_sentinel:
+        if not _sentinel_check(cur, delta=delta, caller=caller):
+            return  # Sentinel rejected — leave cash unchanged
     conn = get_db()
     conn.execute("UPDATE paper_cash SET cash = cash + ? WHERE id=1", (round(delta, 2),))
     conn.commit()
     conn.close()
+    _audit_cash_change(cur, cur + delta, delta, caller, reason)
 
 
 def save_prediction(ticker: str, direction: str, confidence: float,
