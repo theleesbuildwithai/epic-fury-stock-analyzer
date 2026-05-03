@@ -182,14 +182,28 @@ def check_and_correct_snapshot_drift() -> dict:
                     "live_value": round(live_value, 2),
                     "drift_pct": round(drift_pct, 3)}
 
-        # Drift detected and significant — write a corrected snapshot
+        # Drift detected and significant — write a corrected snapshot.
+        # Compute daily_ret from snap, preserve sp500 fields from previous
+        # snapshot (we cannot recompute them here without market data).
         today_str = _dt.utcnow().strftime("%Y-%m-%d")
+        prev_cum = float(last_snap.get("cumulative_return_pct") or 0)
+        prev_sp_cum = float(last_snap.get("sp500_cumulative_return_pct") or 0)
+        prev_sp_daily = float(last_snap.get("sp500_daily_return_pct") or 0)
+        # Cumulative return based on $109k baseline
+        try:
+            new_cum_ret = (live_value - 109000.0) / 109000.0 * 100.0
+        except Exception:
+            new_cum_ret = prev_cum
         try:
             save_portfolio_snapshot(
                 total_value=live_value,
                 cash=live_value,
                 positions_value=0.0,
-                num_positions=0,
+                daily_ret=0.0,           # 0 positions, no intraday move
+                cum_ret=new_cum_ret,
+                sp500_daily=prev_sp_daily,
+                sp500_cum=prev_sp_cum,
+                num_pos=0,
             )
         except Exception as save_err:
             return {"ok": False, "action": "save_failed",
