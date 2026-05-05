@@ -304,9 +304,14 @@ MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade 
 # can never hit 100% (always keeps a cash buffer) and never collapses
 # below the minimum trading level.
 
-DYNAMIC_EXPOSURE_MIN = 0.45  # Hard floor — always trade at least 45%
-DYNAMIC_EXPOSURE_MAX = 0.70  # Hard ceiling — keep at least 30% cash buffer
-DYNAMIC_EXPOSURE_BASE = 0.60  # Starting point — targets ~40% cash after adjustments
+DYNAMIC_EXPOSURE_MIN = 0.65  # Hard floor — always trade at least 65% (raised from 0.45)
+DYNAMIC_EXPOSURE_MAX = 0.92  # Hard ceiling — keep at least 8% cash buffer (raised from 0.70)
+DYNAMIC_EXPOSURE_BASE = 0.80  # Starting point — targets ~20% cash after adjustments (raised from 0.60)
+# Position-size floor: the product of all 11 sizing multipliers cannot
+# crush a trade below this fraction of nominal. Without this, multiplier
+# stacking (~0.7^11) was reducing trades to ~2% of intended size,
+# leaving the portfolio at 1.6% gross exposure when target was 65%+.
+POSITION_SIZE_MULT_FLOOR = 0.50
 DYNAMIC_EXPOSURE_SAFE_DEFAULT = 0.60  # Used if calculation fails
 
 
@@ -2616,6 +2621,39 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
 
+        # ============================================================
+        # INTERNATIONAL DIVERSIFICATION QUOTA
+        # ============================================================
+        # If international ADRs (or country/region ETFs) appear in the
+        # candidate pool, ensure at least ~30% of the selected picks
+        # come from outside the US. Without this, US names dominate the
+        # composite score (more data, longer histories) and we end up
+        # 100% US — defeating the purpose of adding the 222 international
+        # tickers to the universe.
+        try:
+            from analysis.quant_engine import INTERNATIONAL_UNIVERSE as _INTL_LIST
+            _INTL_SET = set(_INTL_LIST or [])
+        except Exception:
+            _INTL_SET = set()
+
+        if _INTL_SET and len(all_picks) > 5:
+            us_picks = [p for p in all_picks if p["symbol"] not in _INTL_SET]
+            intl_picks = [p for p in all_picks if p["symbol"] in _INTL_SET]
+            if intl_picks:
+                # Target: 30% international when candidates exist
+                target_intl_count = max(1, int(round(len(all_picks) * 0.30)))
+                target_intl_count = min(target_intl_count, len(intl_picks))
+                top_us = us_picks[:max(1, len(all_picks) - target_intl_count)]
+                top_intl = intl_picks[:target_intl_count]
+                # Re-merge keeping confidence ranking inside each group
+                merged = top_us + top_intl
+                merged.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
+                all_picks = merged
+                logger.info(
+                    f"INTL QUOTA applied: {target_intl_count} intl + {len(top_us)} US "
+                    f"(from {len(intl_picks)} intl candidates, {len(us_picks)} us candidates)"
+                )
+
         # CAPITAL PRESERVATION: Limit new trades to top 25% when protecting gains
         if preservation and len(all_picks) > 3:
             orig_count = len(all_picks)
@@ -2919,10 +2957,19 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 sector_streak_mod = float(sector_streak_data) if sector_streak_data else 1.0
 
             # Apply all multipliers: VIX, drawdown, overnight, circuit breaker, streak, timing, VaR, correlation, sector streak
-            position_value = (total_value * size_pct * drawdown_multiplier * vix_multiplier *
-                            overnight_size_mod * cb_multiplier * dd_multiplier *
-                            streak_size_mod * timing_size_mod *
-                            var_multiplier * corr_multiplier * sector_streak_mod)
+            # SIZING FLOOR: clamp the product of all reducer multipliers
+            # to >= POSITION_SIZE_MULT_FLOOR. Stacking 11 multipliers at
+            # 0.7-0.8 each produced ~2% of nominal, leaving exposure
+            # stuck at 1.6% even with 27 valid picks. The floor preserves
+            # safety overrides (any single multiplier being 0 still
+            # blocks the trade — these are checked separately above)
+            # while preventing death-by-1000-cuts compounding.
+            _reducer_product = (drawdown_multiplier * vix_multiplier *
+                                overnight_size_mod * cb_multiplier * dd_multiplier *
+                                streak_size_mod * timing_size_mod *
+                                var_multiplier * corr_multiplier * sector_streak_mod)
+            _reducer_product = max(POSITION_SIZE_MULT_FLOOR, _reducer_product)
+            position_value = total_value * size_pct * _reducer_product
             shares = round(position_value / price, 4)
 
             if shares * price > cash:
