@@ -2100,17 +2100,22 @@ def _reset_day():
         conn.commit()
         conn.close()
 
-        # Save new snapshot at the reset value
-        save_portfolio_snapshot(
-            total_value=RESET_VALUE,
-            cash=RESET_VALUE,
-            positions_value=0,
-            daily_ret=0,
-            cum_ret=9.58,
-            sp500_daily=0,
-            sp500_cum=0,
-            num_pos=0
-        )
+        # Save new snapshot at the reset value via truth engine
+        # (preserves prior sp500_cum instead of writing zero)
+        try:
+            from predictions.truth_engine import safe_save_snapshot as _safe_reset_snap
+            _safe_reset_snap()
+        except Exception:
+            save_portfolio_snapshot(
+                total_value=RESET_VALUE,
+                cash=RESET_VALUE,
+                positions_value=0,
+                daily_ret=0,
+                cum_ret=9.58,
+                sp500_daily=0,
+                sp500_cum=0,
+                num_pos=0
+            )
 
         logger.warning(f"RESET DAY: Closed {closed_count} positions. Cash set to ${RESET_VALUE:,.2f}. Fresh start.")
     except Exception as e:
@@ -3356,6 +3361,73 @@ def api_snapshot_drift_check(request: Request):
     try:
         from predictions.sentinels import check_and_correct_snapshot_drift
         return {"ok": True, "result": check_and_correct_snapshot_drift(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
+#  TRUTH ENGINE — bulletproof S&P 500 + fund return endpoints
+# ============================================================
+
+@app.get("/api/truth/sp500")
+def api_truth_sp500(request: Request, force_refresh: bool = False):
+    """Multi-source S&P 500 truth (yf ^GSPC -> SPY -> ^SPX -> last-good)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.truth_engine import get_sp500_truth
+        return {"ok": True, "result": get_sp500_truth(force_refresh=force_refresh),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/truth/fund")
+def api_truth_fund(request: Request):
+    """Validated fund metrics with options-aware bounds + warnings."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.truth_engine import get_fund_truth
+        return {"ok": True, "result": get_fund_truth(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/truth/inception")
+def api_truth_inception(request: Request):
+    """Pinned fund inception date + S&P 500 baseline close."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.truth_engine import get_inception
+        return {"ok": True, "result": get_inception(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/safe-snapshot")
+def api_admin_safe_snapshot(request: Request, force: bool = False):
+    """Manually trigger a validated snapshot save via the truth engine."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.truth_engine import safe_save_snapshot
+        return {"ok": True, "result": safe_save_snapshot(force=force),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/sp500-recompute")
+def api_admin_sp500_recompute(request: Request):
+    """Re-fetch S&P 500 history and rebuild all snapshots' sp500_cum
+    + sp500_daily values from the pinned inception baseline. Carries
+    forward last good close for any missing day so the equity-curve
+    chart never has zero-pollution artifacts."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.truth_engine import recompute_sp500_history
+        return {"ok": True, "result": recompute_sp500_history(),
                 "generated_at": dt.now().isoformat()}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}

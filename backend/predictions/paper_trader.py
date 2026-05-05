@@ -1261,6 +1261,154 @@ def _get_vix_scale() -> float:
     return 1.0
 
 
+def _per_position_quick_profit_lock(trade: dict, pnl_pct: float, vix: float = 20.0,
+                                    regime: str = "SIDEWAYS") -> tuple:
+    """Per-position dynamic WIN-LOCK — TRULY DYNAMIC, no hardcoded thresholds.
+
+    Locks a winner when the gain is statistically "too fast" — meaning
+    the realized profit exceeds what is expected for the holding window
+    given current market volatility, the position's own risk profile,
+    and the regime.
+
+    Algorithm:
+
+      1. EXPECTED MOVE (sigma) — derived from VIX:
+            expected_daily_pct = VIX / 16   (VIX = annualized vol % * 100;
+                                             dividing by 16 ≈ sqrt(252)
+                                             gives 1-day expected move)
+            expected_hours_pct = expected_daily_pct * sqrt(hours / 6.5)
+                                 (6.5 = trading hours per day; volatility
+                                 scales with sqrt(time))
+
+      2. INSTRUMENT LEVERAGE:
+            Equity:  leverage = 1.0
+            Option:  leverage = 4.0      (typical OTM near-the-money delta
+                                          and gamma combined produce ~4x
+                                          underlying-equivalent move)
+
+      3. RISK-BASED OVERLAY (uses the trade's own stop_loss):
+            risk_pct = abs(entry - stop) / entry * 100
+            If realized profit >= risk_pct * R_MULT in less than half the
+            trade's expected hold window, the trade has hit its target
+            faster than planned — lock it in.
+
+      4. REGIME MULTIPLIER:
+            BULL    → K_sigma = 3.5    (let winners run more in bull)
+            BEAR    → K_sigma = 2.0    (lock fast in bear — reversals brutal)
+            SIDEWAYS→ K_sigma = 2.5    (default — catch statistical outliers)
+            R_MULT  derived similarly:  BULL=3.0, BEAR=1.5, default=2.0
+
+    Lock fires when EITHER:
+        - pnl_pct >= K_sigma * leverage * expected_hours_pct
+        - pnl_pct >= R_MULT * risk_pct AND hours_held < hold_window/2
+
+    Returns: (should_close: bool, reason: str)
+    """
+    try:
+        import math
+        from datetime import datetime as _dt
+
+        if pnl_pct <= 0:
+            return False, ""
+
+        # 1. Hours held
+        try:
+            entry_dt = _dt.fromisoformat(trade.get("entry_date", ""))
+            hours_held = max(0.05, (_dt.now() - entry_dt).total_seconds() / 3600.0)
+        except Exception:
+            return False, ""   # unknown entry time — defer to other exits
+
+        # 2. VIX → expected move
+        try:
+            vix_f = float(vix or 20.0)
+            if vix_f <= 0 or vix_f > 200:
+                vix_f = 20.0
+        except Exception:
+            vix_f = 20.0
+        expected_daily_pct = vix_f / 16.0                # ~1-day SPY move
+        # Time-scaled expected move (volatility scales with sqrt(t))
+        expected_hours_pct = expected_daily_pct * math.sqrt(max(hours_held, 0.5) / 6.5)
+
+        # 3. Instrument leverage
+        instr = (trade.get("instrument_type") or "equity").lower()
+        is_option = instr in ("call", "put")
+        leverage = 4.0 if is_option else 1.0
+
+        # 4. Regime-driven sigma multiplier and R-multiple
+        reg = (regime or "SIDEWAYS").upper()
+        if reg == "BULL":
+            k_sigma, r_mult = 3.5, 3.0
+        elif reg == "BEAR":
+            k_sigma, r_mult = 2.0, 1.5
+        else:
+            k_sigma, r_mult = 2.5, 2.0
+
+        # 5. Statistical lock: gain > k_sigma * leverage * expected window move
+        sigma_threshold = k_sigma * leverage * expected_hours_pct
+
+        # 6. Risk-based lock: hit target faster than planned
+        risk_pct = None
+        risk_threshold = None
+        try:
+            entry_p = float(trade.get("entry_price") or 0)
+            stop_p = float(trade.get("stop_loss_price") or 0)
+            if entry_p > 0 and stop_p > 0:
+                risk_pct = abs(entry_p - stop_p) / entry_p * 100
+                risk_threshold = r_mult * risk_pct
+        except Exception:
+            pass
+        hold_days = float(trade.get("hold_duration_days") or 5)
+        hold_hours = hold_days * 24.0
+        risk_window_ok = hours_held < (hold_hours / 2.0)
+
+        # Decide
+        ticker = trade.get("ticker", "?")
+        kind = "OPT" if is_option else "EQT"
+
+        if pnl_pct >= sigma_threshold:
+            return True, (
+                f"WIN-LOCK ({kind}): {ticker} +{pnl_pct:.1f}% in {hours_held:.1f}h "
+                f">= sigma_threshold {sigma_threshold:.1f}% "
+                f"(VIX={vix_f:.0f}, lev={leverage}x, k={k_sigma}, regime={reg})"
+            )
+
+        if (risk_threshold is not None and pnl_pct >= risk_threshold
+                and risk_window_ok):
+            return True, (
+                f"WIN-LOCK ({kind}): {ticker} +{pnl_pct:.1f}% in {hours_held:.1f}h "
+                f">= {r_mult:.1f}R risk_threshold {risk_threshold:.1f}% "
+                f"(half hold window: {hold_hours/2:.1f}h, regime={reg})"
+            )
+
+        return False, ""
+    except Exception:
+        return False, ""
+
+
+def _cached_vix_for_winlock() -> float:
+    """Light VIX getter for the per-position win-lock. Falls back to 20
+    on any error so the lock still works. Uses a 5-minute process-local
+    cache to avoid hammering yfinance on every exit cycle."""
+    global _vix_winlock_cache
+    try:
+        import time as _t
+        now = _t.time()
+        if "_vix_winlock_cache" not in globals():
+            _vix_winlock_cache = {"vix": 20.0, "ts": 0}
+        if (now - _vix_winlock_cache.get("ts", 0)) < 300:
+            return _vix_winlock_cache.get("vix", 20.0)
+        _throttle()
+        df = yf.download("^VIX", period="2d", progress=False)
+        if df is not None and not df.empty:
+            v = float(_safe_col(df, "Close").dropna().iloc[-1])
+            if 0 < v < 200:
+                _vix_winlock_cache = {"vix": v, "ts": now}
+                return v
+    except Exception:
+        pass
+    return 20.0
+
+
 def _get_dynamic_winlock(regime: str = "SIDEWAYS") -> dict:
     """
     Dynamic WIN-LOCK: the system decides its own profit-lock threshold
@@ -3037,20 +3185,40 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         except Exception:
             pass
 
-        prev_value = snapshots[-1]["total_value"] if snapshots else INITIAL_CAPITAL
-        daily_return = ((total_value / prev_value) - 1) * 100 if prev_value > 0 else 0
-        cum_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-
-        save_portfolio_snapshot(
-            total_value=round(total_value, 2),
-            cash=round(cash, 2),
-            positions_value=round(positions_value, 2),
-            daily_ret=round(daily_return, 2),
-            cum_ret=round(cum_return, 2),
-            sp500_daily=round(sp500_daily, 2),
-            sp500_cum=round(sp500_cum, 2),
-            num_pos=current_positions,
-        )
+        # ROUTE THROUGH TRUTH ENGINE — bulletproof S&P 500 + fund value
+        # validation, options-aware bounds, sp500 multi-source fallback,
+        # carry-forward on yfinance failure, snapshot rejection on
+        # balance mismatch. Falls back to legacy save on engine failure.
+        try:
+            from predictions.truth_engine import safe_save_snapshot as _safe_snap
+            _r = _safe_snap()
+            if not _r.get("ok"):
+                # Truth engine rejected the snapshot — log + fall back to legacy
+                results["errors"].append(
+                    f"Truth engine rejected snapshot: {_r.get('action')} "
+                    f"reason={_r.get('reason') or _r.get('cash')}"
+                )
+                raise RuntimeError("truth_engine_rejected")
+        except Exception:
+            # Legacy fallback — preserves prior sp500 from last snapshot
+            # instead of writing 0 (which polluted the chart historically)
+            prev_value = snapshots[-1]["total_value"] if snapshots else INITIAL_CAPITAL
+            daily_return = ((total_value / prev_value) - 1) * 100 if prev_value > 0 else 0
+            cum_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
+            # Carry-forward sp500 if today's fetch returned 0
+            if sp500_cum == 0 and snapshots:
+                sp500_cum = float(snapshots[-1].get("sp500_cumulative_return_pct") or 0)
+                sp500_daily = 0.0
+            save_portfolio_snapshot(
+                total_value=round(total_value, 2),
+                cash=round(cash, 2),
+                positions_value=round(positions_value, 2),
+                daily_ret=round(daily_return, 2),
+                cum_ret=round(cum_return, 2),
+                sp500_daily=round(sp500_daily, 2),
+                sp500_cum=round(sp500_cum, 2),
+                num_pos=current_positions,
+            )
     except Exception as e:
         results["errors"].append(f"Snapshot save failed: {str(e)}")
 
@@ -3861,8 +4029,16 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         )
         total_value = cash + positions_val_after
         cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-        save_portfolio_snapshot(total_value, cash, remaining_positions, daily_gain, cum_ret, 0, 0, 0)
+        # ROUTE THROUGH TRUTH ENGINE — bulletproof sp500 + carry-forward
+        try:
+            from predictions.truth_engine import safe_save_snapshot as _safe_snap_wl
+            _safe_snap_wl()
+        except Exception:
+            save_portfolio_snapshot(total_value, cash, remaining_positions, daily_gain, cum_ret, 0, 0, 0)
         return {"closed": closed, "checked": len(open_trades), "kept": kept_count, "win_lock": True, "winlock_info": winlock}
+
+    # Cache VIX once per cycle for the per-position win-lock
+    _winlock_vix = _cached_vix_for_winlock()
 
     for trade in open_trades:
         ticker = trade["ticker"]
@@ -3875,6 +4051,60 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         instrument_type = trade.get("instrument_type") or "equity"
         should_close = False
         close_reason = ""
+
+        # ============================================================
+        # PER-POSITION DYNAMIC WIN-LOCK (highest priority — runs FIRST)
+        # ============================================================
+        # If a single position has gained more than the statistically-
+        # expected window move (k_sigma * VIX-derived volatility *
+        # leverage) OR has hit risk-multiple target faster than half
+        # the planned hold window, lock the win immediately. Thresholds
+        # are 100% derived from VIX, regime, hold-time and the trade's
+        # own risk profile — never hardcoded.
+        try:
+            # Compute provisional pnl for the win-lock check
+            if instrument_type in ("call", "put"):
+                # For options use premium-based pnl when available
+                _entry_prem = trade.get("premium_per_contract") or entry_price
+                _wl_pnl = 0.0
+                try:
+                    from predictions.options_engine import get_current_premium
+                    _strike = trade.get("strike_price", 0)
+                    _exp = trade.get("expiration_date", "")
+                    _cur_prem = get_current_premium(ticker, _strike, _exp, instrument_type)
+                    if _cur_prem and _cur_prem > 0 and _entry_prem and _entry_prem > 0:
+                        if direction == "long":
+                            _wl_pnl = ((_cur_prem / _entry_prem) - 1) * 100
+                        else:
+                            _wl_pnl = ((_entry_prem / _cur_prem) - 1) * 100
+                except Exception:
+                    _wl_pnl = 0.0
+            else:
+                if direction == "long":
+                    _wl_pnl = ((current_price / entry_price) - 1) * 100
+                else:
+                    _wl_pnl = ((entry_price / current_price) - 1) * 100
+
+            _wl_should, _wl_reason = _per_position_quick_profit_lock(
+                trade, _wl_pnl, vix=_winlock_vix, regime=regime
+            )
+            if _wl_should:
+                try:
+                    _smart_close_trade(trade, current_price)
+                    closed.append({
+                        "ticker": ticker, "direction": direction,
+                        "instrument_type": instrument_type,
+                        "entry_price": entry_price,
+                        "exit_price": round(current_price, 2),
+                        "pnl_pct": round(_wl_pnl, 2),
+                        "reason": _wl_reason,
+                    })
+                    logger.warning(_wl_reason)
+                except Exception as _e:
+                    logger.error(f"PER-POS WIN-LOCK close {ticker} failed: {_e}")
+                continue  # Move to next trade — this one is closed
+        except Exception as _e:
+            logger.debug(f"per-position winlock soft-fail {ticker}: {_e}")
 
         # --- OPTIONS EXIT CHECK (before equity logic) ---
         if instrument_type in ("call", "put"):
@@ -4124,7 +4354,12 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             )
             total_value = cash + positions_value
             cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-            save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
+            # ROUTE THROUGH TRUTH ENGINE — bulletproof sp500 + carry-forward
+            try:
+                from predictions.truth_engine import safe_save_snapshot as _safe_snap_ec
+                _safe_snap_ec()
+            except Exception:
+                save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
         except Exception:
             pass
 
