@@ -89,11 +89,11 @@ PAIRS_UNIVERSE = [
 ]
 
 # Trade gating thresholds — tuned conservatively to avoid false signals
-ENTRY_Z_THRESHOLD = 2.0          # only enter if |z| >= 2 sigma
+ENTRY_Z_THRESHOLD = 1.5          # was 2.0 — relaxed to fire more pairs trades (still statistically significant)
 EXIT_Z_THRESHOLD = 0.3           # exit when spread reverts close to mean
 STOP_Z_THRESHOLD = 4.0           # cut losses if spread blows out further
 MAX_HALF_LIFE_DAYS = 25          # ignore pairs that take too long to revert
-MIN_CORRELATION = 0.70           # both legs must move together historically
+MIN_CORRELATION = 0.60           # was 0.70 — relaxed to allow more sector pairs through
 MIN_DATA_POINTS = 100            # need at least 100 daily bars
 ADF_PVALUE_THRESHOLD = 0.05      # spread must be stationary at p < 0.05
 ADF_PVALUE_FALLBACK = 0.02       # stricter when statsmodels unavailable

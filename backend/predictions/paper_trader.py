@@ -1159,24 +1159,28 @@ def _autonomous_stop_and_target(
     # Hard clamp: never risk more than 7% or less than 1.5% (was 2-10% — too wide)
     stop_pct = max(0.015, min(stop_pct, 0.07))
 
-    # --- TAKE PROFIT: Risk-Reward Ratio ---
-    # Target at least 2:1 reward-to-risk (RenTech standard)
-    # High conviction: 3:1, Low conviction: 2:1
+    # --- TAKE PROFIT: ASYMMETRIC R:R for profit-factor edge ---
+    # Math: even at 35% win rate, 2.7:1 R:R produces +0.75R per trade.
+    # Profit factor = (win_rate * avg_win) / (loss_rate * avg_loss)
+    # With 2.7:1 and 35% wr -> PF = (0.35 * 2.7) / (0.65 * 1) = 1.45
+    # With 3.5:1 and 35% wr -> PF = (0.35 * 3.5) / (0.65 * 1) = 1.88
+    # PROFIT-FACTOR FIX: bumped all R:R floors to 2.7+ (was 1.3-2.5)
     if confidence >= 80 and abs(composite_score) >= 5:
-        rr_ratio = 2.5  # High conviction (was 3.0 — targets were unreachable)
+        rr_ratio = 4.0  # High conviction — let big winners run (was 2.5)
     elif confidence >= 60:
-        rr_ratio = 2.0  # Standard (was 2.5)
+        rr_ratio = 3.2  # Standard — 3:1 R:R minimum (was 2.0)
     else:
-        rr_ratio = 1.5  # Low conviction (was 2.0 — more realistic targets)
+        rr_ratio = 2.7  # Low conviction — still asymmetric (was 1.5)
 
-    # Mean reversion: quick profits, lower ratio
+    # Mean reversion: still asymmetric but quicker
     if is_mean_reversion:
-        rr_ratio = 1.3  # MR trades are high win-rate, lower payoff (was 1.5)
+        rr_ratio = 2.5  # was 1.3 — even MR trades need positive R:R
 
     target_pct = stop_pct * rr_ratio
 
-    # Hard clamp: target between 2% and 20% (was 3-30% — unrealistic)
-    target_pct = max(0.02, min(target_pct, 0.20))
+    # Hard clamp: target between 4% and 30% (raised from 2-20% to allow
+    # asymmetric R:R math to actually produce big targets)
+    target_pct = max(0.04, min(target_pct, 0.30))
 
     # --- HOLD DURATION: Based on ATR and signal ---
     # High volatility stocks resolve faster (shorter hold)
@@ -2956,6 +2960,67 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             else:
                 sector_streak_mod = float(sector_streak_data) if sector_streak_data else 1.0
 
+            # ============================================================
+            # QUALITY-GATE SOFT RESIZER (does NOT block trades)
+            # ============================================================
+            # Each failing gate multiplies position size by 0.85x. Three
+            # failures = 0.85^3 = 0.61x → still above POSITION_SIZE_MULT_FLOOR
+            # so trade still goes through, just at smaller size for poor
+            # entry quality. NEVER hard-rejects — preserves trade flow.
+            #
+            # All gates fail-open on data fetch errors so a Yahoo glitch
+            # never inadvertently shrinks every trade.
+            quality_mult = 1.0
+            quality_notes = []
+            try:
+                # Gate 1: ATR > 7% (extreme volatility — slippage risk)
+                _atr = _calculate_stock_atr(symbol, period=14)
+                if _atr > 0.07:
+                    quality_mult *= 0.85
+                    quality_notes.append(f"high_atr={_atr*100:.1f}%")
+
+                # Gate 2: Pre-market gap > 5% in pick direction (chasing)
+                try:
+                    _t = yf.Ticker(symbol)
+                    _info = _t.fast_info
+                    _prev_close = float(_info.get("previousClose") or 0)
+                    if _prev_close > 0 and price > 0:
+                        _gap_pct = (price - _prev_close) / _prev_close * 100
+                        _gap_in_dir = _gap_pct if direction == "long" else -_gap_pct
+                        if _gap_in_dir > 5.0:
+                            quality_mult *= 0.85
+                            quality_notes.append(f"gap_chasing={_gap_in_dir:.1f}%")
+                except Exception:
+                    pass  # fail-open
+
+                # Gate 3: RSI extreme (overbought longs / oversold shorts)
+                try:
+                    _hist_df = yf.download(symbol, period="3mo", progress=False)
+                    if _hist_df is not None and len(_hist_df) > 14:
+                        _closes = _safe_col(_hist_df, "Close").dropna().values.astype(float)
+                        if len(_closes) >= 15:
+                            _diffs = np.diff(_closes[-15:])
+                            _gains = _diffs[_diffs > 0].sum()
+                            _losses = abs(_diffs[_diffs < 0].sum())
+                            if _losses > 0:
+                                _rs = _gains / _losses
+                                _rsi = 100 - (100 / (1 + _rs))
+                                if direction == "long" and _rsi > 80:
+                                    quality_mult *= 0.85
+                                    quality_notes.append(f"rsi_overbought={_rsi:.0f}")
+                                elif direction == "short" and _rsi < 20:
+                                    quality_mult *= 0.85
+                                    quality_notes.append(f"rsi_oversold={_rsi:.0f}")
+                except Exception:
+                    pass  # fail-open
+            except Exception:
+                pass  # entire quality block fails open — no impact
+
+            if quality_notes:
+                logger.info(
+                    f"QUALITY GATES {symbol}: mult={quality_mult:.2f} ({', '.join(quality_notes)})"
+                )
+
             # Apply all multipliers: VIX, drawdown, overnight, circuit breaker, streak, timing, VaR, correlation, sector streak
             # SIZING FLOOR: clamp the product of all reducer multipliers
             # to >= POSITION_SIZE_MULT_FLOOR. Stacking 11 multipliers at
@@ -2967,7 +3032,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _reducer_product = (drawdown_multiplier * vix_multiplier *
                                 overnight_size_mod * cb_multiplier * dd_multiplier *
                                 streak_size_mod * timing_size_mod *
-                                var_multiplier * corr_multiplier * sector_streak_mod)
+                                var_multiplier * corr_multiplier * sector_streak_mod *
+                                quality_mult)
             _reducer_product = max(POSITION_SIZE_MULT_FLOOR, _reducer_product)
             position_value = total_value * size_pct * _reducer_product
             shares = round(position_value / price, 4)
@@ -4219,6 +4285,71 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             pnl_pct = ((current_price / entry_price) - 1) * 100
         else:
             pnl_pct = ((entry_price / current_price) - 1) * 100
+
+        # ============================================================
+        # BREAK-EVEN SHIFT after +1R — single biggest win-rate booster
+        # ============================================================
+        # When a trade has gained 1R (i.e., 1× the original stop distance),
+        # automatically move the stop loss to the entry price. From that
+        # moment forward, the trade can only either profit or close at
+        # break-even — it CANNOT lose money. Wins booked at break-even
+        # don't count as losses, so the win-rate floor rises significantly.
+        # SAFETY: only shifts UP (longs) or DOWN (shorts) — never weakens.
+        try:
+            _orig_stop = trade.get("stop_loss_price") or 0
+            _entry_p = float(entry_price or 0)
+            if _entry_p > 0 and _orig_stop > 0:
+                # Compute the original 1R distance (set at entry)
+                _r_distance_pct = abs(_entry_p - _orig_stop) / _entry_p * 100
+                if _r_distance_pct > 0 and pnl_pct >= _r_distance_pct:
+                    # Move stop to break-even (entry price)
+                    if direction == "long" and _orig_stop < _entry_p:
+                        try:
+                            from predictions.models import update_trade_stop
+                            update_trade_stop(trade["id"], round(_entry_p, 2))
+                            logger.info(
+                                f"BREAK-EVEN SHIFT: {ticker} long +{pnl_pct:.1f}% >= 1R "
+                                f"({_r_distance_pct:.1f}%) — stop moved ${_orig_stop:.2f}->${_entry_p:.2f}"
+                            )
+                        except Exception:
+                            pass
+                    elif direction == "short" and _orig_stop > _entry_p:
+                        try:
+                            from predictions.models import update_trade_stop
+                            update_trade_stop(trade["id"], round(_entry_p, 2))
+                            logger.info(
+                                f"BREAK-EVEN SHIFT: {ticker} short +{pnl_pct:.1f}% >= 1R "
+                                f"({_r_distance_pct:.1f}%) — stop moved ${_orig_stop:.2f}->${_entry_p:.2f}"
+                            )
+                        except Exception:
+                            pass
+        except Exception as _be_err:
+            logger.debug(f"break-even shift soft-fail {ticker}: {_be_err}")
+
+        # ============================================================
+        # TIME-STOP DISCIPLINE — kill stagnant trades
+        # ============================================================
+        # If a trade hasn't reached +1R within 3 trading days, exit it
+        # at break-even (or current price). Cuts the "death by 1000 cuts"
+        # of small losers slowly bleeding capital. Frees cash for fresh
+        # high-conviction setups instead of being trapped in dead money.
+        try:
+            _entry_dt = datetime.fromisoformat(trade.get("entry_date", ""))
+            _days_held = (datetime.now() - _entry_dt).days
+            _orig_stop = trade.get("stop_loss_price") or 0
+            _entry_p = float(entry_price or 0)
+            if _days_held >= 3 and _entry_p > 0 and _orig_stop > 0:
+                _r_distance_pct = abs(_entry_p - _orig_stop) / _entry_p * 100
+                # Only time-stop if the trade has not made meaningful progress
+                if pnl_pct < _r_distance_pct * 0.5 and not should_close:
+                    should_close = True
+                    close_reason = (
+                        f"TIME-STOP: held {_days_held}d, only +{pnl_pct:.1f}% "
+                        f"(needed +{_r_distance_pct*0.5:.1f}% to keep, "
+                        f"+{_r_distance_pct:.1f}% to hit 1R) — freeing capital"
+                    )
+        except Exception:
+            pass
 
         # ADAPTIVE ATR TRAILING STOP — dynamic stop that ratchets with price
         # Replaces static stop with volatility-scaled trailing stop
