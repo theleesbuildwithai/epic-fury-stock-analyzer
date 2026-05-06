@@ -279,21 +279,20 @@ def _get_position_size_pct() -> float:
     return 0.08  # 8% per position — aggressive conviction sizing
 
 def _get_min_confidence() -> int:
-    """Dynamic confidence filter: looser when aggressive.
-    QUALITY BOOST: raised the aggressive floor from 35 -> 50 so only
-    higher-quality picks become trades. With asymmetric R:R already in
-    place, fewer-but-better trades raise win rate + profit factor."""
+    """Dynamic confidence filter — sweet spot 40 (was 35 too loose,
+    50 too strict). Wide pick funnel + asymmetric R:R + win-lock +
+    loss-cut do the quality work. Don't make the entry filter so
+    strict that the book ever sits at 0 picks."""
     if _is_preservation_mode():
-        return 60  # was 55 — even higher bar in preservation
-    return 50  # was 35 — better picks only
+        return 50
+    return 40
 
 def _get_min_composite_score() -> float:
-    """Dynamic score filter: looser when aggressive.
-    QUALITY BOOST: raised the aggressive floor from 1.5 -> 2.5 to
-    drop the marginal-edge picks that drag down the win rate."""
+    """Dynamic score filter — sweet spot 2.0 (was 1.5 too loose,
+    2.5 too strict)."""
     if _is_preservation_mode():
-        return 3.5  # was 3.0
-    return 2.5  # was 1.5 — only stronger statistical edges
+        return 3.0
+    return 2.0
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time

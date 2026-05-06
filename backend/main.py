@@ -2122,6 +2122,38 @@ def _prewarm_benchmark_bg():
 _prewarm_benchmark_bg()
 
 
+# ============================================================
+# PICKS PRE-WARM ON STARTUP — never let cache sit empty after deploy
+# ============================================================
+# Pick generation takes 5-15 minutes to scan the 700+ ticker universe.
+# Without this background pre-warm, trade cycles fire on an empty cache
+# right after every deploy and open ZERO new trades until the picks
+# eventually populate. With this, the cache starts populating
+# immediately on container start, BEFORE any trade cycle runs.
+def _prewarm_picks_bg():
+    try:
+        import threading, time as _t
+        def _run():
+            try:
+                _t.sleep(15)  # let other startup tasks settle
+                logger.warning("PICKS PRE-WARM starting (background)")
+                from analysis.quant_engine import generate_quant_picks
+                picks = generate_quant_picks()
+                long_n = len(picks.get("long_picks", []))
+                short_n = len(picks.get("short_picks", []))
+                logger.warning(
+                    f"PICKS PRE-WARM complete: {long_n} longs, {short_n} shorts cached"
+                )
+            except Exception as _e:
+                logger.error(f"PICKS PRE-WARM error: {_e}")
+        threading.Thread(target=_run, daemon=True, name="picks-prewarm").start()
+        logger.info("Picks pre-warm thread started")
+    except Exception as e:
+        logger.error(f"Failed to start picks pre-warm: {e}")
+
+_prewarm_picks_bg()
+
+
 # --- RESET DAY: Close all positions, restore to yesterday's value ---
 # This runs ONCE on this deploy to undo today's damage and restart fresh.
 def _reset_day():
