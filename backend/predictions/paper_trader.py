@@ -1394,6 +1394,220 @@ def _per_position_quick_profit_lock(trade: dict, pnl_pct: float, vix: float = 20
         return False, ""
 
 
+def _per_position_quick_loss_cut(trade: dict, pnl_pct: float, vix: float = 20.0,
+                                  regime: str = "SIDEWAYS") -> tuple:
+    """Per-position dynamic LOSS-CUT — mirror of _per_position_quick_profit_lock.
+
+    Cuts a position immediately when the loss is statistically "too fast"
+    for the holding window. This catches:
+      - "Wrong from minute one" trades that gap against entry
+      - Catalyst trades where the thesis broke fast
+      - Options that decayed faster than expected
+
+    Same dynamic algorithm as the win-lock, mirrored for losses:
+
+      1. EXPECTED MOVE (sigma) from VIX:
+            expected_daily_pct = VIX / 16
+            expected_hours_pct = expected_daily_pct * sqrt(hours/6.5)
+
+      2. INSTRUMENT LEVERAGE:
+            Equity:  1.0    Option: 4.0
+
+      3. LOSS THRESHOLD:
+            cut when |loss_pct| >= K_loss * leverage * expected_hours_pct
+            K_loss derived from regime (mirror of K_sigma):
+              BULL    K_loss = 2.5  (less likely to revert, cut early)
+              BEAR    K_loss = 1.8  (very fast cut — bear losses snowball)
+              SIDEWAYS K_loss = 2.2
+
+      4. RISK-MULTIPLE CUT:
+            If loss exceeds 1.0R (full original stop distance) within
+            half the planned hold window, exit. The regular stop-loss
+            line will catch it eventually but this is FASTER.
+
+    Returns: (should_close: bool, reason: str)
+
+    SAFETY: only acts on NEGATIVE pnl_pct. Returns (False, "") on any
+    error so a bug here can never trigger spurious exits.
+    """
+    try:
+        import math
+        from datetime import datetime as _dt
+
+        # Only act on losses
+        if pnl_pct >= 0:
+            return False, ""
+
+        loss_pct = abs(pnl_pct)
+
+        # Hours held
+        try:
+            entry_dt = _dt.fromisoformat(trade.get("entry_date", ""))
+            hours_held = max(0.05, (_dt.now() - entry_dt).total_seconds() / 3600.0)
+        except Exception:
+            return False, ""
+
+        # DELIBERATE GUARD: never cut a position in the first 30 minutes.
+        # That window is dominated by entry slippage, bid/ask noise, and
+        # normal price discovery — not signal. Only after 30 min does a
+        # loss become statistically meaningful.
+        if hours_held < 0.5:
+            return False, ""
+
+        # VIX → expected move (volatility scales with sqrt(time))
+        try:
+            vix_f = float(vix or 20.0)
+            if vix_f <= 0 or vix_f > 200:
+                vix_f = 20.0
+        except Exception:
+            vix_f = 20.0
+        expected_daily_pct = vix_f / 16.0
+        expected_hours_pct = expected_daily_pct * math.sqrt(max(hours_held, 0.5) / 6.5)
+
+        # Instrument leverage
+        instr = (trade.get("instrument_type") or "equity").lower()
+        is_option = instr in ("call", "put")
+        leverage = 4.0 if is_option else 1.0
+
+        # ============================================================
+        # DYNAMIC, SELF-THINKING K_loss
+        # ============================================================
+        # Starts from a regime baseline, then adjusts based on 5 LIVE
+        # signals. Each signal nudges the engine to be more or less
+        # patient based on real conditions, not a hardcoded value.
+        #
+        # Higher k_loss = more patient (waits longer before cutting)
+        # Lower  k_loss = more aggressive (cuts losses faster)
+        reg = (regime or "SIDEWAYS").upper()
+        if reg == "BULL":
+            k_loss = 2.5
+            r_cut = 1.0
+        elif reg == "BEAR":
+            k_loss = 2.0
+            r_cut = 0.85
+        else:
+            k_loss = 2.3
+            r_cut = 0.95
+
+        signal_notes = []
+
+        # SIGNAL 1: Recent overall win rate
+        # Losing streak means our edge is dulled — cut losses faster
+        try:
+            from predictions.models import get_closed_trades
+            recent = get_closed_trades(limit=20) or []
+            if len(recent) >= 5:
+                wins = sum(1 for t in recent if (t.get("pnl_pct") or 0) > 0)
+                wr = wins / len(recent)
+                if wr < 0.30:
+                    k_loss *= 0.85
+                    signal_notes.append(f"low_wr={wr:.0%}")
+                elif wr > 0.55:
+                    k_loss *= 1.10
+                    signal_notes.append(f"hot_wr={wr:.0%}")
+        except Exception:
+            pass
+
+        # SIGNAL 2: Portfolio drawdown — cut faster when bleeding
+        try:
+            from predictions.models import get_portfolio_snapshots
+            snaps = get_portfolio_snapshots(days=30) or []
+            if len(snaps) >= 5:
+                vals = [float(s.get("total_value") or 0) for s in snaps if s.get("total_value")]
+                if vals:
+                    peak = max(vals)
+                    cur = vals[-1]
+                    dd = (peak - cur) / peak if peak > 0 else 0
+                    if dd > 0.08:
+                        k_loss *= 0.85
+                        signal_notes.append(f"drawdown={dd*100:.1f}%")
+                    elif dd < 0.02:
+                        k_loss *= 1.05
+                        signal_notes.append(f"shallow_dd={dd*100:.1f}%")
+        except Exception:
+            pass
+
+        # SIGNAL 3: Same-sector recent losses — cut faster on weak sectors
+        try:
+            from predictions.models import get_closed_trades
+            trade_sector = trade.get("sector", "")
+            if trade_sector and trade_sector != "Unknown":
+                recent = get_closed_trades(limit=30) or []
+                sector_recent = [t for t in recent if t.get("sector") == trade_sector]
+                if len(sector_recent) >= 3:
+                    sector_losses = sum(1 for t in sector_recent
+                                        if (t.get("pnl_pct") or 0) < 0)
+                    sector_loss_rate = sector_losses / len(sector_recent)
+                    if sector_loss_rate > 0.6:
+                        k_loss *= 0.88
+                        signal_notes.append(f"weak_sector={trade_sector[:10]}")
+        except Exception:
+            pass
+
+        # SIGNAL 4: VIX rising — cut faster in deteriorating conditions
+        try:
+            if vix_f >= 25:
+                k_loss *= 0.92
+                signal_notes.append(f"high_vix={vix_f:.0f}")
+        except Exception:
+            pass
+
+        # SIGNAL 5: Trade is already past half its planned hold window
+        # AND still losing — thesis isn't playing out, cut faster
+        try:
+            hold_days_p = float(trade.get("hold_duration_days") or 5)
+            if hours_held > (hold_days_p * 24 * 0.5):
+                k_loss *= 0.85
+                signal_notes.append(f"past_half_window")
+        except Exception:
+            pass
+
+        # Hard bounds so the multiplier stack can't make k_loss insane
+        k_loss = max(1.0, min(4.0, k_loss))
+
+        # Statistical cut threshold
+        sigma_threshold = k_loss * leverage * expected_hours_pct
+
+        # Risk-multiple cut threshold (uses trade's own stop distance)
+        risk_pct = None
+        risk_threshold = None
+        try:
+            entry_p = float(trade.get("entry_price") or 0)
+            stop_p = float(trade.get("stop_loss_price") or 0)
+            if entry_p > 0 and stop_p > 0:
+                risk_pct = abs(entry_p - stop_p) / entry_p * 100
+                risk_threshold = r_cut * risk_pct
+        except Exception:
+            pass
+        hold_days = float(trade.get("hold_duration_days") or 5)
+        hold_hours = hold_days * 24.0
+        risk_window_ok = hours_held < (hold_hours / 2.0)
+
+        ticker = trade.get("ticker", "?")
+        kind = "OPT" if is_option else "EQT"
+
+        # Statistical cut — loss is statistically extreme for the window
+        if loss_pct >= sigma_threshold:
+            return True, (
+                f"LOSS-CUT ({kind}): {ticker} -{loss_pct:.1f}% in {hours_held:.1f}h "
+                f">= sigma_cut {sigma_threshold:.1f}% "
+                f"(VIX={vix_f:.0f}, lev={leverage}x, k={k_loss}, regime={reg})"
+            )
+
+        # Risk-multiple cut — exceeded fraction of stop distance fast
+        if (risk_threshold is not None and loss_pct >= risk_threshold
+                and risk_window_ok):
+            return True, (
+                f"LOSS-CUT ({kind}): {ticker} -{loss_pct:.1f}% in {hours_held:.1f}h "
+                f">= {r_cut:.2f}R cut_threshold {risk_threshold:.1f}% "
+                f"(half hold window: {hold_hours/2:.1f}h, regime={reg})"
+            )
+
+        return False, ""
+    except Exception:
+        return False, ""
+
+
 def _cached_vix_for_winlock() -> float:
     """Light VIX getter for the per-position win-lock. Falls back to 20
     on any error so the lock still works. Uses a 5-minute process-local
@@ -2963,54 +3177,44 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # ============================================================
             # QUALITY-GATE SOFT RESIZER (does NOT block trades)
             # ============================================================
-            # Each failing gate multiplies position size by 0.85x. Three
-            # failures = 0.85^3 = 0.61x → still above POSITION_SIZE_MULT_FLOOR
-            # so trade still goes through, just at smaller size for poor
-            # entry quality. NEVER hard-rejects — preserves trade flow.
-            #
-            # All gates fail-open on data fetch errors so a Yahoo glitch
-            # never inadvertently shrinks every trade.
+            # Each failing gate multiplies position size by 0.85x. Worst
+            # case ~0.85^2 = 0.72 -> still above POSITION_SIZE_MULT_FLOOR
+            # so trade still goes through. NEVER hard-rejects.
+            # YFINANCE-FRIENDLY: only uses data already cached or cheap
+            # fast_info calls. The previous RSI gate triggered a fresh
+            # 3-month download per pick — removed to prevent rate limits.
             quality_mult = 1.0
             quality_notes = []
             try:
                 # Gate 1: ATR > 7% (extreme volatility — slippage risk)
+                # _calculate_stock_atr is already memoized via shared cache
                 _atr = _calculate_stock_atr(symbol, period=14)
                 if _atr > 0.07:
                     quality_mult *= 0.85
                     quality_notes.append(f"high_atr={_atr*100:.1f}%")
 
-                # Gate 2: Pre-market gap > 5% in pick direction (chasing)
+                # Gate 2: Gap chasing — uses fast_info (very cheap, single
+                # JSON read, no historical download). Fails open on any
+                # network error so a Yahoo blip never penalizes trade.
+                # Skip entirely when yfinance is in degraded state.
                 try:
-                    _t = yf.Ticker(symbol)
-                    _info = _t.fast_info
-                    _prev_close = float(_info.get("previousClose") or 0)
-                    if _prev_close > 0 and price > 0:
-                        _gap_pct = (price - _prev_close) / _prev_close * 100
-                        _gap_in_dir = _gap_pct if direction == "long" else -_gap_pct
-                        if _gap_in_dir > 5.0:
-                            quality_mult *= 0.85
-                            quality_notes.append(f"gap_chasing={_gap_in_dir:.1f}%")
-                except Exception:
-                    pass  # fail-open
-
-                # Gate 3: RSI extreme (overbought longs / oversold shorts)
-                try:
-                    _hist_df = yf.download(symbol, period="3mo", progress=False)
-                    if _hist_df is not None and len(_hist_df) > 14:
-                        _closes = _safe_col(_hist_df, "Close").dropna().values.astype(float)
-                        if len(_closes) >= 15:
-                            _diffs = np.diff(_closes[-15:])
-                            _gains = _diffs[_diffs > 0].sum()
-                            _losses = abs(_diffs[_diffs < 0].sum())
-                            if _losses > 0:
-                                _rs = _gains / _losses
-                                _rsi = 100 - (100 / (1 + _rs))
-                                if direction == "long" and _rsi > 80:
+                    from predictions.sentinels import yf_is_degraded, yf_record_failure
+                    if not yf_is_degraded():
+                        try:
+                            _t = yf.Ticker(symbol)
+                            _info = _t.fast_info
+                            _prev_close = float(_info.get("previousClose") or 0)
+                            if _prev_close > 0 and price > 0:
+                                _gap_pct = (price - _prev_close) / _prev_close * 100
+                                _gap_in_dir = _gap_pct if direction == "long" else -_gap_pct
+                                if _gap_in_dir > 5.0:
                                     quality_mult *= 0.85
-                                    quality_notes.append(f"rsi_overbought={_rsi:.0f}")
-                                elif direction == "short" and _rsi < 20:
-                                    quality_mult *= 0.85
-                                    quality_notes.append(f"rsi_oversold={_rsi:.0f}")
+                                    quality_notes.append(f"gap_chasing={_gap_in_dir:.1f}%")
+                        except Exception:
+                            try:
+                                yf_record_failure()
+                            except Exception:
+                                pass
                 except Exception:
                     pass  # fail-open
             except Exception:
@@ -4216,8 +4420,30 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 except Exception as _e:
                     logger.error(f"PER-POS WIN-LOCK close {ticker} failed: {_e}")
                 continue  # Move to next trade — this one is closed
+
+            # Mirror cutter: dynamic, self-thinking loss-cut
+            # Only fires on losses; uses 5 live signals (win-rate, drawdown,
+            # sector streak, VIX level, time-in-trade) to decide patience.
+            _lc_should, _lc_reason = _per_position_quick_loss_cut(
+                trade, _wl_pnl, vix=_winlock_vix, regime=regime
+            )
+            if _lc_should:
+                try:
+                    _smart_close_trade(trade, current_price)
+                    closed.append({
+                        "ticker": ticker, "direction": direction,
+                        "instrument_type": instrument_type,
+                        "entry_price": entry_price,
+                        "exit_price": round(current_price, 2),
+                        "pnl_pct": round(_wl_pnl, 2),
+                        "reason": _lc_reason,
+                    })
+                    logger.warning(_lc_reason)
+                except Exception as _e:
+                    logger.error(f"PER-POS LOSS-CUT close {ticker} failed: {_e}")
+                continue
         except Exception as _e:
-            logger.debug(f"per-position winlock soft-fail {ticker}: {_e}")
+            logger.debug(f"per-position winlock/losscut soft-fail {ticker}: {_e}")
 
         # --- OPTIONS EXIT CHECK (before equity logic) ---
         if instrument_type in ("call", "put"):

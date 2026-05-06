@@ -330,8 +330,49 @@ def reset_circuit_breaker(reason: str = "manual"):
 # ============================================================
 
 _yf_call_times = deque()
+_yf_failure_times = deque()             # rolling window of consecutive failures
+_yf_degraded_until = [0.0]              # epoch time the yf-degraded state expires
 YF_BUDGET_PER_MIN = 60                  # max yfinance calls per 60s
 YF_THROTTLE_SLEEP = 1.0                 # extra sleep when over budget
+YF_DEGRADED_FAIL_WINDOW = 120           # 2 min rolling window
+YF_DEGRADED_FAIL_THRESHOLD = 5          # 5 fails in 2 min => degraded
+YF_DEGRADED_DURATION = 600              # back off for 10 min when degraded
+
+
+def yf_record_failure():
+    """Track yfinance failures so we can detect degraded state.
+    Called from any code that catches a yfinance exception."""
+    try:
+        now = time.time()
+        _yf_failure_times.append(now)
+        cutoff = now - YF_DEGRADED_FAIL_WINDOW
+        while _yf_failure_times and _yf_failure_times[0] < cutoff:
+            _yf_failure_times.popleft()
+        if len(_yf_failure_times) >= YF_DEGRADED_FAIL_THRESHOLD:
+            _yf_degraded_until[0] = now + YF_DEGRADED_DURATION
+            try:
+                from predictions.audit import audit_log
+                audit_log("yfinance_degraded",
+                          old_value="ok", new_value="degraded",
+                          caller="yf_record_failure",
+                          reason=f"{len(_yf_failure_times)} fails in {YF_DEGRADED_FAIL_WINDOW}s")
+            except Exception:
+                pass
+            logger.warning(
+                f"YFINANCE DEGRADED: {len(_yf_failure_times)} failures in "
+                f"{YF_DEGRADED_FAIL_WINDOW}s — backing off for {YF_DEGRADED_DURATION//60} min"
+            )
+    except Exception:
+        pass
+
+
+def yf_is_degraded() -> bool:
+    """True when yfinance is in degraded state and non-critical features
+    should skip Yahoo calls + use cached/fallback data instead."""
+    try:
+        return time.time() < _yf_degraded_until[0]
+    except Exception:
+        return False
 
 
 def yfinance_budget_check() -> dict:
