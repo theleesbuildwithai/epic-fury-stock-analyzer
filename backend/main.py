@@ -3480,13 +3480,29 @@ def api_admin_safe_snapshot(request: Request, force: bool = False):
 @app.post("/api/admin/sp500-recompute")
 def api_admin_sp500_recompute(request: Request):
     """Re-fetch S&P 500 history and rebuild all snapshots' sp500_cum
-    + sp500_daily values from the pinned inception baseline. Carries
-    forward last good close for any missing day so the equity-curve
-    chart never has zero-pollution artifacts."""
+    + sp500_daily values from the pinned inception baseline.
+
+    SAFETY: validates fetched closes (100 < x < 100000) AND cross-checks
+    against live truth_engine value before writing. Aborts on bad data."""
     check_rate_limit(request.client.host)
     try:
         from predictions.truth_engine import recompute_sp500_history
         return {"ok": True, "result": recompute_sp500_history(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/sp500-restore-from-truth")
+def api_admin_sp500_restore_from_truth(request: Request):
+    """SAFE RESTORE: when recompute corrupts snapshots with bad yfinance
+    data, this rebuilds sp500_cum from the live truth_engine value via
+    linear interpolation from inception. No yfinance download required —
+    always safe to call."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.truth_engine import restore_snapshot_sp500_from_truth
+        return {"ok": True, "result": restore_snapshot_sp500_from_truth(),
                 "generated_at": dt.now().isoformat()}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}

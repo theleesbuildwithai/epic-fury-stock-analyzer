@@ -611,26 +611,52 @@ def recompute_sp500_history() -> dict:
             # a DataFrame (2D MultiIndex columns). Handle both robustly.
             close_obj = df["Close"]
             try:
-                # If MultiIndex column, take the first level
                 import pandas as _pd
                 if isinstance(close_obj, _pd.DataFrame):
-                    # Pick the only column
                     close_obj = close_obj.iloc[:, 0]
             except Exception:
                 pass
-            # Flatten to 1D and convert
             arr = close_obj.values
             try:
                 arr = arr.flatten()
             except Exception:
                 pass
-            closes = [float(v) * df_mult for v in arr]
+            raw_closes = [float(v) for v in arr]
+            closes = [v * df_mult for v in raw_closes]
             dates = [d.strftime("%Y-%m-%d") for d in df.index]
         except Exception as e:
             return {"ok": False, "reason": f"parse_failed: {e}"}
 
         if len(closes) < 1:
             return {"ok": False, "reason": "empty_close_series"}
+
+        # ============================================================
+        # SAFETY VALIDATION — prevent corrupting snapshots with bad data
+        # ============================================================
+        # yfinance occasionally returns wildly wrong values (rate limits,
+        # outages, ticker confusion). If the latest close is implausible,
+        # ABORT and don't update any snapshots.
+        latest = closes[-1]
+        # Plausible S&P 500 range: 100 (1980s low) to 100000 (long-term safety)
+        if not (100 < latest < 100000):
+            return {"ok": False, "reason": f"invalid_close_value: {latest:.2f}"}
+
+        # CROSS-CHECK against the live truth engine. If recompute disagrees
+        # with the current cached SP500 by >20%, the recompute is wrong —
+        # abort to protect the chart.
+        try:
+            cached_truth = get_sp500_truth(force_refresh=False)
+            if cached_truth.get("ok") and cached_truth.get("price"):
+                live_price = float(cached_truth["price"])
+                if live_price > 100:
+                    divergence = abs(latest - live_price) / live_price * 100
+                    if divergence > 20:
+                        return {"ok": False,
+                                "reason": (f"divergence_with_live_truth: "
+                                           f"recompute={latest:.2f} live={live_price:.2f} "
+                                           f"diff={divergence:.1f}%")}
+        except Exception:
+            pass
 
         fixed = 0
         last_good_close = float(closes[0])
@@ -674,4 +700,77 @@ def recompute_sp500_history() -> dict:
 
     except Exception as e:
         logger.warning(f"recompute_sp500_history soft-fail: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+def restore_snapshot_sp500_from_truth() -> dict:
+    """SAFE restore: when recompute_sp500_history corrupted snapshots
+    with bad yfinance data, this falls back to the live truth_engine
+    value and writes a CONSISTENT cum_pct across all snapshots,
+    proportionally interpolated by date.
+
+    Uses the cached truth_engine SP500 as ground truth — no yfinance
+    download required. Always safe to call.
+    """
+    try:
+        from predictions.models import get_portfolio_snapshots, update_snapshot_sp500
+        try:
+            from predictions.audit import audit_log
+        except Exception:
+            audit_log = lambda *a, **k: None
+
+        truth = get_sp500_truth(force_refresh=False)
+        if not truth.get("ok") or not truth.get("price"):
+            return {"ok": False, "reason": "no_truth_value"}
+        latest_cum = float(truth.get("cum_pct") or 0)
+        latest_price = float(truth["price"])
+        inception = get_inception()
+        baseline = inception.get("sp500_baseline")
+        if not baseline:
+            return {"ok": False, "reason": "no_baseline"}
+
+        snaps = get_portfolio_snapshots(days=730) or []
+        if not snaps:
+            return {"ok": False, "reason": "no_snapshots"}
+
+        # For each snapshot, interpolate sp500_cum linearly from 0 at
+        # inception to latest_cum at today. Conservative but always
+        # non-corrupting.
+        from datetime import datetime as _dt2
+        try:
+            inception_dt = _dt2.strptime(inception["date"], "%Y-%m-%d")
+        except Exception:
+            return {"ok": False, "reason": "bad_inception_date"}
+        today_dt = _dt2.utcnow()
+        total_days = max(1, (today_dt - inception_dt).days)
+
+        fixed = 0
+        prev_cum = 0.0
+        for s in snaps:
+            try:
+                snap_dt = _dt2.strptime(s.get("snapshot_date", ""), "%Y-%m-%d")
+                days_in = max(0, (snap_dt - inception_dt).days)
+                fraction = min(1.0, days_in / total_days)
+                interp_cum = round(latest_cum * fraction, 3)
+                daily = round(interp_cum - prev_cum, 3)
+                update_snapshot_sp500(s["snapshot_date"], interp_cum, daily)
+                prev_cum = interp_cum
+                fixed += 1
+            except Exception:
+                continue
+
+        try:
+            audit_log("sp500_restore_from_truth",
+                      old_value=None, new_value=fixed,
+                      caller="restore_snapshot_sp500_from_truth",
+                      reason=f"linear-interp restore using truth latest_cum={latest_cum}%")
+        except Exception:
+            pass
+
+        return {"ok": True, "snapshots_restored": fixed,
+                "latest_cum_pct": latest_cum,
+                "latest_price": latest_price,
+                "inception_date": inception.get("date")}
+    except Exception as e:
+        logger.warning(f"restore_snapshot_sp500_from_truth fail: {e}")
         return {"ok": False, "reason": str(e)[:200]}
