@@ -607,7 +607,24 @@ def recompute_sp500_history() -> dict:
             return {"ok": False, "reason": "all_sources_failed"}
 
         try:
-            closes = df["Close"].values.astype(float) * df_mult
+            # yfinance can return df["Close"] as either a Series (1D) or
+            # a DataFrame (2D MultiIndex columns). Handle both robustly.
+            close_obj = df["Close"]
+            try:
+                # If MultiIndex column, take the first level
+                import pandas as _pd
+                if isinstance(close_obj, _pd.DataFrame):
+                    # Pick the only column
+                    close_obj = close_obj.iloc[:, 0]
+            except Exception:
+                pass
+            # Flatten to 1D and convert
+            arr = close_obj.values
+            try:
+                arr = arr.flatten()
+            except Exception:
+                pass
+            closes = [float(v) * df_mult for v in arr]
             dates = [d.strftime("%Y-%m-%d") for d in df.index]
         except Exception as e:
             return {"ok": False, "reason": f"parse_failed: {e}"}

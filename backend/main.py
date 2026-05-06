@@ -414,6 +414,25 @@ except Exception as e:
 # Previously, sp500_cumulative_return_pct was computed from only 1 month of
 # S&P data, making the equity curve's S&P benchmark look wrong. This backfills
 # correct cumulative values from inception for all historical snapshots.
+#
+# PERMANENT FIX (2026-05-06): also runs the truth_engine recompute on
+# every container start so any garbage values written by old code paths
+# are scrubbed automatically. This makes the SP500 chart self-healing —
+# no admin call required after future deploys.
+try:
+    from predictions.truth_engine import recompute_sp500_history as _truth_recompute
+    _r = _truth_recompute()
+    if _r.get("ok"):
+        logger.warning(
+            f"SP500 STARTUP RECOMPUTE: {_r.get('snapshots_updated', 0)} snapshots "
+            f"rebuilt from inception {_r.get('inception_date')} "
+            f"(latest sp500_cum={_r.get('latest_sp_cum_pct')}%)"
+        )
+    else:
+        logger.warning(f"SP500 startup recompute soft-fail: {_r.get('reason')}")
+except Exception as _e:
+    logger.warning(f"SP500 startup recompute error (non-fatal): {_e}")
+
 try:
     import os as _os3
     _sp_backfill_flag = _os3.path.join(_os3.path.dirname(__file__), ".sp500_backfill_v1_done")

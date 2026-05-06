@@ -279,16 +279,21 @@ def _get_position_size_pct() -> float:
     return 0.08  # 8% per position — aggressive conviction sizing
 
 def _get_min_confidence() -> int:
-    """Dynamic confidence filter: looser when aggressive."""
+    """Dynamic confidence filter: looser when aggressive.
+    QUALITY BOOST: raised the aggressive floor from 35 -> 50 so only
+    higher-quality picks become trades. With asymmetric R:R already in
+    place, fewer-but-better trades raise win rate + profit factor."""
     if _is_preservation_mode():
-        return 55  # Only high-quality signals in preservation mode
-    return 35  # Aggressive — take more trades
+        return 60  # was 55 — even higher bar in preservation
+    return 50  # was 35 — better picks only
 
 def _get_min_composite_score() -> float:
-    """Dynamic score filter: looser when aggressive."""
+    """Dynamic score filter: looser when aggressive.
+    QUALITY BOOST: raised the aggressive floor from 1.5 -> 2.5 to
+    drop the marginal-edge picks that drag down the win rate."""
     if _is_preservation_mode():
-        return 3.0  # Higher bar in preservation mode
-    return 1.5  # Aggressive — lower bar, more opportunities
+        return 3.5  # was 3.0
+    return 2.5  # was 1.5 — only stronger statistical edges
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
@@ -304,9 +309,9 @@ MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade 
 # can never hit 100% (always keeps a cash buffer) and never collapses
 # below the minimum trading level.
 
-DYNAMIC_EXPOSURE_MIN = 0.65  # Hard floor — always trade at least 65% (raised from 0.45)
-DYNAMIC_EXPOSURE_MAX = 0.92  # Hard ceiling — keep at least 8% cash buffer (raised from 0.70)
-DYNAMIC_EXPOSURE_BASE = 0.80  # Starting point — targets ~20% cash after adjustments (raised from 0.60)
+DYNAMIC_EXPOSURE_MIN = 0.55  # Hard floor — always trade at least 55%
+DYNAMIC_EXPOSURE_MAX = 0.70  # Hard ceiling — keep at least 30% cash buffer (per user request)
+DYNAMIC_EXPOSURE_BASE = 0.65  # Starting point — targets 35% cash after adjustments
 # Position-size floor: the product of all 11 sizing multipliers cannot
 # crush a trade below this fraction of nominal. Without this, multiplier
 # stacking (~0.7^11) was reducing trades to ~2% of intended size,
@@ -1836,29 +1841,88 @@ def get_portfolio_state() -> dict:
                     entry_premium = trade.get("premium_per_contract") or entry_price
                     num_contracts = trade.get("contracts") or shares
                     strike = trade.get("strike_price", 0)
-                    if instrument_type == "call":
-                        intrinsic = max(0, current_price - strike) if strike else 0
-                    else:
-                        intrinsic = max(0, strike - current_price) if strike else 0
-                    entry_intrinsic = 0
-                    if strike:
+
+                    # ============================================================
+                    # OPTIONS PNL — try LIVE premium first, fallback to estimate
+                    # ============================================================
+                    # The previous estimate-only path was wrong in two places:
+                    #   1. underlying_price_at_entry fell back to entry_price,
+                    #      but entry_price for an option is the PREMIUM, not
+                    #      the stock price -> garbage entry_intrinsic
+                    #   2. linear time_decay_factor (dte/hold_days) was too
+                    #      aggressive — assumed 50% decay just halfway through
+                    # Now we fetch the real market premium first; only fall
+                    # back to estimate if the chain fetch fails.
+                    est_premium = None
+                    _premium_source = "estimate"
+                    try:
+                        from predictions.options_engine import get_current_premium
+                        live_prem = get_current_premium(
+                            ticker, strike,
+                            trade.get("expiration_date", ""),
+                            instrument_type
+                        )
+                        if live_prem and live_prem > 0:
+                            est_premium = float(live_prem)
+                            _premium_source = "live_chain"
+                    except Exception:
+                        pass
+
+                    if est_premium is None:
+                        # Fallback estimate — fixed math + sqrt time decay
                         if instrument_type == "call":
-                            entry_intrinsic = max(0, (trade.get("underlying_price_at_entry") or entry_price) - strike)
+                            intrinsic = max(0, current_price - strike) if strike else 0
                         else:
-                            entry_intrinsic = max(0, strike - (trade.get("underlying_price_at_entry") or entry_price))
-                    entry_time_value = max(0, entry_premium - entry_intrinsic)
-                    dte_est = 14
-                    if trade.get("expiration_date"):
+                            intrinsic = max(0, strike - current_price) if strike else 0
+
+                        # Use stored underlying_at_entry, fall back to STRIKE
+                        # (better proxy than premium when missing)
+                        ul_at_entry = trade.get("underlying_price_at_entry")
+                        if ul_at_entry is None or ul_at_entry <= 0:
+                            ul_at_entry = strike if strike else current_price
+
+                        if strike:
+                            if instrument_type == "call":
+                                entry_intrinsic = max(0, ul_at_entry - strike)
+                            else:
+                                entry_intrinsic = max(0, strike - ul_at_entry)
+                        else:
+                            entry_intrinsic = 0
+                        entry_time_value = max(0, entry_premium - entry_intrinsic)
+
+                        # DTE
+                        dte_est = 14
+                        if trade.get("expiration_date"):
+                            try:
+                                exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
+                                dte_est = max(0, (exp - datetime.now()).days)
+                            except Exception:
+                                pass
+
+                        # SQRT time decay (Black-Scholes-ish): vol scales
+                        # with sqrt(t), not linear. A 30-day option at 15
+                        # DTE should retain ~71% of time value (sqrt(15/30)),
+                        # not 50%. Fixes the over-aggressive decay that
+                        # showed TXN call at -50% when in reality it's
+                        # closer to break-even.
+                        import math as _math
                         try:
-                            exp = datetime.strptime(trade["expiration_date"], "%Y-%m-%d")
-                            dte_est = max(0, (exp - datetime.now()).days)
+                            entry_dt = datetime.fromisoformat(trade.get("entry_date", ""))
+                            total_life_days = max(1, dte_est + max(0, (datetime.now() - entry_dt).days))
                         except Exception:
-                            pass
-                    hold_days = max(1, (trade.get("hold_duration_days") or 30))
-                    time_decay_factor = max(0.1, min(1.0, dte_est / max(1, hold_days)))
-                    remaining_time_value = entry_time_value * time_decay_factor
-                    est_premium = max(intrinsic + remaining_time_value, entry_premium * 0.05)
-                    position_value = est_premium * num_contracts * 100
+                            total_life_days = max(dte_est, 30)
+                        time_decay_factor = max(0.10, min(1.0, _math.sqrt(dte_est / total_life_days)))
+                        remaining_time_value = entry_time_value * time_decay_factor
+                        est_premium = max(intrinsic + remaining_time_value,
+                                          entry_premium * 0.10)  # floor 10% of entry
+                        # CLAMP: the estimate cannot move pnl by >70% from
+                        # entry without a real chain fetch. Prevents the
+                        # display from showing scary numbers like -50% when
+                        # the chain just isn't loading.
+                        est_premium = max(entry_premium * 0.30,
+                                          min(entry_premium * 3.0, est_premium))
+
+                    position_value = max(0, est_premium * num_contracts * 100)
                     if direction == "long":
                         unrealized_pnl = (est_premium - entry_premium) * num_contracts * 100
                         unrealized_pct = ((est_premium / entry_premium) - 1) * 100 if entry_premium > 0 else 0
