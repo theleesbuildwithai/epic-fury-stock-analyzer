@@ -1341,6 +1341,46 @@ scheduler.add_job(
     misfire_grace_time=3600,
 )
 
+
+# ============================================================
+# PICKS ROLLOUT — fresh picks ready at 7am Pacific (10am ET)
+# ============================================================
+# Forces a full quant_picks regeneration at exactly 10:00 AM ET
+# (7:00 AM Pacific) so the cache is hot and stocks are ready to
+# trade at the user's "7am west" trading day start. Without this,
+# the first cycle of the morning could hit a stale cache or trigger
+# a slow first-time generation while trades are waiting to fire.
+def _picks_rollout():
+    """Force-refresh quant_picks at 10am ET so the trading day
+    starts with fresh signals. Runs Mon-Fri only."""
+    try:
+        logger.warning("PICKS ROLLOUT (7am PT / 10am ET): regenerating quant_picks")
+        from analysis.quant_engine import generate_quant_picks
+        picks = generate_quant_picks()
+        long_n = len(picks.get("long_picks", []))
+        short_n = len(picks.get("short_picks", []))
+        pairs_n = len(picks.get("pairs_trades", []))
+        logger.warning(
+            f"PICKS ROLLOUT complete: {long_n} longs, {short_n} shorts, "
+            f"{pairs_n} pairs ready for the trading day"
+        )
+    except Exception as e:
+        logger.error(f"PICKS ROLLOUT error: {e}")
+
+
+scheduler.add_job(
+    _picks_rollout,
+    "cron",
+    day_of_week="mon-fri",
+    hour=10,
+    minute=0,
+    id="picks_rollout",
+    name="Picks Rollout (10am ET / 7am PT trading day start)",
+    max_instances=1,
+    misfire_grace_time=1800,
+    replace_existing=True,
+)
+
 # Also run pre-market scan on Sundays at 8pm ET (futures open Sunday 6pm ET)
 # This catches weekend news before Monday
 scheduler.add_job(
