@@ -2136,6 +2136,29 @@ def _prewarm_picks_bg():
         def _run():
             try:
                 _t.sleep(15)  # let other startup tasks settle
+
+                # FAST PATH: try S3 restore first — populates cache in <1s
+                # vs the 5-15min full regen. Trades can start firing while
+                # the fresh background gen runs to replace.
+                try:
+                    from predictions.enhancements import restore_picks_from_s3
+                    s3_restore = restore_picks_from_s3()
+                    if s3_restore.get("ok") and s3_restore.get("picks"):
+                        from analysis.quant_engine import _quant_cache
+                        _quant_cache["quant_picks"] = {
+                            "data": s3_restore["picks"],
+                            "time": _t.time(),
+                        }
+                        logger.warning(
+                            f"PICKS S3 RESTORE: {s3_restore.get('long_count')} longs + "
+                            f"{s3_restore.get('short_count')} shorts loaded from S3 backup"
+                        )
+                except Exception as _e:
+                    logger.debug(f"S3 restore skipped (non-fatal): {_e}")
+
+                # Always run a fresh background regen to replace the cache
+                # with new data (S3 might be hours stale). This populates
+                # both the in-memory cache AND saves a fresh S3 backup.
                 logger.warning("PICKS PRE-WARM starting (background)")
                 from analysis.quant_engine import generate_quant_picks
                 picks = generate_quant_picks()
@@ -2152,6 +2175,75 @@ def _prewarm_picks_bg():
         logger.error(f"Failed to start picks pre-warm: {e}")
 
 _prewarm_picks_bg()
+
+
+# ============================================================
+# BLACK SWAN PROTECTION JOB (every 15 min during market hours)
+# ============================================================
+# If SPY drops >2% intraday, automatically tighten stops on winning
+# positions to break-even. Only TIGHTENS stops, never closes positions,
+# never blocks new entries. Trades keep flowing — gains just get locked
+# in faster during crashes.
+def _black_swan_check_job():
+    try:
+        from predictions.enhancements import apply_black_swan_protection
+        result = apply_black_swan_protection()
+        if result.get("is_swan"):
+            logger.warning(
+                f"BLACK SWAN: SPY {result.get('spy_pct_change'):+.2f}% — "
+                f"tightened {result.get('stops_tightened', 0)} stops "
+                f"(severity={result.get('severity')})"
+            )
+    except Exception as e:
+        logger.debug(f"black_swan_check_job (non-fatal): {e}")
+
+scheduler.add_job(
+    _black_swan_check_job,
+    "interval",
+    minutes=15,
+    id="black_swan_check",
+    name="Black Swan Detector (every 15 min)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=600,
+    replace_existing=True,
+)
+
+
+# ============================================================
+# END-OF-DAY REPORT JOB (4:30 PM ET, weekdays)
+# ============================================================
+# Generates a daily summary at market close. Read-only — never affects
+# trading. Stored in trading_state for retrieval via /api/eod-report.
+def _eod_report_job():
+    try:
+        from predictions.enhancements import generate_eod_report
+        report = generate_eod_report()
+        portfolio = report.get("portfolio", {})
+        today = report.get("today_trades", {})
+        logger.warning(
+            f"EOD REPORT: total=${portfolio.get('total_value'):,.2f} "
+            f"return={portfolio.get('cum_return_pct')}% "
+            f"trades_closed={today.get('total_closed', 0)} "
+            f"win_rate={today.get('win_rate', 0)}% "
+            f"pnl=${today.get('total_pnl_dollars', 0):+,.2f}"
+        )
+    except Exception as e:
+        logger.error(f"eod_report_job error: {e}")
+
+scheduler.add_job(
+    _eod_report_job,
+    "cron",
+    day_of_week="mon-fri",
+    hour=16,
+    minute=30,
+    id="eod_report",
+    name="End-of-Day Summary (4:30 PM ET)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=3600,
+    replace_existing=True,
+)
 
 
 # --- RESET DAY: Close all positions, restore to yesterday's value ---
@@ -3535,6 +3627,94 @@ def api_admin_sp500_restore_from_truth(request: Request):
     try:
         from predictions.truth_engine import restore_snapshot_sp500_from_truth
         return {"ok": True, "result": restore_snapshot_sp500_from_truth(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
+# ENHANCEMENT ENDPOINTS — all read-only / safe-mutate, never block trades
+# ============================================================
+
+@app.get("/api/truth/trading-return")
+def api_truth_trading_return(request: Request):
+    """Compute fund return EXCLUDING manual cash adjustments. Shows what
+    your trading strategy actually earned vs the displayed cum_return."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.enhancements import compute_true_trading_return
+        return {"ok": True, "result": compute_true_trading_return(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/black-swan-status")
+def api_black_swan_status(request: Request):
+    """Live SPY drawdown check. Reports swan severity but does NOT
+    block trades. Read-only."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.enhancements import check_black_swan
+        return {"ok": True, "result": check_black_swan(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/choppy-window")
+def api_choppy_window(request: Request):
+    """Returns whether we're in the open/close 15-min chop window.
+    INFORMATIONAL ONLY — not wired into trade execution. Trades fire
+    in all market windows."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.enhancements import is_choppy_window
+        return {"ok": True, "result": is_choppy_window(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/eod-report")
+def api_eod_report(request: Request):
+    """Latest end-of-day report (regenerated daily at 4:30 PM ET)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.enhancements import generate_eod_report
+        # Always regenerate fresh on request — cheap, accurate
+        return {"ok": True, "result": generate_eod_report(),
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/picks-cache-status")
+def api_picks_cache_status(request: Request):
+    """Show whether the picks cache is in S3 and how old."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.enhancements import restore_picks_from_s3
+        # Just check, don't restore
+        result = restore_picks_from_s3(max_age_hours=999)
+        return {"ok": True, "result": {
+            "s3_available": result.get("ok"),
+            "long_count": result.get("long_count", 0),
+            "short_count": result.get("short_count", 0),
+            "saved_at": (result.get("picks") or {}).get("_saved_at"),
+        }, "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/black-swan-protect")
+def api_admin_black_swan_protect(request: Request):
+    """Manually trigger black-swan protection (tightens stops on
+    winners). Safe — only adjusts stops in the favorable direction."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.enhancements import apply_black_swan_protection
+        return {"ok": True, "result": apply_black_swan_protection(),
                 "generated_at": dt.now().isoformat()}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}

@@ -3940,6 +3940,17 @@ def generate_quant_picks() -> dict:
             except Exception:
                 pass
 
+        # S3 BACKUP — second layer of cache durability. If the container
+        # restarts and the local disk is wiped, S3 still has the picks.
+        # Wrapped in try/except — never breaks pick gen even if S3 down.
+        try:
+            from predictions.enhancements import save_picks_to_s3
+            _s3_save = save_picks_to_s3({k: v for k, v in result.items() if k != "_price_data"})
+            if _s3_save.get("ok"):
+                logger.info(f"Picks S3 backup saved: {_s3_save.get('bytes')} bytes")
+        except Exception as _e:
+            logger.debug(f"S3 picks backup failed (non-fatal): {_e}")
+
     return result
 
 
