@@ -2220,10 +2220,11 @@ def _smart_close_trade(trade: dict, equity_price: float):
 def _get_current_prices(symbols: list) -> dict:
     """Get current prices for a list of symbols (batch download).
 
-    THREE-TIER SAFETY NET — separate infrastructure on every tier so a
+    FOUR-TIER SAFETY NET — separate infrastructure on every tier so a
     single-vendor outage cannot blind the portfolio.
 
-      TIER 1: Yahoo Finance batch (primary — gives close prices)
+      TIER 0: Finnhub (PRIMARY when FINNHUB_API_KEY env var set; skipped otherwise)
+      TIER 1: Yahoo Finance batch (legacy primary — fills what Finnhub missed)
       TIER 2: CNBC quote API (fills any symbols Yahoo dropped)
       TIER 3: Stooq CSV API (catches anything CNBC also missed)
 
@@ -2236,26 +2237,50 @@ def _get_current_prices(symbols: list) -> dict:
         return {}
     prices = {}
 
-    # TIER 1: Yahoo Finance
-    _throttle()
+    # TIER 0: Finnhub (only when API key configured — fail-safe no-op otherwise)
+    # Finnhub gives a guaranteed 60/min budget vs Yahoo's silent random
+    # rate-limiting. If the key is unset, finnhub.is_enabled() returns
+    # False and this entire block is skipped — existing behavior preserved.
     try:
-        df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
-        if df is not None and not df.empty:
-            for sym in symbols:
-                try:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        if sym in df.columns.get_level_values(0):
-                            close = df[(sym, "Close")].dropna()
+        from predictions.finnhub_adapter import is_enabled as _fh_enabled, get_prices_batch as _fh_batch
+        if _fh_enabled():
+            try:
+                fh_prices = _fh_batch(symbols)
+                if fh_prices:
+                    prices.update(fh_prices)
+                    logger.info(
+                        f"FINNHUB PRICES (T0): {len(fh_prices)}/{len(symbols)} "
+                        f"symbols served from Finnhub"
+                    )
+            except Exception as _fh_e:
+                logger.debug(f"Finnhub T0 fetch failed (non-fatal): {_fh_e}")
+    except Exception:
+        pass  # finnhub_adapter import failure → skip silently
+
+    # TIER 1: Yahoo Finance — fills any symbol Finnhub missed (or all if disabled).
+    # Only fetches symbols not already filled by Finnhub. This both saves
+    # yfinance budget AND prevents Yahoo overwriting fresher Finnhub values.
+    yahoo_symbols = [s for s in symbols if s not in prices]
+    if yahoo_symbols:
+        _throttle()
+        try:
+            df = yf.download(yahoo_symbols, period="5d", progress=False, group_by="ticker")
+            if df is not None and not df.empty:
+                for sym in yahoo_symbols:
+                    try:
+                        if isinstance(df.columns, pd.MultiIndex):
+                            if sym in df.columns.get_level_values(0):
+                                close = df[(sym, "Close")].dropna()
+                                if len(close) > 0:
+                                    prices[sym] = float(close.iloc[-1])
+                        elif len(yahoo_symbols) == 1:
+                            close = df["Close"].dropna()
                             if len(close) > 0:
                                 prices[sym] = float(close.iloc[-1])
-                    elif len(symbols) == 1:
-                        close = df["Close"].dropna()
-                        if len(close) > 0:
-                            prices[sym] = float(close.iloc[-1])
-                except Exception:
-                    continue
-    except Exception as e:
-        logger.warning(f"Yahoo price batch failed for {len(symbols)} symbols: {e}")
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"Yahoo price batch failed for {len(yahoo_symbols)} symbols: {e}")
 
     # TIER 2: CNBC for any symbol Yahoo dropped.
     # cnbc_get_prices() is hardened: returns {} on any error, filters bad data,

@@ -3749,6 +3749,30 @@ def api_eod_report(request: Request):
         return {"ok": False, "reason": str(e)[:200]}
 
 
+@app.get("/api/finnhub-status")
+def api_finnhub_status(request: Request):
+    """Show whether Finnhub is enabled (FINNHUB_API_KEY set) + budget usage.
+    If enabled, also runs a live SPY quote to confirm the key works."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.finnhub_adapter import get_status, get_quote
+        status = get_status()
+        if status.get("enabled"):
+            try:
+                test = get_quote("SPY")
+                status["live_test_spy"] = {
+                    "price": test.get("price"),
+                    "ok": bool(test.get("price")),
+                    "cached": test.get("cached"),
+                }
+            except Exception as _e:
+                status["live_test_spy"] = {"ok": False, "error": str(_e)[:120]}
+        return {"ok": True, "result": status,
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 @app.get("/api/picks-cache-status")
 def api_picks_cache_status(request: Request):
     """Show whether the picks cache is in S3 and how old."""
