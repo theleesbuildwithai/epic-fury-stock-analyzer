@@ -3147,6 +3147,36 @@ def ibkr_snapshot_endpoint(request: Request, refresh: bool = False):
         return {"available": False, "error": str(e)}
 
 
+# Process-local response cache for slow read-only endpoints. Prevents
+# multiple dashboard refreshes from each triggering a 5-15s recomputation.
+# All cached values regenerate on TTL expiry; failures fall through to a
+# fresh compute (so a stale cached error never persists).
+_response_cache = {}
+_RESPONSE_CACHE_TTL = 30  # seconds — balances freshness vs latency
+
+def _cached_response(key: str, fn, ttl: int = _RESPONSE_CACHE_TTL):
+    """Return cached response if fresh, else compute + cache. Fail-safe."""
+    import time as _t
+    try:
+        now = _t.time()
+        entry = _response_cache.get(key)
+        if entry and (now - entry["ts"]) < ttl:
+            cached = dict(entry["data"])
+            cached["_cache_age_seconds"] = round(now - entry["ts"], 1)
+            return cached
+        data = fn()
+        # Only cache if the result looks valid (not an error placeholder)
+        if isinstance(data, dict):
+            _response_cache[key] = {"data": data, "ts": now}
+        return data
+    except Exception:
+        # On any error, return a fresh compute uncached
+        try:
+            return fn()
+        except Exception as _e:
+            return {"ok": False, "reason": str(_e)[:200]}
+
+
 @app.get("/api/system-thinking")
 def system_thinking(request: Request):
     """Single endpoint that returns everything the algorithm is "thinking"
@@ -3167,8 +3197,21 @@ def system_thinking(request: Request):
     SAFETY: every section wrapped in try/except. A failure in one
     section returns a placeholder for that section without breaking
     the overall response. Never raises.
+
+    CACHED: 30-second response cache so dashboard refreshes don't each
+    trigger 5-15s of yfinance calls. Cache failures fall through to a
+    fresh compute.
     """
     check_rate_limit(request.client.host)
+
+    # Fast path: serve from cache if fresh
+    import time as _t_st
+    _cached = _response_cache.get("system_thinking")
+    if _cached and (_t_st.time() - _cached["ts"]) < _RESPONSE_CACHE_TTL:
+        out = dict(_cached["data"])
+        out["_cache_age_seconds"] = round(_t_st.time() - _cached["ts"], 1)
+        return out
+
     result = {"generated_at": dt.now().isoformat()}
 
     # ----- Dynamic exposure + TACO (run live to compute now) -----
@@ -3288,6 +3331,11 @@ def system_thinking(request: Request):
     except Exception as _e:
         result["flags"] = {"error": str(_e)}
 
+    # Cache the response for 30s so dashboard refreshes are fast
+    try:
+        _response_cache["system_thinking"] = {"data": result, "ts": _t_st.time()}
+    except Exception:
+        pass
     return result
 
 
@@ -3639,12 +3687,24 @@ def api_admin_sp500_restore_from_truth(request: Request):
 @app.get("/api/truth/trading-return")
 def api_truth_trading_return(request: Request):
     """Compute fund return EXCLUDING manual cash adjustments. Shows what
-    your trading strategy actually earned vs the displayed cum_return."""
+    your trading strategy actually earned vs the displayed cum_return.
+    Cached 30s to avoid repeated heavy iterations on dashboard refresh."""
     check_rate_limit(request.client.host)
+    import time as _t_tr
+    _cached = _response_cache.get("trading_return")
+    if _cached and (_t_tr.time() - _cached["ts"]) < _RESPONSE_CACHE_TTL:
+        out = dict(_cached["data"])
+        out["_cache_age_seconds"] = round(_t_tr.time() - _cached["ts"], 1)
+        return out
     try:
         from predictions.enhancements import compute_true_trading_return
-        return {"ok": True, "result": compute_true_trading_return(),
-                "generated_at": dt.now().isoformat()}
+        result = {"ok": True, "result": compute_true_trading_return(),
+                  "generated_at": dt.now().isoformat()}
+        try:
+            _response_cache["trading_return"] = {"data": result, "ts": _t_tr.time()}
+        except Exception:
+            pass
+        return result
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}
 
