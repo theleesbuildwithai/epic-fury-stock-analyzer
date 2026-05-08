@@ -2263,6 +2263,48 @@ _prewarm_picks_bg()
 
 
 # ============================================================
+# COLD-START TRADE KICK — fire one cycle 2 min after container boot
+# ============================================================
+# Without this, after every container restart trades wait up to 5 min
+# (smart_monitor's interval) before the first cycle fires. With this,
+# the FIRST cycle fires within 2 min of boot regardless of scheduler
+# state. Critical for Monday-morning openings — trades start within
+# ~2 min of the market open instead of 5-10 min.
+#
+# Wait 120s so picks pre-warm has at least started (S3 restore is <1s,
+# fresh regen takes longer but cycle can fire on stale picks).
+def _cold_start_trade_kick():
+    try:
+        import threading, time as _t_cs
+        def _run():
+            try:
+                _t_cs.sleep(120)
+                # Only fire if scheduler hasn't already run a cycle
+                last_run = auto_trade_stats.get("last_run")
+                if last_run:
+                    try:
+                        from datetime import datetime as _dt_cs
+                        last_dt = _dt_cs.fromisoformat(last_run)
+                        age_min = (_dt_cs.now() - last_dt).total_seconds() / 60
+                        if age_min < 5:
+                            logger.info("COLD-START KICK: skipping — scheduler already ran a cycle recently")
+                            return
+                    except Exception:
+                        pass
+                logger.warning("COLD-START KICK: firing first trade cycle (2 min after boot)")
+                _smart_trade_monitor()
+                logger.warning("COLD-START KICK: first trade cycle complete")
+            except Exception as _e:
+                logger.error(f"COLD-START KICK error: {_e}")
+        threading.Thread(target=_run, daemon=True, name="cold-start-trade-kick").start()
+        logger.info("Cold-start trade kick thread armed (fires in 120s)")
+    except Exception as e:
+        logger.error(f"Cold-start kick failed to start: {e}")
+
+_cold_start_trade_kick()
+
+
+# ============================================================
 # BLACK SWAN PROTECTION JOB (every 15 min during market hours)
 # ============================================================
 # If SPY drops >2% intraday, automatically tighten stops on winning
@@ -2550,17 +2592,44 @@ def search_stocks(request: Request, q: str = ""):
     return {"results": results}
 
 
+# Per-ticker 5-min cache for analyze endpoint. With the deterministic
+# Monte Carlo seed, the same call returns the same result anyway, but
+# this avoids re-running the heavy compute on dashboard refreshes.
+_analyze_cache = {}
+_ANALYZE_CACHE_TTL = 300  # 5 min — refreshes 5x per market hour
+
 @app.get("/api/analyze/{ticker}")
 def analyze_stock(request: Request, ticker: str, period: str = "1y"):
-    """Full stock analysis — the main endpoint."""
+    """Full stock analysis — the main endpoint.
+
+    CACHED: per-ticker 5-min cache. With the deterministic Monte Carlo
+    seed (rentech_advanced.py), same ticker on same day already gives
+    same result; this just makes refreshes instant instead of 2-5s
+    recomputes. Cache failures fall through to fresh compute.
+    """
     check_rate_limit(request.client.host)
     clean_ticker = validate_ticker(ticker)
     if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
         raise HTTPException(status_code=400, detail="Invalid period")
+
+    # Cache key includes period so different periods cache separately
+    import time as _t_an
+    cache_key = f"{clean_ticker}:{period}"
+    cached = _analyze_cache.get(cache_key)
+    if cached and (_t_an.time() - cached["ts"]) < _ANALYZE_CACHE_TTL:
+        result = dict(cached["data"])
+        result["_cache_age_seconds"] = round(_t_an.time() - cached["ts"], 1)
+        return result
+
     try:
         report = generate_full_report(clean_ticker, period)
         if "error" in report:
             raise HTTPException(status_code=404, detail="Stock not found")
+        # Cache successful result
+        try:
+            _analyze_cache[cache_key] = {"data": report, "ts": _t_an.time()}
+        except Exception:
+            pass
         return report
     except HTTPException:
         raise

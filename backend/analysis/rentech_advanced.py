@@ -910,6 +910,27 @@ def monte_carlo_price_simulation(ticker: str, horizon_days: int = 20,
         p_minus5 = float(np.mean(final_prices < S0 * 0.95))
         p_minus10 = float(np.mean(final_prices < S0 * 0.90))
 
+        # OUTLIER REJECTION — clamp the bull/bear bands to plausible ranges
+        # for the time horizon. Without this, low-volume stocks with sparse
+        # data could produce 50%+ moves over 1-day horizons, scaring users
+        # with "97% bull / 7% bull" wild swings. Cap at horizon-scaled
+        # historical 99th percentile to keep forecasts realistic.
+        # Daily expected move ≈ sigma (annualized vol / sqrt(252))
+        try:
+            max_move_pct = min(0.50, sigma * np.sqrt(horizon_days / 252.0) * 3.0)
+            # Clamp p5/p95 to within max_move_pct of S0
+            p5 = max(p5, S0 * (1 - max_move_pct))
+            p95 = min(p95, S0 * (1 + max_move_pct))
+            # Probabilities of extreme moves should be near zero if we clamped
+            if max_move_pct < 0.05:
+                p_plus5 = min(p_plus5, 0.10)
+                p_minus5 = min(p_minus5, 0.10)
+            if max_move_pct < 0.10:
+                p_plus10 = min(p_plus10, 0.05)
+                p_minus10 = min(p_minus10, 0.05)
+        except Exception:
+            pass  # outlier clamp must never break the simulation
+
         # VaR and CVaR (at 95% confidence) on returns
         returns = (final_prices - S0) / S0
         var_95 = float(-np.percentile(returns, 5))  # negate: VaR is a positive loss
