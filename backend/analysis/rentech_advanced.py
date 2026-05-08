@@ -877,7 +877,15 @@ def monte_carlo_price_simulation(ticker: str, horizon_days: int = 20,
 
         # Vectorized GBM paths: shape (n_paths, horizon_days)
         # S_t = S_{t-1} * exp((mu - 0.5*sigma^2)*dt + sigma*sqrt(dt)*Z)
-        rng = np.random.default_rng(int(time.time()) % (2**31))
+        # DETERMINISTIC SEED: ticker + today's date so the same ticker on
+        # the same day produces IDENTICAL forecasts. Without this, every
+        # call to analyze AMAT returned different random results, flipping
+        # the recommendation between Strong Buy and Strong Sell. The seed
+        # rolls daily so forecasts naturally update without being random.
+        from datetime import datetime as _dt_seed
+        _seed_str = f"{ticker}_{_dt_seed.utcnow().strftime('%Y-%m-%d')}_{horizon_days}"
+        _seed = abs(hash(_seed_str)) % (2**31)
+        rng = np.random.default_rng(_seed)
         shocks = rng.standard_normal(size=(n_paths, horizon_days))
         drift = (mu - 0.5 * sigma ** 2) * dt
         diffusion = sigma * np.sqrt(dt) * shocks

@@ -2039,6 +2039,91 @@ except Exception as _sched_err:
     # User can call /api/trigger-trade-cycle manually.
 
 
+# ============================================================
+# CRITICAL SCHEDULER WATCHDOG — detects dead scheduler + recovers
+# ============================================================
+# A separate Python thread that runs every 5 min and checks:
+#   1. last_scan_attempted is fresh (within last 15 min)
+#   2. status is not stuck on "trading" for >30 min
+# If either fails, force-runs _smart_trade_monitor() directly so trades
+# fire even if APScheduler died. This prevents the
+# "scheduler claims running, last_run was 34 hours ago" failure mode.
+def _scheduler_health_watchdog():
+    """Runs forever in a daemon thread. Detects dead scheduler + recovers."""
+    import threading, time as _t_w
+    from datetime import datetime as _dt_w, timedelta as _td_w
+
+    while True:
+        try:
+            _t_w.sleep(300)  # check every 5 min
+
+            # Health check 1: last_scan_attempted must be recent
+            last_scan = auto_trade_stats.get("last_scan_attempted")
+            stuck_status = auto_trade_stats.get("status")
+            now = _dt_w.now()
+
+            scan_stale = False
+            if last_scan:
+                try:
+                    last_dt = _dt_w.fromisoformat(last_scan)
+                    age_min = (now - last_dt).total_seconds() / 60
+                    if age_min > 15:
+                        scan_stale = True
+                        logger.warning(
+                            f"WATCHDOG: last_scan_attempted is {age_min:.1f}min old "
+                            f"(stuck status='{stuck_status}') — forcing direct monitor call"
+                        )
+                except Exception:
+                    pass
+
+            # Health check 2: status stuck on "trading" for too long
+            stuck_trading = False
+            last_run = auto_trade_stats.get("last_run")
+            if stuck_status == "trading" and last_run:
+                try:
+                    lr_dt = _dt_w.fromisoformat(last_run)
+                    if (now - lr_dt).total_seconds() / 60 > 30:
+                        stuck_trading = True
+                        logger.warning(
+                            f"WATCHDOG: status='trading' but last_run was "
+                            f"{(now - lr_dt).total_seconds()/60:.1f}min ago — clearing stuck state"
+                        )
+                        # Clear the stuck status so next cycle can fire
+                        auto_trade_stats["status"] = "running"
+                except Exception:
+                    pass
+
+            if scan_stale or stuck_trading:
+                # Force-run smart_monitor in a separate thread (so any hang
+                # here doesn't block the watchdog from continuing)
+                try:
+                    threading.Thread(
+                        target=_smart_trade_monitor,
+                        daemon=True,
+                        name=f"watchdog-monitor-{int(_t_w.time())}",
+                    ).start()
+                    logger.warning("WATCHDOG: force-spawned _smart_trade_monitor thread")
+                except Exception as _e:
+                    logger.error(f"WATCHDOG: failed to spawn monitor: {_e}")
+        except Exception as _e:
+            logger.error(f"WATCHDOG outer loop error (will continue): {_e}")
+            try:
+                _t_w.sleep(60)
+            except Exception:
+                pass
+
+try:
+    import threading as _wd_threading
+    _wd_threading.Thread(
+        target=_scheduler_health_watchdog,
+        daemon=True,
+        name="scheduler-health-watchdog",
+    ).start()
+    logger.warning("SCHEDULER HEALTH WATCHDOG started — will detect + recover dead scheduler")
+except Exception as _wd_e:
+    logger.error(f"Failed to start scheduler health watchdog: {_wd_e}")
+
+
 # --- IBKR S3 SNAPSHOT PUSHER (only runs on EC2) ---
 # When IBKR_PUSH_SNAPSHOT=true, start a background thread that uploads the
 # IBKR account state to S3 every N seconds. App Runner reads from that S3
@@ -2763,27 +2848,65 @@ def ai_analyst(request: Request, q: str = ""):
 # ============================================================
 
 @app.get("/api/quant-picks")
-def quant_picks(request: Request):
-    """Get quantitative LONG/SHORT picks with regime, macro, and factor breakdown.
-    Returns cached data instantly. If cache is cold, returns empty picks and triggers background generation."""
+def quant_picks(request: Request, force_refresh: bool = False):
+    """Get quantitative LONG/SHORT picks. Returns cached data instantly.
+
+    AUTO-REFRESH: if cache is stale (>1 hour OR caller passed
+    force_refresh=true), spawns a BACKGROUND thread to regenerate. The
+    current request returns the existing (stale) cache immediately so
+    the API never blocks; the next call gets the fresh data.
+
+    Without this, picks could sit stale for 35+ hours (the in-memory
+    cache TTL only refreshes on calls to generate_quant_picks() — if
+    nothing called it, stale data persisted forever).
+    """
     check_rate_limit(request.client.host)
     try:
-        from analysis.quant_engine import _quant_cache
-        # If cache exists, return it instantly
-        if "quant_picks" in _quant_cache:
-            import time as _time
-            cache_entry = _quant_cache["quant_picks"]
-            cache_age = _time.time() - cache_entry["time"]
+        from analysis.quant_engine import _quant_cache, generate_quant_picks
+        import time as _time
+
+        cache_entry = _quant_cache.get("quant_picks")
+        cache_age = (_time.time() - cache_entry["time"]) if cache_entry else None
+
+        # Stale-cache or force_refresh: trigger background regen
+        STALE_TTL_SEC = 3600  # 1 hour
+        needs_refresh = force_refresh or (cache_age is None) or (cache_age > STALE_TTL_SEC)
+        if needs_refresh:
+            try:
+                import threading
+                # Only spawn one background regen at a time
+                global _picks_regen_in_progress
+                _in_progress = globals().get('_picks_regen_in_progress', False)
+                if not _in_progress:
+                    globals()['_picks_regen_in_progress'] = True
+                    def _bg_regen():
+                        try:
+                            logger.warning(
+                                f"PICKS BG REGEN: cache_age={cache_age}s force={force_refresh} — regenerating in background"
+                            )
+                            generate_quant_picks()
+                            logger.warning("PICKS BG REGEN: complete")
+                        except Exception as _e:
+                            logger.error(f"PICKS BG REGEN failed: {_e}")
+                        finally:
+                            globals()['_picks_regen_in_progress'] = False
+                    threading.Thread(target=_bg_regen, daemon=True, name="picks-regen").start()
+            except Exception as _e:
+                logger.debug(f"Background regen spawn failed (non-fatal): {_e}")
+
+        # Always return current cache (even if stale) so the API responds fast
+        if cache_entry:
             result = cache_entry["data"]
-            result["cache_age_seconds"] = round(cache_age)
-            # Strip internal data that can't be JSON serialized
+            result["cache_age_seconds"] = round(cache_age) if cache_age else 0
+            result["regen_triggered"] = needs_refresh
             return {k: v for k, v in result.items() if not k.startswith("_")}
-        # No cache — return empty picks (the scheduler will populate it soon)
+
         return {
             "regime": {"regime": "LOADING", "description": "Analyzing 500+ stocks..."},
             "long_picks": [],
             "short_picks": [],
             "cache_status": "cold",
+            "regen_triggered": True,
             "message": "Quant engine is analyzing 500+ stocks. Data will be available after the next trade cycle (runs every few minutes).",
         }
     except Exception as e:

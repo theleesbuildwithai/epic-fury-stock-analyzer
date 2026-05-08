@@ -308,9 +308,9 @@ MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade 
 # can never hit 100% (always keeps a cash buffer) and never collapses
 # below the minimum trading level.
 
-DYNAMIC_EXPOSURE_MIN = 0.55  # Hard floor — always trade at least 55%
-DYNAMIC_EXPOSURE_MAX = 0.70  # Hard ceiling — keep at least 30% cash buffer (per user request)
-DYNAMIC_EXPOSURE_BASE = 0.65  # Starting point — targets 35% cash after adjustments
+DYNAMIC_EXPOSURE_MIN = 0.65  # Hard floor — always trade at least 65%
+DYNAMIC_EXPOSURE_MAX = 0.80  # Hard ceiling — 70-80% deployed in good markets (raised from 0.70)
+DYNAMIC_EXPOSURE_BASE = 0.75  # Starting point — targets 25% cash buffer (raised from 0.65)
 # Position-size floor: the product of all 11 sizing multipliers cannot
 # crush a trade below this fraction of nominal. Without this, multiplier
 # stacking (~0.7^11) was reducing trades to ~2% of intended size,
