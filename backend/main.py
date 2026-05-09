@@ -5109,6 +5109,90 @@ def mistake_analysis(request: Request):
         raise HTTPException(status_code=500, detail="Failed to analyze mistakes")
 
 
+# ============================================================
+#  STOCK LEARNING (Level 1) — per-ticker historical hit rates
+# ============================================================
+
+@app.get("/api/stock-learning/leaderboard")
+def stock_learning_leaderboard(request: Request, mode: str = "best",
+                                limit: int = 20, min_trades: int = 5,
+                                lookback_days: int = 90):
+    """Top performers (mode='best') or biggest blind spots (mode='worst')."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.stock_learning import get_leaderboard
+        if mode not in ("best", "worst"):
+            mode = "best"
+        return get_leaderboard(limit=int(limit), mode=mode,
+                               min_trades=int(min_trades),
+                               lookback_days=int(lookback_days))
+    except Exception as e:
+        logger.error(f"Stock learning leaderboard error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/stock-learning/{ticker}")
+def stock_learning_ticker(ticker: str, request: Request, lookback_days: int = 90):
+    """Per-ticker historical stats + confidence adjustment factor."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.stock_learning import get_stock_stats
+        return get_stock_stats(ticker, lookback_days=int(lookback_days))
+    except Exception as e:
+        logger.error(f"Stock learning ticker error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/stock-learning-backfill")
+def stock_learning_backfill(request: Request, limit: int = 5000):
+    """One-shot import of existing closed trades into the learning log."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.stock_learning import backfill_from_closed_trades
+        return backfill_from_closed_trades(limit=int(limit))
+    except Exception as e:
+        logger.error(f"Stock learning backfill error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
+#  BACKTEST (Level 2) — historical strategy replay
+# ============================================================
+
+@app.get("/api/backtest/summary")
+def backtest_summary(request: Request):
+    """Cached backtest result snapshot for the dashboard."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest import get_backtest_summary
+        return get_backtest_summary()
+    except Exception as e:
+        logger.error(f"Backtest summary error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest/run")
+def backtest_run(request: Request, days: int = 365, top_n: int = 10,
+                  hold_days: int = 5, stop_pct: float = 0.04,
+                  take_pct: float = 0.10, position_pct: float = 0.08):
+    """Run momentum-strategy backtest (heavy: may take 30-90s)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest import run_backtest as run_strategy_backtest
+        from datetime import datetime as _dt, timedelta as _td
+        end = _dt.utcnow().date().isoformat()
+        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        return run_strategy_backtest(
+            start_date=start, end_date=end,
+            top_n=int(top_n), hold_days=int(hold_days),
+            stop_pct=float(stop_pct), take_pct=float(take_pct),
+            position_pct=float(position_pct),
+        )
+    except Exception as e:
+        logger.error(f"Backtest run error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 @app.get("/api/system-intelligence")
 @app.get("/api/intelligence-status")
 def system_intelligence(request: Request):

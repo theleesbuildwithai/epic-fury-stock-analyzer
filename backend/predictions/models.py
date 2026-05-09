@@ -222,6 +222,13 @@ def init_db():
     except Exception:
         pass
 
+    # Initialize stock_learning table — soft-fails on any error
+    try:
+        from predictions.stock_learning import init_stock_learning_table
+        init_stock_learning_table()
+    except Exception:
+        pass
+
 
 def get_trading_state(key: str, default: str = "0") -> str:
     """Get a persistent trading state value."""
@@ -695,6 +702,22 @@ def close_paper_trade(trade_id: int, exit_price: float):
         conn.execute("UPDATE paper_cash SET cash = cash + ? WHERE id=1", (round(cash_returned, 2),))
         conn.commit()
     conn.close()
+
+    # ===== STOCK LEARNING HOOK (soft-fails) =====
+    # Append outcome to stock_learning_log for per-ticker hit-rate analysis.
+    # Wrapped in try/except — failure here must NEVER break trade close.
+    try:
+        if trade:
+            from predictions.stock_learning import record_trade_outcome
+            record_trade_outcome(
+                ticker=trade["ticker"],
+                direction=trade["direction"],
+                signal_score=trade["signal_score"] or 0,
+                pnl_pct=round(pnl_pct, 3),
+                won=(pnl_pct > 0),
+            )
+    except Exception:
+        pass
 
 
 def get_options_exposure() -> dict:
