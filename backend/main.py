@@ -1400,6 +1400,55 @@ scheduler.add_job(
     replace_existing=True,
 )
 
+
+# ============================================================
+# AUTO-FIX FEEDBACK LOOP — runs Sunday 2am ET (no trading happening)
+# ============================================================
+# Once a week, replays a 180-day momentum strategy across 100 historical
+# tickers, identifies losers, and applies safe per-ticker confidence
+# penalties. Penalties auto-expire in 30 days so the system can recover.
+# Sunday 2am ET chosen because:
+#   - markets closed (no contention with live trading cycle)
+#   - early morning = low Yahoo Finance load = fast download
+#   - runs BEFORE Monday's picks rollout so penalties take effect
+#     for the new trading week
+def _auto_fix_weekly():
+    """Weekly closed-loop self-tuning. Soft-fails — never breaks
+    other scheduled jobs."""
+    try:
+        logger.warning("AUTO-FIX WEEKLY: starting feedback loop (180d backtest, 100 tickers)")
+        from predictions.auto_fixer import run_feedback_loop
+        result = run_feedback_loop(days=180, top_n=10, hold_days=5, apply=True)
+        if result.get("ok"):
+            applied = (result.get("applied") or {}).get("applied_count", 0)
+            flagged = (result.get("insights") or {}).get("summary", {}).get("flagged", 0)
+            evaluated = (result.get("insights") or {}).get("summary", {}).get("total_evaluated", 0)
+            bt = result.get("backtest_summary", {})
+            logger.warning(
+                f"AUTO-FIX WEEKLY complete: backtest alpha={bt.get('alpha_vs_sp500_pct')}%, "
+                f"sharpe={bt.get('sharpe')}, evaluated={evaluated}, "
+                f"flagged={flagged}, applied={applied} penalties"
+            )
+        else:
+            logger.warning(f"AUTO-FIX WEEKLY skipped: {result.get('reason')}")
+    except Exception as e:
+        # Never crash the scheduler — auto-fix failure is non-fatal
+        logger.error(f"AUTO-FIX WEEKLY error (non-fatal): {e}")
+
+
+scheduler.add_job(
+    _auto_fix_weekly,
+    "cron",
+    day_of_week="sun",
+    hour=2,
+    minute=0,
+    id="auto_fix_weekly",
+    name="Auto-Fix Weekly (Sunday 2am ET — replay 100 tickers, apply penalties)",
+    max_instances=1,
+    misfire_grace_time=7200,  # 2hr — okay if container restarted around the slot
+    replace_existing=True,
+)
+
 # Also run pre-market scan on Sundays at 8pm ET (futures open Sunday 6pm ET)
 # This catches weekend news before Monday
 scheduler.add_job(

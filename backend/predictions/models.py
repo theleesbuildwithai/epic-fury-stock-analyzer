@@ -229,6 +229,102 @@ def init_db():
     except Exception:
         pass
 
+    # One-shot phantom-PnL scrub (idempotent — only runs if matching trades exist).
+    # Detects + neutralizes the DD/EMN/DXC class of trades where options were
+    # closed as equity, which inflated PnL by tens of thousands of dollars.
+    # Soft-fails so a scrub error cannot block startup.
+    try:
+        _scrub_phantom_trades_v2()
+    except Exception as _e:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(f"phantom scrub v2 soft-fail at init: {_e}")
+
+
+def _scrub_phantom_trades_v2() -> dict:
+    """One-shot, idempotent scrub of phantom-PnL closed trades that
+    slipped past the 15x ceiling validator (DD/EMN/DXC class).
+
+    Detection criteria — ALL must hold:
+      - status = 'closed'  (only previously-credited trades)
+      - instrument_type IS NULL OR 'equity'  (options excluded)
+      - entry_price > 0 AND entry_price < 20  (suspicious low entry)
+      - exit_price > 3 * entry_price  (>=3x gain on equity is impossible
+        in days — almost always a units mismatch)
+
+    Action when matched:
+      1. Set status='closed_flat_validator_v2', zero pnl_dollars + pnl_pct
+      2. Reverse the bogus cash credit via adjust_cash(bypass_sentinel=True)
+         with a clear audit-log reason
+
+    NEVER raises (caller wraps in try/except too) — soft-fail returns
+    {ok: False, reason: ...}.
+    """
+    import logging as _lg
+    _logger = _lg.getLogger(__name__)
+    try:
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                """SELECT id, ticker, entry_price, exit_price, pnl_dollars
+                   FROM paper_trades
+                   WHERE status = 'closed'
+                     AND (instrument_type IS NULL OR instrument_type = 'equity')
+                     AND entry_price > 0
+                     AND entry_price < 20
+                     AND exit_price > 3.0 * entry_price"""
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return {"ok": True, "scrubbed": 0, "phantom_pnl": 0.0}
+
+        ids = [r["id"] for r in rows]
+        tickers = [r["ticker"] for r in rows]
+        phantom_pnl = sum(float(r["pnl_dollars"] or 0) for r in rows)
+
+        # Phase 1 — zero the trade PnLs (mark as scrubbed)
+        conn = get_db()
+        try:
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"""UPDATE paper_trades SET
+                       status='closed_flat_validator_v2',
+                       pnl_dollars=0, pnl_pct=0
+                    WHERE id IN ({placeholders})""",
+                ids
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Phase 2 — reverse the bogus cash credit. bypass_sentinel because
+        # this is a trusted recovery operation; reason is audit-logged.
+        try:
+            adjust_cash(
+                delta=-float(phantom_pnl),
+                caller="scrub_phantom_v2",
+                reason=(f"reversed ${phantom_pnl:,.2f} phantom-PnL credit from "
+                        f"{len(ids)} bogus trades: {tickers}"),
+                bypass_sentinel=True,
+            )
+        except Exception as _ce:
+            _logger.error(
+                f"SCRUB v2: trades zeroed but cash reversal failed: {_ce}. "
+                f"Cash is over-credited by ${phantom_pnl:,.2f} until manual fix."
+            )
+
+        _logger.warning(
+            f"SCRUB v2: marked {len(ids)} phantom trades as "
+            f"closed_flat_validator_v2, removed ${phantom_pnl:,.2f} bogus cash, "
+            f"tickers={tickers}"
+        )
+        return {"ok": True, "scrubbed": len(ids), "phantom_pnl": phantom_pnl,
+                "tickers": tickers, "trade_ids": ids}
+    except Exception as e:
+        _logger.warning(f"_scrub_phantom_trades_v2 soft-fail: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
 
 def get_trading_state(key: str, default: str = "0") -> str:
     """Get a persistent trading state value."""
@@ -619,17 +715,40 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 _reject_reason = ""
                 # TIGHTENED 30 -> 15 after the OXY incident (entry $2.01,
                 # exit $58.71 = 29.2x slipped through under the 30x ceiling).
-                # 15x catches the bug while still allowing legitimate options
-                # moonshots up to ~14x in a single trade.
-                if ratio > 15:
-                    _reject = True
-                    _reject_reason = f"exit/entry ratio {ratio:.2f}x exceeds 15x ceiling"
-                elif ratio < (1 / 15) and not _is_option:
-                    _reject = True
-                    _reject_reason = (
-                        f"exit/entry ratio {ratio:.4f} below 1/15 floor "
-                        f"for non-options (likely units mismatch)"
-                    )
+                # TIGHTENED v3 (2026-05-09 after DD/EMN/DXC incident — phantom
+                # PnL totalling $40k slipped through the 15x ceiling because
+                # the bogus trades were 3.5x to 14.85x):
+                #   - OPTIONS: 15x ceiling preserved (legitimate options
+                #     moonshots can hit 10-14x)
+                #   - EQUITY: NEW 3x ceiling. No legitimate equity trade
+                #     gains 3x in days. Anything more is a units mismatch
+                #     (option premium misclassified as equity price).
+                #   - EQUITY low-price guard: entry < $20 + ratio > 2x is
+                #     overwhelmingly an options trade with NULL instrument_type.
+                if _is_option:
+                    if ratio > 15:
+                        _reject = True
+                        _reject_reason = f"option exit/entry ratio {ratio:.2f}x exceeds 15x ceiling"
+                else:
+                    # EQUITY path
+                    if ratio > 3:
+                        _reject = True
+                        _reject_reason = (
+                            f"equity exit/entry ratio {ratio:.2f}x exceeds 3x ceiling "
+                            f"(real equities don't 3x in days — likely units mismatch)"
+                        )
+                    elif entry < 20 and ratio > 2:
+                        _reject = True
+                        _reject_reason = (
+                            f"equity entry ${entry:.2f} (low) + ratio {ratio:.2f}x "
+                            f"strongly suggests options misclassified as equity"
+                        )
+                    elif ratio < (1 / 15):
+                        _reject = True
+                        _reject_reason = (
+                            f"equity ratio {ratio:.4f} below 1/15 floor "
+                            f"(stock dropped 93%+ — likely units mismatch)"
+                        )
 
                 if _reject:
                     _logger.error(
