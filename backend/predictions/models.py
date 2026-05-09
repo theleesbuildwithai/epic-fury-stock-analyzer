@@ -286,7 +286,6 @@ def _scrub_phantom_trades_v2() -> dict:
                           OR status NOT IN ('open',
                                             'closed_flat_validator',
                                             'closed_flat_validator_v2'))
-                     AND (instrument_type IS NULL OR instrument_type = 'equity')
                      AND entry_price > 0
                      AND (exit_price > 10.0 * entry_price
                           OR pnl_pct > 500)"""

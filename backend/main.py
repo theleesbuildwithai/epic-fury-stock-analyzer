@@ -5305,6 +5305,116 @@ def backtest_run(request: Request, days: int = 365, top_n: int = 10,
 #  in production (App Runner caching or import-time race).
 # ============================================================
 
+@app.post("/api/admin/force-scrub-trades")
+def admin_force_scrub_trades(request: Request, ids: str):
+    """SURGICAL ESCAPE HATCH: scrub specific trade IDs by name.
+    Bypasses all SQL filters — you tell it WHICH trades, it scrubs
+    them and reverses the cash. Use this when the auto-scrub SQL
+    misses something or when you need precise control.
+
+    Usage: POST /api/admin/force-scrub-trades?ids=379,382,388
+
+    Each trade is:
+      1. Status set to 'closed_flat_validator_v2'
+      2. pnl_dollars + pnl_pct zeroed
+      3. The original pnl_dollars subtracted from cash via
+         adjust_cash(bypass_sentinel=True) with audit-log reason
+
+    Skips trades already in scrubbed status (idempotent)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_db, adjust_cash
+        try:
+            id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+        except Exception:
+            return {"ok": False, "reason": "ids must be comma-separated integers"}
+        if not id_list:
+            return {"ok": False, "reason": "no_ids_provided"}
+        if len(id_list) > 100:
+            return {"ok": False, "reason": "max_100_ids_per_call"}
+
+        # Phase 1 — fetch + validate
+        conn = get_db()
+        try:
+            placeholders = ",".join("?" * len(id_list))
+            rows = conn.execute(
+                f"""SELECT id, ticker, entry_price, exit_price,
+                          pnl_dollars, pnl_pct, status, instrument_type
+                   FROM paper_trades WHERE id IN ({placeholders})""",
+                id_list,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return {"ok": False, "reason": "no_trades_found_for_ids"}
+
+        # Skip trades already in scrubbed status
+        already_scrubbed = []
+        to_scrub = []
+        for r in rows:
+            if r["status"] in ("closed_flat_validator", "closed_flat_validator_v2"):
+                already_scrubbed.append({"id": r["id"], "ticker": r["ticker"]})
+            else:
+                to_scrub.append(dict(r))
+
+        if not to_scrub:
+            return {"ok": True, "scrubbed": 0,
+                    "already_scrubbed": already_scrubbed,
+                    "note": "all provided IDs were already scrubbed"}
+
+        # Phase 2 — zero PnL + update status
+        scrub_ids = [r["id"] for r in to_scrub]
+        phantom_pnl = sum(float(r["pnl_dollars"] or 0) for r in to_scrub)
+        conn = get_db()
+        try:
+            phs = ",".join("?" * len(scrub_ids))
+            conn.execute(
+                f"""UPDATE paper_trades SET
+                       status='closed_flat_validator_v2',
+                       pnl_dollars=0, pnl_pct=0
+                    WHERE id IN ({phs})""",
+                scrub_ids,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Phase 3 — reverse the bogus cash credit
+        cash_reversal_ok = True
+        cash_reversal_error = None
+        try:
+            adjust_cash(
+                delta=-float(phantom_pnl),
+                caller="force_scrub_by_id",
+                reason=(f"manual scrub of {len(scrub_ids)} trades "
+                        f"(${phantom_pnl:,.2f}): {[r['ticker'] for r in to_scrub]}"),
+                bypass_sentinel=True,
+            )
+        except Exception as _ce:
+            cash_reversal_ok = False
+            cash_reversal_error = str(_ce)[:200]
+            logger.error(f"force_scrub cash reversal failed: {_ce}")
+
+        return {
+            "ok": True,
+            "scrubbed": len(scrub_ids),
+            "scrubbed_trades": [
+                {"id": r["id"], "ticker": r["ticker"],
+                 "instrument_type": r["instrument_type"],
+                 "phantom_pnl": float(r["pnl_dollars"] or 0)}
+                for r in to_scrub
+            ],
+            "total_phantom_pnl": round(phantom_pnl, 2),
+            "cash_reversed": cash_reversal_ok,
+            "cash_reversal_error": cash_reversal_error,
+            "already_scrubbed": already_scrubbed,
+        }
+    except Exception as e:
+        logger.error(f"force-scrub-trades error: {e}")
+        return {"ok": False, "reason": str(e)[:300]}
+
+
 @app.get("/api/admin/inspect-trade/{ticker}")
 def admin_inspect_trade(ticker: str, request: Request):
     """Dump ALL raw fields for a specific ticker from paper_trades.
@@ -5350,7 +5460,6 @@ def admin_scrub_phantom_diagnostic(request: Request):
                           OR status NOT IN ('open',
                                             'closed_flat_validator',
                                             'closed_flat_validator_v2'))
-                     AND (instrument_type IS NULL OR instrument_type = 'equity')
                      AND entry_price > 0
                      AND (exit_price > 10.0 * entry_price
                           OR pnl_pct > 500)
