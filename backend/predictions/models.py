@@ -241,23 +241,28 @@ def init_db():
 
 
 def _scrub_phantom_trades_v2() -> dict:
-    """One-shot, idempotent scrub of phantom-PnL closed trades that
-    slipped past the 15x ceiling validator (DD/EMN/DXC class).
+    """One-shot, idempotent scrub of UNAMBIGUOUSLY phantom-PnL trades.
 
-    Detection criteria — ALL must hold:
-      - exit_price IS NOT NULL (i.e. trade is actually closed)
-      - status NOT IN already-scrubbed states (open, closed_flat_validator,
-        closed_flat_validator_v2)  — NULL status counts as eligible
-      - instrument_type IS NULL OR 'equity'  (options excluded)
-      - entry_price > 0 AND entry_price < 20  (suspicious low entry)
-      - exit_price > 3 * entry_price  (>=3x gain on equity is impossible
-        in days — almost always a units mismatch)
+    v4 TIGHTENED criteria — only catch what NO legitimate trade
+    (equity OR options) could produce:
 
-    v3 FIX (2026-05-09 post-deploy diagnosis): legacy trades have
-    status=NULL rather than 'closed'. The v2 query missed all 100
-    legacy trades because it required status='closed'. The new query
-    excludes already-scrubbed states + requires exit_price IS NOT NULL
-    instead — catches both legacy NULL-status AND current 'closed'.
+      - exit_price IS NOT NULL (trade actually closed)
+      - status NOT IN already-scrubbed states (open,
+        closed_flat_validator, closed_flat_validator_v2)
+        — NULL status counts as eligible (legacy trades)
+      - instrument_type IS NULL OR 'equity' (explicit-options excluded)
+      - entry_price > 0
+      - EITHER exit_price > 10 * entry_price  (>=10x in days = impossible
+        for any single trade, even a legit options moonshot)
+        OR pnl_pct > 500  (>=500% gain in days = impossible)
+
+    v3 -> v4 (2026-05-09): the v3 criteria (entry<$20 + ratio>3x) was
+    too aggressive — it would have scrubbed DXC ($2.70 -> $9.43, ratio
+    3.49x = 249%) which is consistent with a LEGIT call option premium
+    move. User confirmed actual return is ~22-27%, matching keeping
+    DXC's $8,076 in the books and only scrubbing DD ($18,564 at 14.85x
+    = 1385%) and EMN ($13,520 at 12.17x = 1117%) — both clearly
+    impossible regardless of options vs equity.
 
     Action when matched:
       1. Set status='closed_flat_validator_v2', zero pnl_dollars + pnl_pct
@@ -273,7 +278,8 @@ def _scrub_phantom_trades_v2() -> dict:
         conn = get_db()
         try:
             rows = conn.execute(
-                """SELECT id, ticker, entry_price, exit_price, pnl_dollars
+                """SELECT id, ticker, entry_price, exit_price,
+                          pnl_dollars, pnl_pct
                    FROM paper_trades
                    WHERE exit_price IS NOT NULL
                      AND (status IS NULL
@@ -282,8 +288,8 @@ def _scrub_phantom_trades_v2() -> dict:
                                             'closed_flat_validator_v2'))
                      AND (instrument_type IS NULL OR instrument_type = 'equity')
                      AND entry_price > 0
-                     AND entry_price < 20
-                     AND exit_price > 3.0 * entry_price"""
+                     AND (exit_price > 10.0 * entry_price
+                          OR pnl_pct > 500)"""
             ).fetchall()
         finally:
             conn.close()

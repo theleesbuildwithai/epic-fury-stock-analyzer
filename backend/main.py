@@ -5326,8 +5326,8 @@ def admin_scrub_phantom_diagnostic(request: Request):
                                             'closed_flat_validator_v2'))
                      AND (instrument_type IS NULL OR instrument_type = 'equity')
                      AND entry_price > 0
-                     AND entry_price < 20
-                     AND exit_price > 3.0 * entry_price
+                     AND (exit_price > 10.0 * entry_price
+                          OR pnl_pct > 500)
                    ORDER BY pnl_dollars DESC"""
             ).fetchall()
             candidates = [dict(r) for r in rows]
