@@ -245,11 +245,19 @@ def _scrub_phantom_trades_v2() -> dict:
     slipped past the 15x ceiling validator (DD/EMN/DXC class).
 
     Detection criteria — ALL must hold:
-      - status = 'closed'  (only previously-credited trades)
+      - exit_price IS NOT NULL (i.e. trade is actually closed)
+      - status NOT IN already-scrubbed states (open, closed_flat_validator,
+        closed_flat_validator_v2)  — NULL status counts as eligible
       - instrument_type IS NULL OR 'equity'  (options excluded)
       - entry_price > 0 AND entry_price < 20  (suspicious low entry)
       - exit_price > 3 * entry_price  (>=3x gain on equity is impossible
         in days — almost always a units mismatch)
+
+    v3 FIX (2026-05-09 post-deploy diagnosis): legacy trades have
+    status=NULL rather than 'closed'. The v2 query missed all 100
+    legacy trades because it required status='closed'. The new query
+    excludes already-scrubbed states + requires exit_price IS NOT NULL
+    instead — catches both legacy NULL-status AND current 'closed'.
 
     Action when matched:
       1. Set status='closed_flat_validator_v2', zero pnl_dollars + pnl_pct
@@ -267,7 +275,11 @@ def _scrub_phantom_trades_v2() -> dict:
             rows = conn.execute(
                 """SELECT id, ticker, entry_price, exit_price, pnl_dollars
                    FROM paper_trades
-                   WHERE status = 'closed'
+                   WHERE exit_price IS NOT NULL
+                     AND (status IS NULL
+                          OR status NOT IN ('open',
+                                            'closed_flat_validator',
+                                            'closed_flat_validator_v2'))
                      AND (instrument_type IS NULL OR instrument_type = 'equity')
                      AND entry_price > 0
                      AND entry_price < 20

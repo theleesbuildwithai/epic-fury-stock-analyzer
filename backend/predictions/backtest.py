@@ -128,7 +128,8 @@ def run_backtest(start_date: str = None,
                  stop_pct: float = DEFAULT_STOP_PCT,
                  take_pct: float = DEFAULT_TAKE_PCT,
                  initial_capital: float = DEFAULT_INITIAL_CAPITAL,
-                 position_pct: float = DEFAULT_POSITION_PCT) -> dict:
+                 position_pct: float = DEFAULT_POSITION_PCT,
+                 include_internals: bool = False) -> dict:
     """Replay a momentum-based long-only strategy over historical data.
 
     Args:
@@ -390,6 +391,27 @@ def run_backtest(start_date: str = None,
             },
             "computed_at": datetime.utcnow().isoformat(),
         }
+
+        # Optionally include internals (equity curve + full trade list +
+        # SPY series) for downstream analyzers like backtest_pro.py.
+        # Skipped by default to keep API responses light.
+        if include_internals:
+            try:
+                result["_internals"] = {
+                    "equity_curve": [
+                        {"date": d, "equity": float(e)} for d, e in equity_curve
+                    ],
+                    "trades": closed_trades,  # already serializable dicts
+                    "sp500_series": (
+                        [{"date": idx.strftime("%Y-%m-%d"), "close": float(v)}
+                         for idx, v in sp_series.items()]
+                        if sp_series is not None else []
+                    ),
+                }
+            except Exception as _ie:
+                logger.debug(f"include_internals serialization soft-fail: {_ie}")
+                result["_internals"] = {"equity_curve": [], "trades": [],
+                                        "sp500_series": []}
 
         # Cache
         try:

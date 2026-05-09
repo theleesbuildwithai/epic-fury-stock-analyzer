@@ -5243,6 +5243,113 @@ def backtest_run(request: Request, days: int = 365, top_n: int = 10,
 
 
 # ============================================================
+#  BACKTEST PRO (Level 3) — hedge-fund-grade analyses
+#  Walk-forward + Monte Carlo + regime-conditional + stress tests
+# ============================================================
+
+@app.get("/api/backtest-pro/walk-forward")
+def backtest_pro_walk_forward(request: Request, train_months: int = 6,
+                                test_months: int = 1, top_n: int = 10,
+                                hold_days: int = 5):
+    """Walk-forward train/test validation — overfitting detector.
+    Heavy: typically 60-180s depending on universe + window count."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import walk_forward_validation
+        return walk_forward_validation(
+            train_months=int(train_months),
+            test_months=int(test_months),
+            top_n=int(top_n),
+            hold_days=int(hold_days),
+        )
+    except Exception as e:
+        logger.error(f"Backtest-pro walk-forward error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest-pro/monte-carlo")
+def backtest_pro_monte_carlo(request: Request, n_simulations: int = 1000,
+                              days: int = 180, top_n: int = 10,
+                              hold_days: int = 5):
+    """Bootstrap-resample trades to give CIs on return + Sharpe + max DD.
+    Tells you whether the result was skill or luck."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import monte_carlo_bootstrap
+        from datetime import datetime as _dt, timedelta as _td
+        end = _dt.utcnow().date().isoformat()
+        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        return monte_carlo_bootstrap(
+            n_simulations=int(n_simulations),
+            start_date=start, end_date=end,
+            top_n=int(top_n), hold_days=int(hold_days),
+        )
+    except Exception as e:
+        logger.error(f"Backtest-pro monte-carlo error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest-pro/regimes")
+def backtest_pro_regimes(request: Request, days: int = 540,
+                          top_n: int = 10, hold_days: int = 5):
+    """Per-regime (bull/bear/sideways x low/mid/high vol) Sharpe + win rate.
+    Default 540 days — needs 200d history for SPY MAs."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import regime_conditional_analysis
+        from datetime import datetime as _dt, timedelta as _td
+        end = _dt.utcnow().date().isoformat()
+        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        return regime_conditional_analysis(
+            start_date=start, end_date=end,
+            top_n=int(top_n), hold_days=int(hold_days),
+        )
+    except Exception as e:
+        logger.error(f"Backtest-pro regimes error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest-pro/stress-tests")
+def backtest_pro_stress_tests(request: Request, top_n: int = 10,
+                                hold_days: int = 5):
+    """Replay strategy across COVID, 2022 inflation, SVB, Aug 2024 vol spike."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import stress_tests
+        return stress_tests(top_n=int(top_n), hold_days=int(hold_days))
+    except Exception as e:
+        logger.error(f"Backtest-pro stress-tests error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest-pro/full")
+def backtest_pro_full(request: Request, top_n: int = 10, hold_days: int = 5,
+                       force_refresh: bool = False):
+    """Aggregate — runs all 4 hedge-fund analyses. 1hr cache. Heavy (60-180s)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import run_full_pro_analysis
+        return run_full_pro_analysis(top_n=int(top_n),
+                                     hold_days=int(hold_days),
+                                     force_refresh=bool(force_refresh))
+    except Exception as e:
+        logger.error(f"Backtest-pro full error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest-pro/summary")
+def backtest_pro_summary(request: Request):
+    """Cached snapshot of last full analysis (no compute)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import get_pro_summary
+        return get_pro_summary()
+    except Exception as e:
+        logger.error(f"Backtest-pro summary error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
 #  AUTO-FIXER — closes loop between backtest insights + live picks
 # ============================================================
 
