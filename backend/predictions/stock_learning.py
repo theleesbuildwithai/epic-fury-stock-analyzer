@@ -58,12 +58,132 @@ def init_stock_learning_table():
 
                 CREATE INDEX IF NOT EXISTS idx_sl_time
                     ON stock_learning_log(closed_at DESC);
+
+                -- Auto-fixer penalties: per-ticker confidence reductions
+                -- learned from backtest results. Multiplied with the live
+                -- confidence_adj. Auto-expire after 30 days so the system
+                -- can recover its own mistakes.
+                CREATE TABLE IF NOT EXISTS backtest_penalties (
+                    ticker TEXT PRIMARY KEY,
+                    penalty_factor REAL NOT NULL,
+                    reason TEXT,
+                    backtest_avg_pnl_pct REAL,
+                    backtest_trades INTEGER,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
             """)
             conn.commit()
         finally:
             conn.close()
     except Exception as e:
         logger.warning(f"init_stock_learning_table failed (non-fatal): {e}")
+
+
+def set_backtest_penalty(ticker: str, penalty_factor: float, reason: str = "",
+                          avg_pnl_pct: float = None, trades: int = None,
+                          ttl_days: int = 30) -> dict:
+    """Set a per-ticker confidence penalty learned from backtest.
+
+    penalty_factor in [0.5, 1.0]: multiplied with confidence_adj.
+    NEVER raises. REPLACES any existing penalty (latest insight wins).
+    """
+    try:
+        if not ticker:
+            return {"ok": False, "reason": "no_ticker"}
+        # Bound penalty: never below 0.5 (would silence stock entirely),
+        # never above 1.0 (penalty must REDUCE — boosts come from real
+        # trade win rates only, never from backtest)
+        pf = max(0.50, min(1.0, float(penalty_factor)))
+        now = datetime.utcnow()
+        exp = now + timedelta(days=int(ttl_days))
+        conn = _get_db()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO backtest_penalties
+                   (ticker, penalty_factor, reason, backtest_avg_pnl_pct,
+                    backtest_trades, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ticker.upper()[:16], pf, str(reason or "")[:200],
+                 float(avg_pnl_pct) if avg_pnl_pct is not None else None,
+                 int(trades) if trades is not None else None,
+                 now.isoformat(), exp.isoformat())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "ticker": ticker.upper(), "penalty_factor": pf,
+                "expires_at": exp.isoformat()}
+    except Exception as e:
+        logger.debug(f"set_backtest_penalty soft-fail {ticker}: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+def get_backtest_penalty(ticker: str) -> float:
+    """Returns the active penalty factor for a ticker (1.0 = no penalty).
+    Auto-prunes expired penalties on read. Never raises."""
+    try:
+        if not ticker:
+            return 1.0
+        now_iso = datetime.utcnow().isoformat()
+        conn = _get_db()
+        try:
+            row = conn.execute(
+                """SELECT penalty_factor, expires_at FROM backtest_penalties
+                   WHERE ticker = ?""",
+                (ticker.upper(),)
+            ).fetchone()
+            if not row:
+                return 1.0
+            if row["expires_at"] and row["expires_at"] < now_iso:
+                # Expired — clean it up
+                try:
+                    conn.execute("DELETE FROM backtest_penalties WHERE ticker = ?",
+                                 (ticker.upper(),))
+                    conn.commit()
+                except Exception:
+                    pass
+                return 1.0
+            return float(row["penalty_factor"])
+        finally:
+            conn.close()
+    except Exception:
+        return 1.0
+
+
+def get_all_backtest_penalties() -> list:
+    """Returns all active (non-expired) penalties. Never raises."""
+    try:
+        now_iso = datetime.utcnow().isoformat()
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM backtest_penalties
+                   WHERE expires_at >= ?
+                   ORDER BY penalty_factor ASC""",
+                (now_iso,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"get_all_backtest_penalties soft-fail: {e}")
+        return []
+
+
+def clear_backtest_penalties() -> dict:
+    """Wipe all penalties — the 'undo' button if backtest insights look
+    wrong. NEVER raises."""
+    try:
+        conn = _get_db()
+        try:
+            n = conn.execute("DELETE FROM backtest_penalties").rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "cleared": int(n or 0)}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
 
 
 def record_trade_outcome(ticker: str,
@@ -119,9 +239,16 @@ def get_stock_stats(ticker: str, lookback_days: int = 90) -> dict:
             conn.close()
 
         if not rows:
+            # Even with zero live trades, a backtest penalty may apply
+            bt_only = get_backtest_penalty(ticker)
+            interp = "no historical data — neutral confidence"
+            if bt_only < 1.0:
+                interp = f"no live trades; backtest penalty x{bt_only:.2f}"
             return {"ok": True, "ticker": ticker.upper(), "sample_size": 0,
-                    "confidence_adj": 1.0,
-                    "interpretation": "no historical data — neutral confidence"}
+                    "confidence_adj_live": 1.0,
+                    "backtest_penalty": bt_only,
+                    "confidence_adj": round(bt_only, 3),
+                    "interpretation": interp}
 
         wins = sum(1 for r in rows if r["won"])
         n = len(rows)
@@ -147,6 +274,17 @@ def get_stock_stats(ticker: str, lookback_days: int = 90) -> dict:
             else:
                 interp = f"average: {n} trades, {win_rate*100:.0f}% wr — neutral"
 
+        # ===== AUTO-FIXER PENALTY (from backtest insights) =====
+        # If a backtest discovered this ticker is a serial loser, apply a
+        # multiplicative penalty. Penalty in [0.5, 1.0] — only REDUCES
+        # confidence, never boosts. Auto-expires after 30 days.
+        # Bound final conf_adj_final to [0.50, 1.30] to prevent any
+        # downstream consumer from seeing an out-of-range multiplier.
+        bt_penalty = get_backtest_penalty(ticker)
+        conf_adj_final = round(max(0.50, min(1.30, conf_adj * bt_penalty)), 3)
+        if bt_penalty < 1.0:
+            interp = f"{interp} | backtest penalty x{bt_penalty:.2f}"
+
         return {
             "ok": True,
             "ticker": ticker.upper(),
@@ -157,7 +295,9 @@ def get_stock_stats(ticker: str, lookback_days: int = 90) -> dict:
             "avg_pnl_pct": round(avg_pnl, 3),
             "avg_winner_pct": round(avg_winner, 3),
             "avg_loser_pct": round(avg_loser, 3),
-            "confidence_adj": conf_adj,
+            "confidence_adj_live": conf_adj,         # before backtest penalty
+            "backtest_penalty": bt_penalty,
+            "confidence_adj": conf_adj_final,        # post-penalty (consumer-facing)
             "interpretation": interp,
             "lookback_days": lookback_days,
         }

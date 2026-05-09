@@ -5193,6 +5193,54 @@ def backtest_run(request: Request, days: int = 365, top_n: int = 10,
         return {"ok": False, "reason": str(e)[:200]}
 
 
+# ============================================================
+#  AUTO-FIXER — closes loop between backtest insights + live picks
+# ============================================================
+
+@app.post("/api/auto-fix/feedback-loop")
+def auto_fix_feedback_loop(request: Request, days: int = 180,
+                           top_n: int = 10, hold_days: int = 5,
+                           apply: bool = True):
+    """Run backtest → extract insights → apply per-ticker penalties.
+    Set apply=false to preview recommendations without writing."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.auto_fixer import run_feedback_loop
+        return run_feedback_loop(days=int(days), top_n=int(top_n),
+                                 hold_days=int(hold_days),
+                                 apply=bool(apply))
+    except Exception as e:
+        logger.error(f"Auto-fix feedback loop error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/auto-fix/insights")
+def auto_fix_insights(request: Request):
+    """Returns all currently active backtest penalties."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.stock_learning import get_all_backtest_penalties
+        penalties = get_all_backtest_penalties()
+        return {"ok": True, "active_count": len(penalties),
+                "penalties": penalties}
+    except Exception as e:
+        logger.error(f"Auto-fix insights error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/auto-fix/clear-penalties")
+def auto_fix_clear_penalties(request: Request):
+    """Wipe all penalties — the 'undo' button. Use this if backtest
+    insights look wrong or you want to reset learning."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.stock_learning import clear_backtest_penalties
+        return clear_backtest_penalties()
+    except Exception as e:
+        logger.error(f"Auto-fix clear penalties error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 @app.get("/api/system-intelligence")
 @app.get("/api/intelligence-status")
 def system_intelligence(request: Request):

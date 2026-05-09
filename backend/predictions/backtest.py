@@ -153,12 +153,32 @@ def run_backtest(start_date: str = None,
         if not start_date:
             start_date = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-        # Default universe — 30 high-liquidity US stocks across sectors
+        # Default universe — 100 high-liquidity US stocks across all sectors
+        # Broader universe = better learning from historical patterns, not just
+        # the 30 names we've previously traded. This is what makes the
+        # auto-fixer's insights statistically meaningful.
         if not tickers:
             tickers = [
-                "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","AMD","NFLX",
-                "JPM","BAC","GS","MS","V","MA","JNJ","UNH","PFE","LLY",
-                "XOM","CVX","COP","HD","WMT","COST","KO","PEP","DIS","NKE"
+                # Mega-cap tech
+                "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
+                "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
+                # Financials
+                "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
+                "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
+                # Healthcare
+                "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
+                "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
+                # Energy
+                "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
+                # Consumer
+                "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
+                "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
+                # Industrials
+                "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
+                # Communication / Media
+                "T","VZ","TMUS","CMCSA","CHTR",
+                # Utilities + Materials
+                "NEE","SO","DUK","LIN","APD","FCX",
             ]
 
         # Download all historical data
@@ -308,6 +328,31 @@ def run_backtest(start_date: str = None,
             win_rate = 0; profit_factor = 0; avg_win = 0; avg_loss = 0
             best = worst = None
 
+        # Per-ticker breakdown (for auto-fixer insight extraction)
+        per_ticker = {}
+        try:
+            from collections import defaultdict
+            tk = defaultdict(lambda: {"trades": 0, "wins": 0, "total_pnl_pct": 0.0})
+            for t in closed_trades:
+                sym = t.get("ticker")
+                if not sym:
+                    continue
+                tk[sym]["trades"] += 1
+                if t["pnl_pct"] > 0:
+                    tk[sym]["wins"] += 1
+                tk[sym]["total_pnl_pct"] += float(t["pnl_pct"])
+            for sym, d in tk.items():
+                n = d["trades"]
+                per_ticker[sym] = {
+                    "trades": n,
+                    "wins": d["wins"],
+                    "win_rate_pct": round(d["wins"] / n * 100, 2) if n else 0,
+                    "avg_pnl_pct": round(d["total_pnl_pct"] / n, 3) if n else 0,
+                    "total_pnl_pct": round(d["total_pnl_pct"], 3),
+                }
+        except Exception as _e:
+            logger.debug(f"per_ticker breakdown soft-fail: {_e}")
+
         # SP500 buy-and-hold return
         sp_return = None
         if sp_series is not None and len(sp_series) >= 2:
@@ -341,6 +386,7 @@ def run_backtest(start_date: str = None,
                 "avg_loss_pct": round(avg_loss, 2),
                 "best_trade": best,
                 "worst_trade": worst,
+                "per_ticker": per_ticker,
             },
             "computed_at": datetime.utcnow().isoformat(),
         }
