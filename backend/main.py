@@ -5243,6 +5243,68 @@ def backtest_run(request: Request, days: int = 365, top_n: int = 10,
 
 
 # ============================================================
+#  ADMIN — phantom-trade scrub (manual trigger + diagnostic)
+#  Needed because the init_db auto-call appears to no-op silently
+#  in production (App Runner caching or import-time race).
+# ============================================================
+
+@app.get("/api/admin/scrub-phantom-diagnostic")
+def admin_scrub_phantom_diagnostic(request: Request):
+    """READ-ONLY: shows what trades the scrub query would match,
+    without modifying anything. Use this BEFORE calling the POST
+    trigger to verify which trades will be affected."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_db
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                """SELECT id, ticker, entry_price, exit_price, pnl_dollars,
+                          pnl_pct, status, instrument_type, exit_date
+                   FROM paper_trades
+                   WHERE exit_price IS NOT NULL
+                     AND (status IS NULL
+                          OR status NOT IN ('open',
+                                            'closed_flat_validator',
+                                            'closed_flat_validator_v2'))
+                     AND (instrument_type IS NULL OR instrument_type = 'equity')
+                     AND entry_price > 0
+                     AND entry_price < 20
+                     AND exit_price > 3.0 * entry_price
+                   ORDER BY pnl_dollars DESC"""
+            ).fetchall()
+            candidates = [dict(r) for r in rows]
+            phantom_pnl = sum(float(r["pnl_dollars"] or 0) for r in rows)
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "candidates_found": len(candidates),
+            "total_phantom_pnl": round(phantom_pnl, 2),
+            "candidates": candidates,
+            "note": "READ-ONLY. Call POST /api/admin/scrub-phantom-trades-v2 to apply.",
+        }
+    except Exception as e:
+        logger.error(f"scrub diagnostic error: {e}")
+        return {"ok": False, "reason": str(e)[:300]}
+
+
+@app.post("/api/admin/scrub-phantom-trades-v2")
+def admin_scrub_phantom_trades_v2(request: Request):
+    """Manually trigger the phantom-trade scrub. Idempotent — running
+    twice does nothing the second time. Use the diagnostic GET first
+    to preview which trades will be affected."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import _scrub_phantom_trades_v2
+        result = _scrub_phantom_trades_v2()
+        return result
+    except Exception as e:
+        logger.error(f"manual scrub error: {e}")
+        return {"ok": False, "reason": str(e)[:300]}
+
+
+# ============================================================
 #  BACKTEST PRO (Level 3) — hedge-fund-grade analyses
 #  Walk-forward + Monte Carlo + regime-conditional + stress tests
 # ============================================================
