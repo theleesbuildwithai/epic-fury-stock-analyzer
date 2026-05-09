@@ -5305,6 +5305,32 @@ def backtest_run(request: Request, days: int = 365, top_n: int = 10,
 #  in production (App Runner caching or import-time race).
 # ============================================================
 
+@app.get("/api/admin/inspect-trade/{ticker}")
+def admin_inspect_trade(ticker: str, request: Request):
+    """Dump ALL raw fields for a specific ticker from paper_trades.
+    Use to diagnose why scrub doesn't match a row."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_db
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM paper_trades WHERE ticker = ?",
+                (ticker.upper(),)
+            ).fetchall()
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "ticker": ticker.upper(),
+            "count": len(rows),
+            "rows": [dict(r) for r in rows],
+        }
+    except Exception as e:
+        logger.error(f"inspect-trade error: {e}")
+        return {"ok": False, "reason": str(e)[:300]}
+
+
 @app.get("/api/admin/scrub-phantom-diagnostic")
 def admin_scrub_phantom_diagnostic(request: Request):
     """READ-ONLY: shows what trades the scrub query would match,
