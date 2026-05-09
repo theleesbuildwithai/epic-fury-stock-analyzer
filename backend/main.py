@@ -321,6 +321,63 @@ except Exception as e:
 # Initialize the database when the app starts
 init_db()
 
+# ============================================================
+#  BULLETPROOF PHANTOM SCRUB — runs explicitly at module load
+#  AND via FastAPI startup event AND via first-request middleware.
+#  Triple-redundant because init_db's auto-call has been observed
+#  to silently no-op in App Runner (last deploy went live but
+#  scrub did not fire). All three paths are idempotent.
+# ============================================================
+
+def _force_phantom_scrub(source: str = "module-load"):
+    """Single entry point for the phantom scrub. Logs loudly on
+    success and on failure so we can see in App Runner logs
+    exactly what happened. Idempotent."""
+    try:
+        from predictions.models import _scrub_phantom_trades_v2
+        result = _scrub_phantom_trades_v2()
+        if result.get("scrubbed", 0) > 0:
+            logger.warning(
+                f"PHANTOM SCRUB ({source}): scrubbed {result['scrubbed']} "
+                f"trades, removed ${result.get('phantom_pnl', 0):,.2f} bogus PnL, "
+                f"tickers={result.get('tickers')}"
+            )
+        else:
+            logger.warning(
+                f"PHANTOM SCRUB ({source}): no candidates found "
+                f"(result={result})"
+            )
+    except Exception as e:
+        logger.error(f"PHANTOM SCRUB ({source}) failed: {e}")
+
+
+# Path 1: explicit module-load call (in addition to init_db's call)
+_force_phantom_scrub(source="module-load")
+
+
+@app.on_event("startup")
+def _startup_phantom_scrub():
+    """Path 2: FastAPI startup hook — guaranteed to fire after the
+    application object is fully built. Belt-and-suspenders."""
+    _force_phantom_scrub(source="startup-event")
+
+
+# Path 3: first-request middleware — fires on the first HTTP request
+# if (somehow) neither path 1 nor path 2 ran the scrub. Set the flag
+# BEFORE running so even an exception inside doesn't cause re-entry.
+_first_request_scrub_done = {"done": False}
+
+
+@app.middleware("http")
+async def _first_request_phantom_scrub(request, call_next):
+    if not _first_request_scrub_done["done"]:
+        _first_request_scrub_done["done"] = True
+        try:
+            _force_phantom_scrub(source="first-request")
+        except Exception as _e:
+            logger.error(f"first-request scrub middleware failure: {_e}")
+    return await call_next(request)
+
 # --- Sync paper_cash with reality on startup ---
 # If paper_cash was just created (default $100K), sync it to the latest snapshot
 try:
