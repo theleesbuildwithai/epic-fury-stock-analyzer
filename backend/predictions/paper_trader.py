@@ -2839,12 +2839,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                            and abs(p.get("composite_score", 0)) >= min_score
                            and p["symbol"] not in open_tickers]
 
-        # SHORT-SIDE QUALITY GATE: Shorts are harder — require stronger signals
+        # SHORT-SIDE QUALITY GATE: Shorts are harder — require modestly stronger signals.
+        # LOOSENED: was score<=-3 + conf>=55 (rejected 100% of shorts in audit).
+        # New: score<=-2.0 + conf>=45 — allows ~50% of shorts through. We
+        # don't need 100% confidence to trade; the asymmetric R:R + loss-cut
+        # do the quality work.
         pre_gate = len(short_candidates)
         short_candidates = [p for p in short_candidates
-                           if p.get("composite_score", 0) <= -3 and p["confidence"] >= 55]
+                           if p.get("composite_score", 0) <= -2.0 and p["confidence"] >= 45]
         if pre_gate > len(short_candidates):
-            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need score<=-4, conf>=65%)")
+            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need score<=-2, conf>=45%)")
 
         # Defensive sectors — safe for long positions even in bear markets
         # These are stable, dividend-paying, recession-resistant sectors
