@@ -229,6 +229,13 @@ def init_db():
     except Exception:
         pass
 
+    # Initialize regime_playbook table — soft-fails on any error
+    try:
+        from predictions.regime_playbook import init_playbook_table
+        init_playbook_table()
+    except Exception:
+        pass
+
     # One-shot phantom-PnL scrub (idempotent — only runs if matching trades exist).
     # Detects + neutralizes the DD/EMN/DXC class of trades where options were
     # closed as equity, which inflated PnL by tens of thousands of dollars.

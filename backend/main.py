@@ -5604,6 +5604,63 @@ def backtest_pro_summary(request: Request):
 
 
 # ============================================================
+#  REGIME PLAYBOOK (Level 4) — lessons from history
+#  For each major past event (COVID, 2022 inflation, SVB, AI boom...)
+#  pull what sectors + factors worked. When current regime matches
+#  a historical pattern, surface the playbook.
+# ============================================================
+
+@app.post("/api/regime-playbook/build")
+def regime_playbook_build(request: Request):
+    """HEAVY (~30-90s): pull sector + factor returns for all 8 historical
+    events, store as playbooks. Idempotent — safe to re-run."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_playbook import build_all_playbooks
+        return build_all_playbooks()
+    except Exception as e:
+        logger.error(f"Regime playbook build error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/regime-playbook/all")
+def regime_playbook_all(request: Request):
+    """List every stored playbook with full details."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_playbook import get_all_playbooks
+        return get_all_playbooks()
+    except Exception as e:
+        logger.error(f"Regime playbook all error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/regime-playbook/event/{label}")
+def regime_playbook_event(label: str, request: Request):
+    """Specific event playbook (e.g. covid_crash_2020)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_playbook import get_playbook
+        return get_playbook(label)
+    except Exception as e:
+        logger.error(f"Regime playbook event error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/regime-playbook/current-match")
+def regime_playbook_current_match(request: Request):
+    """Match TODAY's regime to closest historical playbook(s) and return
+    sector recommendations: 'buy these, avoid these'."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_playbook import get_current_match
+        return get_current_match()
+    except Exception as e:
+        logger.error(f"Regime playbook current-match error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
 #  AUTO-FIXER — closes loop between backtest insights + live picks
 # ============================================================
 
