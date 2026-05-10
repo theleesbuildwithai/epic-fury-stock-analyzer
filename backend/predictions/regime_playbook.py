@@ -233,8 +233,19 @@ def build_all_playbooks() -> dict:
         failed = 0
         for label, start, end, desc, regime in HISTORICAL_EVENTS:
             try:
+                # POST-DEPLOY FIX: yfinance occasionally fails transiently.
+                # Retry once after a brief pause before giving up — observed
+                # in production where 2 of 8 events failed first try then
+                # succeeded second try. Retry is cheap (single API call).
                 analysis = analyze_historical_event(label, start, end,
                                                      desc, regime)
+                if not analysis.get("ok"):
+                    try:
+                        time.sleep(2)
+                    except Exception:
+                        pass
+                    analysis = analyze_historical_event(label, start, end,
+                                                         desc, regime)
                 if not analysis.get("ok"):
                     results.append({"event": label, "ok": False,
                                     "reason": analysis.get("reason")})

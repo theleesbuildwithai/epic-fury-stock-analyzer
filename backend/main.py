@@ -5661,6 +5661,261 @@ def regime_playbook_current_match(request: Request):
 
 
 # ============================================================
+#  LEVEL 5 — ADVISORY-ONLY learning + risk awareness layers
+#  Every endpoint here is READ-ONLY. NONE block trades or cycles.
+#  All wrapped in try/except so a bug here cannot affect trading.
+#
+#  1. Auto-Postmortem on Every Loss   /api/postmortem/*
+#  2. Cross-Asset Signal Engine       /api/cross-asset/*
+#  3. Earnings Drift Learner          /api/earnings-drift/*
+#  4. Macro Event Calendar            /api/event-calendar/*
+#  5. Live Regime Drift Alarm         /api/regime-drift/*
+#  6. Position Correlation Matrix     /api/correlation/*
+#  7. Trade Replay Simulator          /api/trade-replay/*
+# ============================================================
+
+# --- 1. Auto-Postmortem ---
+@app.get("/api/postmortem/summary")
+def postmortem_summary(request: Request, lookback_days: int = 180):
+    """Aggregate stats on all losing trades — by regime/sector/day-of-week."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.loss_postmortem import get_postmortem_summary
+        return get_postmortem_summary(int(lookback_days))
+    except Exception as e:
+        logger.error(f"Postmortem summary error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/postmortem/patterns")
+def postmortem_patterns(request: Request, lookback_days: int = 180):
+    """Loss patterns that meet min-occurrence threshold."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.loss_postmortem import aggregate_loss_patterns
+        return aggregate_loss_patterns(int(lookback_days))
+    except Exception as e:
+        logger.error(f"Postmortem patterns error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/postmortem/active-filters")
+def postmortem_active_filters(request: Request):
+    """Active loss-pattern filters (advisory — picks may opt-in)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.loss_postmortem import get_active_loss_filters
+        return {"ok": True, "filters": get_active_loss_filters()}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/postmortem-backfill")
+def postmortem_backfill(request: Request, limit: int = 5000):
+    """Import existing closed losses into the postmortem log. Idempotent."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.loss_postmortem import backfill_from_closed_trades
+        return backfill_from_closed_trades(int(limit))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# --- 2. Cross-Asset Signals ---
+@app.get("/api/cross-asset/signals")
+def cross_asset_signals(request: Request, force_refresh: bool = False):
+    """Snapshot of TLT, UUP, ^VIX, GLD, BTC — synthesized into risk-on/off."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.cross_asset import get_current_signals
+        return get_current_signals(force_refresh=bool(force_refresh))
+    except Exception as e:
+        logger.error(f"Cross-asset signals error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/cross-asset/recommendation")
+def cross_asset_recommendation(request: Request):
+    """Higher-level: just the regime + sector tilt recommendation."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.cross_asset import get_sector_recommendation
+        return get_sector_recommendation()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# --- 3. Earnings Drift ---
+# CRITICAL: literal routes (summary, predict/...) MUST come BEFORE the
+# {ticker} path-param route or they get captured as ticker="summary".
+@app.get("/api/earnings-drift/summary")
+def earnings_drift_summary(request: Request, min_events: int = 4):
+    """Cached drift patterns across all analyzed tickers."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.earnings_drift import get_drift_summary
+        return get_drift_summary(int(min_events))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/earnings-drift/predict/{ticker}")
+def earnings_drift_predict(ticker: str, request: Request):
+    """Predict drift signal for a ticker based on historical pattern."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.earnings_drift import predict_drift
+        return predict_drift(ticker)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/earnings-drift/{ticker}")
+def earnings_drift_ticker(ticker: str, request: Request,
+                           lookback_quarters: int = 8):
+    """Per-ticker historical drift pattern from earnings."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.earnings_drift import build_ticker_drift_history
+        return build_ticker_drift_history(ticker,
+                                           lookback_quarters=int(lookback_quarters))
+    except Exception as e:
+        logger.error(f"Earnings drift error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# --- 4. Macro Event Calendar ---
+@app.get("/api/event-calendar/upcoming")
+def event_calendar_upcoming(request: Request, days_ahead: int = 14):
+    """Upcoming FOMC/CPI/NFP/etc events in the window."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.event_calendar import get_upcoming_events
+        return get_upcoming_events(int(days_ahead))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/event-calendar/risk-adjustment")
+def event_calendar_risk_adjustment(request: Request):
+    """Suggested position-size factor (1.0 normal, lower = cut size)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.event_calendar import get_risk_adjustment_factor
+        return get_risk_adjustment_factor()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/event-calendar/blackout-status")
+def event_calendar_blackout(request: Request):
+    """Are we within an event blackout window? (Advisory only.)"""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.event_calendar import is_event_blackout_window
+        return is_event_blackout_window()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# --- 5. Regime Drift Alarms ---
+@app.post("/api/regime-drift/snapshot")
+def regime_drift_snapshot(request: Request):
+    """Take a fresh regime snapshot."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_drift import snapshot_regime
+        return snapshot_regime()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/regime-drift/detect")
+def regime_drift_detect(request: Request, lookback_days: int = 3):
+    """Detect drift vs N-day baseline — records alarms in DB."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_drift import detect_drift
+        return detect_drift(int(lookback_days))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/regime-drift/alarms")
+def regime_drift_alarms(request: Request, hours: int = 48):
+    """Recent regime-drift alarms."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.regime_drift import get_recent_alarms
+        return get_recent_alarms(int(hours))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# --- 6. Position Correlation ---
+@app.get("/api/correlation/full")
+def correlation_full(request: Request, force_refresh: bool = False):
+    """Full pairwise correlation matrix of open equity positions."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.correlation_matrix import get_open_positions_correlation
+        return get_open_positions_correlation(force_refresh=bool(force_refresh))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/correlation/summary")
+def correlation_summary(request: Request):
+    """Lightweight summary — warnings + score, no full matrix."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.correlation_matrix import get_concentration_summary
+        return get_concentration_summary()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# --- 7. Trade Replay ---
+# CRITICAL: literal route (aggregate-lessons) MUST come BEFORE
+# {trade_id} or it gets captured as trade_id="aggregate-lessons".
+@app.get("/api/trade-replay/aggregate-lessons")
+def trade_replay_aggregate(request: Request, lookback_days: int = 90,
+                            limit: int = 50):
+    """HEAVY (~30-90s): aggregate replay lessons across recent trades."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.trade_replay import aggregate_replay_lessons
+        return aggregate_replay_lessons(int(lookback_days), int(limit))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/trade-replay/{trade_id}/optimal")
+def trade_replay_optimal(trade_id: int, request: Request):
+    """Grid-search optimal stop/take/hold for one trade."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.trade_replay import find_optimal_params_for_trade
+        return find_optimal_params_for_trade(int(trade_id))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/trade-replay/{trade_id}")
+def trade_replay_one(trade_id: int, request: Request,
+                      stop_pct: float = 0.04, take_pct: float = 0.10,
+                      max_hold_days: int = 5):
+    """Replay one trade with alternate parameters."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.trade_replay import replay_trade
+        return replay_trade(int(trade_id), float(stop_pct),
+                            float(take_pct), int(max_hold_days))
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
 #  AUTO-FIXER — closes loop between backtest insights + live picks
 # ============================================================
 

@@ -236,6 +236,25 @@ def init_db():
     except Exception:
         pass
 
+    # Initialize Level 5 tables (loss_postmortem, earnings_drift, regime_drift).
+    # Each is independently try/except wrapped — one failure cannot block
+    # the others, and none can block startup.
+    try:
+        from predictions.loss_postmortem import init_postmortem_table
+        init_postmortem_table()
+    except Exception:
+        pass
+    try:
+        from predictions.earnings_drift import init_drift_table as _init_ed
+        _init_ed()
+    except Exception:
+        pass
+    try:
+        from predictions.regime_drift import init_drift_table as _init_rd
+        _init_rd()
+    except Exception:
+        pass
+
     # One-shot phantom-PnL scrub (idempotent — only runs if matching trades exist).
     # Detects + neutralizes the DD/EMN/DXC class of trades where options were
     # closed as equity, which inflated PnL by tens of thousands of dollars.
@@ -859,6 +878,34 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 pnl_pct=round(pnl_pct, 3),
                 won=(pnl_pct > 0),
             )
+    except Exception:
+        pass
+
+    # ===== LOSS POSTMORTEM HOOK (soft-fails — Level 5) =====
+    # Captures full context of every losing trade for pattern learning.
+    # Doubly safety-wrapped: outer try/except + module's internal soft-fail.
+    # Cannot affect trade close, cycle, or any other code path.
+    try:
+        if trade and pnl_pct < 0:
+            from predictions.loss_postmortem import record_loss_postmortem
+            # Build a dict from the sqlite3.Row so postmortem doesn't depend
+            # on the connection being open
+            try:
+                trade_dict = {
+                    "id": trade["id"],
+                    "ticker": trade["ticker"],
+                    "direction": trade["direction"],
+                    "sector": trade["sector"] if "sector" in trade.keys() else None,
+                    "regime_at_entry": trade["regime_at_entry"]
+                        if "regime_at_entry" in trade.keys() else None,
+                    "signal_score": trade["signal_score"] or 0,
+                    "entry_date": trade["entry_date"],
+                    "exit_date": datetime.now().isoformat(),
+                    "pnl_pct": round(pnl_pct, 3),
+                }
+                record_loss_postmortem(trade_dict, exit_reason="trade_close")
+            except Exception:
+                pass
     except Exception:
         pass
 
