@@ -5496,6 +5496,56 @@ def admin_scrub_phantom_trades_v2(request: Request):
         return {"ok": False, "reason": str(e)[:300]}
 
 
+@app.post("/api/admin/force-picks-regen-sync")
+def admin_force_picks_regen_sync(request: Request):
+    """SYNCHRONOUS picks regen — bypasses bg thread + flag. Calls
+    generate_quant_picks() directly and returns:
+      - whether _intel_overlay was applied to the picks
+      - first pick's overlay components (for diagnosis)
+      - any exception that occurred
+
+    READ-ONLY for cash/trades — only refreshes the picks cache.
+    Cannot block trades or cycles."""
+    check_rate_limit(request.client.host)
+    try:
+        # Bust the in-memory cache to FORCE re-fetch
+        try:
+            from analysis.quant_engine import _quant_cache
+            if "quant_picks" in _quant_cache:
+                _quant_cache["quant_picks"]["time"] = 0  # expire
+        except Exception:
+            pass
+
+        from analysis.quant_engine import generate_quant_picks
+        result = generate_quant_picks()
+
+        longs = result.get("long_picks") or []
+        n_with_overlay = sum(1 for p in longs if p.get("_intel_overlay"))
+        first_overlay = None
+        first_keys = None
+        if longs:
+            first_keys = sorted(longs[0].keys())
+            first_overlay = longs[0].get("_intel_overlay")
+
+        return {
+            "ok": True,
+            "long_picks_count": len(longs),
+            "short_picks_count": len(result.get("short_picks") or []),
+            "picks_with_overlay": n_with_overlay,
+            "first_pick_keys": first_keys,
+            "first_pick_overlay": first_overlay,
+            "_cache_source": result.get("_cache_source"),
+            "_cache_age_hours": result.get("_cache_age_hours"),
+            "regime": (result.get("regime") or {}).get("regime"),
+            "error_in_result": result.get("error"),
+        }
+    except Exception as e:
+        import traceback
+        logger.error(f"force picks regen sync error: {e}")
+        return {"ok": False, "reason": str(e)[:300],
+                "traceback": traceback.format_exc()[:1500]}
+
+
 # ============================================================
 #  BACKTEST PRO (Level 3) — hedge-fund-grade analyses
 #  Walk-forward + Monte Carlo + regime-conditional + stress tests
