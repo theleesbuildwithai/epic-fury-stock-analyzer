@@ -231,8 +231,15 @@ def init_db():
 
     # Initialize regime_playbook table — soft-fails on any error
     try:
-        from predictions.regime_playbook import init_playbook_table
+        from predictions.regime_playbook import init_playbook_table, auto_rebuild_if_empty
         init_playbook_table()
+        # If table is empty (fresh container / ephemeral storage reset),
+        # spawn BACKGROUND rebuild. Non-blocking — never affects startup
+        # or trade firing. Build runs out-of-band in daemon thread.
+        try:
+            auto_rebuild_if_empty()
+        except Exception:
+            pass
     except Exception:
         pass
 

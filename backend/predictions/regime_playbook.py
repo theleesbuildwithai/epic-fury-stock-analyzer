@@ -119,6 +119,57 @@ def init_playbook_table():
         logger.warning(f"init_playbook_table soft-fail: {e}")
 
 
+def auto_rebuild_if_empty():
+    """Called from init_db on startup. If the regime_playbooks table
+    is empty (e.g. fresh container, ephemeral storage reset), spawns
+    a BACKGROUND daemon thread to rebuild all 8 playbooks via yfinance.
+
+    NEVER blocks startup. NEVER raises. The build itself is heavy
+    (~10-90s of yfinance calls) but runs out-of-band so it cannot
+    affect trade firing or scheduler jobs."""
+    try:
+        # Quick check — must be cheap (single SELECT COUNT)
+        conn = _get_db()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM regime_playbooks"
+            ).fetchone()
+            n = int(row["n"]) if row else 0
+        finally:
+            conn.close()
+
+        if n > 0:
+            return {"ok": True, "skipped": True, "rows": n,
+                    "reason": "playbook already populated"}
+
+        # Empty — spawn background rebuild
+        import threading
+        def _rebuild():
+            try:
+                logger.warning("AUTO-REBUILD playbooks: starting background fetch")
+                result = build_all_playbooks()
+                if result.get("ok"):
+                    logger.warning(
+                        f"AUTO-REBUILD playbooks: complete — "
+                        f"{result.get('succeeded')}/{result.get('events_total')} events"
+                    )
+                else:
+                    logger.warning(
+                        f"AUTO-REBUILD playbooks: failed — {result.get('reason')}"
+                    )
+            except Exception as _e:
+                logger.warning(f"AUTO-REBUILD playbooks: exception {_e}")
+        try:
+            threading.Thread(target=_rebuild, daemon=True,
+                             name="regime-playbook-auto-rebuild").start()
+        except Exception as _te:
+            logger.warning(f"AUTO-REBUILD spawn fail: {_te}")
+        return {"ok": True, "rebuild_spawned": True, "rows": 0}
+    except Exception as e:
+        logger.warning(f"auto_rebuild_if_empty soft-fail: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 def _safe_period_returns(tickers: list, start: str, end: str) -> dict:
     """Pull total returns for each ticker over [start, end].
     Returns {ticker: return_pct}. Skips tickers that fail. Never raises."""
