@@ -101,14 +101,17 @@ def _delta_stock_learning(ticker: str) -> float:
 
 
 def _delta_regime_playbook(sector: str) -> float:
-    """+10% if sector is top-3 in current matched playbook, -10% if bottom-3."""
+    """+10% if sector is top-3 in current matched playbook, -10% if bottom-3.
+
+    Uses 10-min module-level cache so 50 picks in one cycle trigger
+    AT MOST ONE call to get_current_match (which does heavy yfinance).
+    """
     try:
-        from predictions.regime_playbook import get_current_match
         sector_etf = _SECTOR_TO_ETF.get(sector)
         if not sector_etf:
             return 0.0
-        match = get_current_match()
-        if not match.get("ok"):
+        match = _cached_regime_match()
+        if not match or not match.get("ok"):
             return 0.0
         recs = match.get("recommendations", {}) or {}
         buys = {s.get("ticker") for s in recs.get("buy_sectors", []) or []}
@@ -121,6 +124,38 @@ def _delta_regime_playbook(sector: str) -> float:
         return 0.0
     except Exception:
         return 0.0
+
+
+# 10-min module-level cache for the expensive get_current_match call.
+# Pick generation runs ~50 picks per cycle — without this cache, each
+# pick triggers a fresh yfinance fetch and we'd block for 5+ minutes.
+_REGIME_MATCH_CACHE_TTL = 600   # 10 min
+_regime_match_cache = {"data": None, "ts": 0}
+_regime_match_lock = threading.Lock()
+
+
+def _cached_regime_match() -> dict:
+    """10-min cached wrapper around regime_playbook.get_current_match.
+    NEVER raises — returns None on any error."""
+    try:
+        with _regime_match_lock:
+            now = time.time()
+            cached = _regime_match_cache.get("data")
+            ts = _regime_match_cache.get("ts", 0)
+            if cached and (now - ts) < _REGIME_MATCH_CACHE_TTL:
+                return cached
+        # Fetch fresh (outside lock — heavy operation)
+        try:
+            from predictions.regime_playbook import get_current_match
+            fresh = get_current_match()
+        except Exception:
+            return None
+        with _regime_match_lock:
+            _regime_match_cache["data"] = fresh
+            _regime_match_cache["ts"] = time.time()
+        return fresh
+    except Exception:
+        return None
 
 
 def _delta_loss_postmortem(ticker: str, sector: str, regime: str,
@@ -171,10 +206,15 @@ def _delta_cross_asset(sector: str, direction: str) -> float:
 
 
 def _delta_earnings_drift(ticker: str, direction: str) -> float:
-    """PEAD pattern: positive drift -> boost long, penalize short."""
+    """PEAD pattern: positive drift -> boost long, penalize short.
+
+    CRITICAL: uses cache_only=True so a cache miss returns NEUTRAL
+    (1.0) immediately instead of triggering a 5-10s yfinance fetch.
+    Pick generation must NEVER block on yfinance — earnings-drift
+    cache is warmed by separate /api/earnings-drift/{ticker} calls."""
     try:
         from predictions.earnings_drift import predict_drift
-        pred = predict_drift(ticker)
+        pred = predict_drift(ticker, cache_only=True)
         if not pred.get("ok"):
             return 0.0
         signal = float(pred.get("confidence_signal") or 1.0)

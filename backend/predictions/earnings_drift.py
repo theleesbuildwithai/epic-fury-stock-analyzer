@@ -247,15 +247,55 @@ def build_ticker_drift_history(ticker: str,
         return {"ok": False, "ticker": ticker, "reason": str(e)[:200]}
 
 
-def predict_drift(ticker: str, current_surprise_pct: float = None) -> dict:
+def predict_drift(ticker: str, current_surprise_pct: float = None,
+                   cache_only: bool = False) -> dict:
     """Given a new earnings surprise (or auto-detect from latest event),
     forecast expected drift based on this ticker's historical pattern.
 
-    If current_surprise_pct is None, uses the most recent historical
-    event as the "current" — useful when picks were made shortly after
-    earnings.
+    cache_only=True: read DB cache only, return neutral on miss.
+    USE THIS from any hot path (pick generation) to avoid blocking on
+    yfinance during a trading cycle.
     """
     try:
+        if cache_only:
+            # Cache-only path: just check the DB, never trigger fresh fetch
+            try:
+                conn = _get_db()
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM earnings_drift_cache WHERE ticker = ?",
+                        (ticker.upper(),)
+                    ).fetchone()
+                finally:
+                    conn.close()
+                if not row or row["n_events"] is None or row["n_events"] < MIN_QUARTERS_FOR_PATTERN:
+                    return {"ok": True, "ticker": ticker.upper(),
+                            "n_events": 0,
+                            "confidence_signal": 1.0,
+                            "direction": "neutral",
+                            "reason": "no_cache",
+                            "cache_only": True}
+                avg_60d = float(row["avg_drift_60d"] or 0)
+                if avg_60d > 3:
+                    direction = "drifts_up"
+                    confidence_signal = 1.10
+                elif avg_60d < -3:
+                    direction = "drifts_down"
+                    confidence_signal = 0.90
+                else:
+                    direction = "neutral"
+                    confidence_signal = 1.0
+                return {"ok": True, "ticker": ticker.upper(),
+                        "n_events": int(row["n_events"]),
+                        "confidence_signal": confidence_signal,
+                        "direction": direction,
+                        "cache_only": True,
+                        "avg_drift_60d": avg_60d}
+            except Exception as ce:
+                logger.debug(f"predict_drift cache_only soft-fail {ticker}: {ce}")
+                return {"ok": True, "ticker": ticker, "confidence_signal": 1.0,
+                        "direction": "neutral", "reason": "cache_error"}
+
         history = build_ticker_drift_history(ticker)
         if not history.get("ok"):
             return {"ok": False, "ticker": ticker,
