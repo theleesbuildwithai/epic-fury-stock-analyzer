@@ -3430,6 +3430,48 @@ def generate_quant_picks() -> dict:
         top_longs = long_picks[:30]
         top_shorts = short_picks[:20]
 
+        # Step 5A.5: INTELLIGENCE OVERLAY (Level 6) — apply composite
+        # multiplier from Level 1-5 learning layers (postmortem, regime
+        # playbook, earnings drift, cross-asset, stock learning, regime
+        # drift). Soft-fails per-pick to neutral 1.0; cannot block any
+        # pick. Disabled by env DISABLE_INTELLIGENCE_OVERLAY=1.
+        try:
+            from predictions.intelligence_overlay import compute_pick_overlay
+            regime_label = (regime.get("regime", "unknown")
+                            if isinstance(regime, dict) else str(regime or "unknown"))
+            for pick in top_longs:
+                try:
+                    ov = compute_pick_overlay(
+                        ticker=pick.get("symbol") or pick.get("ticker") or "",
+                        sector=pick.get("sector") or "",
+                        regime=regime_label,
+                        signal_score=pick.get("composite_score") or 0,
+                        direction="long",
+                    )
+                    mult = float(ov.get("multiplier", 1.0))
+                    pick["confidence"] = max(15, min(95,
+                        int(pick.get("confidence", 50) * mult)))
+                    pick["_intel_overlay"] = ov
+                except Exception:
+                    pass
+            for pick in top_shorts:
+                try:
+                    ov = compute_pick_overlay(
+                        ticker=pick.get("symbol") or pick.get("ticker") or "",
+                        sector=pick.get("sector") or "",
+                        regime=regime_label,
+                        signal_score=pick.get("composite_score") or 0,
+                        direction="short",
+                    )
+                    mult = float(ov.get("multiplier", 1.0))
+                    pick["confidence"] = max(15, min(95,
+                        int(pick.get("confidence", 50) * mult)))
+                    pick["_intel_overlay"] = ov
+                except Exception:
+                    pass
+        except Exception as _ov_e:
+            logger.debug(f"Intelligence overlay soft-fail: {_ov_e}")
+
         # Step 5B: Apply overnight confidence modifier to all picks
         # If futures tanked overnight, reduce long confidence; if bullish, boost it
         overnight_mod = overnight.get("confidence_modifier", 0)

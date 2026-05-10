@@ -5661,6 +5661,50 @@ def regime_playbook_current_match(request: Request):
 
 
 # ============================================================
+#  LEVEL 6 — INTELLIGENCE OVERLAY (composite scorer)
+#  Wires Level 1-5 signals into pick generation + position sizing.
+#  Hard kill switch: env DISABLE_INTELLIGENCE_OVERLAY=1
+# ============================================================
+
+@app.get("/api/intelligence/status")
+def intelligence_status(request: Request):
+    """Health snapshot of overlay (enabled, bounds, kill switch state)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.intelligence_overlay import get_overlay_status
+        return get_overlay_status()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/intelligence/preview")
+def intelligence_preview(request: Request, ticker: str = "AAPL",
+                          sector: str = "Technology", regime: str = "BULL",
+                          signal_score: float = 2.0,
+                          direction: str = "long"):
+    """Preview overlay multiplier for a hypothetical pick — explains
+    why a real pick's confidence got adjusted."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.intelligence_overlay import compute_pick_overlay
+        return compute_pick_overlay(ticker, sector, regime,
+                                     float(signal_score), direction)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/intelligence/size-factor")
+def intelligence_size_factor(request: Request):
+    """Current position-size multiplier (event calendar + correlation)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.intelligence_overlay import compute_size_factor
+        return compute_size_factor()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+# ============================================================
 #  LEVEL 5 — ADVISORY-ONLY learning + risk awareness layers
 #  Every endpoint here is READ-ONLY. NONE block trades or cycles.
 #  All wrapped in try/except so a bug here cannot affect trading.

@@ -3229,6 +3229,19 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             else:
                 size_pct = kelly_size
 
+            # INTELLIGENCE OVERLAY size factor (Level 6) — cuts size before
+            # known macro events (FOMC/CPI) and when sector concentration
+            # is too high. ALWAYS in [0.5, 1.0] range, NEVER zeroes the
+            # size. Disable via env DISABLE_INTELLIGENCE_OVERLAY=1.
+            try:
+                from predictions.intelligence_overlay import compute_size_factor
+                _sf_result = compute_size_factor()
+                _size_factor = float(_sf_result.get("factor", 1.0))
+                if 0.5 <= _size_factor <= 1.0 and _size_factor < 1.0:
+                    size_pct = size_pct * _size_factor
+            except Exception:
+                pass  # soft-fail to no adjustment
+
             # CORRELATION-AWARE POSITION LIMIT (from rentech VaR module)
             # Uses real return correlations, not just sector proxies
             corr_multiplier = 1.0

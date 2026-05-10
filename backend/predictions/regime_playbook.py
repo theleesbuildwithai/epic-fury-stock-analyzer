@@ -365,7 +365,14 @@ def _classify_current_regime() -> dict:
                          progress=False, auto_adjust=True)
         if df is None or df.empty or len(df) < 200:
             return {"ok": False, "reason": "insufficient_spy_data"}
-        closes = df["Close"].dropna().values.tolist()
+        closes_raw = df["Close"].dropna().values.tolist()
+        # FIX: yfinance occasionally returns nested lists for single-ticker
+        # downloads. Flatten + force float so sum() doesn't fail with
+        # "unsupported operand type(s) for +: 'int' and 'list'".
+        if closes_raw and isinstance(closes_raw[0], list):
+            closes = [float(c[0]) for c in closes_raw]
+        else:
+            closes = [float(c) for c in closes_raw]
         if len(closes) < 200:
             return {"ok": False, "reason": "need_200_days_for_ma200"}
         ma_50 = sum(closes[-50:]) / 50
