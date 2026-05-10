@@ -136,13 +136,21 @@ _regime_match_lock = threading.Lock()
 
 def _cached_regime_match() -> dict:
     """10-min cached wrapper around regime_playbook.get_current_match.
-    NEVER raises — returns None on any error."""
+    NEVER raises — returns None on any error.
+
+    BUG FIX (post-deploy diagnosis): only caches SUCCESSFUL responses
+    (ok=True). A failed first call would have poisoned the cache for
+    10 min and prevented overlay from working until cache TTL expired.
+    Now: failed responses bypass the cache entirely and are retried
+    on the next call."""
     try:
         with _regime_match_lock:
             now = time.time()
             cached = _regime_match_cache.get("data")
             ts = _regime_match_cache.get("ts", 0)
-            if cached and (now - ts) < _REGIME_MATCH_CACHE_TTL:
+            # Only return cached if it's a SUCCESSFUL response
+            if (cached and isinstance(cached, dict) and cached.get("ok")
+                    and (now - ts) < _REGIME_MATCH_CACHE_TTL):
                 return cached
         # Fetch fresh (outside lock — heavy operation)
         try:
@@ -150,9 +158,11 @@ def _cached_regime_match() -> dict:
             fresh = get_current_match()
         except Exception:
             return None
-        with _regime_match_lock:
-            _regime_match_cache["data"] = fresh
-            _regime_match_cache["ts"] = time.time()
+        # Only cache if fresh result is successful — never poison the cache
+        if fresh and isinstance(fresh, dict) and fresh.get("ok"):
+            with _regime_match_lock:
+                _regime_match_cache["data"] = fresh
+                _regime_match_cache["ts"] = time.time()
         return fresh
     except Exception:
         return None
