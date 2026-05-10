@@ -138,34 +138,65 @@ def _cached_regime_match() -> dict:
     """10-min cached wrapper around regime_playbook.get_current_match.
     NEVER raises — returns None on any error.
 
-    BUG FIX (post-deploy diagnosis): only caches SUCCESSFUL responses
-    (ok=True). A failed first call would have poisoned the cache for
-    10 min and prevented overlay from working until cache TTL expired.
-    Now: failed responses bypass the cache entirely and are retried
-    on the next call."""
+    CRITICAL BUG FIX v2 (post-timeout diagnosis): on cache miss, this
+    is called FROM INSIDE pick generation (50 picks per cycle). The
+    underlying get_current_match() does a 300d SPY yfinance download
+    that can take 30-60s under rate-limiting. With 50 picks running
+    sequentially and the FIRST one triggering the heavy fetch,
+    generate_quant_picks would exceed App Runner's 120s edge timeout.
+
+    NEW BEHAVIOR: cache miss returns None IMMEDIATELY. Pick generation
+    NEVER blocks on yfinance for the overlay. The cache is warmed
+    lazily in a background thread (spawned once per cache miss) so
+    NEXT cycle has fresh data.
+
+    Also bug fix v1 still in place: only cache successful responses
+    so a failed fetch doesn't poison the cache."""
     try:
         with _regime_match_lock:
             now = time.time()
             cached = _regime_match_cache.get("data")
             ts = _regime_match_cache.get("ts", 0)
-            # Only return cached if it's a SUCCESSFUL response
+            warming = _regime_match_cache.get("warming", False)
+            # Only return cached if it's a SUCCESSFUL response in TTL
             if (cached and isinstance(cached, dict) and cached.get("ok")
                     and (now - ts) < _REGIME_MATCH_CACHE_TTL):
                 return cached
-        # Fetch fresh (outside lock — heavy operation)
-        try:
-            from predictions.regime_playbook import get_current_match
-            fresh = get_current_match()
-        except Exception:
-            return None
-        # Only cache if fresh result is successful — never poison the cache
+            # Cache miss: spawn ONE background warmer if not already warming
+            if not warming:
+                _regime_match_cache["warming"] = True
+                try:
+                    threading.Thread(target=_warm_regime_match_cache,
+                                      daemon=True,
+                                      name="overlay-warm-regime").start()
+                except Exception:
+                    _regime_match_cache["warming"] = False
+        # NEVER block the pick-gen hot path — return None immediately
+        return None
+    except Exception:
+        return None
+
+
+def _warm_regime_match_cache():
+    """Background warmer — fetches get_current_match() and stores in
+    cache. Called once per cache miss. NEVER raises."""
+    try:
+        from predictions.regime_playbook import get_current_match
+        fresh = get_current_match()
         if fresh and isinstance(fresh, dict) and fresh.get("ok"):
             with _regime_match_lock:
                 _regime_match_cache["data"] = fresh
                 _regime_match_cache["ts"] = time.time()
-        return fresh
+                _regime_match_cache["warming"] = False
+        else:
+            with _regime_match_lock:
+                _regime_match_cache["warming"] = False
     except Exception:
-        return None
+        try:
+            with _regime_match_lock:
+                _regime_match_cache["warming"] = False
+        except Exception:
+            pass
 
 
 def _delta_loss_postmortem(ticker: str, sector: str, regime: str,
@@ -183,12 +214,63 @@ def _delta_loss_postmortem(ticker: str, sector: str, regime: str,
         return 0.0
 
 
-def _delta_cross_asset(sector: str, direction: str) -> float:
-    """Map cross-asset tilt to a sector-aware delta."""
+# Module-level cache for cross_asset (also yfinance-heavy)
+_cross_asset_cache = {"data": None, "ts": 0, "warming": False}
+_cross_asset_lock = threading.Lock()
+_CROSS_ASSET_CACHE_TTL = 1800  # 30 min
+
+
+def _warm_cross_asset_cache():
+    """Background warmer for cross_asset. NEVER raises."""
     try:
         from predictions.cross_asset import get_sector_recommendation
-        rec = get_sector_recommendation()
-        if not rec.get("ok"):
+        fresh = get_sector_recommendation()
+        if fresh and isinstance(fresh, dict) and fresh.get("ok"):
+            with _cross_asset_lock:
+                _cross_asset_cache["data"] = fresh
+                _cross_asset_cache["ts"] = time.time()
+                _cross_asset_cache["warming"] = False
+        else:
+            with _cross_asset_lock:
+                _cross_asset_cache["warming"] = False
+    except Exception:
+        try:
+            with _cross_asset_lock:
+                _cross_asset_cache["warming"] = False
+        except Exception:
+            pass
+
+
+def _cached_cross_asset() -> dict:
+    """Cache-only cross_asset wrapper — never blocks pick gen."""
+    try:
+        with _cross_asset_lock:
+            now = time.time()
+            cached = _cross_asset_cache.get("data")
+            ts = _cross_asset_cache.get("ts", 0)
+            warming = _cross_asset_cache.get("warming", False)
+            if (cached and isinstance(cached, dict) and cached.get("ok")
+                    and (now - ts) < _CROSS_ASSET_CACHE_TTL):
+                return cached
+            if not warming:
+                _cross_asset_cache["warming"] = True
+                try:
+                    threading.Thread(target=_warm_cross_asset_cache,
+                                      daemon=True,
+                                      name="overlay-warm-crossasset").start()
+                except Exception:
+                    _cross_asset_cache["warming"] = False
+        return None
+    except Exception:
+        return None
+
+
+def _delta_cross_asset(sector: str, direction: str) -> float:
+    """Map cross-asset tilt to a sector-aware delta.
+    Uses cache-only — never blocks pick generation on yfinance."""
+    try:
+        rec = _cached_cross_asset()
+        if not rec or not rec.get("ok"):
             return 0.0
         tilt = rec.get("sector_tilt", "balanced")
         regime = rec.get("regime")
