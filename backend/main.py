@@ -1382,6 +1382,46 @@ scheduler.add_job(
     misfire_grace_time=3600,
 )
 
+
+# --- SP500 PERIODIC SELF-HEAL (every 30 min) ---
+# Recomputes sp500_cumulative_return_pct on all snapshots from
+# truth-engine SPY data. Catches yfinance glitches, stale cache,
+# bad multipliers, etc. Self-heals quietly in background.
+# Replaces the once-per-startup behavior so the chart NEVER
+# stays broken until next deploy.
+def _sp500_periodic_recompute():
+    """Self-healing SP500: rebuild snapshot SP500 cum returns
+    from truth-engine SPY history. Idempotent + soft-fail."""
+    try:
+        from predictions.truth_engine import recompute_sp500_history
+        result = recompute_sp500_history()
+        if result.get("ok"):
+            n = result.get("snapshots_updated", 0)
+            latest = result.get("latest_sp_cum_pct")
+            if n > 0:
+                logger.warning(
+                    f"SP500 PERIODIC RECOMPUTE: rebuilt {n} snapshots, "
+                    f"latest_sp_cum={latest}%"
+                )
+        else:
+            logger.debug(f"SP500 PERIODIC RECOMPUTE skipped: {result.get('reason')}")
+    except Exception as e:
+        # NEVER raise — sp500 recompute failure must not crash scheduler
+        logger.error(f"SP500 PERIODIC RECOMPUTE error (non-fatal): {e}")
+
+
+scheduler.add_job(
+    _sp500_periodic_recompute,
+    "interval",
+    minutes=30,
+    id="sp500_periodic_recompute",
+    name="SP500 Self-Heal (every 30 min)",
+    max_instances=1,
+    misfire_grace_time=600,
+    replace_existing=True,
+)
+
+
 # --- PRE-MARKET INTELLIGENCE SCAN (6:30am ET) ---
 # Runs 1 hour before first trade cycle to check overnight futures,
 # global markets, weekend news impact, and Bitcoin (24/7 risk gauge).
