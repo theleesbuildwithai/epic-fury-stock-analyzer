@@ -5501,8 +5501,16 @@ def admin_scrub_phantom_diagnostic(request: Request):
                                             'closed_flat_validator',
                                             'closed_flat_validator_v2'))
                      AND entry_price > 0
-                     AND (exit_price > 10.0 * entry_price
-                          OR pnl_pct > 500)
+                     AND (
+                        exit_price > 10.0 * entry_price
+                        OR pnl_pct > 500
+                        OR (
+                            -- v6: DXC-class options phantoms
+                            pnl_dollars > 3000
+                            AND pnl_pct > 100
+                            AND entry_price < 20
+                        )
+                     )
                    ORDER BY pnl_dollars DESC"""
             ).fetchall()
             candidates = [dict(r) for r in rows]

@@ -320,8 +320,21 @@ def _scrub_phantom_trades_v2() -> dict:
                                             'closed_flat_validator',
                                             'closed_flat_validator_v2'))
                      AND entry_price > 0
-                     AND (exit_price > 10.0 * entry_price
-                          OR pnl_pct > 500)"""
+                     AND (
+                        exit_price > 10.0 * entry_price
+                        OR pnl_pct > 500
+                        OR (
+                            -- v6: catch DXC-class options phantoms.
+                            -- Real legit small-premium trades rarely net
+                            -- more than $3k AND >100% in a single trade.
+                            -- Combined with entry < $20 (options-priced)
+                            -- this catches the inflated-exit-price pattern
+                            -- without false-positiving on legit equity.
+                            pnl_dollars > 3000
+                            AND pnl_pct > 100
+                            AND entry_price < 20
+                        )
+                     )"""
             ).fetchall()
         finally:
             conn.close()
