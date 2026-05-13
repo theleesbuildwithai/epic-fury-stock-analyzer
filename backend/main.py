@@ -437,6 +437,15 @@ try:
                 f"CASH CORRECTION V1: skipped (delta=${_delta_corr:,.2f} out of [100, 50000])"
             )
         _set_state_corr("cash_correction_v1_done", "1")
+        # DEFENSIVE: also mark portfolio_reset_v3 as done so it cannot
+        # later in this same startup force cash to $122,156.30, overriding
+        # the v1 restore. v3 was a separate one-time fix that should not
+        # run if v1 has already corrected cash.
+        try:
+            _set_state_corr("portfolio_reset_v3_done", "1")
+            logger.info("CASH CORRECTION V1: also marked portfolio_reset_v3_done=1 to prevent override")
+        except Exception as _pe:
+            logger.warning(f"Could not mark v3 done: {_pe}")
 except Exception as e:
     logger.warning(f"Cash correction v1 error (non-fatal): {e}")
 
