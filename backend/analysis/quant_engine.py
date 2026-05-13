@@ -950,13 +950,39 @@ def detect_market_regime() -> dict:
         try:
             _throttle()
             sp_df = yf.download("^GSPC", period="1y", progress=False)
+            sp_current = None
             if sp_df is not None and len(sp_df) >= 200:
                 sp_closes = _safe_close(sp_df).values.astype(float)
                 sp_current = float(sp_closes[-1])
                 sp_sma200 = float(np.mean(sp_closes[-200:]))
                 sp_sma50 = float(np.mean(sp_closes[-50:]))
-                sp_pct_above_200 = ((sp_current / sp_sma200) - 1) * 100
-
+                # SANITY CHECK: S&P 500 must be in plausible range
+                # (the index has not been below 1000 since 2009 and not above
+                # 20000 ever). Implausible value → fall through to truth_engine
+                # fallback below. Prevents corrupted yfinance data from causing
+                # phantom BEAR regime.
+                if not (1000 < sp_current < 20000):
+                    logger.warning(
+                        f"Regime: implausible S&P 500 close {sp_current} — "
+                        f"discarding and trying truth_engine fallback"
+                    )
+                    sp_current = None
+            if sp_current is None:
+                # Fallback to truth_engine (multi-source: ^GSPC, SPY, ^SPX with bounds)
+                try:
+                    from predictions.truth_engine import get_sp500_truth
+                    truth = get_sp500_truth(force_refresh=True)
+                    if truth.get("ok") and truth.get("price"):
+                        sp_current = float(truth["price"])
+                        sp_sma200 = sp_current   # Conservative: assume at SMA
+                        sp_sma50 = sp_current
+                        regime_data["details"].append(
+                            f"S&P 500 from truth_engine ({truth.get('source')}) — yfinance corrupted"
+                        )
+                except Exception as _te:
+                    logger.warning(f"Regime: truth_engine fallback failed: {_te}")
+            if sp_current is not None and sp_current > 0:
+                sp_pct_above_200 = ((sp_current / sp_sma200) - 1) * 100 if sp_sma200 > 0 else 0
                 regime_data["sp500_price"] = round(sp_current, 2)
                 regime_data["sp500_sma200"] = round(sp_sma200, 2)
                 regime_data["sp500_sma50"] = round(sp_sma50, 2)
@@ -986,31 +1012,44 @@ def detect_market_regime() -> dict:
             vix_df = yf.download("^VIX", period="5d", progress=False)
             if vix_df is not None and not vix_df.empty:
                 vix_val = float(_safe_close(vix_df).dropna().iloc[-1])
-                regime_data["vix_level"] = round(vix_val, 2)
-
-                if vix_val < 15:
-                    regime_data["vix_zone"] = "complacent"
-                    regime_data["details"].append(
-                        f"VIX at {vix_val:.1f} — low fear, possible complacency"
+                # SANITY CHECK: VIX has historical range ~9 to ~85.
+                # Anything outside 5-100 is corrupt data. Skip rather than
+                # poison the regime classifier with a phantom CRISIS reading.
+                if not (5 < vix_val < 100):
+                    logger.warning(
+                        f"Regime: implausible VIX {vix_val} — discarded; "
+                        f"using neutral 'normal' zone"
                     )
-                elif vix_val < 20:
+                    regime_data["vix_level"] = 18.0  # neutral fallback
                     regime_data["vix_zone"] = "normal"
-                    regime_data["details"].append(f"VIX at {vix_val:.1f} — normal range")
-                elif vix_val < 25:
-                    regime_data["vix_zone"] = "elevated"
                     regime_data["details"].append(
-                        f"VIX at {vix_val:.1f} — elevated uncertainty"
-                    )
-                elif vix_val < 35:
-                    regime_data["vix_zone"] = "fear"
-                    regime_data["details"].append(
-                        f"VIX at {vix_val:.1f} — significant fear in market"
+                        f"VIX read {vix_val:.1f} discarded as corrupt — using neutral"
                     )
                 else:
-                    regime_data["vix_zone"] = "crisis"
-                    regime_data["details"].append(
-                        f"VIX at {vix_val:.1f} — CRISIS level, extreme caution"
-                    )
+                    regime_data["vix_level"] = round(vix_val, 2)
+                    if vix_val < 15:
+                        regime_data["vix_zone"] = "complacent"
+                        regime_data["details"].append(
+                            f"VIX at {vix_val:.1f} — low fear, possible complacency"
+                        )
+                    elif vix_val < 20:
+                        regime_data["vix_zone"] = "normal"
+                        regime_data["details"].append(f"VIX at {vix_val:.1f} — normal range")
+                    elif vix_val < 25:
+                        regime_data["vix_zone"] = "elevated"
+                        regime_data["details"].append(
+                            f"VIX at {vix_val:.1f} — elevated uncertainty"
+                        )
+                    elif vix_val < 35:
+                        regime_data["vix_zone"] = "fear"
+                        regime_data["details"].append(
+                            f"VIX at {vix_val:.1f} — significant fear in market"
+                        )
+                    else:
+                        regime_data["vix_zone"] = "crisis"
+                        regime_data["details"].append(
+                            f"VIX at {vix_val:.1f} — CRISIS level, extreme caution"
+                        )
         except Exception as e:
             logger.warning(f"Regime: VIX data failed: {e}")
 
