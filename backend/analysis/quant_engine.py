@@ -967,6 +967,7 @@ def detect_market_regime() -> dict:
                         f"discarding and trying truth_engine fallback"
                     )
                     sp_current = None
+            sp_used_fallback = False
             if sp_current is None:
                 # Fallback to truth_engine (multi-source: ^GSPC, SPY, ^SPX with bounds)
                 try:
@@ -974,35 +975,41 @@ def detect_market_regime() -> dict:
                     truth = get_sp500_truth(force_refresh=True)
                     if truth.get("ok") and truth.get("price"):
                         sp_current = float(truth["price"])
-                        sp_sma200 = sp_current   # Conservative: assume at SMA
+                        # Mark fallback so we DON'T pretend to know the SMA-trend
+                        sp_used_fallback = True
+                        sp_sma200 = sp_current   # placeholder for display only
                         sp_sma50 = sp_current
                         regime_data["details"].append(
-                            f"S&P 500 from truth_engine ({truth.get('source')}) — yfinance corrupted"
+                            f"S&P 500 from truth_engine ({truth.get('source')}) — yfinance corrupted; trend=neutral"
                         )
                 except Exception as _te:
                     logger.warning(f"Regime: truth_engine fallback failed: {_te}")
             if sp_current is not None and sp_current > 0:
-                sp_pct_above_200 = ((sp_current / sp_sma200) - 1) * 100 if sp_sma200 > 0 else 0
                 regime_data["sp500_price"] = round(sp_current, 2)
-                regime_data["sp500_sma200"] = round(sp_sma200, 2)
-                regime_data["sp500_sma50"] = round(sp_sma50, 2)
-                regime_data["sp500_pct_above_200sma"] = round(sp_pct_above_200, 2)
-
-                if sp_current > sp_sma200:
-                    regime_data["sp500_trend"] = "bullish"
-                    if sp_current > sp_sma50 > sp_sma200:
-                        regime_data["details"].append(
-                            "S&P 500 in strong uptrend (price > 50-SMA > 200-SMA)"
-                        )
-                    else:
-                        regime_data["details"].append(
-                            f"S&P 500 above 200-SMA by {sp_pct_above_200:.1f}%"
-                        )
+                if sp_used_fallback:
+                    # No real SMA → trend stays "unknown"; do NOT emit bearish signal
+                    regime_data["sp500_trend"] = "unknown"
+                    regime_data["sp500_pct_above_200sma"] = 0
                 else:
-                    regime_data["sp500_trend"] = "bearish"
-                    regime_data["details"].append(
-                        f"S&P 500 below 200-SMA by {abs(sp_pct_above_200):.1f}% — risk-off"
-                    )
+                    sp_pct_above_200 = ((sp_current / sp_sma200) - 1) * 100 if sp_sma200 > 0 else 0
+                    regime_data["sp500_sma200"] = round(sp_sma200, 2)
+                    regime_data["sp500_sma50"] = round(sp_sma50, 2)
+                    regime_data["sp500_pct_above_200sma"] = round(sp_pct_above_200, 2)
+                    if sp_current > sp_sma200:
+                        regime_data["sp500_trend"] = "bullish"
+                        if sp_current > sp_sma50 > sp_sma200:
+                            regime_data["details"].append(
+                                "S&P 500 in strong uptrend (price > 50-SMA > 200-SMA)"
+                            )
+                        else:
+                            regime_data["details"].append(
+                                f"S&P 500 above 200-SMA by {sp_pct_above_200:.1f}%"
+                            )
+                    else:
+                        regime_data["sp500_trend"] = "bearish"
+                        regime_data["details"].append(
+                            f"S&P 500 below 200-SMA by {abs(sp_pct_above_200):.1f}% — risk-off"
+                        )
         except Exception as e:
             logger.warning(f"Regime: S&P 500 data failed: {e}")
 
@@ -1012,10 +1019,13 @@ def detect_market_regime() -> dict:
             vix_df = yf.download("^VIX", period="5d", progress=False)
             if vix_df is not None and not vix_df.empty:
                 vix_val = float(_safe_close(vix_df).dropna().iloc[-1])
-                # SANITY CHECK: VIX has historical range ~9 to ~85.
-                # Anything outside 5-100 is corrupt data. Skip rather than
-                # poison the regime classifier with a phantom CRISIS reading.
-                if not (5 < vix_val < 100):
+                # SANITY CHECK: VIX intraday lifetime high is 89.53 (2008-10-24)
+                # but in normal operation > 60 has only happened in 2008/2020/2022.
+                # We tighten to 60 because the production bug observed VIX=76.36
+                # while real VIX was ~18 — a clear corruption pattern.  False
+                # negative on a real once-a-decade crisis is acceptable (system
+                # treats as "normal" — conservative for risk).
+                if not (5 < vix_val < 60):
                     logger.warning(
                         f"Regime: implausible VIX {vix_val} — discarded; "
                         f"using neutral 'normal' zone"
