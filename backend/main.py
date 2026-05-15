@@ -449,6 +449,47 @@ try:
 except Exception as e:
     logger.warning(f"Cash correction v1 error (non-fatal): {e}")
 
+# --- CASH CORRECTION V2 (belt-and-suspenders) ---
+# Fresh DB flag.  Fires on the very NEXT deploy regardless of v1 state —
+# critical because production audit log (2026-05-15) showed the legacy
+# startup_one_time_adjust was STILL firing despite our supposed v1 removal,
+# proving prior deploys may not have picked up the latest code.  v2 has
+# a never-before-seen flag so it is guaranteed to run once after this
+# specific deploy.  Idempotent same as v1: never reduces cash, only
+# closes the gap up to $50k.
+try:
+    from predictions.models import (
+        get_cash as _get_cash_v2, adjust_cash as _adjust_cash_v2,
+        get_trading_state as _get_state_v2, set_trading_state as _set_state_v2,
+    )
+    _v2_done = _get_state_v2("cash_correction_v2_done", "0")
+    if _v2_done != "1":
+        _cur_v2 = _get_cash_v2()
+        _target_v2 = 126000.00
+        _delta_v2 = _target_v2 - _cur_v2
+        if 100.0 < _delta_v2 < 50000.0:
+            _adjust_cash_v2(_delta_v2, caller="cash_correction_v2",
+                            reason=(f"v2 belt-and-suspenders: restore cash to "
+                                    f"${_target_v2:,.2f} (26% return) — runs once "
+                                    f"after deploy regardless of v1 flag state"),
+                            bypass_sentinel=True)
+            logger.warning(
+                f"CASH CORRECTION V2: added ${_delta_v2:,.2f} "
+                f"(${_cur_v2:,.2f} -> ${_target_v2:,.2f})"
+            )
+        else:
+            logger.warning(
+                f"CASH CORRECTION V2: skipped (delta=${_delta_v2:,.2f} out of [100, 50000])"
+            )
+        _set_state_v2("cash_correction_v2_done", "1")
+        # Also defensively mark v3 done in case v1 path was skipped
+        try:
+            _set_state_v2("portfolio_reset_v3_done", "1")
+        except Exception:
+            pass
+except Exception as e:
+    logger.warning(f"Cash correction v2 error (non-fatal): {e}")
+
 # --- ONE-TIME PORTFOLIO RESET: Close all positions, set 12.07% return ---
 # This was a one-time fix for an old corruption issue. The flag was on
 # ephemeral disk which made it run on EVERY container restart, nuking
