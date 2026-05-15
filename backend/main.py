@@ -2440,19 +2440,43 @@ def _prewarm_picks_bg():
                 # FAST PATH: try S3 restore first — populates cache in <1s
                 # vs the 5-15min full regen. Trades can start firing while
                 # the fresh background gen runs to replace.
+                #
+                # SAFETY GATE (2026-05-15): validate the restored picks' regime
+                # data BEFORE populating cache. The 2026-05-15 deploy saw S3
+                # cache holding pre-deploy regime with corrupt sp500=79.38 and
+                # vix=190.68 (yfinance bug). Without this gate the stale corrupt
+                # data was served to /api/quant-picks until full regen completed
+                # 10+ minutes later. Now we reject corrupt S3 cache so the
+                # endpoint returns the "loading" placeholder until live regen
+                # produces sane data — better than serving phantom-CRISIS picks.
                 try:
                     from predictions.enhancements import restore_picks_from_s3
                     s3_restore = restore_picks_from_s3()
                     if s3_restore.get("ok") and s3_restore.get("picks"):
-                        from analysis.quant_engine import _quant_cache
-                        _quant_cache["quant_picks"] = {
-                            "data": s3_restore["picks"],
-                            "time": _t.time(),
-                        }
-                        logger.warning(
-                            f"PICKS S3 RESTORE: {s3_restore.get('long_count')} longs + "
-                            f"{s3_restore.get('short_count')} shorts loaded from S3 backup"
-                        )
+                        _s3_picks = s3_restore["picks"]
+                        # Validate regime data plausibility
+                        _s3_regime = _s3_picks.get("regime") or {}
+                        _s3_sp = _s3_regime.get("sp500_price")
+                        _s3_vx = _s3_regime.get("vix_level")
+                        # sp500 must be None or in [1000, 20000]; vix must be None/0/in [5, 60]
+                        _sp_ok = (_s3_sp is None) or (1000 < float(_s3_sp) < 20000)
+                        _vx_ok = (_s3_vx is None) or (float(_s3_vx) == 0) or (5 < float(_s3_vx) < 60)
+                        if not (_sp_ok and _vx_ok):
+                            logger.warning(
+                                f"PICKS S3 RESTORE REJECTED — corrupt regime "
+                                f"(sp500={_s3_sp}, vix={_s3_vx}). Waiting for live regen."
+                            )
+                        else:
+                            from analysis.quant_engine import _quant_cache
+                            _quant_cache["quant_picks"] = {
+                                "data": _s3_picks,
+                                "time": _t.time(),
+                            }
+                            logger.warning(
+                                f"PICKS S3 RESTORE: {s3_restore.get('long_count')} longs + "
+                                f"{s3_restore.get('short_count')} shorts loaded from S3 backup "
+                                f"(regime sp500={_s3_sp}, vix={_s3_vx} — validated)"
+                            )
                 except Exception as _e:
                     logger.debug(f"S3 restore skipped (non-fatal): {_e}")
 
