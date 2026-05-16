@@ -57,33 +57,98 @@ _BACKTEST_TTL = 3600  # 1 hour cache
 def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -> dict:
     """Download historical close prices for a list of tickers.
     Returns {ticker: pd.Series of closes} dict, skipping any that fail.
-    Never raises."""
+    Never raises.
+
+    RESILIENCE (2026-05-15): yfinance bulk fetch of 100 tickers for 365
+    days frequently fails with rate-limit or empty result.  Three-tier
+    strategy:
+      1. Try one bulk fetch (fastest happy path)
+      2. If bulk yields <50% of requested tickers, chunk into 20-ticker
+         batches with 0.5s spacing
+      3. For tickers still missing, retry individually with 1s spacing
+
+    This trades latency (backtest may now take 60-90s for full universe)
+    for reliability — the previous 365-day failure mode is eliminated.
+    """
     out = {}
+    if not tickers:
+        return out
     try:
         import yfinance as yf
         import pandas as pd
-        # Batch download
+        import time as _time
+
+        def _extract(df, syms):
+            """Extract closes from a yf result into out dict.  Returns
+            set of tickers successfully extracted."""
+            got = set()
+            if df is None or df.empty:
+                return got
+            for sym in syms:
+                if sym in out:
+                    got.add(sym)
+                    continue
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if sym in df.columns.get_level_values(0):
+                            s = df[(sym, "Close")].dropna()
+                            if len(s) >= 30:
+                                out[sym] = s
+                                got.add(sym)
+                    elif len(syms) == 1:
+                        s = df["Close"].dropna()
+                        if len(s) >= 30:
+                            out[sym] = s
+                            got.add(sym)
+                except Exception:
+                    continue
+            return got
+
         kwargs = {"start": start, "end": end, "progress": False,
                   "auto_adjust": True, "threads": True, "group_by": "ticker"}
         if period:
             kwargs["period"] = period
-        df = yf.download(tickers, **kwargs)
-        if df is None or df.empty:
+
+        # TIER 1: bulk fetch (fastest path)
+        try:
+            df = yf.download(tickers, **kwargs)
+            _extract(df, tickers)
+        except Exception as e:
+            logger.debug(f"_safe_yf_download bulk tier failed: {e}")
+
+        # If we got >= 50% of requested tickers, accept and return
+        if len(out) >= len(tickers) * 0.5:
             return out
 
-        for sym in tickers:
+        # TIER 2: chunked retry (yfinance handles 20-ticker batches more reliably)
+        missing = [t for t in tickers if t not in out]
+        CHUNK_SIZE = 20
+        for i in range(0, len(missing), CHUNK_SIZE):
+            chunk = missing[i:i + CHUNK_SIZE]
             try:
-                if isinstance(df.columns, pd.MultiIndex):
-                    if sym in df.columns.get_level_values(0):
-                        s = df[(sym, "Close")].dropna()
-                        if len(s) >= 30:
-                            out[sym] = s
-                elif len(tickers) == 1:
-                    s = df["Close"].dropna()
-                    if len(s) >= 30:
-                        out[sym] = s
-            except Exception:
+                df = yf.download(chunk, **kwargs)
+                _extract(df, chunk)
+                _time.sleep(0.5)  # gentle on rate limits
+            except Exception as e:
+                logger.debug(f"_safe_yf_download chunk fail [{i}]: {e}")
                 continue
+
+        # TIER 3: individual retry for stragglers (rate-limit safest)
+        still_missing = [t for t in tickers if t not in out]
+        if still_missing and len(still_missing) <= 30:
+            for sym in still_missing:
+                try:
+                    df = yf.download([sym], **kwargs)
+                    _extract(df, [sym])
+                    _time.sleep(1.0)
+                except Exception:
+                    continue
+
+        if out:
+            logger.warning(
+                f"_safe_yf_download: got {len(out)}/{len(tickers)} tickers "
+                f"({len(out)/len(tickers)*100:.0f}% coverage)"
+            )
     except Exception as e:
         logger.warning(f"_safe_yf_download soft-fail: {e}")
     return out
