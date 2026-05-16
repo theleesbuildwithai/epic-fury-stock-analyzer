@@ -272,8 +272,53 @@ def _is_preservation_mode() -> bool:
     except Exception:
         return True  # Default to cautious if we can't check
 
+
+# ============================================================
+#  LIVE TRADING SAFETY MODE — activated by env var for real-money IBKR
+# ============================================================
+# When LIVE_TRADING_SAFETY_MODE=true (set in App Runner env), the system
+# uses conservative-but-not-paranoid limits suitable for first weeks of
+# live trading.  "Just right" — not so safe that nothing fires, not so
+# loose that one bad day wipes 10%.  Layered on top of all existing
+# sentinels (circuit breaker, snapshot drift, daily pause).
+#
+# Effects when active:
+#   - Position size 4% (vs 8% paper)
+#   - Min confidence 50 (vs 40 paper)
+#   - Min composite score 2.5 (vs 2.0 paper)
+#   - Gross exposure cap 50% (vs 80% paper) — see _get_dynamic_exposure_cap
+#   - Auto-pause at -2% daily loss (existing drawdown halt logic)
+#
+# Override individual limits via env if needed:
+#   LIVE_POSITION_SIZE_PCT, LIVE_MIN_CONFIDENCE, LIVE_MIN_SCORE,
+#   LIVE_MAX_GROSS_EXPOSURE
+def _is_live_safety_mode() -> bool:
+    """Check if LIVE_TRADING_SAFETY_MODE is enabled.  Cached after first
+    read — never raises."""
+    try:
+        import os as _os_ls
+        return _os_ls.environ.get("LIVE_TRADING_SAFETY_MODE", "").lower() in ("true", "1", "yes")
+    except Exception:
+        return False
+
+
+def _live_safety_float(env_name: str, default: float) -> float:
+    """Read a float override from env, fall back to default on any error."""
+    try:
+        import os as _os_lsf
+        v = _os_lsf.environ.get(env_name, "").strip()
+        if v:
+            return float(v)
+    except Exception:
+        pass
+    return default
+
+
 def _get_position_size_pct() -> float:
-    """Dynamic position sizing: larger when aggressive."""
+    """Dynamic position sizing: larger when aggressive, smaller in
+    preservation or live safety mode."""
+    if _is_live_safety_mode():
+        return _live_safety_float("LIVE_POSITION_SIZE_PCT", 0.04)
     if _is_preservation_mode():
         return 0.03  # 3% per position — half size in preservation mode
     return 0.08  # 8% per position — aggressive conviction sizing
@@ -283,6 +328,8 @@ def _get_min_confidence() -> int:
     50 too strict). Wide pick funnel + asymmetric R:R + win-lock +
     loss-cut do the quality work. Don't make the entry filter so
     strict that the book ever sits at 0 picks."""
+    if _is_live_safety_mode():
+        return int(_live_safety_float("LIVE_MIN_CONFIDENCE", 50))
     if _is_preservation_mode():
         return 50
     return 40
@@ -290,6 +337,8 @@ def _get_min_confidence() -> int:
 def _get_min_composite_score() -> float:
     """Dynamic score filter — sweet spot 2.0 (was 1.5 too loose,
     2.5 too strict)."""
+    if _is_live_safety_mode():
+        return _live_safety_float("LIVE_MIN_SCORE", 2.5)
     if _is_preservation_mode():
         return 3.0
     return 2.0
@@ -605,11 +654,22 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         target = max(DYNAMIC_EXPOSURE_MIN, min(DYNAMIC_EXPOSURE_MAX, target))
         target = round(target, 3)
 
+        # LIVE TRADING SAFETY MODE: cap exposure at 50% (override-able via env)
+        # Applied AFTER normal clamp so safety mode is the final word.
+        if _is_live_safety_mode():
+            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.50)
+            if target > _live_cap:
+                adjustments.append(
+                    f"LIVE_SAFETY_CAP {target:.2f} -> {_live_cap:.2f}"
+                )
+                target = round(_live_cap, 3)
+
         return {
             "target": target,
             "base": DYNAMIC_EXPOSURE_BASE,
             "adjustments": adjustments,
             "reasoning": " | ".join(adjustments),
+            "live_safety_mode": _is_live_safety_mode(),
         }
     except Exception as _e:
         logger.warning(f"_compute_dynamic_exposure_target error (using safe default): {_e}")

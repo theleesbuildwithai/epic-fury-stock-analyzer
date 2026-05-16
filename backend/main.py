@@ -4922,6 +4922,49 @@ def admin_cash_recovery(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/live-safety-mode")
+def live_safety_mode_status(request: Request):
+    """Reports whether LIVE_TRADING_SAFETY_MODE is active and the effective
+    limits.  Use this to verify safety mode BEFORE flipping IBKR live."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.paper_trader import (
+            _is_live_safety_mode, _get_position_size_pct,
+            _get_min_confidence, _get_min_composite_score,
+            _live_safety_float,
+        )
+        active = _is_live_safety_mode()
+        return {
+            "enabled": active,
+            "env_var": "LIVE_TRADING_SAFETY_MODE",
+            "effective_limits": {
+                "position_size_pct": _get_position_size_pct(),
+                "min_confidence": _get_min_confidence(),
+                "min_composite_score": _get_min_composite_score(),
+                "max_gross_exposure": _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.50) if active else 0.80,
+            },
+            "paper_defaults": {
+                "position_size_pct": 0.08,
+                "min_confidence": 40,
+                "min_composite_score": 2.0,
+                "max_gross_exposure": 0.80,
+            },
+            "env_overrides_available": [
+                "LIVE_POSITION_SIZE_PCT",
+                "LIVE_MIN_CONFIDENCE",
+                "LIVE_MIN_SCORE",
+                "LIVE_MAX_GROSS_EXPOSURE",
+            ],
+            "guidance": (
+                "Set LIVE_TRADING_SAFETY_MODE=true in App Runner env before IBKR. "
+                "Verify this endpoint shows enabled=true post-deploy."
+            ),
+        }
+    except Exception as e:
+        logger.error(f"live-safety-mode status error: {e}")
+        return {"enabled": False, "error": str(e)[:200]}
+
+
 @app.post("/api/ibkr/kill-switch")
 def ibkr_kill_switch(request: Request):
     """EMERGENCY: Flatten all IBKR positions immediately. ADMIN-ONLY."""
