@@ -53,6 +53,19 @@ DEFAULT_POSITION_PCT = 0.08     # 8% per position
 _last_backtest = {"data": None, "ts": 0}
 _BACKTEST_TTL = 3600  # 1 hour cache
 
+# PRICE DATA CACHE — biggest defense against yfinance rate limits.
+# Same tickers+range returns instantly without hitting yfinance again.
+# 2-hour TTL because historical data doesn't change.
+_price_cache = {}   # key: (tickers_tuple, start, end) -> {"data": dict, "ts": float}
+_PRICE_CACHE_TTL = 7200   # 2 hours
+import threading as _threading
+_price_cache_lock = _threading.Lock()
+
+
+def _cache_key(tickers: list, start: str, end: str) -> tuple:
+    """Build a stable cache key from request parameters."""
+    return (tuple(sorted(tickers)), start, end)
+
 
 def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -> dict:
     """Download historical close prices for a list of tickers.
@@ -67,12 +80,28 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
          batches with 0.5s spacing
       3. For tickers still missing, retry individually with 1s spacing
 
-    This trades latency (backtest may now take 60-90s for full universe)
-    for reliability — the previous 365-day failure mode is eliminated.
+    CACHE (2026-05-17): 2-hour in-memory cache by (tickers, start, end).
+    Repeat backtests on same window hit cache, eliminating rate limit
+    exposure entirely.
     """
     out = {}
     if not tickers:
         return out
+
+    # Cache check (only when not using period override)
+    cache_hit = None
+    if period is None and start and end:
+        try:
+            ck = _cache_key(list(tickers), start, end)
+            with _price_cache_lock:
+                entry = _price_cache.get(ck)
+                if entry and (time.time() - entry["ts"]) < _PRICE_CACHE_TTL:
+                    cache_hit = dict(entry["data"])
+        except Exception:
+            cache_hit = None
+        if cache_hit:
+            return cache_hit
+
     try:
         import yfinance as yf
         import pandas as pd
@@ -151,6 +180,15 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
             )
     except Exception as e:
         logger.warning(f"_safe_yf_download soft-fail: {e}")
+
+    # Cache successful results (don't cache empty/partial failures)
+    try:
+        if out and len(out) >= max(1, int(len(tickers) * 0.5)) and period is None and start and end:
+            ck = _cache_key(list(tickers), start, end)
+            with _price_cache_lock:
+                _price_cache[ck] = {"data": dict(out), "ts": time.time()}
+    except Exception:
+        pass
     return out
 
 
@@ -194,7 +232,9 @@ def run_backtest(start_date: str = None,
                  take_pct: float = DEFAULT_TAKE_PCT,
                  initial_capital: float = DEFAULT_INITIAL_CAPITAL,
                  position_pct: float = DEFAULT_POSITION_PCT,
-                 include_internals: bool = False) -> dict:
+                 include_internals: bool = False,
+                 cost_bps: float = 0.0,
+                 slippage_bps: float = 0.0) -> dict:
     """Replay a momentum-based long-only strategy over historical data.
 
     Args:
@@ -272,6 +312,9 @@ def run_backtest(start_date: str = None,
         positions = {}  # ticker -> {entry_price, shares, entry_date, entry_idx}
         trades = []   # list of {ticker, entry_price, exit_price, pnl_pct, days_held, exit_reason}
         equity_curve = []  # list of (date, total_equity)
+        # Transaction cost: total round-trip = (cost_bps + slippage_bps) / 10000 * 2
+        # Applied to each trade's pnl_pct (entry + exit cost combined)
+        round_trip_cost_pct = (float(cost_bps) + float(slippage_bps)) / 10000.0 * 2.0
 
         for i, d in enumerate(date_list):
             # Need at least 25 days of history for signal
@@ -303,14 +346,18 @@ def run_backtest(start_date: str = None,
                     exit_reason = "time_stop"
 
                 if exit_reason:
-                    cash += p["shares"] * cur_price
+                    # Apply round-trip cost (entry + exit slippage + commission)
+                    pnl_after_cost = pnl_pct - round_trip_cost_pct
+                    cash += p["shares"] * cur_price * (1 - round_trip_cost_pct)
                     trades.append({
                         "ticker": sym,
                         "entry_date": p["entry_date"].strftime("%Y-%m-%d") if hasattr(p["entry_date"], "strftime") else str(p["entry_date"])[:10],
                         "exit_date": d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10],
                         "entry_price": round(p["entry_price"], 2),
                         "exit_price": round(cur_price, 2),
-                        "pnl_pct": round(pnl_pct * 100, 2),
+                        "pnl_pct": round(pnl_after_cost * 100, 2),
+                        "pnl_pct_gross": round(pnl_pct * 100, 2),
+                        "cost_pct": round(round_trip_cost_pct * 100, 3),
                         "days_held": days_held,
                         "exit_reason": exit_reason,
                     })

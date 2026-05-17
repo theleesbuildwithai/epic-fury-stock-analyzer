@@ -6,9 +6,16 @@ export default function BacktestDashboard() {
   const [stopPct, setStopPct] = useState(0.04)
   const [takePct, setTakePct] = useState(0.10)
   const [holdDays, setHoldDays] = useState(5)
+  const [costBps, setCostBps] = useState(5)
+  const [slippageBps, setSlippageBps] = useState(5)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+
+  // Pro analysis states
+  const [proLoading, setProLoading] = useState({ wf: false, mc: false, rg: false, st: false })
+  const [proData, setProData] = useState({ wf: null, mc: null, rg: null, st: null })
+  const [proError, setProError] = useState({ wf: null, mc: null, rg: null, st: null })
 
   const runBacktest = useCallback(async () => {
     setLoading(true)
@@ -17,6 +24,7 @@ export default function BacktestDashboard() {
       const params = new URLSearchParams({
         days, top_n: topN,
         stop_pct: stopPct, take_pct: takePct, hold_days: holdDays,
+        cost_bps: costBps, slippage_bps: slippageBps,
       })
       const res = await fetch(`/api/backtest/detail?${params}`)
       const json = await res.json()
@@ -28,7 +36,28 @@ export default function BacktestDashboard() {
     } finally {
       setLoading(false)
     }
-  }, [days, topN, stopPct, takePct, holdDays])
+  }, [days, topN, stopPct, takePct, holdDays, costBps, slippageBps])
+
+  const runProAnalysis = useCallback(async (kind) => {
+    const endpoints = {
+      wf: '/api/backtest-pro/walk-forward?train_months=4&test_months=1',
+      mc: '/api/backtest-pro/monte-carlo?n_simulations=300&days=180',
+      rg: '/api/backtest-pro/regimes?days=540',
+      st: '/api/backtest-pro/stress-tests',
+    }
+    setProLoading(s => ({ ...s, [kind]: true }))
+    setProError(s => ({ ...s, [kind]: null }))
+    try {
+      const res = await fetch(endpoints[kind])
+      const json = await res.json()
+      if (!json.ok) throw new Error(json.reason || 'Analysis failed')
+      setProData(s => ({ ...s, [kind]: json }))
+    } catch (e) {
+      setProError(s => ({ ...s, [kind]: e.message }))
+    } finally {
+      setProLoading(s => ({ ...s, [kind]: false }))
+    }
+  }, [])
 
   useEffect(() => { runBacktest() }, [])  // initial load
 
@@ -38,12 +67,14 @@ export default function BacktestDashboard() {
       <p className="text-gray-400 mb-6">Replays historical data with chosen parameters — see what the strategy WOULD have done.</p>
 
       {/* Controls */}
-      <div className="bg-slate-800 rounded-lg p-4 mb-6 grid grid-cols-2 md:grid-cols-6 gap-3">
+      <div className="bg-slate-800 rounded-lg p-4 mb-6 grid grid-cols-2 md:grid-cols-8 gap-3">
         <Field label="Days back" value={days} onChange={setDays} type="number" />
         <Field label="Top N" value={topN} onChange={setTopN} type="number" />
         <Field label="Stop %" value={stopPct} onChange={setStopPct} type="number" step="0.01" />
         <Field label="Take %" value={takePct} onChange={setTakePct} type="number" step="0.01" />
         <Field label="Hold days" value={holdDays} onChange={setHoldDays} type="number" />
+        <Field label="Cost bps" value={costBps} onChange={setCostBps} type="number" />
+        <Field label="Slippage bps" value={slippageBps} onChange={setSlippageBps} type="number" />
         <button onClick={runBacktest} disabled={loading}
           className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-semibold rounded px-4 py-2">
           {loading ? 'Running…' : 'Run Backtest'}
@@ -161,6 +192,99 @@ export default function BacktestDashboard() {
       {!data && !loading && !error && (
         <div className="text-gray-400 p-6 bg-slate-800 rounded-lg">Adjust parameters above and click "Run Backtest".</div>
       )}
+
+      {/* ── PRO ANALYSES — separate section, each loads independently ── */}
+      <div className="mt-10 mb-3">
+        <h2 className="text-2xl font-bold text-white">Pro Analyses</h2>
+        <p className="text-gray-400 text-sm">Hedge-fund-grade validation. Each takes 30-120s.</p>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ProAnalysisCard
+          title="Walk-Forward Validation"
+          desc="Train on first half, test on second. If OOS Sharpe ≈ in-sample Sharpe → strategy is real. If OOS drops >50% → overfit."
+          loading={proLoading.wf} error={proError.wf} data={proData.wf}
+          onRun={() => runProAnalysis('wf')}
+          render={(d) => (
+            <div className="text-sm">
+              <div>Windows: {d.windows?.length || d.n_windows || '—'}</div>
+              <div>In-sample Sharpe: <span className="text-white font-bold">{d.avg_in_sample_sharpe?.toFixed(2) ?? '—'}</span></div>
+              <div>OOS Sharpe: <span className="text-white font-bold">{d.avg_oos_sharpe?.toFixed(2) ?? '—'}</span></div>
+              <div>Overfit ratio: <span className={d.overfit_ratio > 0.7 ? 'text-green-400' : 'text-yellow-400'}>{d.overfit_ratio?.toFixed(2) ?? '—'}</span></div>
+            </div>
+          )}
+        />
+        <ProAnalysisCard
+          title="Monte Carlo (300 sims)"
+          desc="Bootstrap-resample trades 300 times. Shows the distribution of possible outcomes — was result skill or luck?"
+          loading={proLoading.mc} error={proError.mc} data={proData.mc}
+          onRun={() => runProAnalysis('mc')}
+          render={(d) => {
+            const r = d.return_distribution || {}
+            return (
+              <div className="text-sm">
+                <div>Mean return: <span className="text-white font-bold">{r.mean?.toFixed(2) ?? '—'}%</span></div>
+                <div>Median: {r.median?.toFixed(2) ?? '—'}%</div>
+                <div className="text-red-400">5% worst: {r.p5?.toFixed(2) ?? '—'}%</div>
+                <div className="text-green-400">95% best: {r.p95?.toFixed(2) ?? '—'}%</div>
+              </div>
+            )
+          }}
+        />
+        <ProAnalysisCard
+          title="Regime-Conditional Stats"
+          desc="Separate Sharpe / win rate for BULL / BEAR / SIDEWAYS market regimes. Tells you when strategy works."
+          loading={proLoading.rg} error={proError.rg} data={proData.rg}
+          onRun={() => runProAnalysis('rg')}
+          render={(d) => (
+            <div className="text-sm space-y-1">
+              {Object.entries(d.regime_stats || {}).map(([reg, s]) => (
+                <div key={reg} className="flex justify-between border-b border-slate-700 py-1">
+                  <span className="text-gray-300">{reg}</span>
+                  <span>{s.trades} trades | {s.win_rate_pct?.toFixed(1)}% wr | Sharpe {s.sharpe?.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        />
+        <ProAnalysisCard
+          title="Stress Tests"
+          desc="Replay strategy across COVID 2020, 2022 inflation, SVB, Aug 2024 vol spike. Did it survive?"
+          loading={proLoading.st} error={proError.st} data={proData.st}
+          onRun={() => runProAnalysis('st')}
+          render={(d) => (
+            <div className="text-sm space-y-1">
+              {(d.scenarios || []).map((sc, i) => (
+                <div key={i} className="flex justify-between border-b border-slate-700 py-1">
+                  <span className="text-gray-300">{sc.name}</span>
+                  <span className={(sc.return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
+                    {sc.return_pct?.toFixed(2) ?? '—'}% ({sc.trades ?? '—'} trades)
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        />
+      </div>
+    </div>
+  )
+}
+
+function ProAnalysisCard({ title, desc, loading, error, data, onRun, render }) {
+  return (
+    <div className="bg-slate-800 rounded-lg p-4">
+      <div className="flex justify-between items-start mb-2">
+        <div>
+          <h3 className="text-lg font-semibold text-white">{title}</h3>
+          <p className="text-xs text-gray-400 mt-1">{desc}</p>
+        </div>
+        <button onClick={onRun} disabled={loading}
+          className="bg-purple-700 hover:bg-purple-600 disabled:bg-gray-600 text-white text-sm font-medium rounded px-3 py-1">
+          {loading ? '…' : 'Run'}
+        </button>
+      </div>
+      {error && <div className="text-red-400 text-sm mt-2">Error: {error}</div>}
+      {data && !error && <div className="mt-3 text-gray-200">{render(data)}</div>}
+      {!data && !error && !loading && <div className="text-gray-500 text-sm mt-2">Click Run to load.</div>}
     </div>
   )
 }

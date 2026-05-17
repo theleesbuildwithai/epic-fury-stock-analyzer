@@ -5125,12 +5125,24 @@ def backtest_threshold_sweep(request: Request, days: int = 90):
 @app.get("/api/backtest/detail")
 def backtest_detail(request: Request, days: int = 90, top_n: int = 10,
                      stop_pct: float = 0.04, take_pct: float = 0.10,
-                     hold_days: int = 5):
+                     hold_days: int = 5,
+                     cost_bps: float = 5.0, slippage_bps: float = 5.0):
     """Rich backtest data for a frontend visualization page.  Returns
     everything the backtest 'saw': config, full result metrics, equity
     curve, per-ticker breakdown, best/worst trades.  Single call =
-    everything a backtest page needs to render."""
+    everything a backtest page needs to render.
+
+    cost_bps/slippage_bps: realistic transaction costs (default 5 each
+    = ~10bps round trip ≈ what IBKR retail tier charges)."""
     check_rate_limit(request.client.host)
+    # Safety bounds
+    days = max(30, min(int(days), 730))
+    top_n = max(1, min(int(top_n), 30))
+    stop_pct = max(0.005, min(float(stop_pct), 0.20))
+    take_pct = max(0.01, min(float(take_pct), 0.50))
+    hold_days = max(1, min(int(hold_days), 60))
+    cost_bps = max(0.0, min(float(cost_bps), 100.0))
+    slippage_bps = max(0.0, min(float(slippage_bps), 100.0))
     try:
         from predictions.backtest import run_backtest
         from datetime import datetime as _dt, timedelta as _td
@@ -5140,6 +5152,7 @@ def backtest_detail(request: Request, days: int = 90, top_n: int = 10,
             start_date=start, end_date=end,
             stop_pct=stop_pct, take_pct=take_pct,
             hold_days=hold_days, top_n=top_n,
+            cost_bps=cost_bps, slippage_bps=slippage_bps,
             include_internals=True,
         )
         if not r.get("ok"):
@@ -5950,19 +5963,24 @@ def admin_force_picks_regen_sync(request: Request):
 # ============================================================
 
 @app.get("/api/backtest-pro/walk-forward")
-def backtest_pro_walk_forward(request: Request, train_months: int = 6,
+def backtest_pro_walk_forward(request: Request, train_months: int = 4,
                                 test_months: int = 1, top_n: int = 10,
                                 hold_days: int = 5):
     """Walk-forward train/test validation — overfitting detector.
-    Heavy: typically 60-180s depending on universe + window count."""
+    Safe bounds: train_months in [3, 12], test_months in [1, 6].
+    Defaults guarantee enough trading days to not fail."""
     check_rate_limit(request.client.host)
+    train_months = max(3, min(int(train_months), 12))
+    test_months = max(1, min(int(test_months), 6))
+    top_n = max(1, min(int(top_n), 30))
+    hold_days = max(1, min(int(hold_days), 30))
     try:
         from predictions.backtest_pro import walk_forward_validation
         return walk_forward_validation(
-            train_months=int(train_months),
-            test_months=int(test_months),
-            top_n=int(top_n),
-            hold_days=int(hold_days),
+            train_months=train_months,
+            test_months=test_months,
+            top_n=top_n,
+            hold_days=hold_days,
         )
     except Exception as e:
         logger.error(f"Backtest-pro walk-forward error: {e}")
@@ -5970,21 +5988,25 @@ def backtest_pro_walk_forward(request: Request, train_months: int = 6,
 
 
 @app.get("/api/backtest-pro/monte-carlo")
-def backtest_pro_monte_carlo(request: Request, n_simulations: int = 1000,
+def backtest_pro_monte_carlo(request: Request, n_simulations: int = 500,
                               days: int = 180, top_n: int = 10,
                               hold_days: int = 5):
     """Bootstrap-resample trades to give CIs on return + Sharpe + max DD.
-    Tells you whether the result was skill or luck."""
+    Safe bounds: n_simulations [50, 5000], days [60, 730]."""
     check_rate_limit(request.client.host)
+    n_simulations = max(50, min(int(n_simulations), 5000))
+    days = max(60, min(int(days), 730))
+    top_n = max(1, min(int(top_n), 30))
+    hold_days = max(1, min(int(hold_days), 30))
     try:
         from predictions.backtest_pro import monte_carlo_bootstrap
         from datetime import datetime as _dt, timedelta as _td
         end = _dt.utcnow().date().isoformat()
-        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        start = (_dt.utcnow() - _td(days=days)).date().isoformat()
         return monte_carlo_bootstrap(
-            n_simulations=int(n_simulations),
+            n_simulations=n_simulations,
             start_date=start, end_date=end,
-            top_n=int(top_n), hold_days=int(hold_days),
+            top_n=top_n, hold_days=hold_days,
         )
     except Exception as e:
         logger.error(f"Backtest-pro monte-carlo error: {e}")
@@ -5995,16 +6017,19 @@ def backtest_pro_monte_carlo(request: Request, n_simulations: int = 1000,
 def backtest_pro_regimes(request: Request, days: int = 540,
                           top_n: int = 10, hold_days: int = 5):
     """Per-regime (bull/bear/sideways x low/mid/high vol) Sharpe + win rate.
-    Default 540 days — needs 200d history for SPY MAs."""
+    Safe bounds: days [300, 1095] (needs 200d history for SPY MAs)."""
     check_rate_limit(request.client.host)
+    days = max(300, min(int(days), 1095))
+    top_n = max(1, min(int(top_n), 30))
+    hold_days = max(1, min(int(hold_days), 30))
     try:
         from predictions.backtest_pro import regime_conditional_analysis
         from datetime import datetime as _dt, timedelta as _td
         end = _dt.utcnow().date().isoformat()
-        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        start = (_dt.utcnow() - _td(days=days)).date().isoformat()
         return regime_conditional_analysis(
             start_date=start, end_date=end,
-            top_n=int(top_n), hold_days=int(hold_days),
+            top_n=top_n, hold_days=hold_days,
         )
     except Exception as e:
         logger.error(f"Backtest-pro regimes error: {e}")
