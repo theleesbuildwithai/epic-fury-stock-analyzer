@@ -2975,14 +2975,18 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
         # SHORT-SIDE QUALITY GATE: Shorts are harder — require modestly stronger signals.
         # LOOSENED: was score<=-3 + conf>=55 (rejected 100% of shorts in audit).
-        # New: score<=-2.0 + conf>=45 — allows ~50% of shorts through. We
-        # don't need 100% confidence to trade; the asymmetric R:R + loss-cut
-        # do the quality work.
+        # 2026-05-17 FIX: previous gate used `composite_score <= -2.0` which
+        # required negative-signed scores, but the picks API returns short
+        # scores as positive abs values (HOLX displayed as +2.22).  This
+        # rejected ALL shorts and cascaded to ZERO put options.  Now uses
+        # abs() so positive- or negative-signed scores both pass the magnitude
+        # check.  Symmetric with long-side filter at line 2972 which already
+        # uses abs(p.get("composite_score", 0)).
         pre_gate = len(short_candidates)
         short_candidates = [p for p in short_candidates
-                           if p.get("composite_score", 0) <= -2.0 and p["confidence"] >= 45]
+                           if abs(p.get("composite_score", 0)) >= 2.0 and p["confidence"] >= 45]
         if pre_gate > len(short_candidates):
-            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need score<=-2, conf>=45%)")
+            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need |score|>=2, conf>=45%)")
 
         # Defensive sectors — safe for long positions even in bear markets
         # These are stable, dividend-paying, recession-resistant sectors
