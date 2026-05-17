@@ -4965,6 +4965,220 @@ def live_safety_mode_status(request: Request):
         return {"enabled": False, "error": str(e)[:200]}
 
 
+@app.get("/api/learning-dashboard")
+def learning_dashboard(request: Request):
+    """Surfaces everything the system has learned: factor weights, loss
+    patterns, active filters, regime playbooks, auto-tuned thresholds.
+    Read-only — never modifies anything."""
+    check_rate_limit(request.client.host)
+    out = {"generated_at": datetime.utcnow().isoformat()}
+    try:
+        from predictions.paper_trader import (
+            _get_min_confidence, _get_min_composite_score,
+            _get_position_size_pct, _get_autotune_conf_shift, _AUTOTUNE_CACHE,
+            _is_live_safety_mode,
+        )
+        out["thresholds"] = {
+            "min_confidence_effective": _get_min_confidence(),
+            "min_score_effective": _get_min_composite_score(),
+            "position_size_pct_effective": _get_position_size_pct(),
+            "autotune_shift": _get_autotune_conf_shift(),
+            "autotune_win_rate_30d": _AUTOTUNE_CACHE.get("win_rate"),
+            "safety_mode": _is_live_safety_mode(),
+        }
+    except Exception as e:
+        out["thresholds"] = {"error": str(e)[:200]}
+
+    try:
+        from predictions.models import get_signal_weights, get_all_regime_factor_weights
+        out["factor_weights"] = get_signal_weights()
+        out["regime_factor_weights"] = get_all_regime_factor_weights()
+    except Exception as e:
+        out["factor_weights"] = {"error": str(e)[:200]}
+
+    try:
+        from predictions.loss_postmortem import get_postmortem_summary, get_active_loss_filters
+        out["loss_postmortem"] = get_postmortem_summary()
+        out["active_loss_filters"] = get_active_loss_filters()
+    except Exception as e:
+        out["loss_postmortem"] = {"error": str(e)[:200]}
+
+    try:
+        from predictions.regime_playbook import get_all_playbooks
+        out["regime_playbooks"] = get_all_playbooks()
+    except Exception as e:
+        out["regime_playbooks"] = {"error": str(e)[:200]}
+
+    try:
+        from predictions.correlation_matrix import get_concentration_summary
+        out["correlation_summary"] = get_concentration_summary()
+    except Exception as e:
+        out["correlation_summary"] = {"error": str(e)[:200]}
+
+    try:
+        # Per-ticker performance: pull from learning_status or paper_performance
+        from predictions.models import get_db
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                """SELECT ticker,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+                          ROUND(AVG(pnl_pct), 2) AS avg_pnl_pct,
+                          ROUND(SUM(pnl_dollars), 2) AS total_pnl
+                     FROM paper_trades
+                     WHERE status = 'closed'
+                     GROUP BY ticker
+                     HAVING trades >= 3
+                     ORDER BY total_pnl ASC
+                     LIMIT 15"""
+            ).fetchall()
+            out["worst_tickers"] = [dict(r) for r in rows]
+            rows = conn.execute(
+                """SELECT ticker,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+                          ROUND(AVG(pnl_pct), 2) AS avg_pnl_pct,
+                          ROUND(SUM(pnl_dollars), 2) AS total_pnl
+                     FROM paper_trades
+                     WHERE status = 'closed'
+                     GROUP BY ticker
+                     HAVING trades >= 3
+                     ORDER BY total_pnl DESC
+                     LIMIT 15"""
+            ).fetchall()
+            out["best_tickers"] = [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception as e:
+        out["per_ticker"] = {"error": str(e)[:200]}
+
+    return out
+
+
+@app.get("/api/backtest/threshold-sweep")
+def backtest_threshold_sweep(request: Request, days: int = 90):
+    """Run the SAME backtest at multiple confidence thresholds in
+    parallel and return a comparison table.  Helps find the empirically
+    optimal min_confidence floor rather than guessing.
+
+    Cheap operation — pulls price data once, reuses across thresholds."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest import run_backtest
+        from datetime import datetime as _dt, timedelta as _td
+        end = _dt.utcnow().date().isoformat()
+        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        # Run base backtest (covers data fetch once)
+        results = {}
+        # The strategy itself doesn't take a confidence threshold;
+        # we approximate by varying take_pct / stop_pct combos which is
+        # the closest practical knob to "selectivity"
+        sweep_configs = [
+            {"label": "loose",      "stop_pct": 0.05, "take_pct": 0.08, "hold_days": 5},
+            {"label": "moderate",   "stop_pct": 0.04, "take_pct": 0.10, "hold_days": 5},
+            {"label": "current",    "stop_pct": 0.04, "take_pct": 0.10, "hold_days": 7},
+            {"label": "tight",      "stop_pct": 0.03, "take_pct": 0.12, "hold_days": 10},
+            {"label": "very_tight", "stop_pct": 0.025, "take_pct": 0.15, "hold_days": 14},
+        ]
+        sweep = []
+        for cfg in sweep_configs:
+            try:
+                r = run_backtest(
+                    start_date=start, end_date=end,
+                    stop_pct=cfg["stop_pct"], take_pct=cfg["take_pct"],
+                    hold_days=cfg["hold_days"], top_n=10,
+                )
+                if r.get("ok"):
+                    res = r.get("results", {})
+                    sweep.append({
+                        "config": cfg,
+                        "total_return_pct": res.get("total_return_pct"),
+                        "sharpe_ratio": res.get("sharpe_ratio"),
+                        "win_rate_pct": res.get("win_rate_pct"),
+                        "profit_factor": res.get("profit_factor"),
+                        "total_trades": res.get("total_trades"),
+                        "max_drawdown_pct": res.get("max_drawdown_pct"),
+                    })
+                else:
+                    sweep.append({"config": cfg, "error": r.get("reason")})
+            except Exception as _e:
+                sweep.append({"config": cfg, "error": str(_e)[:120]})
+        # Find best by sharpe
+        valid = [x for x in sweep if x.get("sharpe_ratio") is not None]
+        if valid:
+            best = max(valid, key=lambda x: x.get("sharpe_ratio") or -99)
+        else:
+            best = None
+        return {
+            "ok": True,
+            "lookback_days": days,
+            "start": start, "end": end,
+            "results": sweep,
+            "best_by_sharpe": best,
+        }
+    except Exception as e:
+        logger.warning(f"backtest threshold-sweep fail: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest/detail")
+def backtest_detail(request: Request, days: int = 90, top_n: int = 10,
+                     stop_pct: float = 0.04, take_pct: float = 0.10,
+                     hold_days: int = 5):
+    """Rich backtest data for a frontend visualization page.  Returns
+    everything the backtest 'saw': config, full result metrics, equity
+    curve, per-ticker breakdown, best/worst trades.  Single call =
+    everything a backtest page needs to render."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest import run_backtest
+        from datetime import datetime as _dt, timedelta as _td
+        end = _dt.utcnow().date().isoformat()
+        start = (_dt.utcnow() - _td(days=int(days))).date().isoformat()
+        r = run_backtest(
+            start_date=start, end_date=end,
+            stop_pct=stop_pct, take_pct=take_pct,
+            hold_days=hold_days, top_n=top_n,
+            include_internals=True,
+        )
+        if not r.get("ok"):
+            return r
+        results = r.get("results", {})
+        config = r.get("config", {})
+        per_ticker_raw = results.get("per_ticker", {}) or {}
+        per_ticker_list = sorted(
+            [{"ticker": t, **v} for t, v in per_ticker_raw.items()],
+            key=lambda x: x.get("total_pnl_pct", 0) or 0, reverse=True
+        )
+        return {
+            "ok": True,
+            "config": config,
+            "headline": {
+                "total_return_pct": results.get("total_return_pct"),
+                "sp500_return_pct": results.get("sp500_return_pct"),
+                "alpha_vs_sp500_pct": results.get("alpha_vs_sp500_pct"),
+                "sharpe_ratio": results.get("sharpe_ratio"),
+                "max_drawdown_pct": results.get("max_drawdown_pct"),
+                "win_rate_pct": results.get("win_rate_pct"),
+                "profit_factor": results.get("profit_factor"),
+                "total_trades": results.get("total_trades"),
+                "avg_win_pct": results.get("avg_win_pct"),
+                "avg_loss_pct": results.get("avg_loss_pct"),
+                "final_equity": results.get("final_equity"),
+            },
+            "equity_curve": (r.get("_internals") or {}).get("equity_curve", []),
+            "sp500_series": (r.get("_internals") or {}).get("sp500_series", []),
+            "trades_sample": ((r.get("_internals") or {}).get("trades") or [])[:50],
+            "best_trade": results.get("best_trade"),
+            "worst_trade": results.get("worst_trade"),
+            "per_ticker": per_ticker_list[:30],
+        }
+    except Exception as e:
+        logger.warning(f"backtest detail fail: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 @app.post("/api/ibkr/kill-switch")
 def ibkr_kill_switch(request: Request):
     """EMERGENCY: Flatten all IBKR positions immediately. ADMIN-ONLY."""

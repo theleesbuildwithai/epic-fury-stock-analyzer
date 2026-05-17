@@ -316,29 +316,99 @@ def _live_safety_float(env_name: str, default: float) -> float:
 
 def _get_position_size_pct() -> float:
     """Dynamic position sizing: larger when aggressive, smaller in
-    preservation or live safety mode."""
+    preservation or live safety mode.
+
+    LOOSENED 2026-05-16: safety mode was too strict (only 4 of 28 picks
+    qualified). New "just right" calibration: 5% (vs paper 8%, vs old
+    safety 4%) — still half-risk vs paper, allows ~20 positions max."""
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_POSITION_SIZE_PCT", 0.04)
+        return _live_safety_float("LIVE_POSITION_SIZE_PCT", 0.05)
     if _is_preservation_mode():
         return 0.03  # 3% per position — half size in preservation mode
     return 0.08  # 8% per position — aggressive conviction sizing
+
+
+# Auto-tune confidence floor based on recent win rate ───────────────────
+# Reads rolling 30-day win rate; nudges threshold up/down within bounds.
+#  Win rate < 40% → +10 confidence (be more selective)
+#  Win rate 40-50% → +5  (cautious)
+#  Win rate 50-55% → +0  (baseline)
+#  Win rate > 55% → -3   (slightly looser, we're winning)
+# Bounded at [base, base+15] so it can never get insanely strict.
+_AUTOTUNE_CACHE = {"shift": 0, "ts": 0, "win_rate": None}
+_AUTOTUNE_TTL = 3600  # recompute hourly
+
+def _get_autotune_conf_shift() -> int:
+    """Compute confidence shift based on rolling 30-day win rate.
+    Returns int in [-3, +10].  Cached 1 hour to avoid hammering DB."""
+    try:
+        import time as _t
+        if _AUTOTUNE_CACHE["ts"] and (_t.time() - _AUTOTUNE_CACHE["ts"]) < _AUTOTUNE_TTL:
+            return _AUTOTUNE_CACHE["shift"]
+        from predictions.models import get_db
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.utcnow() - _td(days=30)).isoformat()
+        conn = get_db()
+        try:
+            row = conn.execute(
+                """SELECT
+                     SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+                     COUNT(*) AS total
+                   FROM paper_trades
+                   WHERE status='closed' AND exit_date >= ?""",
+                (cutoff,)
+            ).fetchone()
+        finally:
+            conn.close()
+        total = int(row["total"] or 0)
+        wins = int(row["wins"] or 0)
+        if total < 20:   # too few trades — don't auto-tune
+            shift = 0
+            win_rate = None
+        else:
+            win_rate = (wins / total) * 100
+            if win_rate < 40:
+                shift = 10
+            elif win_rate < 50:
+                shift = 5
+            elif win_rate < 55:
+                shift = 0
+            else:
+                shift = -3
+        _AUTOTUNE_CACHE.update({"shift": shift, "ts": _t.time(), "win_rate": win_rate})
+        return shift
+    except Exception:
+        return 0   # fail-open to baseline
+
 
 def _get_min_confidence() -> int:
     """Dynamic confidence filter — sweet spot 40 (was 35 too loose,
     50 too strict). Wide pick funnel + asymmetric R:R + win-lock +
     loss-cut do the quality work. Don't make the entry filter so
-    strict that the book ever sits at 0 picks."""
+    strict that the book ever sits at 0 picks.
+
+    AUTO-TUNE 2026-05-16: applies rolling 30-day win-rate-driven shift
+    on top of the base threshold.  Clamped to [base, base+15]."""
     if _is_live_safety_mode():
-        return int(_live_safety_float("LIVE_MIN_CONFIDENCE", 50))
-    if _is_preservation_mode():
-        return 50
-    return 40
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 45))
+    elif _is_preservation_mode():
+        base = 50
+    else:
+        base = 40
+    # Apply auto-tune shift, clamped
+    shift = _get_autotune_conf_shift()
+    final = max(base, min(base + 15, base + shift))
+    return final
 
 def _get_min_composite_score() -> float:
     """Dynamic score filter — sweet spot 2.0 (was 1.5 too loose,
-    2.5 too strict)."""
+    2.5 too strict).
+
+    LOOSENED 2026-05-16: safety mode now uses 2.0 (vs old 2.5).  The
+    confidence filter does most quality work; piling on score floor too
+    high crushes pick count without much loss-prevention upside."""
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 2.5)
+        return _live_safety_float("LIVE_MIN_SCORE", 2.0)
     if _is_preservation_mode():
         return 3.0
     return 2.0
@@ -654,10 +724,10 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         target = max(DYNAMIC_EXPOSURE_MIN, min(DYNAMIC_EXPOSURE_MAX, target))
         target = round(target, 3)
 
-        # LIVE TRADING SAFETY MODE: cap exposure at 50% (override-able via env)
+        # LIVE TRADING SAFETY MODE: cap exposure at 65% (loosened from 50%)
         # Applied AFTER normal clamp so safety mode is the final word.
         if _is_live_safety_mode():
-            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.50)
+            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.65)
             if target > _live_cap:
                 adjustments.append(
                     f"LIVE_SAFETY_CAP {target:.2f} -> {_live_cap:.2f}"
