@@ -306,6 +306,8 @@ def run_backtest(start_date: str = None,
                     cash += p["shares"] * cur_price
                     trades.append({
                         "ticker": sym,
+                        "entry_date": p["entry_date"].strftime("%Y-%m-%d") if hasattr(p["entry_date"], "strftime") else str(p["entry_date"])[:10],
+                        "exit_date": d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10],
                         "entry_price": round(p["entry_price"], 2),
                         "exit_price": round(cur_price, 2),
                         "pnl_pct": round(pnl_pct * 100, 2),
