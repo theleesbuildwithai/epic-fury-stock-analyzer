@@ -2973,6 +2973,69 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                            and abs(p.get("composite_score", 0)) >= min_score
                            and p["symbol"] not in open_tickers]
 
+        # ────────────────────────────────────────────────────────────────
+        # SECTOR CONCENTRATION CAP (2026-05-17 ADD)
+        # Caps any single sector at MAX_PER_SECTOR picks so the book is
+        # diversified.  Without this, the system can put 100% of capital
+        # into one sector (e.g., all Energy) which is single-event risk.
+        #
+        # SAFETY:
+        #   - Sorts by confidence desc first so we keep highest-conviction
+        #     name in each sector.
+        #   - If applying the cap would drop us below MIN_PICKS, we KEEP
+        #     extra picks from the dominant sector — never let the cap
+        #     completely starve the book.
+        #   - Stocks with no sector tag (rare) get treated as their own
+        #     "Unknown" bucket and capped together.
+        # ────────────────────────────────────────────────────────────────
+        MAX_PER_SECTOR = 4    # 40% of 10 picks max in one sector
+        MIN_PICKS = 5         # don't let the cap drop us below 5 trades
+
+        def _apply_sector_cap(cands):
+            """Cap any sector at MAX_PER_SECTOR; never drop below MIN_PICKS.
+            Pure function — returns new list, never mutates input."""
+            try:
+                if not cands:
+                    return cands
+                # Sort by confidence desc (then |score| desc) — keep top in each sector
+                sorted_cands = sorted(
+                    cands,
+                    key=lambda p: (p.get("confidence", 0), abs(p.get("composite_score", 0))),
+                    reverse=True,
+                )
+                kept, overflow = [], []
+                sector_counts = {}
+                for p in sorted_cands:
+                    sec = (p.get("sector") or "Unknown")
+                    if sector_counts.get(sec, 0) < MAX_PER_SECTOR:
+                        kept.append(p)
+                        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+                    else:
+                        overflow.append(p)
+                # Safety: if cap dropped us below minimum, backfill from overflow
+                if len(kept) < MIN_PICKS and overflow:
+                    backfill = overflow[: MIN_PICKS - len(kept)]
+                    kept.extend(backfill)
+                    logger.warning(
+                        f"SECTOR CAP: backfilled {len(backfill)} from overflow "
+                        f"to stay above MIN_PICKS={MIN_PICKS}"
+                    )
+                if len(kept) < len(cands):
+                    logger.warning(
+                        f"SECTOR CAP: {len(cands)} → {len(kept)} candidates "
+                        f"(max {MAX_PER_SECTOR}/sector)"
+                    )
+                return kept
+            except Exception as _se:
+                # NEVER block trades — if cap logic errors, return original list
+                logger.warning(f"SECTOR CAP soft-fail (returning unfiltered): {_se}")
+                return cands
+
+        long_candidates = _apply_sector_cap(long_candidates)
+        # Shorts already capped at 2 by regime logic — but apply for completeness
+        if len(short_candidates) > MAX_PER_SECTOR:
+            short_candidates = _apply_sector_cap(short_candidates)
+
         # SHORT-SIDE QUALITY GATE: Shorts are harder — require modestly stronger signals.
         # LOOSENED: was score<=-3 + conf>=55 (rejected 100% of shorts in audit).
         # 2026-05-17 FIX: previous gate used `composite_score <= -2.0` which
