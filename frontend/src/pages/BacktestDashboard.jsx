@@ -54,13 +54,21 @@ export default function BacktestDashboard() {
     }
     setProLoading(s => ({ ...s, [kind]: true }))
     setProError(s => ({ ...s, [kind]: null }))
+    // 4-minute timeout so a hung backend can't leave UI spinning forever
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 240000)
     try {
-      const res = await fetch(endpoints[kind])
+      const res = await fetch(endpoints[kind], { signal: controller.signal })
+      clearTimeout(timeoutId)
       const json = await res.json()
       if (!json.ok) throw new Error(json.reason || 'Analysis failed')
       setProData(s => ({ ...s, [kind]: json }))
     } catch (e) {
-      setProError(s => ({ ...s, [kind]: e.message }))
+      clearTimeout(timeoutId)
+      const msg = e.name === 'AbortError'
+        ? 'Timed out (>4 min). Backend may be busy — try again in a minute.'
+        : e.message
+      setProError(s => ({ ...s, [kind]: msg }))
     } finally {
       setProLoading(s => ({ ...s, [kind]: false }))
     }
@@ -202,7 +210,13 @@ export default function BacktestDashboard() {
       )}
 
       {!data && !loading && !error && (
-        <div className="text-gray-400 p-6 bg-slate-800 rounded-lg">Adjust parameters above and click "Run Backtest".</div>
+        <div className="text-gray-400 p-6 bg-slate-800 rounded-lg">Pick a time period above to run a backtest.</div>
+      )}
+
+      {data?._stale && (
+        <div className="bg-yellow-900/40 border border-yellow-700 text-yellow-200 p-3 rounded mb-4 text-sm">
+          ⚠ Serving cached result ({data._stale_age_seconds}s old) — live data unavailable. Click again later for fresh.
+        </div>
       )}
 
       {/* ── PRO ANALYSES — separate section, each loads independently ── */}
@@ -297,21 +311,6 @@ function ProAnalysisCard({ title, desc, loading, error, data, onRun, render }) {
       {error && <div className="text-red-400 text-sm mt-2">Error: {error}</div>}
       {data && !error && <div className="mt-3 text-gray-200">{render(data)}</div>}
       {!data && !error && !loading && <div className="text-gray-500 text-sm mt-2">Click Run to load.</div>}
-    </div>
-  )
-}
-
-function Field({ label, value, onChange, type = 'text', step }) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-400 mb-1">{label}</label>
-      <input
-        type={type}
-        step={step}
-        value={value}
-        onChange={e => onChange(type === 'number' ? Number(e.target.value) : e.target.value)}
-        className="w-full bg-slate-900 text-white rounded px-2 py-1.5 border border-slate-700 focus:border-blue-500 outline-none"
-      />
     </div>
   )
 }
