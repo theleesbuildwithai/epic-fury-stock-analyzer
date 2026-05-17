@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 
+const PERIODS = [
+  { label: '30 days',  days: 30 },
+  { label: '90 days',  days: 90 },
+  { label: '180 days', days: 180 },
+  { label: '1 year',   days: 365 },
+]
+
 export default function BacktestDashboard() {
   const [days, setDays] = useState(90)
-  const [topN, setTopN] = useState(10)
-  const [stopPct, setStopPct] = useState(0.04)
-  const [takePct, setTakePct] = useState(0.10)
-  const [holdDays, setHoldDays] = useState(5)
-  const [costBps, setCostBps] = useState(5)
-  const [slippageBps, setSlippageBps] = useState(5)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -17,26 +18,32 @@ export default function BacktestDashboard() {
   const [proData, setProData] = useState({ wf: null, mc: null, rg: null, st: null })
   const [proError, setProError] = useState({ wf: null, mc: null, rg: null, st: null })
 
-  const runBacktest = useCallback(async () => {
+  const runBacktest = useCallback(async (selectedDays) => {
+    const useDays = selectedDays ?? days
     setLoading(true)
     setError(null)
     try {
+      // Fixed sensible defaults — user only changes time period
       const params = new URLSearchParams({
-        days, top_n: topN,
-        stop_pct: stopPct, take_pct: takePct, hold_days: holdDays,
-        cost_bps: costBps, slippage_bps: slippageBps,
+        days: useDays, top_n: 10,
+        stop_pct: 0.04, take_pct: 0.10, hold_days: 5,
+        cost_bps: 5, slippage_bps: 5,
       })
-      const res = await fetch(`/api/backtest/detail?${params}`)
+      // Generous timeout: 365-day first call can take 60-90s
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 180000)
+      const res = await fetch(`/api/backtest/detail?${params}`, { signal: controller.signal })
+      clearTimeout(timeoutId)
       const json = await res.json()
       if (!json.ok) throw new Error(json.reason || 'Backtest failed')
       setData(json)
     } catch (e) {
-      setError(e.message)
+      setError(e.name === 'AbortError' ? 'Backtest timed out (>3min). Try a shorter period or wait & retry.' : e.message)
       setData(null)
     } finally {
       setLoading(false)
     }
-  }, [days, topN, stopPct, takePct, holdDays, costBps, slippageBps])
+  }, [days])
 
   const runProAnalysis = useCallback(async (kind) => {
     const endpoints = {
@@ -66,19 +73,24 @@ export default function BacktestDashboard() {
       <h1 className="text-3xl font-bold text-white mb-2">Backtest Lab</h1>
       <p className="text-gray-400 mb-6">Replays historical data with chosen parameters — see what the strategy WOULD have done.</p>
 
-      {/* Controls */}
-      <div className="bg-slate-800 rounded-lg p-4 mb-6 grid grid-cols-2 md:grid-cols-8 gap-3">
-        <Field label="Days back" value={days} onChange={setDays} type="number" />
-        <Field label="Top N" value={topN} onChange={setTopN} type="number" />
-        <Field label="Stop %" value={stopPct} onChange={setStopPct} type="number" step="0.01" />
-        <Field label="Take %" value={takePct} onChange={setTakePct} type="number" step="0.01" />
-        <Field label="Hold days" value={holdDays} onChange={setHoldDays} type="number" />
-        <Field label="Cost bps" value={costBps} onChange={setCostBps} type="number" />
-        <Field label="Slippage bps" value={slippageBps} onChange={setSlippageBps} type="number" />
-        <button onClick={runBacktest} disabled={loading}
-          className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-semibold rounded px-4 py-2">
-          {loading ? 'Running…' : 'Run Backtest'}
-        </button>
+      {/* Time period buttons — like analyze page */}
+      <div className="bg-slate-800 rounded-lg p-4 mb-6 flex flex-wrap items-center gap-3">
+        <span className="text-gray-400 text-sm mr-2">Time period:</span>
+        {PERIODS.map(p => (
+          <button
+            key={p.days}
+            onClick={() => { setDays(p.days); runBacktest(p.days) }}
+            disabled={loading}
+            className={`px-4 py-2 rounded font-medium transition-colors ${
+              days === p.days
+                ? 'bg-blue-600 text-white'
+                : 'bg-slate-700 text-gray-300 hover:bg-slate-600'
+            } disabled:opacity-50`}
+          >
+            {p.label}
+          </button>
+        ))}
+        {loading && <span className="text-gray-400 text-sm ml-2">Running… (can take up to 3 min on 1-year)</span>}
       </div>
 
       {error && <div className="bg-red-900 text-red-200 p-3 rounded mb-4">Error: {error}</div>}

@@ -3318,8 +3318,26 @@ def equity_curve(request: Request):
                 p["return_pct"] = round(p["return_pct"] - base, 2)
                 p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
 
+        # Build SP500 series from same snapshots so frontend can overlay
+        sp500_curve = []
+        for s in snapshots:
+            if s.get("snapshot_date", "") < "2026-03-30":
+                continue
+            sp_cum = s.get("sp500_cumulative_return_pct")
+            if sp_cum is not None:
+                sp500_curve.append({
+                    "date": s["snapshot_date"],
+                    "return_pct": round(float(sp_cum), 2),
+                })
+        # Rebase SP500 to 0 at start (same anchor as fund)
+        if sp500_curve and sp500_curve[0]["return_pct"] != 0:
+            sp_base = sp500_curve[0]["return_pct"]
+            for p in sp500_curve:
+                p["return_pct"] = round(p["return_pct"] - sp_base, 2)
+
         return {
             "fund": fund_curve,
+            "sp500": sp500_curve,
             "start_date": "2026-03-30",
             "initial_capital": 100000,
         }
