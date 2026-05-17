@@ -279,14 +279,19 @@ export default function BacktestDashboard() {
           onRun={() => runProAnalysis('st')}
           render={(d) => (
             <div className="text-sm space-y-1">
-              {(d.scenarios || []).map((sc, i) => (
+              {(d.crises || []).map((sc, i) => (
                 <div key={i} className="flex justify-between border-b border-slate-700 py-1">
-                  <span className="text-gray-300">{sc.name}</span>
-                  <span className={(sc.return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
-                    {sc.return_pct?.toFixed(2) ?? '—'}% ({sc.trades ?? '—'} trades)
-                  </span>
+                  <span className="text-gray-300" title={sc.description}>{sc.label}</span>
+                  {sc.ok ? (
+                    <span className={(sc.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      {sc.total_return_pct?.toFixed(2) ?? '—'}% ({sc.total_trades ?? '—'} trades)
+                    </span>
+                  ) : (
+                    <span className="text-gray-500">no data ({sc.reason?.slice(0, 30) ?? 'fail'})</span>
+                  )}
                 </div>
               ))}
+              {d.crises?.length === 0 && <div className="text-gray-500">No scenarios returned.</div>}
             </div>
           )}
         />

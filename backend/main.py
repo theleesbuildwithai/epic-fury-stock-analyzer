@@ -2422,6 +2422,69 @@ def _prewarm_benchmark_bg():
 _prewarm_benchmark_bg()
 
 
+# --- Pre-warm backtest cache for common periods (30/90/180 days) ---
+# HARDENED 2026-05-17: runs at startup AND every 3 hours forever so the
+# cache never goes stale.  Each period gets up to 3 retry attempts with
+# 30s backoff if yfinance flakes.  Per-period failure is isolated so one
+# bad period never kills the rest.  All errors swallowed — the thread
+# can never crash the app.
+def _prewarm_backtest_bg():
+    try:
+        import threading, time as _t_pw
+        def _one_period(run_backtest, start, end, days, max_attempts=3):
+            """Pre-warm one period with retries.  Returns True if cached."""
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    r = run_backtest(start_date=start, end_date=end, top_n=10,
+                                     stop_pct=0.04, take_pct=0.10, hold_days=5,
+                                     cost_bps=5.0, slippage_bps=5.0)
+                    if r.get("ok"):
+                        logger.info(f"BACKTEST PRE-WARM: {days}d done (attempt {attempt})")
+                        return True
+                    logger.warning(f"BACKTEST PRE-WARM {days}d attempt {attempt} returned ok=False: {r.get('reason')}")
+                except Exception as _be:
+                    logger.warning(f"BACKTEST PRE-WARM {days}d attempt {attempt} exception: {_be}")
+                if attempt < max_attempts:
+                    _t_pw.sleep(30)   # backoff before retry
+            return False
+
+        def _runner():
+            from predictions.backtest import run_backtest
+            from datetime import datetime as _dt_pw, timedelta as _td_pw
+            # Initial delay so other startup tasks finish first
+            _t_pw.sleep(60)
+            while True:
+                try:
+                    end = _dt_pw.utcnow().date().isoformat()
+                    for days in (30, 90, 180):
+                        try:
+                            start = (_dt_pw.utcnow() - _td_pw(days=days)).date().isoformat()
+                            ok = _one_period(run_backtest, start, end, days)
+                            logger.info(f"BACKTEST PRE-WARM: {days}d cached={ok}")
+                        except Exception as _be:
+                            logger.warning(f"BACKTEST PRE-WARM {days}d outer soft-fail: {_be}")
+                        _t_pw.sleep(15)   # gentle spacing between periods
+                except Exception as _re:
+                    logger.warning(f"Backtest pre-warm loop soft-fail: {_re}")
+                # Sleep 3 hours, then refresh (so cache never goes stale before TTL expires at 6h)
+                _t_pw.sleep(10800)
+
+        try:
+            t = threading.Thread(target=_runner, daemon=True, name="backtest-prewarm")
+            t.start()
+            logger.info("Backtest cache pre-warm thread started (perpetual 3h refresh)")
+        except Exception as _te:
+            logger.error(f"Could not start backtest pre-warm thread: {_te}")
+    except Exception as e:
+        # Never let pre-warm setup take down the app
+        try:
+            logger.error(f"Failed to start backtest pre-warm: {e}")
+        except Exception:
+            pass
+
+_prewarm_backtest_bg()
+
+
 # ============================================================
 # PICKS PRE-WARM ON STARTUP — never let cache sit empty after deploy
 # ============================================================
@@ -3319,21 +3382,47 @@ def equity_curve(request: Request):
                 p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
 
         # Build SP500 series from same snapshots so frontend can overlay
+        # SANITY BOUNDS 2026-05-17: drop points where sp500 cum is outside
+        # [-100%, +500%] — these are corrupt yfinance reads that have plagued
+        # the Quant HF page multiple times.  If too many drop, fall back to
+        # truth_engine.get_sp500_truth() for a clean current value.
         sp500_curve = []
+        dropped = 0
         for s in snapshots:
             if s.get("snapshot_date", "") < "2026-03-30":
                 continue
             sp_cum = s.get("sp500_cumulative_return_pct")
-            if sp_cum is not None:
-                sp500_curve.append({
-                    "date": s["snapshot_date"],
-                    "return_pct": round(float(sp_cum), 2),
-                })
+            if sp_cum is None:
+                continue
+            try:
+                v = float(sp_cum)
+                # Plausibility gate: SP500 hasn't moved -100% or +500% YTD ever
+                if -100.0 <= v <= 500.0:
+                    sp500_curve.append({
+                        "date": s["snapshot_date"],
+                        "return_pct": round(v, 2),
+                    })
+                else:
+                    dropped += 1
+                    logger.warning(f"equity-curve: dropping corrupt sp500_cum={v} on {s.get('snapshot_date')}")
+            except (TypeError, ValueError):
+                dropped += 1
         # Rebase SP500 to 0 at start (same anchor as fund)
         if sp500_curve and sp500_curve[0]["return_pct"] != 0:
             sp_base = sp500_curve[0]["return_pct"]
             for p in sp500_curve:
                 p["return_pct"] = round(p["return_pct"] - sp_base, 2)
+        # If we dropped more than 50% of points, the series is too corrupted
+        # to display — try a single clean point from truth_engine.
+        if dropped > len(sp500_curve) and len(sp500_curve) < 5:
+            try:
+                from predictions.truth_engine import get_sp500_truth
+                t = get_sp500_truth()
+                if t.get("ok") and t.get("cum_pct") is not None:
+                    sp500_curve = [{"date": dt.utcnow().strftime("%Y-%m-%d"),
+                                    "return_pct": round(float(t["cum_pct"]), 2)}]
+            except Exception:
+                pass
 
         return {
             "fund": fund_curve,
