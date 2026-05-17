@@ -330,17 +330,21 @@ def _get_position_size_pct() -> float:
 
 # Auto-tune confidence floor based on recent win rate ───────────────────
 # Reads rolling 30-day win rate; nudges threshold up/down within bounds.
-#  Win rate < 40% → +10 confidence (be more selective)
-#  Win rate 40-50% → +5  (cautious)
-#  Win rate 50-55% → +0  (baseline)
-#  Win rate > 55% → -3   (slightly looser, we're winning)
-# Bounded at [base, base+15] so it can never get insanely strict.
+# SOFTENED 2026-05-17: previous +10 max shift fully cancelled the safety
+# mode loosening (45 + 10 = 55 = back to original strict).  New cap +5
+# so loosened thresholds always retain some pick headroom even during
+# losing streaks.
+#  Win rate < 35% → +5  (selective protection, not crushing)
+#  Win rate 35-50% → +3 (mild caution)
+#  Win rate 50-55% → 0  (baseline)
+#  Win rate > 55% → -3  (slightly looser, we're winning)
+# Bounded at [base, base+5] so it can never overrule the loosening.
 _AUTOTUNE_CACHE = {"shift": 0, "ts": 0, "win_rate": None}
 _AUTOTUNE_TTL = 3600  # recompute hourly
 
 def _get_autotune_conf_shift() -> int:
     """Compute confidence shift based on rolling 30-day win rate.
-    Returns int in [-3, +10].  Cached 1 hour to avoid hammering DB."""
+    Returns int in [-3, +5].  Cached 1 hour to avoid hammering DB."""
     try:
         import time as _t
         if _AUTOTUNE_CACHE["ts"] and (_t.time() - _AUTOTUNE_CACHE["ts"]) < _AUTOTUNE_TTL:
@@ -367,10 +371,10 @@ def _get_autotune_conf_shift() -> int:
             win_rate = None
         else:
             win_rate = (wins / total) * 100
-            if win_rate < 40:
-                shift = 10
-            elif win_rate < 50:
+            if win_rate < 35:
                 shift = 5
+            elif win_rate < 50:
+                shift = 3
             elif win_rate < 55:
                 shift = 0
             else:
@@ -388,16 +392,16 @@ def _get_min_confidence() -> int:
     strict that the book ever sits at 0 picks.
 
     AUTO-TUNE 2026-05-16: applies rolling 30-day win-rate-driven shift
-    on top of the base threshold.  Clamped to [base, base+15]."""
+    on top of the base threshold.  Clamped to [base-3, base+5]."""
     if _is_live_safety_mode():
         base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 45))
     elif _is_preservation_mode():
         base = 50
     else:
         base = 40
-    # Apply auto-tune shift, clamped
+    # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
-    final = max(base, min(base + 15, base + shift))
+    final = max(base - 3, min(base + 5, base + shift))
     return final
 
 def _get_min_composite_score() -> float:

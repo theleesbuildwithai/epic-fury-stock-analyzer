@@ -4941,7 +4941,7 @@ def live_safety_mode_status(request: Request):
                 "position_size_pct": _get_position_size_pct(),
                 "min_confidence": _get_min_confidence(),
                 "min_composite_score": _get_min_composite_score(),
-                "max_gross_exposure": _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.50) if active else 0.80,
+                "max_gross_exposure": _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.65) if active else 0.80,
             },
             "paper_defaults": {
                 "position_size_pct": 0.08,
