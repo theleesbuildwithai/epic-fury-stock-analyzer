@@ -53,6 +53,18 @@ DEFAULT_POSITION_PCT = 0.08     # 8% per position
 _last_backtest = {"data": None, "ts": 0}
 _BACKTEST_TTL = 3600  # 1 hour cache
 
+# Per-parameter result cache for "works no matter what" guarantee.
+# Stores successful runs keyed by (days_back_rounded, stop, take, hold).
+# On any failure, falls back to the most recent successful run that matches.
+_result_cache = {}   # key: (days, top_n, stop, take, hold) -> {"data": dict, "ts": float}
+_RESULT_CACHE_TTL = 21600   # 6 hours
+_result_cache_lock = _threading.Lock() if False else None  # keep ref slot
+
+def _result_key(start: str, end: str, top_n: int, stop: float, take: float, hold: int) -> tuple:
+    """Build a stable cache key (round dates to day, params to nearest)."""
+    return (str(start)[:10], str(end)[:10], int(top_n),
+            round(float(stop), 4), round(float(take), 4), int(hold))
+
 # PRICE DATA CACHE — biggest defense against yfinance rate limits.
 # Same tickers+range returns instantly without hitting yfinance again.
 # 2-hour TTL because historical data doesn't change.
@@ -290,6 +302,19 @@ def run_backtest(start_date: str = None,
         # Download all historical data
         prices = _safe_yf_download(tickers, start_date, end_date)
         if not prices:
+            # STALE-CACHE FALLBACK: serve last good result for same params
+            try:
+                ck = _result_key(start_date, end_date, top_n, stop_pct, take_pct, hold_days)
+                stale = _result_cache.get(ck)
+                if stale and stale.get("data"):
+                    out = dict(stale["data"])
+                    out["_stale"] = True
+                    out["_stale_age_seconds"] = round(time.time() - stale.get("ts", 0), 1)
+                    out["_stale_reason"] = "no_price_data_returned; serving prior run"
+                    logger.warning(f"BACKTEST FALLBACK: serving stale result ({out['_stale_age_seconds']}s old)")
+                    return out
+            except Exception:
+                pass
             return {"ok": False, "reason": "no_price_data_returned"}
 
         # SP500 benchmark
@@ -527,10 +552,17 @@ def run_backtest(start_date: str = None,
                 result["_internals"] = {"equity_curve": [], "trades": [],
                                         "sp500_series": []}
 
-        # Cache
+        # Cache (legacy single-slot + new per-param)
         try:
             _last_backtest["data"] = result
             _last_backtest["ts"] = time.time()
+            # Per-parameter cache for stale fallback
+            ck = _result_key(start_date, end_date, top_n, stop_pct, take_pct, hold_days)
+            _result_cache[ck] = {"data": result, "ts": time.time()}
+            # Cap memory: keep last 50 entries
+            if len(_result_cache) > 50:
+                oldest = min(_result_cache.items(), key=lambda kv: kv[1].get("ts", 0))
+                _result_cache.pop(oldest[0], None)
         except Exception:
             pass
 
@@ -538,6 +570,29 @@ def run_backtest(start_date: str = None,
 
     except Exception as e:
         logger.warning(f"run_backtest soft-fail: {e}")
+        # STALE-CACHE FALLBACK: serve last good result for these params on any crash
+        try:
+            ck = _result_key(start_date or "", end_date or "", top_n, stop_pct, take_pct, hold_days)
+            stale = _result_cache.get(ck)
+            if stale and stale.get("data"):
+                out = dict(stale["data"])
+                out["_stale"] = True
+                out["_stale_age_seconds"] = round(time.time() - stale.get("ts", 0), 1)
+                out["_stale_reason"] = f"exception: {str(e)[:120]}; serving prior run"
+                logger.warning(f"BACKTEST EXCEPTION FALLBACK: serving stale ({out['_stale_age_seconds']}s old)")
+                return out
+        except Exception:
+            pass
+        # No stale match — last-resort: return ANY recent successful result
+        try:
+            if _last_backtest.get("data"):
+                out = dict(_last_backtest["data"])
+                out["_stale"] = True
+                out["_stale_age_seconds"] = round(time.time() - _last_backtest.get("ts", 0), 1)
+                out["_stale_reason"] = f"exception: {str(e)[:120]}; serving any recent run"
+                return out
+        except Exception:
+            pass
         return {"ok": False, "reason": str(e)[:300]}
 
 
