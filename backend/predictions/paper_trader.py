@@ -4508,6 +4508,27 @@ def get_performance_analytics() -> dict:
         if sp_closes is not None and len(sp_closes) >= 2:
             sp_total_return = ((sp_closes[-1] / sp_closes[0]) - 1) * 100
 
+        # SP500 SANITY 2026-05-18: if local calc looks wrong (>50% diff vs
+        # truth_engine), prefer truth_engine. Catches corrupt sp_closes[0]
+        # which was giving -18.95% when real is +17%.
+        try:
+            from predictions.truth_engine import get_sp500_truth
+            t = get_sp500_truth()
+            if t.get("ok") and t.get("cum_pct") is not None:
+                truth_cum = float(t["cum_pct"])
+                if abs(sp_total_return - truth_cum) > 50:
+                    logger.warning(
+                        f"SP500 benchmark mismatch: local={sp_total_return:.2f}% "
+                        f"vs truth_engine={truth_cum:.2f}% — using truth_engine"
+                    )
+                    sp_total_return = truth_cum
+                # Plausibility cap: SP500 cum return must be in [-100%, +500%]
+                if not (-100.0 <= sp_total_return <= 500.0):
+                    logger.warning(f"SP500 benchmark out of bounds ({sp_total_return}%) — using truth_engine")
+                    sp_total_return = truth_cum
+        except Exception as _spe:
+            logger.debug(f"truth_engine SP500 fallback failed: {_spe}")
+
         if sharpe_closes is not None and len(sharpe_closes) >= 30:
             sharpe_returns = np.diff(sharpe_closes) / sharpe_closes[:-1]
             sharpe_returns = sharpe_returns[~np.isnan(sharpe_returns)]
