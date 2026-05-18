@@ -322,7 +322,10 @@ def _get_position_size_pct() -> float:
     qualified). New "just right" calibration: 5% (vs paper 8%, vs old
     safety 4%) — still half-risk vs paper, allows ~20 positions max."""
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_POSITION_SIZE_PCT", 0.05)
+        # 2026-05-18: bumped to 9% so 60-70% gross is hit with as few as
+        # 7-8 positions firing (not just 10). With 10 positions × 9% × 0.90
+        # floor = 81% (capped at 70%). With 7 positions × 9% × 0.90 = 56%.
+        return _live_safety_float("LIVE_POSITION_SIZE_PCT", 0.09)
     if _is_preservation_mode():
         return 0.03  # 3% per position — half size in preservation mode
     return 0.08  # 8% per position — aggressive conviction sizing
@@ -438,7 +441,11 @@ DYNAMIC_EXPOSURE_BASE = 0.75  # Starting point — targets 25% cash buffer (rais
 # crush a trade below this fraction of nominal. Without this, multiplier
 # stacking (~0.7^11) was reducing trades to ~2% of intended size,
 # leaving the portfolio at 1.6% gross exposure when target was 65%+.
-POSITION_SIZE_MULT_FLOOR = 0.50
+# RAISED 2026-05-18: 0.50 was still letting positions shrink to ~1% of
+# nominal in production (see Monday open: 5 positions × $1,200 = 4.8%
+# gross instead of ~50%).  New floor 0.90 means multiplier stacking can
+# at most shrink a position by 10% — ensures actual size ≈ target size.
+POSITION_SIZE_MULT_FLOOR = 0.90
 DYNAMIC_EXPOSURE_SAFE_DEFAULT = 0.60  # Used if calculation fails
 
 
@@ -731,7 +738,7 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         # LIVE TRADING SAFETY MODE: cap exposure at 65% (loosened from 50%)
         # Applied AFTER normal clamp so safety mode is the final word.
         if _is_live_safety_mode():
-            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.65)
+            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.70)
             if target > _live_cap:
                 adjustments.append(
                     f"LIVE_SAFETY_CAP {target:.2f} -> {_live_cap:.2f}"
