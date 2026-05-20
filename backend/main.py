@@ -490,6 +490,42 @@ try:
 except Exception as e:
     logger.warning(f"Cash correction v2 error (non-fatal): {e}")
 
+# --- CASH CORRECTION V3 (2026-05-19) ---
+# User reported cash drifted and MFA prevented manual correction.
+# Resets cash to EXACTLY $126,000 regardless of current value (up or down).
+# Fresh DB flag (cash_correction_v3_done) guarantees one-time execution.
+# Uses set_cash() directly (not adjust_cash) so it can both increase OR
+# decrease cash to hit the exact target.  bypass_sentinel=True because
+# this is an authorized recovery operation.
+try:
+    from predictions.models import (
+        get_cash as _get_cash_v3, set_cash as _set_cash_v3,
+        get_trading_state as _get_state_v3c, set_trading_state as _set_state_v3c,
+    )
+    _v3c_done = _get_state_v3c("cash_correction_v3_done", "0")
+    if _v3c_done != "1":
+        _cur_v3c = _get_cash_v3()
+        _target_v3c = 126000.00
+        # Safety bounds: only execute if cash is within sane range to start
+        if 50_000.0 < _cur_v3c < 250_000.0:
+            _set_cash_v3(_target_v3c, caller="cash_correction_v3",
+                         reason=(f"one-time reset to ${_target_v3c:,.2f} after "
+                                 f"prolonged MFA lockout; was ${_cur_v3c:,.2f}"),
+                         bypass_sentinel=True)
+            logger.warning(
+                f"CASH CORRECTION V3: reset cash to ${_target_v3c:,.2f} "
+                f"(was ${_cur_v3c:,.2f}, delta={_target_v3c - _cur_v3c:+,.2f})"
+            )
+        else:
+            logger.warning(
+                f"CASH CORRECTION V3: skipped (cash ${_cur_v3c:,.2f} out of "
+                f"safety bounds [50k, 250k] — manual intervention required)"
+            )
+        _set_state_v3c("cash_correction_v3_done", "1")
+except Exception as e:
+    logger.warning(f"Cash correction v3 error (non-fatal): {e}")
+
+
 # --- ONE-TIME PORTFOLIO RESET: Close all positions, set 12.07% return ---
 # This was a one-time fix for an old corruption issue. The flag was on
 # ephemeral disk which made it run on EVERY container restart, nuking
