@@ -2868,6 +2868,7 @@ def live_prices(request: Request):
                 _throttle()
                 data = yf.download(tickers, period="1d", progress=False)
                 for t in open_trades:
+                    entry_px = float(t.get("entry_price") or 0)
                     try:
                         if len(tickers) == 1:
                             close_col = data["Close"]
@@ -2882,12 +2883,34 @@ def live_prices(request: Request):
                             if hasattr(ticker_close, "columns"):
                                 ticker_close = ticker_close.iloc[:, 0]
                             price = float(ticker_close.iloc[-1])
+                        # PRICE SANITY BOUND — yfinance occasionally returns wildly
+                        # wrong values during glitches/aggregation errors. If the
+                        # quote moved more than 50% from our entry price, treat it
+                        # as suspect and fall back to entry_price (with a log).
+                        # A real intraday move >50% on an existing position is
+                        # vanishingly rare; an upstream data-bug is far more likely.
+                        if entry_px > 0 and (price > entry_px * 2.0 or price < entry_px * 0.5):
+                            logger.warning(
+                                f"PRICE SANITY: live quote for {t['ticker']} = "
+                                f"${price:.2f} but entry was ${entry_px:.2f} "
+                                f"({(price/entry_px-1)*100:+.1f}%). Using entry price."
+                            )
+                            price = entry_px
+                        # Also reject zero/negative/NaN
+                        import math as _m
+                        if price <= 0 or _m.isnan(price) or _m.isinf(price):
+                            logger.warning(
+                                f"PRICE SANITY: live quote for {t['ticker']} = "
+                                f"{price} (invalid). Using entry price ${entry_px:.2f}."
+                            )
+                            price = entry_px if entry_px > 0 else 0
                         pv = price * t["shares"]
                         if t["direction"] == "short":
                             # Match paper_trader.py: short value = abs(shares * current_price)
                             pv = abs(t["shares"] * price)
                         positions_value += pv
-                        position_prices[t["ticker"]] = round(price, 2)
+                        if price > 0:
+                            position_prices[t["ticker"]] = round(price, 2)
                     except Exception:
                         positions_value += t["entry_price"] * t["shares"]
             except Exception:
@@ -2930,11 +2953,16 @@ def search_stocks(request: Request, q: str = ""):
     return {"results": results}
 
 
-# Per-ticker 5-min cache for analyze endpoint. With the deterministic
-# Monte Carlo seed, the same call returns the same result anyway, but
-# this avoids re-running the heavy compute on dashboard refreshes.
+# Per-ticker DAY-LONG cache for analyze endpoint.
+# Why 1 day instead of 5 min: the Buy/Sell signal is a high-level
+# recommendation, not an intraday quote. If the same stock flips from "Buy"
+# to "Sell" on consecutive page refreshes because of tiny RSI/MACD noise,
+# the page feels broken. With a per-day cache, the user sees the same
+# recommendation throughout the trading day — only refreshing once after
+# the next close. The deterministic Monte Carlo seed makes intra-day
+# results identical anyway, so this only changes the user-visible stability.
 _analyze_cache = {}
-_ANALYZE_CACHE_TTL = 300  # 5 min — refreshes 5x per market hour
+_ANALYZE_CACHE_TTL = 86400  # 24h — one recommendation per ticker per day
 
 @app.get("/api/analyze/{ticker}")
 def analyze_stock(request: Request, ticker: str, period: str = "1y"):
@@ -3306,6 +3334,31 @@ def quant_picks(request: Request, force_refresh: bool = False):
             result = cache_entry["data"]
             result["cache_age_seconds"] = round(cache_age) if cache_age else 0
             result["regen_triggered"] = needs_refresh
+            # ALWAYS populate sp500_return_pct from truth_engine — the Quant HF
+            # page reads this field. If truth says +17% but our local calc says
+            # null (or some wildly different value), the page shows blank/wrong.
+            # truth_engine is the single source of truth (multi-source: yf_gspc
+            # → yf_spy → yf_spx → lastgood) so it's always sane.
+            try:
+                from predictions.truth_engine import get_sp500_truth
+                _t = get_sp500_truth() or {}
+                if _t.get("ok") and _t.get("cum_pct") is not None:
+                    _truth_pct = float(_t["cum_pct"])
+                    if -100.0 <= _truth_pct <= 500.0:
+                        # If local cache value diverges from truth by >5% or is
+                        # missing/insane, use truth.
+                        _local = result.get("sp500_return_pct")
+                        try:
+                            _local_f = float(_local) if _local is not None else None
+                        except (TypeError, ValueError):
+                            _local_f = None
+                        if (_local_f is None
+                            or not (-100.0 <= _local_f <= 500.0)
+                            or abs(_local_f - _truth_pct) > 5.0):
+                            result["sp500_return_pct"] = round(_truth_pct, 2)
+                            result["sp500_return_pct_source"] = _t.get("source", "truth_engine")
+            except Exception as _e:
+                logger.debug(f"SP500 truth-engine overlay failed (non-fatal): {_e}")
             return {k: v for k, v in result.items() if not k.startswith("_")}
 
         return {

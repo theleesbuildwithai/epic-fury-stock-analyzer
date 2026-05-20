@@ -265,24 +265,24 @@ def generate_signal(closes, rsi, macd, trend, volume_analysis) -> dict:
         reasons.append("Warning: declining volume in uptrend")
 
     # --- Determine final signal ---
+    # WIDER DEAD ZONE: score in [-2, +2] = Hold, not Buy/Sell. Previously
+    # score=+1 was "Buy" and score=-1 was "Sell" — meaning a tiny intraday
+    # change in RSI or MACD could flip the same stock from Buy to Sell on
+    # back-to-back page refreshes. With ~8 factors each adding ±1-3, the
+    # noise floor is roughly ±1. Demanding |score| >= 3 to flip out of Hold
+    # eliminates the flip-flop while still surfacing strong opinions.
     if score >= 5:
         direction = "Strong Buy"
         confidence = min(95, 65 + score * 3)
     elif score >= 3:
-        direction = "Strong Buy"
-        confidence = min(90, 60 + score * 3)
-    elif score >= 1:
         direction = "Buy"
-        confidence = min(80, 50 + score * 5)
+        confidence = min(80, 55 + score * 4)
     elif score <= -5:
         direction = "Strong Sell"
         confidence = min(95, 65 + abs(score) * 3)
     elif score <= -3:
-        direction = "Strong Sell"
-        confidence = min(90, 60 + abs(score) * 3)
-    elif score <= -1:
         direction = "Sell"
-        confidence = min(80, 50 + abs(score) * 5)
+        confidence = min(80, 55 + abs(score) * 4)
     else:
         direction = "Hold"
         confidence = 50

@@ -213,6 +213,25 @@ def analyze_factor_performance() -> dict:
         return {"message": "No closed trades to analyze", "factors": {}}
 
     results = _compute_factor_stats(closed)
+    # SELF-TEST: detect the "all factors identical" bug that broke learning
+    # silently for weeks. If 90%+ of factors have the exact same win_rate AND
+    # sharpe, something is wrong with the credit logic. Log loudly so a fix
+    # gets pushed before this drifts unnoticed again.
+    try:
+        _stats = [(s.get("win_rate"), s.get("sharpe")) for n, s in results.items()
+                  if s.get("total_trades", 0) > 0]
+        if len(_stats) >= 5:
+            from collections import Counter
+            most_common, count = Counter(_stats).most_common(1)[0]
+            if count / len(_stats) >= 0.9 and most_common != (0, 0):
+                logger.warning(
+                    "LEARNING SELF-TEST FAIL: %d/%d factors have identical "
+                    "(win_rate, sharpe)=%s — credit logic may be broken. "
+                    "Expected differentiation across factors.",
+                    count, len(_stats), most_common,
+                )
+    except Exception as _ste:
+        logger.debug(f"Learning self-test failed (non-fatal): {_ste}")
     return {
         "factors": results,
         "total_trades_analyzed": len(closed),
