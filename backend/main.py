@@ -6192,6 +6192,59 @@ def backtest_pro_stress_tests(request: Request, top_n: int = 10,
         return {"ok": False, "reason": str(e)[:200]}
 
 
+@app.get("/api/backtest-pro/stress-test-scenarios")
+def backtest_pro_stress_scenarios(request: Request):
+    """List available crisis scenarios so the UI can render a Run button per scenario."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import CRISIS_PERIODS
+        return {"ok": True,
+                "scenarios": [{"label": label, "start": start, "end": end,
+                               "description": desc}
+                              for (label, start, end, desc) in CRISIS_PERIODS]}
+    except Exception as e:
+        logger.error(f"stress scenarios list error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/backtest-pro/stress-test-one")
+def backtest_pro_stress_one(request: Request, label: str,
+                            top_n: int = 10, hold_days: int = 5):
+    """Run a single named stress-test crisis (label must match CRISIS_PERIODS)."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.backtest_pro import CRISIS_PERIODS
+        from predictions.backtest import run_backtest
+        match = next(((lbl, s, e, d) for (lbl, s, e, d) in CRISIS_PERIODS
+                      if lbl == label), None)
+        if not match:
+            return {"ok": False, "reason": f"unknown scenario: {label}"}
+        lbl, start, end, desc = match
+        bt = run_backtest(start_date=start, end_date=end,
+                          top_n=int(top_n), hold_days=int(hold_days))
+        if not bt.get("ok"):
+            return {"ok": False, "label": lbl, "description": desc,
+                    "period": [start, end], "reason": bt.get("reason")}
+        r = bt.get("results", {})
+        cfg = bt.get("config", {})
+        return {
+            "ok": True, "label": lbl, "description": desc,
+            "period": [start, end],
+            "trading_days": cfg.get("trading_days"),
+            "tickers_count": cfg.get("tickers_count"),
+            "total_return_pct": r.get("total_return_pct"),
+            "sp500_return_pct": r.get("sp500_return_pct"),
+            "alpha_vs_sp500_pct": r.get("alpha_vs_sp500_pct"),
+            "max_drawdown_pct": r.get("max_drawdown_pct"),
+            "sharpe_ratio": r.get("sharpe_ratio"),
+            "win_rate_pct": r.get("win_rate_pct"),
+            "total_trades": r.get("total_trades"),
+        }
+    except Exception as e:
+        logger.error(f"stress-test-one error: {e}")
+        return {"ok": False, "reason": str(e)[:200]}
+
+
 @app.get("/api/backtest-pro/full")
 def backtest_pro_full(request: Request, top_n: int = 10, hold_days: int = 5,
                        force_refresh: bool = False):

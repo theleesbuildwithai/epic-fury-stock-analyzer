@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 
 const PERIODS = [
   { label: '30 days',  days: 30 },
@@ -13,10 +13,18 @@ export default function BacktestDashboard() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  // Pro analysis states
-  const [proLoading, setProLoading] = useState({ wf: false, mc: false, rg: false, st: false })
-  const [proData, setProData] = useState({ wf: null, mc: null, rg: null, st: null })
-  const [proError, setProError] = useState({ wf: null, mc: null, rg: null, st: null })
+  // Pro analysis states (wf/mc/rg). Stress tests are handled per-scenario below.
+  const [proLoading, setProLoading] = useState({ wf: false, mc: false, rg: false })
+  const [proData, setProData] = useState({ wf: null, mc: null, rg: null })
+  const [proError, setProError] = useState({ wf: null, mc: null, rg: null })
+
+  // Per-scenario stress test state (one Run button per crisis)
+  const [scenarios, setScenarios] = useState(null)         // list from backend
+  const [scenariosError, setScenariosError] = useState(null)
+  const [scenariosLoading, setScenariosLoading] = useState(false)
+  const [scResults, setScResults] = useState({})           // {label: {ok, total_return_pct, ...}}
+  const [scLoading, setScLoading] = useState({})           // {label: bool}
+  const [scError, setScError] = useState({})               // {label: string|null}
 
   const runBacktest = useCallback(async (selectedDays) => {
     const useDays = selectedDays ?? days
@@ -50,7 +58,6 @@ export default function BacktestDashboard() {
       wf: '/api/backtest-pro/walk-forward?train_months=4&test_months=1',
       mc: '/api/backtest-pro/monte-carlo?n_simulations=300&days=180',
       rg: '/api/backtest-pro/regimes?days=540',
-      st: '/api/backtest-pro/stress-tests',
     }
     setProLoading(s => ({ ...s, [kind]: true }))
     setProError(s => ({ ...s, [kind]: null }))
@@ -74,7 +81,48 @@ export default function BacktestDashboard() {
     }
   }, [])
 
-  useEffect(() => { runBacktest() }, [])  // initial load
+  // NOTE: no auto-run on mount. User must explicitly click a time-period
+  // button to start a backtest (so we don't burn yfinance budget on idle visits).
+
+  // Fetch the list of stress-test scenarios on demand (only when user opens the section)
+  const loadScenarios = useCallback(async () => {
+    if (scenarios || scenariosLoading) return
+    setScenariosLoading(true)
+    setScenariosError(null)
+    try {
+      const res = await fetch('/api/backtest-pro/stress-test-scenarios')
+      const json = await res.json()
+      if (!json.ok) throw new Error(json.reason || 'failed to load scenarios')
+      setScenarios(json.scenarios || [])
+    } catch (e) {
+      setScenariosError(e.message)
+    } finally {
+      setScenariosLoading(false)
+    }
+  }, [scenarios, scenariosLoading])
+
+  const runSingleStress = useCallback(async (label) => {
+    setScLoading(s => ({ ...s, [label]: true }))
+    setScError(s => ({ ...s, [label]: null }))
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 240000)
+    try {
+      const res = await fetch(`/api/backtest-pro/stress-test-one?label=${encodeURIComponent(label)}`,
+                              { signal: controller.signal })
+      clearTimeout(timeoutId)
+      const json = await res.json()
+      if (!json.ok) throw new Error(json.reason || 'scenario failed')
+      setScResults(s => ({ ...s, [label]: json }))
+    } catch (e) {
+      clearTimeout(timeoutId)
+      const msg = e.name === 'AbortError'
+        ? 'Timed out (>4 min). Try again in a minute.'
+        : e.message
+      setScError(s => ({ ...s, [label]: msg }))
+    } finally {
+      setScLoading(s => ({ ...s, [label]: false }))
+    }
+  }, [])
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -272,28 +320,15 @@ export default function BacktestDashboard() {
             </div>
           )}
         />
-        <ProAnalysisCard
-          title="Stress Tests"
-          desc="Replay strategy across COVID 2020, 2022 inflation, SVB, Aug 2024 vol spike. Did it survive?"
-          loading={proLoading.st} error={proError.st} data={proData.st}
-          onRun={() => runProAnalysis('st')}
-          render={(d) => (
-            <div className="text-sm space-y-1">
-              {(d.crises || []).map((sc, i) => (
-                <div key={i} className="flex justify-between border-b border-slate-700 py-1">
-                  <span className="text-gray-300" title={sc.description}>{sc.label}</span>
-                  {sc.ok ? (
-                    <span className={(sc.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
-                      {sc.total_return_pct?.toFixed(2) ?? '—'}% ({sc.total_trades ?? '—'} trades)
-                    </span>
-                  ) : (
-                    <span className="text-gray-500">no data ({sc.reason?.slice(0, 30) ?? 'fail'})</span>
-                  )}
-                </div>
-              ))}
-              {d.crises?.length === 0 && <div className="text-gray-500">No scenarios returned.</div>}
-            </div>
-          )}
+        <StressTestCard
+          scenarios={scenarios}
+          scenariosLoading={scenariosLoading}
+          scenariosError={scenariosError}
+          onLoad={loadScenarios}
+          onRunOne={runSingleStress}
+          results={scResults}
+          loadingMap={scLoading}
+          errorMap={scError}
         />
       </div>
     </div>
@@ -316,6 +351,79 @@ function ProAnalysisCard({ title, desc, loading, error, data, onRun, render }) {
       {error && <div className="text-red-400 text-sm mt-2">Error: {error}</div>}
       {data && !error && <div className="mt-3 text-gray-200">{render(data)}</div>}
       {!data && !error && !loading && <div className="text-gray-500 text-sm mt-2">Click Run to load.</div>}
+    </div>
+  )
+}
+
+function StressTestCard({ scenarios, scenariosLoading, scenariosError, onLoad,
+                         onRunOne, results, loadingMap, errorMap }) {
+  return (
+    <div className="bg-slate-800 rounded-lg p-4">
+      <div className="flex justify-between items-start mb-2">
+        <div>
+          <h3 className="text-lg font-semibold text-white">Stress Tests</h3>
+          <p className="text-xs text-gray-400 mt-1">
+            Replay strategy across major historical crises. Each scenario runs
+            independently — click Run on the one you want to test.
+          </p>
+        </div>
+        {!scenarios && (
+          <button onClick={onLoad} disabled={scenariosLoading}
+            className="bg-purple-700 hover:bg-purple-600 disabled:bg-gray-600 text-white text-sm font-medium rounded px-3 py-1">
+            {scenariosLoading ? '…' : 'Load'}
+          </button>
+        )}
+      </div>
+      {scenariosError && <div className="text-red-400 text-sm mt-2">Error: {scenariosError}</div>}
+      {!scenarios && !scenariosLoading && !scenariosError && (
+        <div className="text-gray-500 text-sm mt-2">Click Load to fetch scenarios.</div>
+      )}
+      {scenarios && scenarios.length === 0 && (
+        <div className="text-gray-500 text-sm mt-2">No scenarios available.</div>
+      )}
+      {scenarios && scenarios.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {scenarios.map((sc) => {
+            const r = results[sc.label]
+            const isLoading = !!loadingMap[sc.label]
+            const err = errorMap[sc.label]
+            return (
+              <div key={sc.label} className="border-b border-slate-700 pb-2">
+                <div className="flex justify-between items-start gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-gray-200 text-sm font-medium truncate" title={sc.description}>
+                      {sc.label}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {sc.start} → {sc.end} · {sc.description}
+                    </div>
+                  </div>
+                  <button onClick={() => onRunOne(sc.label)} disabled={isLoading}
+                    className="bg-purple-700 hover:bg-purple-600 disabled:bg-gray-600 text-white text-xs font-medium rounded px-3 py-1 whitespace-nowrap">
+                    {isLoading ? '…' : (r ? 'Re-run' : 'Run')}
+                  </button>
+                </div>
+                {err && <div className="text-red-400 text-xs mt-1">Error: {err}</div>}
+                {r && r.ok && (
+                  <div className="text-xs text-gray-300 mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                    <span className={(r.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      Return: {r.total_return_pct?.toFixed(2) ?? '—'}%
+                    </span>
+                    <span>vs S&P: {r.alpha_vs_sp500_pct?.toFixed(2) ?? '—'}%</span>
+                    <span>Sharpe: {r.sharpe_ratio?.toFixed(2) ?? '—'}</span>
+                    <span>WinRate: {r.win_rate_pct?.toFixed(1) ?? '—'}%</span>
+                    <span>MaxDD: {r.max_drawdown_pct?.toFixed(2) ?? '—'}%</span>
+                    <span>Trades: {r.total_trades ?? '—'}</span>
+                  </div>
+                )}
+                {r && !r.ok && (
+                  <div className="text-xs text-gray-500 mt-1">no data ({r.reason?.slice(0, 60) ?? 'fail'})</div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
