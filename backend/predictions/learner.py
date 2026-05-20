@@ -27,6 +27,13 @@ MIN_WEIGHT = 0.05  # No factor can go below 5%
 MAX_WEIGHT = 0.40  # No factor can go above 40%
 RECENCY_DECAY = 0.95  # Recent trades matter more: each older trade has 5% less influence
 
+# Minimum |contribution| (z*weight) for a factor to be considered "material"
+# for a trade. Below this, the trade is not credited to that factor — otherwise
+# every factor gets the same trade attribution and we can't differentiate
+# which factors are actually predictive. Tuned so factors driving < ~1% of
+# the composite score are filtered out.
+FACTOR_MATERIAL_THRESHOLD = 0.01
+
 
 FACTOR_NAMES = [
     "momentum", "value", "quality", "low_vol", "rsi2", "volume",
@@ -59,7 +66,8 @@ def _compute_factor_stats(trades: list) -> dict:
     n_trades = len(trades)
     recency_weights = [RECENCY_DECAY ** (n_trades - 1 - i) for i in range(n_trades)]
     factor_perf = {
-        f: {"wins": 0.0, "losses": 0.0, "returns": [], "weights": [], "contributions": []}
+        f: {"wins": 0.0, "losses": 0.0, "returns": [], "weights": [],
+            "contributions": [], "material_trades": 0}
         for f in FACTOR_NAMES
     }
 
@@ -80,14 +88,40 @@ def _compute_factor_stats(trades: list) -> dict:
 
         for factor_name in FACTOR_NAMES:
             factor_data = factors.get(factor_name, {})
-            contribution = factor_data.get("contribution", 0) or 0
+            try:
+                contribution = float(factor_data.get("contribution", 0) or 0)
+            except (TypeError, ValueError):
+                contribution = 0.0
+            abs_contrib = abs(contribution)
+            # Only credit this factor for this trade if it was a material
+            # driver of the score. Otherwise every factor accumulates every
+            # trade and they all show identical stats — making "learning"
+            # meaningless. The recency weight is multiplied by abs_contrib
+            # so a factor that drove the trade strongly gets more credit
+            # than one that barely contributed.
+            if abs_contrib < FACTOR_MATERIAL_THRESHOLD:
+                # Track contribution even if not material, so avg_contribution
+                # reflects the full distribution.
+                factor_perf[factor_name]["contributions"].append(contribution)
+                continue
+            effective_w = w * abs_contrib
+            # Factor-aligned return: positive when the factor's direction
+            # matched the trade's outcome. A consistently predictive factor
+            # has a positive factor_aligned_return across many trades.
+            # Example: factor said BUY (+contribution), trade won (+pnl) → +pnl
+            # Example: factor said BUY (+contribution), trade lost (-pnl) → -|pnl|
+            # Example: factor said SELL (-contribution), trade lost (-pnl) → +|pnl|
+            sign = 1.0 if contribution >= 0 else -1.0
+            aligned_pnl = sign * pnl_pct
             factor_perf[factor_name]["contributions"].append(contribution)
-            factor_perf[factor_name]["returns"].append(pnl_pct)
-            factor_perf[factor_name]["weights"].append(w)
-            if is_win:
-                factor_perf[factor_name]["wins"] += w
+            factor_perf[factor_name]["returns"].append(aligned_pnl)
+            factor_perf[factor_name]["weights"].append(effective_w)
+            factor_perf[factor_name]["material_trades"] += 1
+            # "Win" for the factor = it predicted the right direction
+            if aligned_pnl > 0:
+                factor_perf[factor_name]["wins"] += effective_w
             else:
-                factor_perf[factor_name]["losses"] += w
+                factor_perf[factor_name]["losses"] += effective_w
 
     results = {}
     for factor_name, data in factor_perf.items():
@@ -123,7 +157,7 @@ def _compute_factor_stats(trades: list) -> dict:
             win_rate = (data["wins"] / total_w) * 100 if total_w > 0 else 0
 
             results[factor_name] = {
-                "total_trades": int(round(total_w)),
+                "total_trades": int(data.get("material_trades", 0)),
                 "win_rate": round(win_rate, 1),
                 "avg_return": round(weighted_avg, 2),
                 "sharpe": round(sharpe, 2),
