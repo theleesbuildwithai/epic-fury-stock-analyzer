@@ -277,7 +277,7 @@ export default function AnalysisDashboard({ data }) {
                 className="mt-4 w-full py-3 px-4 bg-white hover:bg-neutral-200
                            text-black font-semibold rounded-lg transition-colors shadow-lg shadow-white/5"
               >
-                {added ? '✓ Added to Watchlist' : '+ Add to Watchlist'}
+                {added ? 'Added to Watchlist' : '+ Add to Watchlist'}
               </button>
               <p className="text-neutral-600 text-xs mt-2 text-center">
                 Track this stock on the Watchlist page

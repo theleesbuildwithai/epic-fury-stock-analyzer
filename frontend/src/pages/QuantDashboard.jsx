@@ -261,7 +261,7 @@ function QuantPicksTab({ picks, loading, RegimeBadge }) {
 
       {/* CALL Picks — longs that qualify for call options */}
       <div className="bg-black border border-neutral-700 rounded-xl p-6">
-        <h2 className="text-xl font-bold text-cyan-400 mb-4">
+        <h2 className="text-xl font-bold text-green-400 mb-4">
           CALL Picks ({(picks.long_picks || []).filter(p => (p.confidence || 0) >= 50 && Math.abs(p.composite_score || 0) >= 1.8).length})
         </h2>
         <p className="text-neutral-500 text-xs mb-3">Long picks qualifying for call options (conf ≥ 50%, |score| ≥ 1.8)</p>
@@ -275,7 +275,7 @@ function QuantPicksTab({ picks, loading, RegimeBadge }) {
 
       {/* PUT Picks — shorts that qualify for put options */}
       <div className="bg-black border border-neutral-700 rounded-xl p-6">
-        <h2 className="text-xl font-bold text-violet-400 mb-4">
+        <h2 className="text-xl font-bold text-red-400 mb-4">
           PUT Picks ({(picks.short_picks || []).filter(p => (p.confidence || 0) >= 50 && Math.abs(p.composite_score || 0) >= 1.8).length})
         </h2>
         <p className="text-neutral-500 text-xs mb-3">Short picks qualifying for put options (conf ≥ 50%, |score| ≥ 1.8)</p>
@@ -355,7 +355,7 @@ function PicksTable({ picks, direction }) {
             <td className={`py-2 px-2 text-right font-mono text-xs font-bold ${
               (p.adx || 25) > 30 ? 'text-green-400' :
               (p.adx || 25) > 20 ? 'text-neutral-400' :
-              'text-yellow-400'
+              'text-red-400'
             }`}>{(p.adx || 25).toFixed(0)}</td>
             <td className="py-2 px-2 text-neutral-500 text-xs">{p.sector}</td>
             <td className="py-2 px-2 text-neutral-400 text-xs">{p.reasons?.[0] || ''}</td>
@@ -424,24 +424,24 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <div className="text-red-400 font-bold font-mono text-lg">{portfolio.num_shorts || 0}</div>
               <div className="text-neutral-600 text-xs">{exp.short_pct || 0}% exposure</div>
             </div>
-            <div className="bg-neutral-900/80 rounded-lg p-3 border border-cyan-500/30">
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-green-500/30">
               <div className="text-neutral-500 text-xs">Calls</div>
-              <div className="text-cyan-400 font-bold font-mono text-lg">{portfolio.num_calls || 0}</div>
+              <div className="text-green-400 font-bold font-mono text-lg">{portfolio.num_calls || 0}</div>
               <div className="text-neutral-600 text-xs">
                 ${((exp.calls_value || 0)).toLocaleString(undefined, {maximumFractionDigits: 0})}
               </div>
             </div>
-            <div className="bg-neutral-900/80 rounded-lg p-3 border border-violet-500/30">
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-red-500/30">
               <div className="text-neutral-500 text-xs">Puts</div>
-              <div className="text-violet-400 font-bold font-mono text-lg">{portfolio.num_puts || 0}</div>
+              <div className="text-red-400 font-bold font-mono text-lg">{portfolio.num_puts || 0}</div>
               <div className="text-neutral-600 text-xs">
                 ${((exp.puts_value || 0)).toLocaleString(undefined, {maximumFractionDigits: 0})}
               </div>
             </div>
             {(portfolio.num_options || 0) > 0 && (
-              <div className="bg-neutral-900/80 rounded-lg p-3 border border-amber-500/30">
+              <div className="bg-neutral-900/80 rounded-lg p-3 border border-red-500/30">
                 <div className="text-neutral-500 text-xs">Options %</div>
-                <div className="text-amber-400 font-bold font-mono text-lg">{exp.options_pct || 0}%</div>
+                <div className="text-red-400 font-bold font-mono text-lg">{exp.options_pct || 0}%</div>
                 <div className="text-neutral-600 text-xs">of portfolio</div>
               </div>
             )}
@@ -552,26 +552,26 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
       {/* ====== RISK INTELLIGENCE ====== */}
       {quantPicks && (
         <div className="bg-black border border-neutral-700 rounded-xl p-6">
-          <h3 className="text-white font-bold text-lg mb-4">🛡️ Risk Intelligence</h3>
+          <h3 className="text-white font-bold text-lg mb-4">Risk Intelligence</h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             {/* Portfolio VaR */}
             <div className={`bg-neutral-900 rounded-lg p-3 border ${
               (quantPicks.portfolio_var?.var_pct || 0) > 2 ? 'border-red-500/40' :
-              (quantPicks.portfolio_var?.var_pct || 0) > 1.5 ? 'border-yellow-500/40' :
+              (quantPicks.portfolio_var?.var_pct || 0) > 1.5 ? 'border-red-500/40' :
               'border-green-500/20'
             }`}>
               <div className="text-neutral-500 text-xs">Daily VaR (95%)</div>
               <div className={`text-xl font-black font-mono ${
                 (quantPicks.portfolio_var?.var_pct || 0) > 2 ? 'text-red-400' :
-                (quantPicks.portfolio_var?.var_pct || 0) > 1.5 ? 'text-yellow-400' :
+                (quantPicks.portfolio_var?.var_pct || 0) > 1.5 ? 'text-red-400' :
                 'text-green-400'
               }`}>
                 {(quantPicks.portfolio_var?.var_pct || 0).toFixed(2)}%
               </div>
               <div className="text-neutral-600 text-xs">
-                {quantPicks.portfolio_var?.status === 'VAR_EXCEEDED' ? '🚫 BLOCKED' :
-                 quantPicks.portfolio_var?.status === 'VAR_WARNING' ? '⚠️ Half-size' :
-                 quantPicks.portfolio_var?.status === 'VAR_ELEVATED' ? '⚡ Elevated' : 'OK'}
+                {quantPicks.portfolio_var?.status === 'VAR_EXCEEDED' ? 'BLOCKED' :
+                 quantPicks.portfolio_var?.status === 'VAR_WARNING' ? 'Half-size' :
+                 quantPicks.portfolio_var?.status === 'VAR_ELEVATED' ? 'Elevated' : 'OK'}
               </div>
             </div>
 
@@ -587,13 +587,13 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             {/* Portfolio Correlation */}
             <div className={`bg-neutral-900 rounded-lg p-3 border ${
               (quantPicks.portfolio_var?.avg_correlation || 0) > 0.6 ? 'border-red-500/40' :
-              (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'border-yellow-500/40' :
+              (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'border-red-500/40' :
               'border-neutral-800'
             }`}>
               <div className="text-neutral-500 text-xs">Avg Correlation</div>
               <div className={`text-xl font-black font-mono ${
                 (quantPicks.portfolio_var?.avg_correlation || 0) > 0.6 ? 'text-red-400' :
-                (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'text-yellow-400' :
+                (quantPicks.portfolio_var?.avg_correlation || 0) > 0.4 ? 'text-red-400' :
                 'text-green-400'
               }`}>
                 {(quantPicks.portfolio_var?.avg_correlation || 0).toFixed(2)}
@@ -609,7 +609,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
               <div className="text-neutral-500 text-xs">Size Multiplier</div>
               <div className={`text-xl font-black font-mono ${
                 (quantPicks.portfolio_var?.var_multiplier || 1) < 0.5 ? 'text-red-400' :
-                (quantPicks.portfolio_var?.var_multiplier || 1) < 1 ? 'text-yellow-400' :
+                (quantPicks.portfolio_var?.var_multiplier || 1) < 1 ? 'text-red-400' :
                 'text-green-400'
               }`}>
                 {(quantPicks.portfolio_var?.var_multiplier || 1).toFixed(1)}x
@@ -629,7 +629,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
             {/* Positions Analyzed */}
             <div className="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
               <div className="text-neutral-500 text-xs">Scoring Engine</div>
-              <div className="text-xl font-black font-mono text-blue-400">
+              <div className="text-xl font-black font-mono text-white">
                 15
               </div>
               <div className="text-neutral-600 text-xs">Active factors</div>
@@ -958,7 +958,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                     <td className="py-2 px-2 text-xs font-bold">
                       {isOption ? (
                         <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                          p.instrument_type === 'call' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-violet-500/20 text-violet-400'
+                          p.instrument_type === 'call' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                         }`}>
                           {p.instrument_type.toUpperCase()}
                         </span>
@@ -968,7 +968,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                     </td>
                     <td className={`py-2 px-2 text-xs font-bold ${
                       isOption
-                        ? (p.instrument_type === 'call' ? 'text-cyan-400' : 'text-violet-400')
+                        ? (p.instrument_type === 'call' ? 'text-green-400' : 'text-red-400')
                         : (p.direction === 'long' ? 'text-green-400' : 'text-red-400')
                     }`}>
                       {isOption
@@ -1054,9 +1054,9 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
   }))
 
   const hedgeColor = hedge.risk_level === 'LOW' ? 'green' : hedge.risk_level === 'MODERATE' ? 'yellow' : hedge.risk_level === 'HIGH' ? 'orange' : 'red'
-  const hedgeBorder = hedgeColor === 'green' ? 'border-green-500/30' : hedgeColor === 'yellow' ? 'border-yellow-500/30' : hedgeColor === 'orange' ? 'border-orange-500/30' : 'border-red-500/30'
-  const hedgeText = hedgeColor === 'green' ? 'text-green-400' : hedgeColor === 'yellow' ? 'text-yellow-400' : hedgeColor === 'orange' ? 'text-orange-400' : 'text-red-400'
-  const hedgeBg = hedgeColor === 'green' ? 'bg-green-500/10' : hedgeColor === 'yellow' ? 'bg-yellow-500/10' : hedgeColor === 'orange' ? 'bg-orange-500/10' : 'bg-red-500/10'
+  const hedgeBorder = hedgeColor === 'green' ? 'border-green-500/30' : hedgeColor === 'yellow' ? 'border-red-500/30' : hedgeColor === 'orange' ? 'border-red-500/30' : 'border-red-500/30'
+  const hedgeText = hedgeColor === 'green' ? 'text-green-400' : hedgeColor === 'yellow' ? 'text-red-400' : hedgeColor === 'orange' ? 'text-red-400' : 'text-red-400'
+  const hedgeBg = hedgeColor === 'green' ? 'bg-green-500/10' : hedgeColor === 'yellow' ? 'bg-red-500/10' : hedgeColor === 'orange' ? 'bg-red-500/10' : 'bg-red-500/10'
 
   return (
     <div className="space-y-6">
@@ -1125,11 +1125,11 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
           {ALL_FACTORS.map((f, i) => {
             const isNew = ['earnings_drift', 'vpoc', 'ichimoku', 'sector_rotation', 'candlestick'].includes(f.key)
             return (
-              <div key={f.key} className={`rounded-lg p-3 border ${isNew ? 'bg-blue-950/30 border-blue-500/30' : 'bg-neutral-900 border-neutral-800'}`}>
+              <div key={f.key} className={`rounded-lg p-3 border ${isNew ? 'bg-white/30 border-neutral-700/30' : 'bg-neutral-900 border-neutral-800'}`}>
                 <div className="flex items-center gap-2">
                   <span className="text-neutral-500 text-xs font-mono">#{i + 1}</span>
                   <span className="text-white text-sm font-semibold">{f.name}</span>
-                  {isNew && <span className="px-1.5 py-0.5 text-[10px] font-bold bg-blue-500/20 text-blue-400 rounded">NEW</span>}
+                  {isNew && <span className="px-1.5 py-0.5 text-[10px] font-bold bg-white/20 text-white rounded">NEW</span>}
                 </div>
                 <div className="text-neutral-500 text-xs mt-1">{f.desc}</div>
               </div>
@@ -1319,7 +1319,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
       </div>
 
       {/* Trading Philosophy */}
-      <div className="bg-black border border-purple-500/20 rounded-xl p-6">
+      <div className="bg-black border border-neutral-500/20 rounded-xl p-6">
         <h3 className="text-white font-bold mb-4">Trading Philosophy</h3>
         <div className="space-y-3 text-neutral-400 text-sm">
           <p><span className="text-white font-semibold">Universe:</span> 520+ stocks across all 11 S&P 500 sectors + 16 ETFs</p>

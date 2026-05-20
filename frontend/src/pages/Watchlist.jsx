@@ -250,7 +250,7 @@ export default function Watchlist() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Watchlist</h1>
+          <h1 className="text-4xl font-bold mb-2"><span className="text-gradient">Watch</span><span className="text-white">list</span></h1>
           <p className="text-neutral-400">
             Track stocks with full quant analytics. Prices auto-update every 60s during market hours.
           </p>

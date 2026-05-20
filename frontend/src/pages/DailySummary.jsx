@@ -79,7 +79,7 @@ export default function DailySummary() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Daily AI Summary</h1>
+          <h1 className="text-4xl font-bold mb-2"><span className="text-gradient">Daily</span> <span className="text-white">AI Summary</span></h1>
           <p className="text-neutral-400">
             {data ? `${formatTradingDate()} market movers, biggest gains & losses, and your watchlist.` : "Loading market summary..."}
           </p>

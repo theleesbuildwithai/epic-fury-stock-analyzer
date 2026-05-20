@@ -66,7 +66,7 @@ export default function News() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Market News</h1>
+          <h1 className="text-4xl font-bold mb-2"><span className="text-gradient">Market</span> <span className="text-white">News</span></h1>
           <p className="text-neutral-400">
             Live headlines from Yahoo Finance, CNN, and CNBC with sentiment analysis.
           </p>
