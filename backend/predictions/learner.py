@@ -76,8 +76,21 @@ def _compute_factor_stats(trades: list) -> dict:
             pnl_pct = float(trade.get("pnl_pct", 0) or 0)
         except (TypeError, ValueError):
             continue
-        is_win = pnl_pct > 0
         w = recency_weights[i]
+
+        # Trade direction: 'long' means we bought; 'short' means we sold.
+        # For a long trade, a factor with POSITIVE contribution agreed
+        # (it said "go up"). For a short trade, a factor with NEGATIVE
+        # contribution agreed (it said "go down"). A factor that AGREED
+        # and the trade was profitable was right. A factor that AGREED
+        # and the trade lost was wrong. The unified formula:
+        #   trade_dir_sign  = +1 long, -1 short
+        #   factor_agreed   = sign(contribution) * trade_dir_sign > 0
+        #   factor_was_right= factor_agreed XOR (pnl < 0)
+        # Equivalently: aligned_pnl = sign(contribution) * trade_dir_sign * pnl
+        # is positive iff the factor was directionally right.
+        direction_raw = str(trade.get("direction") or "long").strip().lower()
+        trade_dir_sign = -1.0 if direction_raw in ("short", "sell", "puts", "put") else 1.0
 
         try:
             factors = json.loads(trade.get("factors_used", "{}") or "{}")
@@ -105,19 +118,15 @@ def _compute_factor_stats(trades: list) -> dict:
                 factor_perf[factor_name]["contributions"].append(contribution)
                 continue
             effective_w = w * abs_contrib
-            # Factor-aligned return: positive when the factor's direction
-            # matched the trade's outcome. A consistently predictive factor
-            # has a positive factor_aligned_return across many trades.
-            # Example: factor said BUY (+contribution), trade won (+pnl) → +pnl
-            # Example: factor said BUY (+contribution), trade lost (-pnl) → -|pnl|
-            # Example: factor said SELL (-contribution), trade lost (-pnl) → +|pnl|
-            sign = 1.0 if contribution >= 0 else -1.0
-            aligned_pnl = sign * pnl_pct
+            contrib_sign = 1.0 if contribution >= 0 else -1.0
+            # aligned_pnl > 0  ⇨  factor's direction was correct
+            # aligned_pnl < 0  ⇨  factor's direction was wrong
+            # Works correctly for BOTH long and short trades.
+            aligned_pnl = contrib_sign * trade_dir_sign * pnl_pct
             factor_perf[factor_name]["contributions"].append(contribution)
             factor_perf[factor_name]["returns"].append(aligned_pnl)
             factor_perf[factor_name]["weights"].append(effective_w)
             factor_perf[factor_name]["material_trades"] += 1
-            # "Win" for the factor = it predicted the right direction
             if aligned_pnl > 0:
                 factor_perf[factor_name]["wins"] += effective_w
             else:
@@ -153,7 +162,16 @@ def _compute_factor_stats(trades: list) -> dict:
                     weighted_std = 1.0
 
             # Sharpe (annualized assuming ~20 trades per year)
-            sharpe = (weighted_avg / (weighted_std + 1e-10)) * np.sqrt(20)
+            # Floor std at 0.1 to prevent numerical blowup when a factor's
+            # aligned returns are too tightly clustered (which would push the
+            # Sharpe into the billions and dominate target-weight allocation
+            # purely from low variance). 0.1% return-volatility is well below
+            # any realistic factor's noise floor.
+            safe_std = max(weighted_std, 0.1)
+            sharpe = (weighted_avg / safe_std) * np.sqrt(20)
+            # Hard clamp Sharpe to ±5 — any real factor with sharpe > 5
+            # annualized is almost certainly a measurement artifact, not skill.
+            sharpe = max(-5.0, min(5.0, sharpe))
             win_rate = (data["wins"] / total_w) * 100 if total_w > 0 else 0
 
             results[factor_name] = {
