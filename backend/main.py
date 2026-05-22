@@ -3513,6 +3513,33 @@ def equity_curve(request: Request):
             except Exception:
                 pass
 
+        # SPOTLESS SP500 GUARANTEE: always anchor the LAST point of the SP500
+        # curve to truth_engine.cum_pct (the multi-source verified value). This
+        # eliminates any chance of a stale or slightly-off historical snapshot
+        # leaving the chart's tail showing a wrong "today" number. The rest of
+        # the curve uses snapshots (so the shape is preserved), but the most
+        # recent point — which is what the user actually reads — is always the
+        # truth value. If truth is unavailable, the snapshot value is kept.
+        try:
+            from predictions.truth_engine import get_sp500_truth
+            _t_anchor = get_sp500_truth() or {}
+            if _t_anchor.get("ok") and _t_anchor.get("cum_pct") is not None:
+                _truth_v = float(_t_anchor["cum_pct"])
+                if -100.0 <= _truth_v <= 500.0:
+                    _today = dt.utcnow().strftime("%Y-%m-%d")
+                    if sp500_curve:
+                        last = sp500_curve[-1]
+                        # If last snapshot is today: overwrite. Otherwise: append.
+                        if last.get("date") == _today:
+                            last["return_pct"] = round(_truth_v, 2)
+                        else:
+                            sp500_curve.append({"date": _today,
+                                                "return_pct": round(_truth_v, 2)})
+                    else:
+                        sp500_curve = [{"date": _today, "return_pct": round(_truth_v, 2)}]
+        except Exception as _eta:
+            logger.debug(f"SP500 truth anchor (non-fatal): {_eta}")
+
         return {
             "fund": fund_curve,
             "sp500": sp500_curve,

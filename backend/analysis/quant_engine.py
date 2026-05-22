@@ -2009,21 +2009,29 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             if current_price <= 0 or np.isnan(current_price) or np.isinf(current_price):
                 continue
 
-            # PRICE SANITY GUARD: if the latest close moved >3x or <1/3 from
-            # the prior close, this is almost certainly a yfinance data glitch
-            # (wrong ticker, split-adjustment error, missing decimal). A real
-            # one-day move of that magnitude on a normal large-cap is rare
-            # enough that the false-positive cost (skipping a real big mover)
-            # is far smaller than the false-negative cost (picking a stock
-            # based on a phantom price that throws off all the factors).
-            # This was the root cause of the user's complaint:
+            # PRICE SANITY GUARD: if the latest close moved >50% up or >33%
+            # down from the prior close, this is almost certainly a yfinance
+            # data glitch (wrong ticker matched, split-adjustment error,
+            # missing decimal). Even a brutal earnings miss rarely moves a
+            # large-cap >50% in one day — the false-positive cost (skipping
+            # one real big mover) is dwarfed by the false-negative cost
+            # (picking a stock based on phantom data that corrupts ALL 21
+            # factor scores).
+            # User's literal complaint:
             #   "prices of stocks that are wrong throw off symbols to buy"
+            # Cross-checked against 5-day median too, so even if the prior day
+            # was also bad we still catch the outlier.
             if len(closes) >= 2:
                 prior = float(closes[-2])
                 if prior > 0 and not np.isnan(prior):
                     ratio = current_price / prior
-                    if ratio > 3.0 or ratio < 0.33:
-                        # Don't include this stock in picks today — bad data
+                    if ratio > 1.5 or ratio < 0.67:
+                        continue
+            if len(closes) >= 6:
+                recent_median = float(np.median(closes[-6:-1]))
+                if recent_median > 0 and not np.isnan(recent_median):
+                    median_ratio = current_price / recent_median
+                    if median_ratio > 1.5 or median_ratio < 0.5:
                         continue
 
             # --- Factor 1: MOMENTUM (12-1 month return) ---
