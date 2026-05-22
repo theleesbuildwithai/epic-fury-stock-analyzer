@@ -76,6 +76,15 @@ def _compute_factor_stats(trades: list) -> dict:
             pnl_pct = float(trade.get("pnl_pct", 0) or 0)
         except (TypeError, ValueError):
             continue
+        # WINSORIZE outliers to [-20%, +20%]. A single -99% blowup (e.g. an
+        # option going to zero) would otherwise dominate a factor's Sharpe and
+        # crush its weight to MIN_WEIGHT based on one bad event. Capping at
+        # ±20% preserves directional signal while preventing one tail event
+        # from overpowering decades of normal-magnitude trades.
+        if pnl_pct > 20.0:
+            pnl_pct = 20.0
+        elif pnl_pct < -20.0:
+            pnl_pct = -20.0
         w = recency_weights[i]
 
         # Trade direction: 'long' means we bought; 'short' means we sold.
@@ -214,9 +223,7 @@ def analyze_factor_performance() -> dict:
 
     results = _compute_factor_stats(closed)
     # SELF-TEST: detect the "all factors identical" bug that broke learning
-    # silently for weeks. If 90%+ of factors have the exact same win_rate AND
-    # sharpe, something is wrong with the credit logic. Log loudly so a fix
-    # gets pushed before this drifts unnoticed again.
+    # silently for weeks.
     try:
         _stats = [(s.get("win_rate"), s.get("sharpe")) for n, s in results.items()
                   if s.get("total_trades", 0) > 0]
@@ -226,14 +233,59 @@ def analyze_factor_performance() -> dict:
             if count / len(_stats) >= 0.9 and most_common != (0, 0):
                 logger.warning(
                     "LEARNING SELF-TEST FAIL: %d/%d factors have identical "
-                    "(win_rate, sharpe)=%s — credit logic may be broken. "
-                    "Expected differentiation across factors.",
+                    "(win_rate, sharpe)=%s — credit logic may be broken.",
                     count, len(_stats), most_common,
                 )
     except Exception as _ste:
         logger.debug(f"Learning self-test failed (non-fatal): {_ste}")
+
+    # STRENGTHS & WEAKNESSES: explicit lists the UI / system intelligence can
+    # render directly. Requires a factor have enough material trades to be
+    # meaningful (>= 5) — random noise on tiny samples shouldn't get labeled
+    # as a strength or weakness.
+    strengths = []
+    weaknesses = []
+    try:
+        scored = []
+        for name, s in results.items():
+            if s.get("total_trades", 0) >= 5:
+                scored.append({
+                    "factor": name,
+                    "sharpe": float(s.get("sharpe", 0) or 0),
+                    "win_rate": float(s.get("win_rate", 0) or 0),
+                    "avg_return": float(s.get("avg_return", 0) or 0),
+                    "total_trades": int(s.get("total_trades", 0) or 0),
+                })
+        # Strengths: Sharpe > 0.5 AND win_rate > 50%
+        for f in scored:
+            if f["sharpe"] > 0.5 and f["win_rate"] > 50:
+                strengths.append({
+                    **f,
+                    "label": "STRENGTH",
+                    "reason": (f"Sharpe {f['sharpe']:+.2f} with "
+                               f"{f['win_rate']:.0f}% win rate over "
+                               f"{f['total_trades']} trades"),
+                })
+        # Weaknesses: Sharpe < -0.5 OR (win_rate < 40% AND sharpe < 0)
+        for f in scored:
+            if f["sharpe"] < -0.5 or (f["win_rate"] < 40 and f["sharpe"] < 0):
+                weaknesses.append({
+                    **f,
+                    "label": "WEAKNESS",
+                    "reason": (f"Sharpe {f['sharpe']:+.2f} with only "
+                               f"{f['win_rate']:.0f}% win rate over "
+                               f"{f['total_trades']} trades"),
+                })
+        # Rank: strongest first, weakest first (most-negative Sharpe first)
+        strengths.sort(key=lambda x: x["sharpe"], reverse=True)
+        weaknesses.sort(key=lambda x: x["sharpe"])
+    except Exception as _swe:
+        logger.debug(f"Strengths/weaknesses extraction failed (non-fatal): {_swe}")
+
     return {
         "factors": results,
+        "strengths": strengths,
+        "weaknesses": weaknesses,
         "total_trades_analyzed": len(closed),
         "timestamp": datetime.now().isoformat(),
     }
