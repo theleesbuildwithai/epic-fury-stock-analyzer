@@ -2978,24 +2978,58 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
     if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
         raise HTTPException(status_code=400, detail="Invalid period")
 
-    # Cache key includes period so different periods cache separately
+    # DOUBLE-LAYER CACHE for absolute answer stability:
+    #   1. In-memory (fast, 24h TTL)
+    #   2. Persistent (SQLite trading_state, S3-synced) — keyed by
+    #      ticker+period+DATE. Once a date's answer is computed, the SAME
+    #      answer returns even across App Runner restarts / new deploys.
+    # This is what guarantees "Strong Buy" can't flip to "Sell" when nothing
+    # has changed: the answer is pinned to the date.
     import time as _t_an
+    import json as _json_an
+    from datetime import datetime as _dt_an
+    today_key = _dt_an.utcnow().strftime("%Y-%m-%d")
     cache_key = f"{clean_ticker}:{period}"
+    persist_key = f"analyze:{clean_ticker}:{period}:{today_key}"
+
+    # Layer 1: in-memory fast path
     cached = _analyze_cache.get(cache_key)
     if cached and (_t_an.time() - cached["ts"]) < _ANALYZE_CACHE_TTL:
         result = dict(cached["data"])
         result["_cache_age_seconds"] = round(_t_an.time() - cached["ts"], 1)
+        result["_cache_source"] = "memory"
         return result
+
+    # Layer 2: persistent — survives restarts and new deploys
+    try:
+        from predictions.models import get_trading_state as _gts
+        raw = _gts(persist_key, "")
+        if raw:
+            try:
+                stored = _json_an.loads(raw)
+                _analyze_cache[cache_key] = {"data": stored, "ts": _t_an.time()}
+                out = dict(stored)
+                out["_cache_source"] = "persistent"
+                return out
+            except Exception:
+                pass
+    except Exception as _pe:
+        logger.debug(f"analyze persistent-cache read failed (non-fatal): {_pe}")
 
     try:
         report = generate_full_report(clean_ticker, period)
         if "error" in report:
             raise HTTPException(status_code=404, detail="Stock not found")
-        # Cache successful result
+        # Write to BOTH layers
         try:
             _analyze_cache[cache_key] = {"data": report, "ts": _t_an.time()}
         except Exception:
             pass
+        try:
+            from predictions.models import set_trading_state as _sts
+            _sts(persist_key, _json_an.dumps(report, default=str))
+        except Exception as _pwe:
+            logger.debug(f"analyze persistent-cache write failed (non-fatal): {_pwe}")
         return report
     except HTTPException:
         raise
