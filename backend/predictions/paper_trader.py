@@ -1938,10 +1938,25 @@ def get_portfolio_state() -> dict:
     if _portfolio_cache["state"] and (now - _portfolio_cache["timestamp"]) < _CACHE_TTL:
         return _portfolio_cache["state"]
 
-    from predictions.models import get_open_trades, get_closed_trades, get_cash
+    from predictions.models import (
+        get_open_trades, get_closed_trades, get_cash, get_trading_state,
+    )
 
     open_trades = get_open_trades()
-    closed_trades = get_closed_trades(limit=500)
+    closed_trades_all = get_closed_trades(limit=500)
+
+    # STATS EPOCH FILTER — see comment in get_performance_analytics().
+    # User wants displayed widget stats reset to 0 from Friday epoch through
+    # Monday's first close; historical trades stay in DB for the learner.
+    _epoch = (get_trading_state("stats_epoch", "") or "").strip()
+    if _epoch:
+        try:
+            closed_trades = [t for t in closed_trades_all
+                             if (t.get("exit_date") or "") >= _epoch]
+        except Exception:
+            closed_trades = closed_trades_all
+    else:
+        closed_trades = closed_trades_all
 
     # Cash from atomic paper_cash table — ALWAYS accurate
     cash = get_cash()
@@ -4474,8 +4489,16 @@ def get_performance_analytics() -> dict:
             "num_positions": s.get("num_positions", 0),
         } for s in snapshots]
 
-        # Max drawdown from equity curve
-        values = [s["total_value"] for s in snapshots]
+        # Max drawdown from equity curve — also respects stats_epoch so a
+        # fresh widget reads 0% drawdown until new drawdowns happen post-epoch.
+        snapshots_for_dd = snapshots
+        if epoch_raw:
+            try:
+                snapshots_for_dd = [s for s in snapshots
+                                    if (s.get("snapshot_date") or "") >= epoch_raw[:10]]
+            except Exception:
+                snapshots_for_dd = snapshots
+        values = [s["total_value"] for s in snapshots_for_dd]
         if len(values) >= 2:
             peak = values[0]
             max_dd = 0
@@ -4484,6 +4507,9 @@ def get_performance_analytics() -> dict:
                 dd = ((v / peak) - 1) * 100
                 max_dd = min(max_dd, dd)
             result["max_drawdown_pct"] = round(max_dd, 2)
+        else:
+            # Only 0 or 1 post-epoch snapshots → no drawdown yet
+            result["max_drawdown_pct"] = 0
 
     # --- Benchmarking vs S&P 500 (with robust caching + last-known-good fallback) ---
     try:

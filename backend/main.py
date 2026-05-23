@@ -3457,9 +3457,22 @@ def trade_history(request: Request):
     """Get closed trade history — every trade the fund has completed."""
     check_rate_limit(request.client.host)
     try:
-        from predictions.models import get_closed_trades, get_all_paper_trades
-        closed = get_closed_trades(limit=200)
+        from predictions.models import (
+            get_closed_trades, get_all_paper_trades, get_trading_state,
+        )
+        closed_all = get_closed_trades(limit=200)
         open_trades = [dict(t) for t in get_all_paper_trades() if t.get("status") == "open"]
+        # STATS EPOCH FILTER — displayed counts/win-rate/PnL show only
+        # trades closed after the user-requested reset epoch.
+        _epoch = (get_trading_state("stats_epoch", "") or "").strip()
+        if _epoch:
+            try:
+                closed = [t for t in closed_all
+                          if (t.get("exit_date") or "") >= _epoch]
+            except Exception:
+                closed = closed_all
+        else:
+            closed = closed_all
         wins = [t for t in closed if (t.get("pnl_pct") or 0) > 0]
         losses = [t for t in closed if (t.get("pnl_pct") or 0) <= 0]
         total_pnl = sum(t.get("pnl_dollars", 0) or 0 for t in closed)
