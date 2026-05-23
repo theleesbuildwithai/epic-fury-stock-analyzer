@@ -4242,11 +4242,33 @@ def get_performance_analytics() -> dict:
       - Win rate by sector, by regime, by direction
       - Equity curve data for charting
       - Comparison vs S&P 500
-    """
-    from predictions.models import get_closed_trades, get_portfolio_snapshots
 
-    closed = get_closed_trades(limit=500)
+    STATS EPOCH (2026-05-22): user requested a stats reset that keeps the
+    historical trade records intact (so the learning system still has
+    training data) but zeroes the user-facing displayed stats — fresh
+    counters starting from the epoch timestamp stored in
+    trading_state['stats_epoch']. Trades closed BEFORE the epoch are
+    excluded from win_rate, Sharpe, Sortino, total_pnl, etc. The fund's
+    total_return and the equity curve are NOT affected — they reflect
+    the real fund value vs initial capital.
+    """
+    from predictions.models import (
+        get_closed_trades, get_portfolio_snapshots, get_trading_state,
+    )
+
+    closed_all = get_closed_trades(limit=500)
     snapshots = get_portfolio_snapshots(days=365)
+
+    # Apply stats epoch filter to displayed trades only
+    epoch_raw = (get_trading_state("stats_epoch", "") or "").strip()
+    if epoch_raw:
+        try:
+            closed = [t for t in closed_all
+                      if (t.get("exit_date") or "") >= epoch_raw]
+        except Exception:
+            closed = closed_all
+    else:
+        closed = closed_all
 
     if not closed and not snapshots:
         return {

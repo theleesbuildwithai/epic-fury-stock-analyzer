@@ -526,6 +526,39 @@ except Exception as e:
     logger.warning(f"Cash correction v3 error (non-fatal): {e}")
 
 
+# --- ONE-TIME STATS EPOCH RESET (2026-05-22) ---
+# User: "reset sortino and sharpe ratios. Also reset all trade statistics ...
+# make them all zero and they start taking data on monday. Keep the return
+# and all backtesting data though."
+#
+# Implementation: set trading_state['stats_epoch'] to the current UTC ISO
+# timestamp. get_performance_analytics() filters closed trades to only those
+# with exit_date >= stats_epoch. Historical trades stay in the DB (learning
+# system keeps its training data + backtest data intact + total_return_pct
+# is computed from fund value not trade pnl so it's unaffected).
+#
+# DB-flagged one-shot (stats_epoch_reset_v1_done) so the epoch is set only
+# the first time the new code boots. Subsequent restarts respect the value
+# already stored.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev1, set_trading_state as _set_state_sev1,
+    )
+    _sev1_done = _get_state_sev1("stats_epoch_reset_v1_done", "0")
+    if _sev1_done != "1":
+        from datetime import datetime as _dt_sev1
+        _epoch_iso = _dt_sev1.utcnow().isoformat()
+        _set_state_sev1("stats_epoch", _epoch_iso)
+        _set_state_sev1("stats_epoch_reset_v1_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v1: displayed Sharpe/Sortino/win-rate/total-pnl "
+            f"now reset to 0; will start collecting from {_epoch_iso}. "
+            f"Historical trades preserved (learning + backtests unaffected)."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v1 error (non-fatal): {e}")
+
+
 # --- ONE-TIME PORTFOLIO RESET: Close all positions, set 12.07% return ---
 # This was a one-time fix for an old corruption issue. The flag was on
 # ephemeral disk which made it run on EVERY container restart, nuking
