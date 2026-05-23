@@ -3699,6 +3699,27 @@ def generate_quant_picks() -> dict:
         top_longs = long_picks[:30]
         top_shorts = short_picks[:20]
 
+        # AUDIT FIX #1 — long/short pre-pick reconciliation
+        # Strips any ticker that simultaneously appears in both lists OR
+        # conflicts with an existing open position on the opposite side.
+        # A dollar-neutral pair on the same ticker is delta≈0 but pays
+        # 2x transaction costs + spread + borrow → guaranteed -EV.
+        try:
+            from predictions.quant_audit_fixes import reconcile_long_short
+            from predictions.models import get_open_trades
+            _opens = get_open_trades() or []
+            _open_short_syms = {t["ticker"].upper() for t in _opens
+                                if str(t.get("direction", "")).lower() == "short"}
+            _open_long_syms = {t["ticker"].upper() for t in _opens
+                               if str(t.get("direction", "")).lower() == "long"}
+            top_longs, top_shorts = reconcile_long_short(
+                top_longs, top_shorts,
+                open_tickers_short=_open_short_syms,
+                open_tickers_long=_open_long_syms,
+            )
+        except Exception as _rec_err:
+            logger.debug(f"Long/short reconciliation skipped: {_rec_err}")
+
         # Step 5A.5: INTELLIGENCE OVERLAY (Level 6) — apply composite
         # multiplier from Level 1-5 learning layers (postmortem, regime
         # playbook, earnings drift, cross-asset, stock learning, regime
@@ -4118,8 +4139,38 @@ def generate_quant_picks() -> dict:
                     "zone": "HOT" if rank <= len(_sorted_secs) // 3 else ("COLD" if rank > len(_sorted_secs) * 2 // 3 else "NEUTRAL"),
                 })
 
+        # AUDIT FIXES #5 + #6 — compute group-penalized weights and soft regime probs
+        try:
+            from predictions.quant_audit_fixes import (
+                apply_group_penalty as _audit_group_pen,
+                regime_probs as _audit_regime_probs,
+                portfolio_beta_metric as _audit_pb,
+            )
+            _raw_weights = {
+                k: round(v, 3) for k, v in (get_signal_weights_safe()).items()
+            }
+            _decorrelated = _audit_group_pen(_raw_weights)
+            _bull_s = float((regime or {}).get("bull_score", 0) or 0)
+            _bear_s = float((regime or {}).get("bear_score", 0) or 0)
+            _reg_probs = _audit_regime_probs(_bull_s, _bear_s)
+            # Portfolio beta over current OPEN positions (informational metric)
+            try:
+                from predictions.models import get_open_trades as _got
+                _opens = _got() or []
+                _pb = _audit_pb(_opens) if _opens else {"portfolio_beta": 0, "beta_neutral": True}
+            except Exception:
+                _pb = {"portfolio_beta": 0, "beta_neutral": True}
+        except Exception as _aud_err:
+            logger.debug(f"Audit metrics computation failed: {_aud_err}")
+            _raw_weights = {k: round(v, 3) for k, v in (get_signal_weights_safe()).items()}
+            _decorrelated = _raw_weights
+            _reg_probs = {"BULL": 0.33, "BEAR": 0.33, "SIDEWAYS": 0.34}
+            _pb = {"portfolio_beta": 0, "beta_neutral": True}
+
         return {
             "regime": regime,
+            "regime_probs": _reg_probs,                # AUDIT #6
+            "portfolio_beta_metric": _pb,              # AUDIT #4
             "macro": macro,
             "overnight": overnight,
             "cross_asset": cross_asset,
@@ -4129,10 +4180,8 @@ def generate_quant_picks() -> dict:
             "total_analyzed": len(all_scored),
             "universe_size": len(QUANT_UNIVERSE),
             "stocks_with_data": len(price_data),
-            "factor_weights": {
-                k: round(v, 3)
-                for k, v in (get_signal_weights_safe()).items()
-            },
+            "factor_weights": _raw_weights,
+            "factor_weights_decorrelated": _decorrelated,  # AUDIT #5
             # RENTECH DATA
             "rentech": rentech_data,
             "pairs_trades": rentech_data.get("pairs_trades", []),

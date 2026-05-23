@@ -3657,6 +3657,70 @@ def learning_status(request: Request):
             result["mistakes_learned"] = analyze_mistakes()
         except Exception:
             pass
+
+        # AUDIT FIX #3 — confidence calibration metrics + isotonic fit
+        # AUDIT FIX #8 — realized vol + vol-target scaler suggestion
+        try:
+            from predictions.quant_audit_fixes import (
+                isotonic_calibrate, expected_calibration_error,
+                estimate_realized_vol_from_trades, vol_target_scaler,
+                apply_group_penalty,
+            )
+            confs = []
+            wins = []
+            for t in closed:
+                try:
+                    pnl_raw = t.get("pnl_pct")
+                    if pnl_raw is None:
+                        continue
+                    # Confidence isn't stored on every trade; try common fields
+                    c = (t.get("confidence_at_entry") or t.get("signal_score") or None)
+                    if c is None:
+                        continue
+                    confs.append(float(c))
+                    wins.append(float(pnl_raw) > 0)
+                except Exception:
+                    continue
+            ece = expected_calibration_error(confs, wins) if confs else -1
+            calibrator = isotonic_calibrate(confs, wins) if confs else None
+            # Sample the calibration curve at 10 points so the UI can plot it
+            cal_curve = None
+            if calibrator:
+                try:
+                    pts = list(range(10, 100, 10))
+                    cal_curve = [
+                        {"raw_conf": p, "calibrated_prob": round(float(calibrator([p])[0]), 4)}
+                        for p in pts
+                    ]
+                except Exception:
+                    cal_curve = None
+
+            rv = estimate_realized_vol_from_trades(closed)
+            vts = vol_target_scaler(rv) if rv > 0 else 1.0
+
+            result["calibration"] = {
+                "ece": ece,
+                "ece_target": 0.05,
+                "ece_status": ("good" if 0 <= ece < 0.05 else
+                               "marginal" if 0 <= ece < 0.15 else
+                               "poor" if ece >= 0.15 else "no_data"),
+                "calibration_curve": cal_curve,
+                "samples_used": len(confs),
+            }
+            result["vol_target"] = {
+                "realized_vol_annualized": round(rv, 4),
+                "target_vol_annualized": 0.12,
+                "next_position_scaler": round(vts, 3),
+                "interpretation": (
+                    "upsize" if vts > 1.05 else
+                    "downsize" if vts < 0.95 else
+                    "neutral"
+                ),
+            }
+            result["weights_decorrelated"] = apply_group_penalty(weights)
+        except Exception as _aerr:
+            logger.debug(f"learning-status audit overlay skipped: {_aerr}")
+
         return result
     except Exception as e:
         logger.error(f"Learning status error: {e}")

@@ -371,9 +371,30 @@ def run_backtest(start_date: str = None,
                     exit_reason = "time_stop"
 
                 if exit_reason:
-                    # Apply round-trip cost (entry + exit slippage + commission)
-                    pnl_after_cost = pnl_pct - round_trip_cost_pct
-                    cash += p["shares"] * cur_price * (1 - round_trip_cost_pct)
+                    # AUDIT #2 — ADV-scaled slippage per trade
+                    # Replaces the flat cost_pct with a Kyle's-lambda sqrt
+                    # impact model that punishes trades larger than 5% of
+                    # ADV. Falls back to flat cost when ADV is unknown.
+                    try:
+                        from predictions.quant_audit_fixes import adv_scaled_slippage_bps
+                        order_dollars = abs(p["shares"]) * cur_price
+                        # Approximate ADV-$ from 20-day mean volume in price-data window
+                        try:
+                            adv_shares = float(prices[sym].iloc[max(0, i-20):i].mean())
+                            adv_dollars = adv_shares * cur_price
+                        except Exception:
+                            adv_dollars = 0
+                        slip_bps_one_side = adv_scaled_slippage_bps(
+                            order_dollars, adv_dollars,
+                            base_bps=float(slippage_bps), impact_coef=100.0,
+                        )
+                        # Round-trip = (cost + adv_slippage) / 10000 * 2 sides
+                        rt_cost_this = (float(cost_bps) + slip_bps_one_side) / 10000.0 * 2.0
+                    except Exception:
+                        rt_cost_this = round_trip_cost_pct
+
+                    pnl_after_cost = pnl_pct - rt_cost_this
+                    cash += p["shares"] * cur_price * (1 - rt_cost_this)
                     trades.append({
                         "ticker": sym,
                         "entry_date": p["entry_date"].strftime("%Y-%m-%d") if hasattr(p["entry_date"], "strftime") else str(p["entry_date"])[:10],
@@ -382,7 +403,7 @@ def run_backtest(start_date: str = None,
                         "exit_price": round(cur_price, 2),
                         "pnl_pct": round(pnl_after_cost * 100, 2),
                         "pnl_pct_gross": round(pnl_pct * 100, 2),
-                        "cost_pct": round(round_trip_cost_pct * 100, 3),
+                        "cost_pct": round(rt_cost_this * 100, 3),
                         "days_held": days_held,
                         "exit_reason": exit_reason,
                     })

@@ -141,6 +141,29 @@ def walk_forward_validation(start_date: str = None,
         consistent = sum(1 for s in test_sharpes if s > 0)
         consistency_pct = (consistent / len(test_sharpes) * 100) if test_sharpes else 0
 
+        # AUDIT #7 — Deflated Sharpe of the aggregate test result.
+        # Adjusts measured Sharpe for finite sample, non-normal tails,
+        # and multiple-hypothesis selection across all the windows.
+        # A backtest SR of 1.5 with low N and many trials often deflates
+        # to near-zero — the proper guard against curve-fitting.
+        deflated = None
+        try:
+            from predictions.quant_audit_fixes import deflated_sharpe as _ds
+            # Approx N: total test trades across windows
+            n_obs_approx = sum(
+                (r.get("test_trades") or 0)
+                for r in results
+            ) or len(results) * 30  # crude fallback
+            # n_trials ≈ number of distinct windows tested
+            deflated = _ds(
+                sr=float(avg_test),
+                n_obs=int(n_obs_approx),
+                n_trials=max(1, len(results)),
+                skew=0.0, kurt=3.0,
+            )
+        except Exception as _dse:
+            logger.debug(f"deflated_sharpe skipped: {_dse}")
+
         return {
             "ok": True,
             "config": {"train_months": train_months, "test_months": test_months,
@@ -153,6 +176,7 @@ def walk_forward_validation(start_date: str = None,
                                     if avg_train != 0 else 0,
                 "test_window_consistency_pct": round(consistency_pct, 1),
                 "overfit_flag": overfit_flag,
+                "deflated_sharpe": deflated,  # AUDIT #7
                 "interpretation": (
                     "OVERFIT WARNING — test Sharpe << train Sharpe"
                     if overfit_flag else
