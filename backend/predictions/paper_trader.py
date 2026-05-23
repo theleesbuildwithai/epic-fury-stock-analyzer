@@ -4278,6 +4278,38 @@ def get_performance_analytics() -> dict:
 
     result = {"has_data": True}
 
+    # When the stats epoch filter excludes all trades but the user is still
+    # post-reset, return ZEROES (not None / not missing) for every overall
+    # stat so the UI shows clean 0s instead of "—" or "N/A". This matches
+    # the user's explicit instruction to "make them all zero and they
+    # start taking data on monday".
+    if not closed:
+        result["overall"] = {
+            "total_trades": 0,
+            "win_rate": 0,
+            "avg_return": 0,
+            "avg_win": 0,
+            "avg_loss": 0,
+            "best_trade": 0,
+            "worst_trade": 0,
+            "total_pnl": 0,
+            "sharpe_ratio": 0,
+            "sortino_ratio": 0,
+            "avg_hold_days": 0,
+            "trades_per_day": 0,
+            "trading_days_active": 0,
+            "profit_factor": 0,
+        }
+        result["by_sector"] = []
+        result["by_regime"] = []
+        result["long_stats"] = {"total_trades": 0, "win_rate": 0, "avg_return": 0, "total_pnl": 0}
+        result["short_stats"] = {"total_trades": 0, "win_rate": 0, "avg_return": 0, "total_pnl": 0}
+        result["max_drawdown_pct"] = 0
+        result["equity_curve"] = []
+        result["timestamp"] = datetime.now().isoformat()
+        # Still include benchmark + snapshots-derived stuff below where applicable
+        # by falling through into the snapshots section.
+
     # --- Overall stats ---
     if closed:
         returns = [t.get("pnl_pct", 0) or 0 for t in closed]
