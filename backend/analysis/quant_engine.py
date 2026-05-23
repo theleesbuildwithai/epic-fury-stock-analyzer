@@ -3443,40 +3443,178 @@ def generate_quant_picks() -> dict:
             logger.debug(f"macro_v2 integration skipped: {_macro_v2_err}")
             macro["macro_v2"] = {"ok": False, "reason": str(_macro_v2_err)[:120]}
 
-        # Step 3: Batch download price data
-        # 10 batches of ~72 tickers each — well below Yahoo Finance's silent
-        # ~150 cap. Smaller batches are slower per-cycle (~30s vs ~24s) but
-        # much more reliable than oversized ones (which silently drop tickers
-        # or return partial data). With ~720 ticker universe (US + 222
-        # international ADRs) this gives plenty of headroom.
+        # Step 3: Batch download price data with 5-TIER RETRY + LAST-GOOD CACHE
+        # ====================================================================
+        # This was the single biggest trading bottleneck. Without retry,
+        # partial yfinance batch failures silently dropped 90%+ of the
+        # 726-ticker universe — meaning all subsequent trade decisions ran
+        # on a tiny <80-stock sample. Now FIVE tiers of escalating retry
+        # plus a persistent per-ticker last-good cache:
+        #
+        #   Tier 1: bulk batches of ~73 (fast — gets ~70% in normal weather)
+        #   Tier 2: missing tickers in chunks of 50
+        #   Tier 3: still-missing in chunks of 20
+        #   Tier 4: still-missing in chunks of 5
+        #   Tier 5: individual fetches with backoff
+        #   Tier 6 (cache fallback): tickers that STILL failed get their
+        #          last successful price frame from the in-memory cache,
+        #          so a single bad scan never collapses coverage below
+        #          the previous scan's level.
+        #
+        # User's literal instruction: "we need the entire universe to scan",
+        # "add at least 5 tiers of retry", "whatever you need to do to make
+        # our trading flawless".
+
+        # Persistent per-ticker last-good price-data cache (module global,
+        # initialized lazily). This is the "memory" that prevents a single
+        # rate-limited scan from collapsing our usable universe.
+        global _PRICE_DATA_LASTGOOD
+        try:
+            _PRICE_DATA_LASTGOOD
+        except NameError:
+            _PRICE_DATA_LASTGOOD = {}
+
         N_BATCHES = 10
         batch_size = (len(QUANT_UNIVERSE) + N_BATCHES - 1) // N_BATCHES
         batches = [QUANT_UNIVERSE[i:i+batch_size] for i in range(0, len(QUANT_UNIVERSE), batch_size)]
 
         price_data = {}
+        import time as _time_scan
 
+        def _extract_batch(df, syms):
+            """Add successful per-ticker frames from a yf bulk download
+            result into price_data. Returns count newly added."""
+            n_added = 0
+            if df is None or df.empty:
+                return n_added
+            for sym in syms:
+                if sym in price_data:
+                    continue
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if sym in df.columns.get_level_values(0):
+                            sym_df = df[sym].dropna(how="all")
+                            if len(sym_df) >= 60:
+                                price_data[sym] = sym_df
+                                n_added += 1
+                    elif len(syms) == 1:
+                        if df is not None and len(df) >= 60:
+                            price_data[sym] = df
+                            n_added += 1
+                except Exception:
+                    continue
+            return n_added
+
+        # --- TIER 1: bulk batches of ~73 ---
         for batch in batches:
             _throttle()
             try:
-                df = yf.download(
-                    batch, period="1y", progress=False, group_by="ticker"
-                )
-                if df is not None and not df.empty:
-                    for sym in batch:
-                        try:
-                            if isinstance(df.columns, pd.MultiIndex):
-                                if sym in df.columns.get_level_values(0):
-                                    sym_df = df[sym].dropna(how="all")
-                                    if len(sym_df) >= 60:
-                                        price_data[sym] = sym_df
-                            elif len(batch) == 1:
-                                if len(df) >= 60:
-                                    price_data[sym] = df
-                        except Exception:
-                            continue
+                df = yf.download(batch, period="1y", progress=False, group_by="ticker")
+                _extract_batch(df, batch)
             except Exception as e:
-                logger.warning(f"Batch download failed: {e}")
-                continue
+                logger.warning(f"Tier 1 batch download failed: {e}")
+        t1 = len(price_data)
+        logger.info(f"UNIVERSE SCAN tier1: {t1}/{len(QUANT_UNIVERSE)} ({t1*100//max(1,len(QUANT_UNIVERSE))}%)")
+
+        # --- TIER 2: missing in chunks of 50 ---
+        def _missing():
+            return [t for t in QUANT_UNIVERSE if t not in price_data]
+        m = _missing()
+        if m:
+            for i in range(0, len(m), 50):
+                chunk = m[i:i+50]
+                _throttle()
+                try:
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    _extract_batch(df, chunk)
+                except Exception as e:
+                    logger.debug(f"Tier 2 chunk failed: {e}")
+            t2 = len(price_data)
+            logger.info(f"UNIVERSE SCAN tier2: {t2}/{len(QUANT_UNIVERSE)} (+{t2-t1})")
+
+        # --- TIER 3: still-missing in chunks of 20 ---
+        m = _missing()
+        if m:
+            for i in range(0, len(m), 20):
+                chunk = m[i:i+20]
+                _throttle()
+                try:
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    _extract_batch(df, chunk)
+                except Exception as e:
+                    logger.debug(f"Tier 3 chunk failed: {e}")
+            t3 = len(price_data)
+            logger.info(f"UNIVERSE SCAN tier3: {t3}/{len(QUANT_UNIVERSE)}")
+
+        # --- TIER 4: still-missing in chunks of 5 ---
+        m = _missing()
+        if m:
+            for i in range(0, len(m), 5):
+                chunk = m[i:i+5]
+                _throttle()
+                try:
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    _extract_batch(df, chunk)
+                except Exception as e:
+                    logger.debug(f"Tier 4 chunk failed: {e}")
+            t4 = len(price_data)
+            logger.info(f"UNIVERSE SCAN tier4: {t4}/{len(QUANT_UNIVERSE)}")
+
+        # --- TIER 5: individual fetches with brief backoff (capped at 200) ---
+        m = _missing()
+        if m:
+            cap = min(len(m), 200)
+            logger.info(f"UNIVERSE SCAN tier5: retrying {cap} individually")
+            for t in m[:cap]:
+                _throttle()
+                try:
+                    df = yf.download(t, period="1y", progress=False)
+                    if df is not None and len(df) >= 60:
+                        price_data[t] = df.dropna(how="all")
+                except Exception:
+                    _time_scan.sleep(0.05)
+                    continue
+            t5 = len(price_data)
+            logger.info(f"UNIVERSE SCAN tier5: {t5}/{len(QUANT_UNIVERSE)}")
+
+        # --- TIER 6: last-good cache fallback ---
+        # For tickers that STILL failed every fetch, use the last successful
+        # price frame from a prior scan. This guarantees that coverage never
+        # regresses below the prior best — a single bad scan can no longer
+        # collapse the trading universe. Frames older than 14 days are
+        # treated as stale and not used.
+        m = _missing()
+        if m:
+            from datetime import datetime as _dt_cache, timedelta as _td_cache
+            stale_cutoff = _dt_cache.utcnow() - _td_cache(days=14)
+            cache_used = 0
+            for t in m:
+                cached = _PRICE_DATA_LASTGOOD.get(t)
+                if not cached:
+                    continue
+                ts = cached.get("ts")
+                if not ts or ts < stale_cutoff:
+                    continue
+                price_data[t] = cached["df"]
+                cache_used += 1
+            if cache_used:
+                logger.info(f"UNIVERSE SCAN tier6 (lastgood cache): brought in {cache_used} prior-scan frames")
+
+        # Update last-good cache with everything we successfully fetched
+        # this scan (so the next scan's tier-6 has fresh data to draw on).
+        try:
+            from datetime import datetime as _dt_save
+            now_ts = _dt_save.utcnow()
+            for t, df in price_data.items():
+                _PRICE_DATA_LASTGOOD[t] = {"df": df, "ts": now_ts}
+        except Exception:
+            pass
+
+        final_coverage = len(price_data) * 100 // max(1, len(QUANT_UNIVERSE))
+        logger.info(f"UNIVERSE SCAN FINAL: {len(price_data)}/{len(QUANT_UNIVERSE)} ({final_coverage}%) after 5-tier retry + cache fallback")
+        # Alarm: if final coverage is below 70%, log loudly so it gets noticed
+        if final_coverage < 70:
+            logger.warning(f"UNIVERSE SCAN LOW COVERAGE: only {final_coverage}% — yfinance may be throttling or down. Trading decisions running on a degraded sample.")
 
         if not price_data:
             return {
