@@ -3187,14 +3187,27 @@ def daily_picks(request: Request):
         raise HTTPException(status_code=500, detail="Failed to generate picks")
 
 
+_earnings_cache = {"data": None, "ts": 0}
+_EARNINGS_CACHE_TTL = 3600  # AUDIT FIX M3 — 1h cache; uncached call was ~45s
+
 @app.get("/api/earnings-calendar")
 def earnings_calendar(request: Request):
     """Get upcoming earnings for major stocks this week."""
     check_rate_limit(request.client.host)
+    import time as _t_ec
+    now = _t_ec.time()
+    if (_earnings_cache["data"] is not None
+            and (now - _earnings_cache["ts"]) < _EARNINGS_CACHE_TTL):
+        return _earnings_cache["data"]
     try:
-        return get_earnings_calendar()
+        result = get_earnings_calendar()
+        _earnings_cache["data"] = result
+        _earnings_cache["ts"] = now
+        return result
     except Exception as e:
         logger.error(f"Earnings error: {e}")
+        if _earnings_cache["data"] is not None:
+            return _earnings_cache["data"]  # stale fallback better than 500
         raise HTTPException(status_code=500, detail="Failed to fetch earnings")
 
 
@@ -3376,11 +3389,28 @@ def quant_picks(request: Request, force_refresh: bool = False):
         if needs_refresh:
             try:
                 import threading
-                # Only spawn one background regen at a time
-                global _picks_regen_in_progress
+                # AUDIT FIX C1 — timeout-based lock so a stuck regen can't
+                # block forever. Previously a regen taking >2h would set the
+                # flag True; if the thread crashed without hitting finally
+                # (OOM, container shutdown, network kill) the flag was stuck
+                # and all subsequent force_refresh calls were silently
+                # ignored, leaving picks cache stale indefinitely. Now the
+                # lock auto-expires after REGEN_LOCK_TIMEOUT_SEC, allowing
+                # a fresh attempt.
+                REGEN_LOCK_TIMEOUT_SEC = 1800  # 30 min — longer than any healthy scan
+                global _picks_regen_in_progress, _picks_regen_started_at
                 _in_progress = globals().get('_picks_regen_in_progress', False)
+                _started_at = globals().get('_picks_regen_started_at', 0)
+                _now_lock = _time.time()
+                if _in_progress and _started_at and (_now_lock - _started_at) > REGEN_LOCK_TIMEOUT_SEC:
+                    logger.warning(
+                        f"PICKS REGEN LOCK STALE ({_now_lock - _started_at:.0f}s > "
+                        f"{REGEN_LOCK_TIMEOUT_SEC}s) — clearing for fresh attempt"
+                    )
+                    _in_progress = False
                 if not _in_progress:
                     globals()['_picks_regen_in_progress'] = True
+                    globals()['_picks_regen_started_at'] = _now_lock
                     def _bg_regen():
                         try:
                             logger.warning(
@@ -3392,6 +3422,7 @@ def quant_picks(request: Request, force_refresh: bool = False):
                             logger.error(f"PICKS BG REGEN failed: {_e}")
                         finally:
                             globals()['_picks_regen_in_progress'] = False
+                            globals()['_picks_regen_started_at'] = 0
                     threading.Thread(target=_bg_regen, daemon=True, name="picks-regen").start()
             except Exception as _e:
                 logger.debug(f"Background regen spawn failed (non-fatal): {_e}")
@@ -3419,9 +3450,13 @@ def quant_picks(request: Request, force_refresh: bool = False):
                             _local_f = float(_local) if _local is not None else None
                         except (TypeError, ValueError):
                             _local_f = None
+                        # AUDIT FIX M2 — tightened 5.0% -> 0.1% so even
+                        # small drift between local calc and truth-engine
+                        # gets corrected. The user explicitly asked for
+                        # "SP500 return must be spotless".
                         if (_local_f is None
                             or not (-100.0 <= _local_f <= 500.0)
-                            or abs(_local_f - _truth_pct) > 5.0):
+                            or abs(_local_f - _truth_pct) > 0.1):
                             result["sp500_return_pct"] = round(_truth_pct, 2)
                             result["sp500_return_pct_source"] = _t.get("source", "truth_engine")
             except Exception as _e:
@@ -3685,16 +3720,29 @@ def learning_status(request: Request):
                     continue
             ece = expected_calibration_error(confs, wins) if confs else -1
             calibrator = isotonic_calibrate(confs, wins) if confs else None
-            # Sample the calibration curve at 10 points so the UI can plot it
+            # AUDIT FIX M1 — sample the calibration curve at points spanning
+            # the ACTUAL training range, not arbitrary [10, 90]. The previous
+            # version sampled at fixed [10, 20, ..., 90] which sat entirely
+            # outside the typical training range of signal_score values
+            # (~[-5, +5]), and the isotonic clip-outside-bounds policy then
+            # collapsed every sample to the same edge value — so the loop
+            # tripped some downstream check and returned None.
             cal_curve = None
-            if calibrator:
+            if calibrator and confs:
                 try:
-                    pts = list(range(10, 100, 10))
+                    lo, hi = min(confs), max(confs)
+                    if hi > lo:
+                        step = (hi - lo) / 9.0
+                        pts = [lo + i * step for i in range(10)]
+                    else:
+                        pts = [lo]
                     cal_curve = [
-                        {"raw_conf": p, "calibrated_prob": round(float(calibrator([p])[0]), 4)}
+                        {"raw_conf": round(float(p), 3),
+                         "calibrated_prob": round(float(calibrator([p])[0]), 4)}
                         for p in pts
                     ]
-                except Exception:
+                except Exception as _ccerr:
+                    logger.debug(f"calibration_curve sampling failed: {_ccerr}")
                     cal_curve = None
 
             # Prefer snapshot-based realized vol (correct measurement);

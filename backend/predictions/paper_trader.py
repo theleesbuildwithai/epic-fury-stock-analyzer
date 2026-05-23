@@ -4676,7 +4676,8 @@ def get_performance_analytics() -> dict:
             if t.get("ok") and t.get("cum_pct") is not None:
                 truth_cum = float(t["cum_pct"])
                 if -100.0 <= truth_cum <= 500.0:
-                    if abs(sp_total_return - truth_cum) > 0.5:
+                    # AUDIT FIX M2 — threshold 0.5 -> 0.1 for spotless SP500
+                    if abs(sp_total_return - truth_cum) > 0.1:
                         logger.warning(
                             f"SP500 benchmark: local={sp_total_return:.2f}% "
                             f"vs truth={truth_cum:.2f}% — using truth ({t.get('source')})"

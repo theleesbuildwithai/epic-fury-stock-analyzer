@@ -42,6 +42,10 @@ FACTOR_NAMES = [
     "vol_compression", "mtf_alignment",
     "earnings_drift", "vpoc", "ichimoku", "sector_rotation",
     "candlestick",
+    # AUDIT FIX m6 — was 21; picks engine reports total_factors=22 because
+    # it also emits fundamental_value. Include here so learner credit and
+    # weight tracking cover the full factor set (no silent off-by-one).
+    "fundamental_value",
 ]
 
 

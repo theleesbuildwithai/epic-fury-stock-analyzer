@@ -120,6 +120,11 @@ def walk_forward_validation(start_date: str = None,
                     "test_return_pct": te_r.get("total_return_pct"),
                     "train_win_rate": tr_r.get("win_rate_pct"),
                     "test_win_rate": te_r.get("win_rate_pct"),
+                    # AUDIT FIX C2 — emit trade counts so deflated_sharpe
+                    # can use the true N_obs instead of the fallback estimate
+                    # of len(results)*30 which is materially wrong.
+                    "train_trades": tr_r.get("total_trades"),
+                    "test_trades": te_r.get("total_trades"),
                 })
             except Exception as _we:
                 logger.debug(f"walk-forward window {i} soft-fail: {_we}")

@@ -863,7 +863,7 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 collateral = entry_premium * num_contracts * multiplier
                 cash_returned = max(0, collateral - buyback_cost + pnl_dollars)
         else:
-            # Equity P&L (unchanged)
+            # Equity P&L
             if direction == "long":
                 pnl_pct = ((exit_price - entry) / entry) * 100
             else:  # short
@@ -873,6 +873,31 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 cash_returned = exit_price * shares
             else:
                 cash_returned = entry * shares + pnl_dollars
+
+            # AUDIT FIX C3 — apply realistic round-trip transaction cost
+            # so live paper P&L matches what real execution would deliver.
+            # Default 10bps round-trip (5bps commission + 5bps slippage)
+            # is the same assumption the backtest uses. Without this,
+            # live paper would overstate edge by 10-30bps per trade vs
+            # what real IBKR execution would produce.
+            try:
+                from predictions.quant_audit_fixes import adv_scaled_slippage_bps
+                _order_dollars = abs(shares) * exit_price
+                # Lazy: we don't have ADV stored at trade time, so use
+                # the conservative flat slippage. When trades schema later
+                # adds avg_volume_at_entry, this can become ADV-scaled.
+                _slip_bps = adv_scaled_slippage_bps(
+                    _order_dollars, 0,  # adv=0 → returns base
+                    base_bps=5.0,
+                )
+                _rt_cost_pct = (5.0 + _slip_bps) / 10000.0 * 2.0  # commission + slippage, both sides
+                _cost_dollars = abs(pnl_dollars) and (entry * shares * _rt_cost_pct) or 0
+                pnl_dollars -= _cost_dollars
+                pnl_pct -= _rt_cost_pct * 100.0
+                cash_returned -= _cost_dollars
+            except Exception:
+                # Cost calc failure must never block trade close
+                pass
 
         conn.execute(
             """UPDATE paper_trades

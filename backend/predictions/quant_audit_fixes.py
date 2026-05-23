@@ -245,8 +245,10 @@ FACTOR_GROUPS = {
     "mean_reversion": ["rsi2", "bb_squeeze", "vol_compression"],
     "volatility":    ["low_vol", "kurtosis", "hurst", "autocorr"],
     "volume":        ["volume", "smart_money", "vpoc"],
-    "fundamental":   ["value", "quality", "earnings_drift"],
-    "microstructure": ["stat_arb", "candlestick", "sector_rotation", "beta", "fundamental_value"],
+    # fundamental_value belongs here, not microstructure (it is a real
+    # fundamental factor, just emitted separately by the picks engine).
+    "fundamental":   ["value", "quality", "earnings_drift", "fundamental_value"],
+    "microstructure": ["stat_arb", "candlestick", "sector_rotation", "beta"],
 }
 
 
