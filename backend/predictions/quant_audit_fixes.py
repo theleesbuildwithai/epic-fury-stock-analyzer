@@ -382,22 +382,35 @@ def deflated_sharpe(sr: float, n_obs: int, n_trials: int,
 def vol_target_scaler(realized_vol_annualized: float,
                       target_vol_annualized: float = 0.12,
                       max_scale: float = 1.5,
-                      min_scale: float = 0.3) -> float:
+                      min_scale: float = 0.6,
+                      sanity_max_vol: float = 0.50) -> float:
     """Returns multiplier for the next position size to keep portfolio
     realized vol near target_vol_annualized (default 12%).
 
     scale = target / realized   (clamped to [min_scale, max_scale])
 
-    During calm markets (realized=8%, target=12%): scale=1.5 → upsize.
-    During panic (realized=30%, target=12%): scale=0.4 → downsize.
+    SAFETY: if realized_vol exceeds sanity_max_vol (default 50% — well
+    above any normal-portfolio realized vol), the input is treated as
+    a data artifact (e.g. cash-correction jumps, bad annualization)
+    and the scaler defaults to 1.0 (no adjustment). This prevents a
+    single bad vol estimate from crushing position sizes to the floor.
 
-    Why: Sharpe-stabilizing. Without this, a vol regime change can
-    halve or double effective leverage without you knowing.
+    During calm markets (realized=8%, target=12%): scale=1.5 → upsize.
+    During real panic (realized=25%, target=12%): scale=0.6 → downsize.
+    During bogus reading (realized=200%): scale=1.0 → no false cut.
+
+    Why floor=0.6 not 0.3: a real 50% downsize (scale=0.5) already
+    halves the portfolio's Sharpe contribution from this scaler; below
+    0.6 the scaler does more damage than the regime it's meant to
+    protect against.
     """
     try:
         rv = float(realized_vol_annualized or 0)
         tv = float(target_vol_annualized or 0.12)
         if rv <= 1e-6 or tv <= 1e-6:
+            return 1.0
+        # Sanity: if realized vol is implausibly high, ignore it
+        if rv > sanity_max_vol:
             return 1.0
         raw = tv / rv
         return float(max(min_scale, min(max_scale, raw)))
@@ -407,8 +420,16 @@ def vol_target_scaler(realized_vol_annualized: float,
 
 def estimate_realized_vol_from_trades(closed_trades: list,
                                       trades_per_year: int = 252) -> float:
-    """Annualized stdev of trade pnl_pct. Used as the input to
-    vol_target_scaler. Returns 0 if not enough data."""
+    """Annualized stdev of trade pnl_pct.
+
+    NOTE: this is a rough proxy. Per-trade returns are not daily
+    returns; treating them as such (annualization * sqrt(252)) over-
+    states portfolio vol for a high-trade-frequency strategy. Returns
+    a value capped at 0.50 (50%) so a bad estimate can't cascade into
+    the vol_target_scaler. Use estimate_realized_vol_from_snapshots()
+    when daily portfolio snapshots are available — that's the correct
+    measurement.
+    """
     try:
         rets = [float(t.get("pnl_pct") or 0) / 100.0
                 for t in (closed_trades or [])
@@ -418,6 +439,63 @@ def estimate_realized_vol_from_trades(closed_trades: list,
         mean = sum(rets) / len(rets)
         var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
         sd = math.sqrt(var)
-        return sd * math.sqrt(max(1, trades_per_year))
+        # Annualize but cap at 0.50 to prevent absurd readings from
+        # cascading into the vol-target scaler. The scaler also
+        # sanity-checks > 0.50 and defaults to 1.0.
+        raw = sd * math.sqrt(max(1, trades_per_year))
+        return min(0.50, raw)
+    except Exception:
+        return 0.0
+
+
+def estimate_realized_vol_from_snapshots(snapshots: list) -> float:
+    """PROPER realized portfolio vol: stdev of daily portfolio returns
+    derived from daily equity snapshots, annualized by sqrt(252).
+
+    Each snapshot must have either 'value' (absolute portfolio value)
+    or 'return_pct' (cumulative-return-from-inception percent).
+
+    Filters out any single-day "jumps" larger than 15% (almost certainly
+    cash-correction artifacts, not real market moves). Returns 0 if
+    fewer than 10 valid daily returns can be computed.
+    """
+    try:
+        if not snapshots or len(snapshots) < 11:
+            return 0.0
+        # Build a series of cumulative-return-from-inception fractions
+        cum = []
+        for s in snapshots:
+            try:
+                if s.get("return_pct") is not None:
+                    cum.append(float(s["return_pct"]) / 100.0)
+                elif s.get("value") is not None:
+                    cum.append(float(s["value"]))
+                elif s.get("portfolio_value") is not None:
+                    cum.append(float(s["portfolio_value"]))
+            except Exception:
+                continue
+        if len(cum) < 11:
+            return 0.0
+        # Daily simple returns. (1+cum_{t+1}) / (1+cum_t) - 1
+        daily = []
+        for i in range(len(cum) - 1):
+            try:
+                denom = (1.0 + cum[i])
+                if abs(denom) < 1e-9:
+                    continue
+                r = (1.0 + cum[i + 1]) / denom - 1.0
+                # Filter cash-correction-sized jumps (>15% daily)
+                if abs(r) > 0.15:
+                    continue
+                daily.append(r)
+            except Exception:
+                continue
+        if len(daily) < 10:
+            return 0.0
+        mean = sum(daily) / len(daily)
+        var = sum((r - mean) ** 2 for r in daily) / max(1, len(daily) - 1)
+        sd = math.sqrt(var)
+        annual = sd * math.sqrt(252)
+        return min(1.0, annual)  # hard cap at 100% annualized
     except Exception:
         return 0.0

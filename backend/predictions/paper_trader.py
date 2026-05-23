@@ -735,10 +735,13 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         target = max(DYNAMIC_EXPOSURE_MIN, min(DYNAMIC_EXPOSURE_MAX, target))
         target = round(target, 3)
 
-        # LIVE TRADING SAFETY MODE: cap exposure at 65% (loosened from 50%)
-        # Applied AFTER normal clamp so safety mode is the final word.
+        # LIVE TRADING SAFETY MODE: cap exposure (user-tunable via env)
+        # 2026-05-23: user wants 70-80% target ("depends on situation, but
+        # pretty high"). Raised the default cap 0.70 -> 0.85 so the
+        # dynamic controller can actually reach the DYNAMIC_EXPOSURE_MAX
+        # (0.80) when conditions warrant it. Env override still wins.
         if _is_live_safety_mode():
-            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.70)
+            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.85)
             if target > _live_cap:
                 adjustments.append(
                     f"LIVE_SAFETY_CAP {target:.2f} -> {_live_cap:.2f}"
@@ -1047,20 +1050,31 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
     if vix_level is not None and vix_level > 25:
         kelly_adjusted = min(0.06, kelly_adjusted)  # Max 6% when VIX > 25
 
-    # AUDIT #8 — Vol-target overlay
-    # Multiply final size by `target_vol / realized_vol` (clamped 0.3-1.5).
-    # When realized portfolio vol exceeds 12% annualized, this downsizes;
-    # when below, it gently upsizes. Keeps portfolio Sharpe stable across
-    # vol regimes. Realized-vol estimate uses the same closed-trades window
-    # already loaded above, so this is essentially free compute.
+    # AUDIT #8 — Vol-target overlay (PROPER snapshot-based realized vol)
+    # Prefer daily portfolio snapshots (the correct measurement) and only
+    # fall back to trade-based vol if no snapshots. The scaler itself has
+    # min_scale=0.6 (not the previous 0.3) and sanity-bails to 1.0 if vol
+    # > 50% — so an artifact like a cash correction cannot crush position
+    # sizes to the floor and starve the portfolio of exposure.
     try:
         from predictions.quant_audit_fixes import (
-            estimate_realized_vol_from_trades, vol_target_scaler,
+            estimate_realized_vol_from_snapshots,
+            estimate_realized_vol_from_trades,
+            vol_target_scaler,
         )
-        _rv = estimate_realized_vol_from_trades(closed)
+        _rv = 0.0
+        try:
+            from predictions.models import get_portfolio_snapshots as _gps
+            _snaps = _gps(days=60) or []
+            _rv = estimate_realized_vol_from_snapshots(_snaps)
+        except Exception:
+            _rv = 0.0
+        if _rv <= 0:
+            _rv = estimate_realized_vol_from_trades(closed)
         if _rv > 0:
             _vts = vol_target_scaler(_rv, target_vol_annualized=0.12,
-                                      max_scale=1.5, min_scale=0.3)
+                                      max_scale=1.5, min_scale=0.6,
+                                      sanity_max_vol=0.50)
             kelly_adjusted = kelly_adjusted * _vts
             # Re-clamp to the regime-specific bounds so vol-scale can't blow
             # past Kelly safety caps

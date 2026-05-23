@@ -3663,7 +3663,9 @@ def learning_status(request: Request):
         try:
             from predictions.quant_audit_fixes import (
                 isotonic_calibrate, expected_calibration_error,
-                estimate_realized_vol_from_trades, vol_target_scaler,
+                estimate_realized_vol_from_trades,
+                estimate_realized_vol_from_snapshots,
+                vol_target_scaler,
                 apply_group_penalty,
             )
             confs = []
@@ -3695,7 +3697,17 @@ def learning_status(request: Request):
                 except Exception:
                     cal_curve = None
 
-            rv = estimate_realized_vol_from_trades(closed)
+            # Prefer snapshot-based realized vol (correct measurement);
+            # fall back to trade-based proxy when snapshots unavailable.
+            rv = 0.0
+            try:
+                from predictions.models import get_portfolio_snapshots as _gps_ls
+                _snaps_ls = _gps_ls(days=60) or []
+                rv = estimate_realized_vol_from_snapshots(_snaps_ls)
+            except Exception:
+                rv = 0.0
+            if rv <= 0:
+                rv = estimate_realized_vol_from_trades(closed)
             vts = vol_target_scaler(rv) if rv > 0 else 1.0
 
             result["calibration"] = {
