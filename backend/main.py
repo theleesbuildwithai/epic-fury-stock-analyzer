@@ -3188,26 +3188,74 @@ def daily_picks(request: Request):
 
 
 _earnings_cache = {"data": None, "ts": 0}
-_EARNINGS_CACHE_TTL = 3600  # AUDIT FIX M3 — 1h cache; uncached call was ~45s
+_EARNINGS_CACHE_TTL = 3600  # 1h
+_EARNINGS_PERSIST_KEY = "earnings_calendar_cache_v1"
 
 @app.get("/api/earnings-calendar")
 def earnings_calendar(request: Request):
-    """Get upcoming earnings for major stocks this week."""
+    """Get upcoming earnings for major stocks this week.
+
+    AUDIT FIX M3 (v2): two-layer cache. In-memory + SQLite-persisted
+    via trading_state. The previous module-global only cache didn't
+    survive App Runner worker boundaries (each worker has its own
+    process state), so different requests hitting different workers
+    re-computed from scratch — yielding the observed 10s second-call
+    delay despite the in-memory layer being "populated".
+    """
     check_rate_limit(request.client.host)
-    import time as _t_ec
+    import time as _t_ec, json as _j_ec
     now = _t_ec.time()
+
+    # Layer 1: in-memory (fast path for repeated calls to SAME worker)
     if (_earnings_cache["data"] is not None
             and (now - _earnings_cache["ts"]) < _EARNINGS_CACHE_TTL):
         return _earnings_cache["data"]
+
+    # Layer 2: persistent SQLite (shared across workers, survives restarts)
+    try:
+        from predictions.models import get_trading_state as _gts_e
+        raw = _gts_e(_EARNINGS_PERSIST_KEY, "")
+        if raw:
+            try:
+                stored = _j_ec.loads(raw)
+                ts = stored.get("_ts", 0)
+                if (now - ts) < _EARNINGS_CACHE_TTL:
+                    # Backfill in-memory so next same-worker call is instant
+                    payload = stored.get("data")
+                    _earnings_cache["data"] = payload
+                    _earnings_cache["ts"] = ts
+                    return payload
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Compute fresh
     try:
         result = get_earnings_calendar()
         _earnings_cache["data"] = result
         _earnings_cache["ts"] = now
+        # Write to persistent layer too
+        try:
+            from predictions.models import set_trading_state as _sts_e
+            _sts_e(_EARNINGS_PERSIST_KEY,
+                   _j_ec.dumps({"data": result, "_ts": now}, default=str))
+        except Exception as _spe:
+            logger.debug(f"earnings persist write failed (non-fatal): {_spe}")
         return result
     except Exception as e:
         logger.error(f"Earnings error: {e}")
         if _earnings_cache["data"] is not None:
-            return _earnings_cache["data"]  # stale fallback better than 500
+            return _earnings_cache["data"]  # stale fallback
+        # Try one more time from persistent (even if stale, better than 500)
+        try:
+            from predictions.models import get_trading_state as _gts_e2
+            raw = _gts_e2(_EARNINGS_PERSIST_KEY, "")
+            if raw:
+                stored = _j_ec.loads(raw)
+                return stored.get("data")
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail="Failed to fetch earnings")
 
 
@@ -3720,30 +3768,48 @@ def learning_status(request: Request):
                     continue
             ece = expected_calibration_error(confs, wins) if confs else -1
             calibrator = isotonic_calibrate(confs, wins) if confs else None
-            # AUDIT FIX M1 — sample the calibration curve at points spanning
-            # the ACTUAL training range, not arbitrary [10, 90]. The previous
-            # version sampled at fixed [10, 20, ..., 90] which sat entirely
-            # outside the typical training range of signal_score values
-            # (~[-5, +5]), and the isotonic clip-outside-bounds policy then
-            # collapsed every sample to the same edge value — so the loop
-            # tripped some downstream check and returned None.
+            # AUDIT FIX M1 (v2) — per-point safety. Previous version's list
+            # comprehension would collapse to None if ANY single point's
+            # predict call failed. Now: independent try/except per point so
+            # one bad value can't kill the whole curve. Also emits a tiny
+            # diag dict so we can see WHY the curve is empty in production.
             cal_curve = None
+            cal_diag = {"calibrator_ok": calibrator is not None,
+                        "confs_len": len(confs)}
             if calibrator and confs:
                 try:
                     lo, hi = min(confs), max(confs)
+                    cal_diag["range"] = [round(float(lo), 3), round(float(hi), 3)]
                     if hi > lo:
                         step = (hi - lo) / 9.0
                         pts = [lo + i * step for i in range(10)]
                     else:
                         pts = [lo]
-                    cal_curve = [
-                        {"raw_conf": round(float(p), 3),
-                         "calibrated_prob": round(float(calibrator([p])[0]), 4)}
-                        for p in pts
-                    ]
+                    points = []
+                    for p in pts:
+                        try:
+                            cp = calibrator([p])
+                            if not cp:
+                                continue
+                            cp_val = cp[0]
+                            if cp_val is None:
+                                continue
+                            points.append({
+                                "raw_conf": round(float(p), 3),
+                                "calibrated_prob": round(float(cp_val), 4),
+                            })
+                        except Exception as _pe:
+                            logger.debug(f"cal point at p={p} failed: {_pe}")
+                            continue
+                    if points:
+                        cal_curve = points
+                    else:
+                        cal_diag["error"] = "all points returned None"
                 except Exception as _ccerr:
-                    logger.debug(f"calibration_curve sampling failed: {_ccerr}")
-                    cal_curve = None
+                    logger.warning(f"calibration_curve outer failure: {_ccerr}")
+                    cal_diag["error"] = str(_ccerr)[:200]
+            else:
+                cal_diag["error"] = "no calibrator or empty confs"
 
             # Prefer snapshot-based realized vol (correct measurement);
             # fall back to trade-based proxy when snapshots unavailable.
@@ -3766,6 +3832,7 @@ def learning_status(request: Request):
                                "poor" if ece >= 0.15 else "no_data"),
                 "calibration_curve": cal_curve,
                 "samples_used": len(confs),
+                "diagnostic": cal_diag,  # AUDIT M1 v2 — see why curve None
             }
             result["vol_target"] = {
                 "realized_vol_annualized": round(rv, 4),

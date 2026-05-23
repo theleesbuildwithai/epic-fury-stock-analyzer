@@ -149,8 +149,23 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
     Kelly sizing on uncalibrated probabilities causes geometric ruin.
     """
     try:
-        c = [float(x) for x in confidences if x is not None]
-        w = [1 if x else 0 for x in wins]
+        # Defensively zip + filter — old trade rows may carry NaN, None
+        # or non-numeric confidence values; any one of which used to
+        # collapse the whole comprehension. Per-element try/except keeps
+        # the rest of the dataset usable.
+        import math as _math
+        c, w = [], []
+        for raw_c, raw_w in zip(confidences or [], wins or []):
+            try:
+                if raw_c is None:
+                    continue
+                cv = float(raw_c)
+                if _math.isnan(cv) or _math.isinf(cv):
+                    continue
+                c.append(cv)
+                w.append(1 if raw_w else 0)
+            except (TypeError, ValueError):
+                continue
         if len(c) != len(w) or len(c) < 50:
             return None
         from sklearn.isotonic import IsotonicRegression  # lazy import
@@ -159,10 +174,33 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
 
         def _apply(values):
             try:
-                vs = [float(v or 0) for v in (values if hasattr(values, '__iter__') else [values])]
-                return iso.predict(vs).tolist()
+                if hasattr(values, '__iter__'):
+                    in_list = list(values)
+                else:
+                    in_list = [values]
+                vs = []
+                for v in in_list:
+                    try:
+                        fv = float(v) if v is not None else 0.0
+                        if _math.isnan(fv) or _math.isinf(fv):
+                            fv = 0.0
+                        vs.append(fv)
+                    except (TypeError, ValueError):
+                        vs.append(0.0)
+                preds = iso.predict(vs)
+                # Handle both numpy array and scalar returns across
+                # sklearn versions.
+                try:
+                    return preds.tolist()
+                except AttributeError:
+                    return [float(preds)]
             except Exception:
-                return [None for _ in vs]
+                # Return a safe shape: same length as input
+                try:
+                    n = len(in_list)
+                except Exception:
+                    n = 1
+                return [None] * n
         return _apply
     except Exception as e:
         logger.debug(f"isotonic_calibrate failed: {e}")
