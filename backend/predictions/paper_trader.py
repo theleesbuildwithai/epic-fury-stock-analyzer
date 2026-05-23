@@ -986,9 +986,43 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
     # Half-Kelly for safety (institutional standard)
     kelly_half = kelly_full * 0.5
 
-    # Adjust by confidence — higher confidence = closer to Kelly
-    # Low confidence (35%) -> 60% of Kelly, high confidence (90%) -> 120% of Kelly
-    conf_multiplier = 0.4 + (confidence / 100) * 0.8
+    # AUDIT #3 — use calibrated probability where available.
+    # Displayed "confidence" is a linear formula not a probability — fitting
+    # an isotonic regression on (confidence, was_win) gives the true mapping.
+    # If calibration fit is available, use calibrated P(win) instead of raw
+    # confidence/100. Falls back to raw confidence if calibrator absent
+    # (e.g. <50 closed trades). This makes Kelly sizing actually correct.
+    calibrated_p = None
+    try:
+        from predictions.quant_audit_fixes import isotonic_calibrate
+        # Build (raw_conf, win) pairs from the closed trades we already loaded
+        _cs, _ws = [], []
+        for _t in closed:
+            try:
+                _c = (_t.get("confidence_at_entry") or _t.get("signal_score"))
+                _p = _t.get("pnl_pct")
+                if _c is None or _p is None:
+                    continue
+                _cs.append(float(_c))
+                _ws.append(float(_p) > 0)
+            except Exception:
+                continue
+        _cal = isotonic_calibrate(_cs, _ws) if _cs else None
+        if _cal:
+            try:
+                calibrated_p = float(_cal([confidence])[0])
+                # Sanity bounds: clip to [0.20, 0.85] so a bad fit can't
+                # produce p=0 (Kelly returns minimum) or p=1 (Kelly explodes)
+                calibrated_p = max(0.20, min(0.85, calibrated_p))
+            except Exception:
+                calibrated_p = None
+    except Exception:
+        calibrated_p = None
+
+    # Use calibrated P(win) when available, else raw confidence
+    effective_p_for_sizing = calibrated_p if calibrated_p is not None else (confidence / 100.0)
+    # conf_multiplier maps p∈[0,1] to [0.4, 1.2]
+    conf_multiplier = 0.4 + effective_p_for_sizing * 0.8
     kelly_adjusted = kelly_half * conf_multiplier
 
     # Adjust by composite score magnitude
@@ -1013,8 +1047,35 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
     if vix_level is not None and vix_level > 25:
         kelly_adjusted = min(0.06, kelly_adjusted)  # Max 6% when VIX > 25
 
+    # AUDIT #8 — Vol-target overlay
+    # Multiply final size by `target_vol / realized_vol` (clamped 0.3-1.5).
+    # When realized portfolio vol exceeds 12% annualized, this downsizes;
+    # when below, it gently upsizes. Keeps portfolio Sharpe stable across
+    # vol regimes. Realized-vol estimate uses the same closed-trades window
+    # already loaded above, so this is essentially free compute.
+    try:
+        from predictions.quant_audit_fixes import (
+            estimate_realized_vol_from_trades, vol_target_scaler,
+        )
+        _rv = estimate_realized_vol_from_trades(closed)
+        if _rv > 0:
+            _vts = vol_target_scaler(_rv, target_vol_annualized=0.12,
+                                      max_scale=1.5, min_scale=0.3)
+            kelly_adjusted = kelly_adjusted * _vts
+            # Re-clamp to the regime-specific bounds so vol-scale can't blow
+            # past Kelly safety caps
+            if regime == "BEAR":
+                kelly_adjusted = max(0.02, min(0.08, kelly_adjusted))
+            elif regime == "VOLATILE":
+                kelly_adjusted = max(0.02, min(0.06, kelly_adjusted))
+            else:
+                kelly_adjusted = max(0.02, min(0.12, kelly_adjusted))
+    except Exception:
+        pass
+
     logger.debug(f"KELLY: p={p:.2f} b={b:.2f} full={kelly_full:.3f} half={kelly_half:.3f} "
-                 f"adj={kelly_adjusted:.3f} conf={confidence}")
+                 f"adj={kelly_adjusted:.3f} conf={confidence} "
+                 f"calibrated_p={calibrated_p}")
 
     return round(kelly_adjusted, 4)
 
