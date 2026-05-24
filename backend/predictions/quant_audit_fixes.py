@@ -140,6 +140,15 @@ def liquidity_rejected(order_dollars: float, adv_dollars: float,
 # #3 — Isotonic calibration of confidence → P(win)
 # ============================================================
 
+# Diagnostic latch — surfaced by callers so we can see WHY the calibrator
+# returned None without redeploying just for logs. Stores the last reason.
+_LAST_CAL_ERROR = {"reason": None}
+
+
+def get_last_calibrate_error() -> "str | None":
+    return _LAST_CAL_ERROR.get("reason")
+
+
 def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
     """Fit an isotonic regression confidence → P(win). Returns a
     callable f(conf_array) → calibrated_probs, or None if not enough
@@ -148,11 +157,8 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
     Why: displayed "confidence" is a linear formula not a probability.
     Kelly sizing on uncalibrated probabilities causes geometric ruin.
     """
+    _LAST_CAL_ERROR["reason"] = None
     try:
-        # Defensively zip + filter — old trade rows may carry NaN, None
-        # or non-numeric confidence values; any one of which used to
-        # collapse the whole comprehension. Per-element try/except keeps
-        # the rest of the dataset usable.
         import math as _math
         c, w = [], []
         for raw_c, raw_w in zip(confidences or [], wins or []):
@@ -166,11 +172,23 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
                 w.append(1 if raw_w else 0)
             except (TypeError, ValueError):
                 continue
-        if len(c) != len(w) or len(c) < 50:
+        if len(c) != len(w):
+            _LAST_CAL_ERROR["reason"] = f"length mismatch c={len(c)} w={len(w)}"
             return None
-        from sklearn.isotonic import IsotonicRegression  # lazy import
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        iso.fit(c, w)
+        if len(c) < 50:
+            _LAST_CAL_ERROR["reason"] = f"insufficient samples after filter: {len(c)} < 50"
+            return None
+        try:
+            from sklearn.isotonic import IsotonicRegression
+        except Exception as _imp:
+            _LAST_CAL_ERROR["reason"] = f"sklearn import failed: {_imp}"
+            return None
+        try:
+            iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+            iso.fit(c, w)
+        except Exception as _fit:
+            _LAST_CAL_ERROR["reason"] = f"isotonic fit failed: {type(_fit).__name__}: {str(_fit)[:200]}"
+            return None
 
         def _apply(values):
             try:
@@ -188,14 +206,11 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
                     except (TypeError, ValueError):
                         vs.append(0.0)
                 preds = iso.predict(vs)
-                # Handle both numpy array and scalar returns across
-                # sklearn versions.
                 try:
                     return preds.tolist()
                 except AttributeError:
                     return [float(preds)]
             except Exception:
-                # Return a safe shape: same length as input
                 try:
                     n = len(in_list)
                 except Exception:
@@ -203,6 +218,7 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
                 return [None] * n
         return _apply
     except Exception as e:
+        _LAST_CAL_ERROR["reason"] = f"outer: {type(e).__name__}: {str(e)[:200]}"
         logger.debug(f"isotonic_calibrate failed: {e}")
         return None
 

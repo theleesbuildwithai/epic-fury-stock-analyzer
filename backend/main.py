@@ -3774,8 +3774,18 @@ def learning_status(request: Request):
             # one bad value can't kill the whole curve. Also emits a tiny
             # diag dict so we can see WHY the curve is empty in production.
             cal_curve = None
+            # Pull the latched internal error from isotonic_calibrate so we
+            # can see WHY it returned None without redeploying for logs.
+            try:
+                from predictions.quant_audit_fixes import get_last_calibrate_error
+                _last_cal_err = get_last_calibrate_error()
+            except Exception:
+                _last_cal_err = None
             cal_diag = {"calibrator_ok": calibrator is not None,
-                        "confs_len": len(confs)}
+                        "confs_len": len(confs),
+                        "internal_error": _last_cal_err,
+                        "confs_sample": confs[:5] if confs else [],
+                        "wins_sample": wins[:5] if wins else []}
             if calibrator and confs:
                 try:
                     lo, hi = min(confs), max(confs)
