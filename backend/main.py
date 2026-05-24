@@ -3542,12 +3542,48 @@ def quant_picks(request: Request, force_refresh: bool = False):
             except Exception as _e:
                 logger.debug(f"SP500 truth-engine overlay failed (non-fatal): {_e}")
 
-            # READ-TIME SECTOR DIVERSIFICATION — applies the cap to any cached
-            # picks, so the fix is visible IMMEDIATELY after deploy without
-            # waiting 45+ min for a fresh background scan to repopulate the
-            # cache.  Identical algorithm to the in-engine version: walks
-            # the sorted picks, keeps ≤MAX_PER_SECTOR per sector, backfills
-            # if necessary to stay above MIN_PICKS.
+            # READ-TIME DIRECTION VALIDATION + SECTOR DIVERSIFICATION
+            #
+            # Direction guard: stale cache or upstream bug occasionally put
+            # NEUTRAL-direction or sign-inverted picks into the wrong queue
+            # (e.g. ZH score=-1.52 in long_picks).  Trading on those would
+            # execute the OPPOSITE of what the model said. Strip any pick
+            # whose direction or score sign doesn't match the queue it's in:
+            #   - long_picks:  direction=="LONG"  AND composite_score >= 0
+            #   - short_picks: direction=="SHORT" AND composite_score <= 0
+            try:
+                def _direction_safe(picks_list, expected_direction, score_sign_ok):
+                    """Strip picks whose direction or score sign disagrees with the queue."""
+                    if not isinstance(picks_list, list):
+                        return picks_list
+                    clean = []
+                    for p in picks_list:
+                        try:
+                            d = str(p.get("direction", "")).upper()
+                            s = float(p.get("composite_score", 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if d != expected_direction:
+                            continue
+                        if not score_sign_ok(s):
+                            continue
+                        clean.append(p)
+                    return clean
+
+                if isinstance(result.get("long_picks"), list):
+                    result["long_picks"] = _direction_safe(
+                        result["long_picks"], "LONG", lambda s: s >= 0,
+                    )
+                if isinstance(result.get("short_picks"), list):
+                    result["short_picks"] = _direction_safe(
+                        result["short_picks"], "SHORT", lambda s: s <= 0,
+                    )
+            except Exception as _dir_e:
+                logger.debug(f"Read-time direction safety soft-fail: {_dir_e}")
+
+            # Sector diversification: ≤MAX_PER_SECTOR per sector so the user
+            # never sees a queue dominated by one sector.  Applied AFTER the
+            # direction guard so we never accidentally re-promote a bad pick.
             try:
                 def _diversify(picks_list, max_per_sec, min_picks, hard_cap):
                     if not isinstance(picks_list, list) or not picks_list:
@@ -3571,8 +3607,6 @@ def quant_picks(request: Request, force_refresh: bool = False):
                         kept.extend(overflow[: min_picks - len(kept)])
                     return kept
 
-                # Min_picks lowered so the sector cap dominates: user asked
-                # "why is everything industrials" — diversity > volume.
                 if isinstance(result.get("long_picks"), list):
                     result["long_picks"] = _diversify(
                         result["long_picks"], max_per_sec=4, min_picks=5, hard_cap=30,

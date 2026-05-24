@@ -3687,9 +3687,17 @@ def generate_quant_picks() -> dict:
         all_scored = calculate_multi_factor_scores(price_data, regime, macro)
 
         # Step 5: Separate into LONG, SHORT, NEUTRAL
-        long_picks = [s for s in all_scored if s["direction"] == "LONG"]
-        short_picks = [s for s in all_scored if s["direction"] == "SHORT"]
-        neutral = [s for s in all_scored if s["direction"] == "NEUTRAL"]
+        # DEFENSIVE: require BOTH direction match AND score sign agreement.
+        # A stock with direction=LONG but score<0 (or vice versa) is bad data
+        # and trading on it executes the opposite of the model's signal.
+        # This guarantee is enforced again at the API layer for double safety.
+        long_picks = [s for s in all_scored
+                      if s.get("direction") == "LONG"
+                      and float(s.get("composite_score", 0) or 0) >= 0]
+        short_picks = [s for s in all_scored
+                       if s.get("direction") == "SHORT"
+                       and float(s.get("composite_score", 0) or 0) <= 0]
+        neutral = [s for s in all_scored if s.get("direction") == "NEUTRAL"]
 
         # Sort: longs by highest score, shorts by lowest score
         long_picks.sort(key=lambda x: x["composite_score"], reverse=True)
