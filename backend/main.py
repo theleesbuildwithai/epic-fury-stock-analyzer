@@ -5554,7 +5554,13 @@ def live_safety_mode_status(request: Request):
                 "position_size_pct": _get_position_size_pct(),
                 "min_confidence": _get_min_confidence(),
                 "min_composite_score": _get_min_composite_score(),
-                "max_gross_exposure": _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.70) if active else 0.80,
+                # Mirror the 0.80 floor that paper_trader enforces in
+                # _compute_dynamic_exposure_target so display matches the
+                # actual cap used at trade time.
+                "max_gross_exposure": (
+                    max(0.80, _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.85))
+                    if active else 0.80
+                ),
             },
             "paper_defaults": {
                 "position_size_pct": 0.08,
