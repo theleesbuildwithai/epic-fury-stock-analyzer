@@ -408,17 +408,22 @@ def _get_min_confidence() -> int:
     return final
 
 def _get_min_composite_score() -> float:
-    """Dynamic score filter — sweet spot 2.0 (was 1.5 too loose,
-    2.5 too strict).
+    """Dynamic score filter.
 
-    LOOSENED 2026-05-16: safety mode now uses 2.0 (vs old 2.5).  The
-    confidence filter does most quality work; piling on score floor too
-    high crushes pick count without much loss-prevention upside."""
+    2026-05-24 RESCALE: picks engine now classifies LONG at score >= 0.6
+    (was 1.0) after the 22-factor weight redistribution shrunk score
+    magnitudes ~3x.  Execution gate of 2.0 was rejecting almost everything
+    the new picks engine produced — would have kept exposure stuck below
+    target.  Lowered to 1.0 so the gate matches the new score
+    distribution and trades can actually reach the 70-80% target.
+    Quality is still enforced by: Kelly sizing, calibration, sector cap,
+    direction safety, auto-tune confidence, and the picks engine's own
+    sector/factor filters."""
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 2.0)
+        return _live_safety_float("LIVE_MIN_SCORE", 1.0)
     if _is_preservation_mode():
-        return 3.0
-    return 2.0
+        return 2.0
+    return 1.0
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
@@ -434,8 +439,8 @@ MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade 
 # can never hit 100% (always keeps a cash buffer) and never collapses
 # below the minimum trading level.
 
-DYNAMIC_EXPOSURE_MIN = 0.65  # Hard floor — always trade at least 65%
-DYNAMIC_EXPOSURE_MAX = 0.80  # Hard ceiling — 70-80% deployed in good markets (raised from 0.70)
+DYNAMIC_EXPOSURE_MIN = 0.70  # Hard floor — always trade at least 70% (was 0.65)
+DYNAMIC_EXPOSURE_MAX = 0.80  # Hard ceiling — 70-80% deployed in good markets
 DYNAMIC_EXPOSURE_BASE = 0.75  # Starting point — targets 25% cash buffer (raised from 0.65)
 # Position-size floor: the product of all 11 sizing multipliers cannot
 # crush a trade below this fraction of nominal. Without this, multiplier
@@ -739,9 +744,15 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         # 2026-05-23: user wants 70-80% target ("depends on situation, but
         # pretty high"). Raised the default cap 0.70 -> 0.85 so the
         # dynamic controller can actually reach the DYNAMIC_EXPOSURE_MAX
-        # (0.80) when conditions warrant it. Env override still wins.
+        # (0.80) when conditions warrant it.
+        #
+        # 2026-05-24 SAFETY-CAP FLOOR: enforce a 0.80 floor on the live
+        # cap so a stale or accidentally-low env var (e.g. App Runner had
+        # LIVE_MAX_GROSS_EXPOSURE=0.70 set previously) can't silently
+        # crush the user-requested 70-80% target band.  Env override can
+        # only RAISE above 0.80, never reduce below it.
         if _is_live_safety_mode():
-            _live_cap = _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.85)
+            _live_cap = max(0.80, _live_safety_float("LIVE_MAX_GROSS_EXPOSURE", 0.85))
             if target > _live_cap:
                 adjustments.append(
                     f"LIVE_SAFETY_CAP {target:.2f} -> {_live_cap:.2f}"
