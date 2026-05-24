@@ -3248,14 +3248,26 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         if macro_adj != 0:
             reasons.append(f"Macro {'+' if macro_adj > 0 else ''}{macro_adj} for {stock['sector']}")
 
-        # Stop loss and target calculations
+        # Stop loss and target calculations — VOL-ADJUSTED inside a sane band.
+        # Old formula used `atr_proxy * 2 * 14` which gave 28× daily-ATR
+        # distances (47-73% stops in production).  Those stops never trigger,
+        # so a position down 40% just keeps bleeding.  New approach:
+        #   stop distance   = clamp(2.5 × daily_ATR, 3%, 8%) of price
+        #   target distance = clamp(4.0 × daily_ATR, 6%, 15%) of price
+        # This gives every position a realistic swing-trade stop/target
+        # without disabling vol-adjustment for unusually quiet/loud names.
         atr_proxy = stock["vol_60d"] / np.sqrt(252) * stock["price"] / 100  # daily vol in $
-        stop_loss = round(stock["price"] - (atr_proxy * 2 * 14), 2) if direction == "LONG" else (
-            round(stock["price"] + (atr_proxy * 2 * 14), 2) if direction == "SHORT" else None
-        )
-        target_price = round(stock["price"] + (atr_proxy * 3 * 14), 2) if direction == "LONG" else (
-            round(stock["price"] - (atr_proxy * 3 * 14), 2) if direction == "SHORT" else None
-        )
+        _price = float(stock["price"])
+        _stop_dist  = max(_price * 0.03, min(_price * 0.08, atr_proxy * 2.5))
+        _tgt_dist   = max(_price * 0.06, min(_price * 0.15, atr_proxy * 4.0))
+        if direction == "LONG":
+            stop_loss    = round(_price - _stop_dist, 2)
+            target_price = round(_price + _tgt_dist,  2)
+        elif direction == "SHORT":
+            stop_loss    = round(_price + _stop_dist, 2)
+            target_price = round(_price - _tgt_dist,  2)
+        else:
+            stop_loss, target_price = None, None
 
         # VOLUME CONFIRMATION: penalize low-volume signals, boost high-volume
         today_vol_ratio = stock.get("today_volume_ratio", 1.0)
