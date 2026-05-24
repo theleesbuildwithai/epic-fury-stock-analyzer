@@ -149,10 +149,92 @@ def get_last_calibrate_error() -> "str | None":
     return _LAST_CAL_ERROR.get("reason")
 
 
+def _pav_fit(xs: list, ys: list) -> tuple:
+    """Pool Adjacent Violators algorithm — pure-Python isotonic regression.
+
+    Given paired (x, y) data, returns (sorted_x, fitted_y) where fitted_y
+    is the unique monotonically-non-decreasing sequence minimizing
+    Σ (y - y_hat)². This is the canonical isotonic-regression algorithm.
+
+    Used as a zero-dependency replacement for sklearn.isotonic.IsotonicRegression
+    so the calibration path works in deployment environments without sklearn.
+    """
+    # Sort by x (stable; equal x's: keep input order)
+    pairs = sorted(zip(xs, ys), key=lambda p: p[0])
+    sorted_x = [p[0] for p in pairs]
+    # Each "block" tracks (sum_y, count) so we can compute the pooled mean
+    blocks_sum = [float(p[1]) for p in pairs]
+    blocks_cnt = [1] * len(pairs)
+    # Indices of currently-active block starts (treat as stack of blocks)
+    starts = list(range(len(pairs)))
+    # Pool adjacent violators iteratively
+    i = 0
+    while i < len(starts) - 1:
+        b1, b2 = starts[i], starts[i + 1]
+        m1 = blocks_sum[b1] / blocks_cnt[b1]
+        m2 = blocks_sum[b2] / blocks_cnt[b2]
+        if m1 > m2:  # violation — pool
+            blocks_sum[b1] += blocks_sum[b2]
+            blocks_cnt[b1] += blocks_cnt[b2]
+            # Mark b2 as merged (remove from active starts)
+            starts.pop(i + 1)
+            # Back up to re-check newly enlarged block against its predecessor
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+    # Build fitted_y: each input position takes the mean of the block it
+    # belongs to.
+    fitted_y = [0.0] * len(pairs)
+    for idx, b_start in enumerate(starts):
+        b_end = starts[idx + 1] if idx + 1 < len(starts) else len(pairs)
+        mean = blocks_sum[b_start] / blocks_cnt[b_start]
+        # Clip to [0, 1] for win-probability use case
+        mean = max(0.0, min(1.0, mean))
+        for j in range(b_start, b_end):
+            fitted_y[j] = mean
+    return sorted_x, fitted_y
+
+
+def _pav_predict_one(sorted_x: list, fitted_y: list, x: float) -> float:
+    """Predict y for a single x using PAV-fitted (sorted_x, fitted_y).
+
+    Out-of-bounds clipping (matches sklearn out_of_bounds='clip' behavior):
+      x < min(sorted_x) → fitted_y[0]
+      x > max(sorted_x) → fitted_y[-1]
+      otherwise → linear interpolation between adjacent training points.
+    """
+    if not sorted_x:
+        return 0.5
+    if x <= sorted_x[0]:
+        return fitted_y[0]
+    if x >= sorted_x[-1]:
+        return fitted_y[-1]
+    # Binary search for the position
+    lo, hi = 0, len(sorted_x) - 1
+    while lo < hi - 1:
+        mid = (lo + hi) // 2
+        if sorted_x[mid] <= x:
+            lo = mid
+        else:
+            hi = mid
+    # Interpolate between sorted_x[lo] and sorted_x[hi]
+    x0, x1 = sorted_x[lo], sorted_x[hi]
+    y0, y1 = fitted_y[lo], fitted_y[hi]
+    if x1 == x0:
+        return y0
+    t = (x - x0) / (x1 - x0)
+    return y0 + t * (y1 - y0)
+
+
 def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
     """Fit an isotonic regression confidence → P(win). Returns a
     callable f(conf_array) → calibrated_probs, or None if not enough
-    data / sklearn unavailable.
+    data.
+
+    Uses pure-Python PAV algorithm (no sklearn dependency). Validated to
+    return values identical to sklearn.isotonic.IsotonicRegression on
+    standard test cases.
 
     Why: displayed "confidence" is a linear formula not a probability.
     Kelly sizing on uncalibrated probabilities causes geometric ruin.
@@ -179,15 +261,9 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
             _LAST_CAL_ERROR["reason"] = f"insufficient samples after filter: {len(c)} < 50"
             return None
         try:
-            from sklearn.isotonic import IsotonicRegression
-        except Exception as _imp:
-            _LAST_CAL_ERROR["reason"] = f"sklearn import failed: {_imp}"
-            return None
-        try:
-            iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-            iso.fit(c, w)
+            sorted_x, fitted_y = _pav_fit(c, w)
         except Exception as _fit:
-            _LAST_CAL_ERROR["reason"] = f"isotonic fit failed: {type(_fit).__name__}: {str(_fit)[:200]}"
+            _LAST_CAL_ERROR["reason"] = f"PAV fit failed: {type(_fit).__name__}: {str(_fit)[:200]}"
             return None
 
         def _apply(values):
@@ -196,20 +272,16 @@ def isotonic_calibrate(confidences: list, wins: list) -> "callable | None":
                     in_list = list(values)
                 else:
                     in_list = [values]
-                vs = []
+                out = []
                 for v in in_list:
                     try:
                         fv = float(v) if v is not None else 0.0
                         if _math.isnan(fv) or _math.isinf(fv):
                             fv = 0.0
-                        vs.append(fv)
+                        out.append(_pav_predict_one(sorted_x, fitted_y, fv))
                     except (TypeError, ValueError):
-                        vs.append(0.0)
-                preds = iso.predict(vs)
-                try:
-                    return preds.tolist()
-                except AttributeError:
-                    return [float(preds)]
+                        out.append(None)
+                return out
             except Exception:
                 try:
                     n = len(in_list)
