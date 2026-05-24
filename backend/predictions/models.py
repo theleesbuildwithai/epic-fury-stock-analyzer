@@ -1033,23 +1033,36 @@ def update_snapshot_sp500(snapshot_date: str, sp500_cum: float, sp500_daily: flo
 
 
 def get_signal_weights() -> dict:
-    """Get current factor weights from the learning system."""
+    """Get current factor weights from the learning system.
+
+    Always returns every known factor — falling back to defaults for any
+    that haven't been written to the DB yet.  Previous behavior returned
+    ONLY rows from signal_performance, so the optimizer kept silently
+    re-allocating across the original 6 factors and ignored our best
+    signal (earnings_drift, Sharpe +2.74).
+    """
+    defaults = {
+        "momentum": 0.11, "value": 0.08, "quality": 0.07,
+        "low_vol": 0.06, "rsi2": 0.06, "volume": 0.05,
+        "smart_money": 0.06, "relative_strength": 0.06,
+        "bb_squeeze": 0.05, "vwap": 0.05,
+        "hurst": 0.04, "autocorr": 0.03, "stat_arb": 0.03, "kurtosis": 0.02,
+        "vol_compression": 0.03, "mtf_alignment": 0.04,
+        "earnings_drift": 0.05, "vpoc": 0.03, "ichimoku": 0.04, "sector_rotation": 0.03,
+        "candlestick": 0.03, "fundamental_value": 0.03,
+    }
     conn = get_db()
     rows = conn.execute("SELECT * FROM signal_performance").fetchall()
     conn.close()
     if not rows:
-        # Default weights for all 22 factors (sum ≈ 1.00)
-        return {
-            "momentum": 0.11, "value": 0.08, "quality": 0.07,
-            "low_vol": 0.06, "rsi2": 0.06, "volume": 0.05,
-            "smart_money": 0.06, "relative_strength": 0.06,
-            "bb_squeeze": 0.05, "vwap": 0.05,
-            "hurst": 0.04, "autocorr": 0.03, "stat_arb": 0.03, "kurtosis": 0.02,
-            "vol_compression": 0.03, "mtf_alignment": 0.04,
-            "earnings_drift": 0.05, "vpoc": 0.03, "ichimoku": 0.04, "sector_rotation": 0.03,
-            "candlestick": 0.03, "beta": 0.03,
-        }
-    return {row["factor_name"]: row["current_weight"] for row in rows}
+        return defaults
+    db_weights = {row["factor_name"]: row["current_weight"] for row in rows}
+    # Merge: DB wins where present, defaults fill the gaps for any newly added
+    # factor that hasn't been persisted yet.  Guarantees the picks engine and
+    # the learner both see the full factor set on every call.
+    merged = dict(defaults)
+    merged.update(db_weights)
+    return merged
 
 
 # ============================================================

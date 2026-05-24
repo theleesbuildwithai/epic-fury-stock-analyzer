@@ -559,6 +559,38 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v1 error (non-fatal): {e}")
 
 
+# --- ONE-TIME ANALYZE CACHE BUST: clear persisted bad analyze entries ---
+# Background: yfinance briefly returned corrupt closes for AAPL (and possibly
+# other popular tickers) which were then saved to the persistent analyze cache
+# for the day. Until the date_key rolls over, that bad entry kept being served
+# (forecast.current_price = $11.44 vs live $308.82). This one-shot clears every
+# row in trading_state whose key starts with "analyze:" so all tickers
+# re-compute fresh on next request. Subsequent requests benefit from the new
+# data-integrity gate (10% live-vs-last-close drift rejects bad data).
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_acb1, set_trading_state as _set_state_acb1,
+        get_db as _get_db_acb1,
+    )
+    _acb1_done = _get_state_acb1("analyze_cache_bust_v1_done", "0")
+    if _acb1_done != "1":
+        _con_acb1 = _get_db_acb1()
+        _cur_acb1 = _con_acb1.execute(
+            "DELETE FROM trading_state WHERE key LIKE 'analyze:%'"
+        )
+        _rows_acb1 = _cur_acb1.rowcount
+        _con_acb1.commit()
+        _con_acb1.close()
+        _set_state_acb1("analyze_cache_bust_v1_done", "1")
+        logger.warning(
+            f"ANALYZE CACHE BUST v1: cleared {_rows_acb1} persisted analyze "
+            f"entries; all tickers will recompute fresh on next request. "
+            f"New data-integrity gate active."
+        )
+except Exception as e:
+    logger.warning(f"Analyze cache bust v1 error (non-fatal): {e}")
+
+
 # --- ONE-TIME PORTFOLIO RESET: Close all positions, set 12.07% return ---
 # This was a one-time fix for an old corruption issue. The flag was on
 # ephemeral disk which made it run on EVERY container restart, nuking

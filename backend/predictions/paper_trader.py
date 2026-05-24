@@ -2346,6 +2346,10 @@ def get_portfolio_state() -> dict:
             "avg_win_pct": round(float(avg_win), 2),
             "avg_loss_pct": round(float(avg_loss), 2),
             "profit_factor": round(profit_factor, 2),
+            # Explicit total_pnl so the frontend never sees None.  Sum of
+            # dollar PnL across closed trades inside the active stats epoch.
+            "total_pnl": round(sum((t.get("pnl_dollars") or 0)
+                                   for t in closed_trades), 2),
         },
         "timestamp": datetime.now().isoformat(),
     }

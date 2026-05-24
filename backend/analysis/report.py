@@ -50,6 +50,28 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     volumes = [d["volume"] for d in history]
     dates = [d["date"] for d in history]
 
+    # DATA INTEGRITY SANITY: detect corrupt historical data BEFORE building the
+    # report.  Symptom: yfinance occasionally returns stale/split-broken closes
+    # for popular tickers (e.g. AAPL showed closes[-1] = $11.44 while the live
+    # quote was $308.82).  When this happens every downstream metric (forecast,
+    # vol, MACD, trend, signal) is poisoned and the cached answer becomes a
+    # permanent wrong "Strong Sell".  Reject these reports so we never cache
+    # bad data and the user sees a clean retry.
+    try:
+        live_p = float((info or {}).get("current_price") or 0)
+        last_close = float(closes[-1]) if closes else 0.0
+        if live_p > 0 and last_close > 0:
+            drift = abs(live_p - last_close) / live_p
+            if drift > 0.10:  # >10% gap between live quote and last historical close
+                return {"error": (
+                    f"Data integrity check failed for {ticker}: "
+                    f"live ${live_p:.2f} vs last close ${last_close:.2f} "
+                    f"(drift {drift*100:.1f}%). Refusing to cache corrupt data — "
+                    f"please retry in a moment."
+                )}
+    except Exception:
+        pass  # never block analysis on the sanity check itself
+
     # 2. Calculate all technical indicators
     sma_20 = calculate_sma(closes, 20)
     sma_50 = calculate_sma(closes, 50)

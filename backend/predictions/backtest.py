@@ -271,6 +271,24 @@ def run_backtest(start_date: str = None,
         if not start_date:
             start_date = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%d")
 
+        # CACHE-FIRST: matching params + fresh cache => return immediately.
+        # Was the root cause of /api/backtest/detail timing out at 60s — the
+        # pre-warm thread populated _result_cache but run_backtest never
+        # consulted it on entry, so every UI request triggered a fresh
+        # 30+ minute yfinance pull.  Cache hit = sub-millisecond response.
+        try:
+            ck_fast = _result_key(start_date, end_date, top_n, stop_pct, take_pct, hold_days)
+            cached = _result_cache.get(ck_fast)
+            if cached and cached.get("data"):
+                age = time.time() - cached.get("ts", 0)
+                if age < _RESULT_CACHE_TTL:
+                    out = dict(cached["data"])
+                    out["_cache_hit"] = True
+                    out["_cache_age_seconds"] = round(age, 1)
+                    return out
+        except Exception as _cce:
+            logger.debug(f"backtest cache-first check soft-fail: {_cce}")
+
         # Default universe — 100 high-liquidity US stocks across all sectors
         # Broader universe = better learning from historical patterns, not just
         # the 30 names we've previously traded. This is what makes the
