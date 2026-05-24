@@ -3060,17 +3060,26 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         # Determine direction — REGIME AWARE
         # In BEAR: raise threshold for LONG (harder to buy), lower for SHORT (easier to short)
         # In BULL: lower threshold for LONG (easier to buy), raise for SHORT (harder to short)
+        #
+        # 2026-05-24 RESCALE: factor weights now distribute across 22 factors
+        # instead of the original 6, so each factor's contribution shrinks
+        # by ~3x and composite scores are correspondingly smaller in
+        # magnitude.  The old thresholds (1.0 for LONG, -3.5 for SHORT in
+        # BULL) were calibrated for the 6-factor regime and were producing
+        # only 5 longs and 0 shorts across a 629-stock universe.  New
+        # thresholds keep the SAME regime intent (BULL favors longs, BEAR
+        # favors shorts) but scale to the new score distribution.
         current_regime = regime.get("regime", "SIDEWAYS") if regime else "SIDEWAYS"
 
         if current_regime == "BEAR":
-            long_threshold_high, long_threshold_low = 3.0, 1.5   # still allow quality longs — long-term success matters
-            short_threshold_high, short_threshold_low = -3.0, -1.0  # easier to short
+            long_threshold_high, long_threshold_low = 2.0, 1.0
+            short_threshold_high, short_threshold_low = -2.0, -0.7
         elif current_regime == "BULL":
-            long_threshold_high, long_threshold_low = 3.0, 1.0   # easier to go long
-            short_threshold_high, short_threshold_low = -5.5, -3.5  # harder to short
+            long_threshold_high, long_threshold_low = 2.0, 0.6
+            short_threshold_high, short_threshold_low = -3.0, -2.0
         else:  # SIDEWAYS
-            long_threshold_high, long_threshold_low = 4.0, 2.0
-            short_threshold_high, short_threshold_low = -4.0, -2.0
+            long_threshold_high, long_threshold_low = 2.5, 1.2
+            short_threshold_high, short_threshold_low = -2.5, -1.2
 
         if final_score >= long_threshold_high:
             direction = "LONG"
