@@ -3541,6 +3541,47 @@ def quant_picks(request: Request, force_refresh: bool = False):
                             result["sp500_return_pct_source"] = _t.get("source", "truth_engine")
             except Exception as _e:
                 logger.debug(f"SP500 truth-engine overlay failed (non-fatal): {_e}")
+
+            # READ-TIME SECTOR DIVERSIFICATION — applies the cap to any cached
+            # picks, so the fix is visible IMMEDIATELY after deploy without
+            # waiting 45+ min for a fresh background scan to repopulate the
+            # cache.  Identical algorithm to the in-engine version: walks
+            # the sorted picks, keeps ≤MAX_PER_SECTOR per sector, backfills
+            # if necessary to stay above MIN_PICKS.
+            try:
+                def _diversify(picks_list, max_per_sec, min_picks, hard_cap):
+                    if not isinstance(picks_list, list) or not picks_list:
+                        return picks_list
+                    sorted_p = sorted(
+                        picks_list,
+                        key=lambda p: abs(float(p.get("composite_score", 0) or 0)),
+                        reverse=True,
+                    )
+                    kept, overflow, counts = [], [], {}
+                    for p in sorted_p:
+                        sec = (p.get("sector") or "Unknown").strip() or "Unknown"
+                        if counts.get(sec, 0) < max_per_sec:
+                            kept.append(p)
+                            counts[sec] = counts.get(sec, 0) + 1
+                        else:
+                            overflow.append(p)
+                        if len(kept) >= hard_cap:
+                            break
+                    if len(kept) < min_picks and overflow:
+                        kept.extend(overflow[: min_picks - len(kept)])
+                    return kept
+
+                if isinstance(result.get("long_picks"), list):
+                    result["long_picks"] = _diversify(
+                        result["long_picks"], max_per_sec=4, min_picks=10, hard_cap=30,
+                    )
+                if isinstance(result.get("short_picks"), list):
+                    result["short_picks"] = _diversify(
+                        result["short_picks"], max_per_sec=4, min_picks=5, hard_cap=20,
+                    )
+            except Exception as _div_e:
+                logger.debug(f"Read-time sector diversification soft-fail: {_div_e}")
+
             return {k: v for k, v in result.items() if not k.startswith("_")}
 
         return {

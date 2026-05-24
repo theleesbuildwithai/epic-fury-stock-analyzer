@@ -3695,9 +3695,39 @@ def generate_quant_picks() -> dict:
         long_picks.sort(key=lambda x: x["composite_score"], reverse=True)
         short_picks.sort(key=lambda x: x["composite_score"])
 
-        # Top picks — show more since we have 200+ stocks
-        top_longs = long_picks[:30]
-        top_shorts = short_picks[:20]
+        # SECTOR DIVERSITY CAP applied at the picks-engine level so the user
+        # never sees a queue that's 29 of 33 Industrials.  Previously the cap
+        # only fired during paper-trade execution, so the displayed queue and
+        # the in-progress trade execution disagreed.  Walks down the sorted
+        # list, keeping each pick UNLESS its sector is already at MAX, then
+        # backfills overflow to guarantee at least MIN_PICKS regardless.
+        MAX_PER_SECTOR_QUEUE = 4   # ≤4 picks per sector in the displayed queue
+        MIN_PICKS_LONG = 10        # never drop below this many long candidates
+        MIN_PICKS_SHORT = 5
+
+        def _diversify_by_sector(sorted_picks, max_per_sector, min_picks, hard_cap):
+            kept = []
+            overflow = []
+            sector_counts = {}
+            for p in sorted_picks:
+                sec = (p.get("sector") or "Unknown").strip() or "Unknown"
+                if sector_counts.get(sec, 0) < max_per_sector:
+                    kept.append(p)
+                    sector_counts[sec] = sector_counts.get(sec, 0) + 1
+                else:
+                    overflow.append(p)
+                if len(kept) >= hard_cap:
+                    break
+            if len(kept) < min_picks and overflow:
+                kept.extend(overflow[: min_picks - len(kept)])
+            return kept
+
+        top_longs = _diversify_by_sector(
+            long_picks, MAX_PER_SECTOR_QUEUE, MIN_PICKS_LONG, hard_cap=30,
+        )
+        top_shorts = _diversify_by_sector(
+            short_picks, MAX_PER_SECTOR_QUEUE, MIN_PICKS_SHORT, hard_cap=20,
+        )
 
         # AUDIT FIX #1 — long/short pre-pick reconciliation
         # Strips any ticker that simultaneously appears in both lists OR
