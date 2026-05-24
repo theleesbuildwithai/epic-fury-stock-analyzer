@@ -3702,8 +3702,8 @@ def generate_quant_picks() -> dict:
         # list, keeping each pick UNLESS its sector is already at MAX, then
         # backfills overflow to guarantee at least MIN_PICKS regardless.
         MAX_PER_SECTOR_QUEUE = 4   # ≤4 picks per sector in the displayed queue
-        MIN_PICKS_LONG = 10        # never drop below this many long candidates
-        MIN_PICKS_SHORT = 5
+        MIN_PICKS_LONG = 5        # never drop below this many long candidates
+        MIN_PICKS_SHORT = 3
 
         def _diversify_by_sector(sorted_picks, max_per_sector, min_picks, hard_cap):
             kept = []

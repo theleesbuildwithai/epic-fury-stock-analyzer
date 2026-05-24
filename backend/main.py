@@ -3571,13 +3571,15 @@ def quant_picks(request: Request, force_refresh: bool = False):
                         kept.extend(overflow[: min_picks - len(kept)])
                     return kept
 
+                # Min_picks lowered so the sector cap dominates: user asked
+                # "why is everything industrials" — diversity > volume.
                 if isinstance(result.get("long_picks"), list):
                     result["long_picks"] = _diversify(
-                        result["long_picks"], max_per_sec=4, min_picks=10, hard_cap=30,
+                        result["long_picks"], max_per_sec=4, min_picks=5, hard_cap=30,
                     )
                 if isinstance(result.get("short_picks"), list):
                     result["short_picks"] = _diversify(
-                        result["short_picks"], max_per_sec=4, min_picks=5, hard_cap=20,
+                        result["short_picks"], max_per_sec=4, min_picks=3, hard_cap=20,
                     )
             except Exception as _div_e:
                 logger.debug(f"Read-time sector diversification soft-fail: {_div_e}")
