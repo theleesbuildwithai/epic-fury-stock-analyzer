@@ -148,47 +148,62 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
          _stale flag if needed.
     """
 
-    def fetch():
-        # Tier 1: try the requested period with one retry
-        for attempt in range(2):
-            _throttle()
-            try:
-                df = yf.download(ticker, period=period, progress=False)
-                if df is not None and not df.empty:
-                    return _df_to_records(df)
-            except Exception:
-                pass
-            if attempt == 0:
-                time.sleep(1.5)
+    cache_key = f"history_{ticker}_{period}"
+    now = time.time()
+    # ONLY trust the in-memory cache when it holds non-empty data.
+    # Caching the empty list would lock the user out for 10 minutes if
+    # yfinance is briefly down — and silently skip the Tier-3 stale
+    # fallback below.  This was the bug that made AMAT 404 persist.
+    if cache_key in _cache:
+        entry = _cache[cache_key]
+        if (now - entry["time"]) < _cache_ttl and entry.get("data"):
+            return entry["data"]
 
-        # Tier 2: try shorter periods so we don't 404 just because the
-        # 1y window happened to fail on this call.  Long periods need
-        # bigger payloads from Yahoo and fail more often under load.
-        fallback_periods = [p for p in ("6mo", "3mo", "1mo") if p != period]
-        for fp in fallback_periods:
+    # Tier 1: try the requested period with one retry
+    data = []
+    for attempt in range(2):
+        _throttle()
+        try:
+            df = yf.download(ticker, period=period, progress=False)
+            if df is not None and not df.empty:
+                data = _df_to_records(df)
+                if data:
+                    break
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(1.5)
+
+    # Tier 2: shorter fallback periods (6mo, 3mo, 1mo) — long windows
+    # are bigger payloads and fail more often under Yahoo load.
+    if not data:
+        for fp in ("6mo", "3mo", "1mo"):
+            if fp == period:
+                continue
             _throttle()
             try:
                 df = yf.download(ticker, period=fp, progress=False)
                 if df is not None and not df.empty:
-                    return _df_to_records(df)
+                    data = _df_to_records(df)
+                    if data:
+                        break
             except Exception:
                 continue
 
-        # Tier 3: serve last-known good data for ANY period of this
-        # ticker. Avoids hard-404 when Yahoo is temporarily down.
+    # Tier 3: serve last-known good data for ANY period of this ticker.
+    # No 404 when yfinance is temporarily down.  Returns a COPY so a
+    # downstream mutation can't corrupt the fallback store.
+    if not data:
         for key, entry in _last_good_history.items():
             if key[0] == ticker and entry.get("data"):
-                return list(entry["data"])  # copy to avoid mutation
+                data = list(entry["data"])
+                break
 
-        return []
-
-    data = _get_cached(f"history_{ticker}_{period}", fetch)
     if data:
-        # Remember successful pulls for the stale-fallback path
-        _last_good_history[(ticker, period)] = {
-            "data": data,
-            "ts": time.time(),
-        }
+        # Persist to both stores so the next call (a) hits in-memory
+        # cache fast and (b) has stale fallback available later.
+        _cache[cache_key] = {"data": data, "time": now}
+        _last_good_history[(ticker, period)] = {"data": data, "ts": now}
     return data
 
 

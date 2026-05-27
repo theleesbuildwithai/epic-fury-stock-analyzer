@@ -4934,22 +4934,26 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             }
         data = cache_entry["data"]
 
-        # Pull EVERY scored stock the engine analyzed today, not just the
-        # already-trimmed top-N.  Need access to the full universe to fill
-        # 25 long + 25 short reliably.  The engine stores the full sorted
-        # lists in long_picks/short_picks before the sector cap is applied
-        # at the API layer, so we grab them BEFORE diversification.
+        # Source of picks: the same cached output from the picks engine
+        # that /api/quant-picks serves.  The engine emits the top 30 longs
+        # and top 20 shorts (after its own engine-level sector cap), so
+        # symbols-to-buy can fill up to 30/20 — fewer if today's regime
+        # only qualified a small number.
         all_longs = list(data.get("long_picks", []) or [])
         all_shorts = list(data.get("short_picks", []) or [])
 
         # Direction & score-sign safety (same guard as /api/quant-picks):
         # a stock with the wrong direction-or-sign combination would
-        # execute the OPPOSITE of the model.  Strip those.
+        # execute the OPPOSITE of the model.  Strip those.  Also require
+        # a real positive price so downstream stop/target math is sane.
         def _safe_pick(p, want_long: bool) -> bool:
             try:
                 d = str(p.get("direction", "")).upper()
                 s = float(p.get("composite_score", 0) or 0)
+                px = float(p.get("price", 0) or 0)
             except (TypeError, ValueError):
+                return False
+            if px <= 0:
                 return False
             return (d == "LONG" and s >= 0) if want_long else (d == "SHORT" and s <= 0)
 
@@ -5005,12 +5009,16 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         def _format(p, direction: str):
             px = float(p.get("price", 0) or 0)
             stop_dist, tgt_dist = _swing_levels(p)
+            # Use `is not None` so a freak 0.0 distance still computes
+            # rather than silently returning None for stop/target.
+            has_stop = stop_dist is not None and px > 0
+            has_tgt  = tgt_dist  is not None and px > 0
             if direction == "long":
-                stop = round(px - stop_dist, 2) if stop_dist else None
-                target = round(px + tgt_dist, 2) if tgt_dist else None
+                stop = round(px - stop_dist, 2) if has_stop else None
+                target = round(px + tgt_dist, 2) if has_tgt else None
             else:
-                stop = round(px + stop_dist, 2) if stop_dist else None
-                target = round(px - tgt_dist, 2) if tgt_dist else None
+                stop = round(px + stop_dist, 2) if has_stop else None
+                target = round(px - tgt_dist, 2) if has_tgt else None
             return {
                 "ticker": p.get("ticker") or p.get("symbol"),
                 "sector": p.get("sector") or "Unknown",
@@ -5018,9 +5026,10 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 "entry_price": px,
                 "stop_loss": stop,
                 "target_price": target,
-                "stop_distance_pct": round((stop_dist / px) * 100, 2) if (stop_dist and px) else None,
-                "target_distance_pct": round((tgt_dist / px) * 100, 2) if (tgt_dist and px) else None,
-                "reward_risk_ratio": round(tgt_dist / stop_dist, 2) if (stop_dist and tgt_dist) else None,
+                "stop_distance_pct": round((stop_dist / px) * 100, 2) if has_stop else None,
+                "target_distance_pct": round((tgt_dist / px) * 100, 2) if has_tgt else None,
+                "reward_risk_ratio": (round(tgt_dist / stop_dist, 2)
+                                       if (has_stop and has_tgt and stop_dist > 0) else None),
                 "confidence": p.get("confidence"),
                 "composite_score": p.get("composite_score"),
                 "rsi14": p.get("rsi14"),
@@ -5034,6 +5043,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         return {
             "ok": True,
             "generated_at": data.get("generated_at") or "unknown",
+            "cache_age_seconds": round(cache_age, 1) if cache_age is not None else None,
             "regime": (data.get("regime") or {}).get("regime", "unknown"),
             "regime_confidence": (data.get("regime") or {}).get("confidence", 0),
             "long_picks": [_format(p, "long") for p in top_longs],
