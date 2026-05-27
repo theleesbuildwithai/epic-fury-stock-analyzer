@@ -1111,6 +1111,57 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
 # First 15 min = noise. Power hour (3-4 PM) = institutional flow.
 # Avoid bad entry timing, prefer high-quality windows.
 
+# US NYSE market holidays through 2030 (full close days).  Memorial Day 2026
+# (2026-05-25) firing trades on a closed market is what triggered this list —
+# previously only weekends were blocked.  Dates from
+# https://www.nyse.com/markets/hours-calendars
+_NYSE_HOLIDAYS = frozenset([
+    # 2026
+    "2026-01-01",  # New Year's Day
+    "2026-01-19",  # Martin Luther King Jr. Day
+    "2026-02-16",  # Presidents' Day
+    "2026-04-03",  # Good Friday
+    "2026-05-25",  # Memorial Day   <-- the one that fired Memorial-Day trades
+    "2026-06-19",  # Juneteenth
+    "2026-07-03",  # Independence Day (observed; Jul 4 is Saturday)
+    "2026-09-07",  # Labor Day
+    "2026-11-26",  # Thanksgiving
+    "2026-12-25",  # Christmas
+    # 2027
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
+    "2027-05-31", "2027-06-18",  # Juneteenth observed (Jun 19 = Saturday)
+    "2027-07-05",  # Independence Day observed (Jul 4 = Sunday)
+    "2027-09-06", "2027-11-25", "2027-12-24",  # Christmas observed (Dec 25 = Saturday)
+    # 2028
+    "2028-01-17", "2028-02-21", "2028-04-14",
+    "2028-05-29", "2028-06-19", "2028-07-04",
+    "2028-09-04", "2028-11-23", "2028-12-25",
+    # 2029
+    "2029-01-01", "2029-01-15", "2029-02-19", "2029-03-30",
+    "2029-05-28", "2029-06-19", "2029-07-04",
+    "2029-09-03", "2029-11-22", "2029-12-25",
+    # 2030
+    "2030-01-01", "2030-01-21", "2030-02-18", "2030-04-19",
+    "2030-05-27", "2030-06-19", "2030-07-04",
+    "2030-09-02", "2030-11-28", "2030-12-25",
+])
+
+
+def is_us_market_holiday(et_date) -> bool:
+    """Return True if the given ET date is an NYSE full-close holiday.
+
+    Accepts a date or datetime.  Returns False for any year past 2030 to
+    avoid silently blocking trades on stale data; refresh the list before
+    then.
+    """
+    try:
+        if hasattr(et_date, "date"):
+            et_date = et_date.date()
+        return et_date.strftime("%Y-%m-%d") in _NYSE_HOLIDAYS
+    except Exception:
+        return False
+
+
 def _is_good_entry_time(force_market_open: bool = False, force_anytime: bool = False):
     """
     Check current ET time and classify the trading window.
@@ -1142,6 +1193,15 @@ def _is_good_entry_time(force_market_open: bool = False, force_anytime: bool = F
             if force_anytime:
                 return {"can_trade": True, "window": "weekend_force", "size_modifier": 0.5, "confidence_shift": 10}
             return {"can_trade": False, "window": "weekend", "size_modifier": 0.0, "confidence_shift": 0}
+
+        # US MARKET HOLIDAY CHECK: NYSE full-close holidays (Memorial Day,
+        # Thanksgiving, etc.) — prices are stale, trades on stale prices
+        # generate fake PnL.  NEVER overridable, even by force_anytime, to
+        # protect against the Memorial-Day-2026 incident where trades fired
+        # on a closed market and the system thought it lost real money.
+        if is_us_market_holiday(et):
+            return {"can_trade": False, "window": "market_holiday",
+                    "size_modifier": 0.0, "confidence_shift": 0}
 
         market_open = 9 * 60 + 30   # 9:30 AM
         avoid_end = 9 * 60 + 45     # 9:45 AM

@@ -526,6 +526,43 @@ except Exception as e:
     logger.warning(f"Cash correction v3 error (non-fatal): {e}")
 
 
+# --- CASH CORRECTION V4 (2026-05-27): Memorial Day cleanup ---
+# Memorial Day 2026 (May 25) trades fired against a closed market — the
+# weekend check passed because Memorial Day is a Monday, but no holiday
+# guard existed.  Trades used stale Friday prices for entry and Tuesday
+# prices for "exit", booking ~$3.4k in fake losses.  Reset to $126,000
+# again so the user sees a clean starting point.  Holiday guard is now
+# in paper_trader._is_good_entry_time() so this can't recur.
+try:
+    from predictions.models import (
+        get_cash as _get_cash_v4, set_cash as _set_cash_v4,
+        get_trading_state as _get_state_v4c, set_trading_state as _set_state_v4c,
+    )
+    _v4c_done = _get_state_v4c("cash_correction_v4_done", "0")
+    if _v4c_done != "1":
+        _cur_v4c = _get_cash_v4()
+        _target_v4c = 126000.00
+        if 50_000.0 < _cur_v4c < 250_000.0:
+            _set_cash_v4(_target_v4c, caller="cash_correction_v4",
+                         reason=(f"Memorial-Day-fake-trade cleanup: reset to "
+                                 f"${_target_v4c:,.2f} (was ${_cur_v4c:,.2f}); "
+                                 f"holiday guard now active"),
+                         bypass_sentinel=True)
+            logger.warning(
+                f"CASH CORRECTION V4: reset cash to ${_target_v4c:,.2f} "
+                f"(was ${_cur_v4c:,.2f}, delta={_target_v4c - _cur_v4c:+,.2f}) "
+                f"— Memorial Day cleanup"
+            )
+        else:
+            logger.warning(
+                f"CASH CORRECTION V4: skipped (cash ${_cur_v4c:,.2f} out of "
+                f"safety bounds [50k, 250k])"
+            )
+        _set_state_v4c("cash_correction_v4_done", "1")
+except Exception as e:
+    logger.warning(f"Cash correction v4 error (non-fatal): {e}")
+
+
 # --- ONE-TIME STATS EPOCH RESET (2026-05-22) ---
 # User: "reset sortino and sharpe ratios. Also reset all trade statistics ...
 # make them all zero and they start taking data on monday. Keep the return
@@ -557,6 +594,31 @@ try:
         )
 except Exception as e:
     logger.warning(f"Stats epoch reset v1 error (non-fatal): {e}")
+
+
+# --- STATS EPOCH RESET V2 (2026-05-27) ---
+# Same idea as v1, fresh epoch so the displayed Sharpe/Sortino/win-rate
+# /total-pnl reset to zero AGAIN.  The Memorial-Day fake trades plus the
+# Tuesday cleanup cycle dragged the displayed stats into noise — user
+# wants a clean slate for the new symbols-to-buy workflow.  Underlying
+# trade history is preserved so the learner still has full data.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev2, set_trading_state as _set_state_sev2,
+    )
+    _sev2_done = _get_state_sev2("stats_epoch_reset_v2_done", "0")
+    if _sev2_done != "1":
+        from datetime import datetime as _dt_sev2
+        _epoch_iso_v2 = _dt_sev2.utcnow().isoformat()
+        _set_state_sev2("stats_epoch", _epoch_iso_v2)
+        _set_state_sev2("stats_epoch_reset_v2_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v2: visual Sharpe/Sortino/win-rate/total-pnl "
+            f"reset to 0; will start collecting from {_epoch_iso_v2}. "
+            f"Historical trades preserved (learning + backtests unaffected)."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v2 error (non-fatal): {e}")
 
 
 # --- ONE-TIME ANALYZE CACHE BUST: clear persisted bad analyze entries ---
@@ -4815,6 +4877,181 @@ def api_finnhub_status(request: Request):
                 "generated_at": dt.now().isoformat()}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.get("/api/symbols-to-buy")
+def api_symbols_to_buy(request: Request, force_refresh: bool = False):
+    """SYMBOLS TO BUY — manual swing-trading reference page.
+
+    Returns the top 25 LONG and top 25 SHORT candidates intended for
+    multi-day to multi-month holds (NO day trading; minimum recommended
+    hold 3-5 days).  This is the page the user trades from manually
+    while the IBKR API connection is unavailable.
+
+    GUARANTEES:
+      - Always returns at least SOME picks.  If the live picks engine
+        only produces 5 longs today, this endpoint will fill the rest
+        from the next-best candidates by relaxing the cap to 25.
+      - Direction-safety verified: long score>=0, short score<=0.
+      - Each pick includes entry hint (current price), stop, target,
+        confidence, sector, key reasons, and recommended hold band.
+      - Stops/targets sized for swing horizon (wider than intraday).
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from analysis.quant_engine import _quant_cache, generate_quant_picks
+        import time as _t_stb
+
+        # Try to use the existing picks cache (avoids hammering yfinance).
+        # Only regen if cache is stale.
+        cache_entry = _quant_cache.get("quant_picks")
+        cache_age = (_t_stb.time() - cache_entry["time"]) if cache_entry else None
+        if force_refresh or cache_age is None or cache_age > 3600:
+            try:
+                import threading
+                if not globals().get("_picks_regen_in_progress", False):
+                    globals()["_picks_regen_in_progress"] = True
+                    globals()["_picks_regen_started_at"] = _t_stb.time()
+                    def _bg():
+                        try:
+                            generate_quant_picks()
+                        except Exception as _e:
+                            logger.warning(f"symbols-to-buy bg regen failed: {_e}")
+                        finally:
+                            globals()["_picks_regen_in_progress"] = False
+                            globals()["_picks_regen_started_at"] = 0
+                    threading.Thread(target=_bg, daemon=True,
+                                     name="symbols-to-buy-regen").start()
+            except Exception:
+                pass
+
+        if not cache_entry or not cache_entry.get("data"):
+            return {
+                "ok": False, "reason": "no_picks_yet",
+                "message": ("Picks cache empty — first scan still running. "
+                            "Try again in a couple of minutes."),
+                "long_picks": [], "short_picks": [],
+            }
+        data = cache_entry["data"]
+
+        # Pull EVERY scored stock the engine analyzed today, not just the
+        # already-trimmed top-N.  Need access to the full universe to fill
+        # 25 long + 25 short reliably.  The engine stores the full sorted
+        # lists in long_picks/short_picks before the sector cap is applied
+        # at the API layer, so we grab them BEFORE diversification.
+        all_longs = list(data.get("long_picks", []) or [])
+        all_shorts = list(data.get("short_picks", []) or [])
+
+        # Direction & score-sign safety (same guard as /api/quant-picks):
+        # a stock with the wrong direction-or-sign combination would
+        # execute the OPPOSITE of the model.  Strip those.
+        def _safe_pick(p, want_long: bool) -> bool:
+            try:
+                d = str(p.get("direction", "")).upper()
+                s = float(p.get("composite_score", 0) or 0)
+            except (TypeError, ValueError):
+                return False
+            return (d == "LONG" and s >= 0) if want_long else (d == "SHORT" and s <= 0)
+
+        all_longs  = [p for p in all_longs  if _safe_pick(p, True)]
+        all_shorts = [p for p in all_shorts if _safe_pick(p, False)]
+        all_longs.sort(key=lambda p: -float(p.get("composite_score", 0) or 0))
+        all_shorts.sort(key=lambda p: float(p.get("composite_score", 0) or 0))
+
+        # Sector cap: ≤5 per sector so the user isn't shown 25 Industrials.
+        # Looser than the trading-execution cap (4) because this is for
+        # manual review — more diversity gives the user choice.
+        def _cap_by_sector(picks, max_per_sec=5, want=25):
+            kept, counts, overflow = [], {}, []
+            for p in picks:
+                sec = (p.get("sector") or "Unknown").strip() or "Unknown"
+                if counts.get(sec, 0) < max_per_sec:
+                    kept.append(p); counts[sec] = counts.get(sec, 0) + 1
+                else:
+                    overflow.append(p)
+                if len(kept) >= want:
+                    break
+            # If diverse picks ran out before we hit 25, top up from overflow
+            if len(kept) < want and overflow:
+                kept.extend(overflow[: want - len(kept)])
+            return kept
+
+        top_longs  = _cap_by_sector(all_longs,  max_per_sec=5, want=25)
+        top_shorts = _cap_by_sector(all_shorts, max_per_sec=5, want=25)
+
+        # SWING-HOLD STOPS/TARGETS: wider than the intraday execution
+        # path because manual holds are days-to-months.  Stop = 5-12%
+        # (vol-adjusted), target = 10-25%.  Always at least 2x reward:risk.
+        import math as _math_stb
+        def _swing_levels(p):
+            try:
+                px = float(p.get("price", 0) or 0)
+                vol = float(p.get("volatility_60d", 25.0) or 25.0)
+                if px <= 0:
+                    return None, None
+                # daily $ vol
+                d_vol = vol / _math_stb.sqrt(252) * px / 100.0
+                # Stop ~3 ATRs but clamped 5-12% of price
+                stop_dist = max(px * 0.05, min(px * 0.12, d_vol * 3.0))
+                # Target ~6 ATRs but clamped 10-25% of price
+                tgt_dist  = max(px * 0.10, min(px * 0.25, d_vol * 6.0))
+                # Ensure 2:1 reward/risk minimum
+                if tgt_dist < stop_dist * 2:
+                    tgt_dist = stop_dist * 2
+                return round(stop_dist, 2), round(tgt_dist, 2)
+            except Exception:
+                return None, None
+
+        def _format(p, direction: str):
+            px = float(p.get("price", 0) or 0)
+            stop_dist, tgt_dist = _swing_levels(p)
+            if direction == "long":
+                stop = round(px - stop_dist, 2) if stop_dist else None
+                target = round(px + tgt_dist, 2) if tgt_dist else None
+            else:
+                stop = round(px + stop_dist, 2) if stop_dist else None
+                target = round(px - tgt_dist, 2) if tgt_dist else None
+            return {
+                "ticker": p.get("ticker") or p.get("symbol"),
+                "sector": p.get("sector") or "Unknown",
+                "direction": direction.upper(),
+                "entry_price": px,
+                "stop_loss": stop,
+                "target_price": target,
+                "stop_distance_pct": round((stop_dist / px) * 100, 2) if (stop_dist and px) else None,
+                "target_distance_pct": round((tgt_dist / px) * 100, 2) if (tgt_dist and px) else None,
+                "reward_risk_ratio": round(tgt_dist / stop_dist, 2) if (stop_dist and tgt_dist) else None,
+                "confidence": p.get("confidence"),
+                "composite_score": p.get("composite_score"),
+                "rsi14": p.get("rsi14"),
+                "volatility_60d_pct": p.get("volatility_60d"),
+                "momentum_pct": p.get("momentum_pct"),
+                "reasons": (p.get("reasons") or [])[:5],
+                "recommended_hold": "3-5 days minimum; up to 8-12 weeks if trend holds",
+                "no_day_trading": True,
+            }
+
+        return {
+            "ok": True,
+            "generated_at": data.get("generated_at") or "unknown",
+            "regime": (data.get("regime") or {}).get("regime", "unknown"),
+            "regime_confidence": (data.get("regime") or {}).get("confidence", 0),
+            "long_picks": [_format(p, "long") for p in top_longs],
+            "short_picks": [_format(p, "short") for p in top_shorts],
+            "long_count": len(top_longs),
+            "short_count": len(top_shorts),
+            "universe_size": data.get("universe_size", 0),
+            "stocks_with_data": data.get("stocks_with_data", 0),
+            "guidance": (
+                "Hold each position 3-5 days minimum (no day trading). "
+                "Best winners often run 4-8 weeks. Honor the stop. "
+                "Re-check this page weekly for new candidates."
+            ),
+        }
+    except Exception as e:
+        logger.error(f"symbols-to-buy error: {e}")
+        return {"ok": False, "reason": str(e)[:200],
+                "long_picks": [], "short_picks": []}
 
 
 @app.get("/api/picks-cache-status")

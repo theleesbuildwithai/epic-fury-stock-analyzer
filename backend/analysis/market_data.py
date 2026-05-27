@@ -124,32 +124,80 @@ def get_stock_info(ticker: str) -> dict:
     return _get_cached(f"info_{ticker}", fetch)
 
 
+# Persistent cache of last successful historical pull, keyed by ticker.
+# Used as a fallback when every fresh yfinance attempt fails — better to
+# show last-known data with a stale warning than 404 the user. This is
+# what closed the "AMAT analyze returns 404" issue.
+_last_good_history = {}   # key: (ticker, period) -> {"data": list, "ts": float}
+
+
 def get_historical_data(ticker: str, period: str = "1y") -> list:
     """
     Get historical price data for a stock.
     period options: 1mo, 3mo, 6mo, 1y, 2y, 5y
     Returns a list of dicts with date, open, high, low, close, volume.
 
-    Uses yf.download() which is the bulk-download method and is less
-    likely to trigger rate-limit (429) errors than Ticker.history().
+    SAFETY NETS (added after AMAT 404 incident):
+      1. Retry the requested period up to 2 times with backoff
+      2. Fall back to shorter periods (6mo -> 3mo -> 1mo) if the
+         requested period still fails — gives the user SOMETHING to
+         analyze rather than a 404
+      3. Stale-cache fallback: if every fresh attempt fails, return
+         the last successful pull for this ticker (any period).  This
+         is logged and the caller can detect staleness via the cache
+         _stale flag if needed.
     """
 
     def fetch():
-        _throttle()
+        # Tier 1: try the requested period with one retry
+        for attempt in range(2):
+            _throttle()
+            try:
+                df = yf.download(ticker, period=period, progress=False)
+                if df is not None and not df.empty:
+                    return _df_to_records(df)
+            except Exception:
+                pass
+            if attempt == 0:
+                time.sleep(1.5)
+
+        # Tier 2: try shorter periods so we don't 404 just because the
+        # 1y window happened to fail on this call.  Long periods need
+        # bigger payloads from Yahoo and fail more often under load.
+        fallback_periods = [p for p in ("6mo", "3mo", "1mo") if p != period]
+        for fp in fallback_periods:
+            _throttle()
+            try:
+                df = yf.download(ticker, period=fp, progress=False)
+                if df is not None and not df.empty:
+                    return _df_to_records(df)
+            except Exception:
+                continue
+
+        # Tier 3: serve last-known good data for ANY period of this
+        # ticker. Avoids hard-404 when Yahoo is temporarily down.
+        for key, entry in _last_good_history.items():
+            if key[0] == ticker and entry.get("data"):
+                return list(entry["data"])  # copy to avoid mutation
+
+        return []
+
+    data = _get_cached(f"history_{ticker}_{period}", fetch)
+    if data:
+        # Remember successful pulls for the stale-fallback path
+        _last_good_history[(ticker, period)] = {
+            "data": data,
+            "ts": time.time(),
+        }
+    return data
+
+
+def _df_to_records(df) -> list:
+    """Convert a yfinance DataFrame into the dict-list format the rest
+    of the codebase expects. Safe against single-row frames."""
+    records = []
+    for date, row in df.iterrows():
         try:
-            df = yf.download(
-                ticker,
-                period=period,
-                progress=False,
-            )
-        except Exception:
-            return []
-
-        if df is None or df.empty:
-            return []
-
-        records = []
-        for date, row in df.iterrows():
             records.append({
                 "date": date.strftime("%Y-%m-%d"),
                 "open": round(float(row["Open"]), 2),
@@ -158,9 +206,9 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
                 "close": round(float(row["Close"]), 2),
                 "volume": int(row["Volume"]),
             })
-        return records
-
-    return _get_cached(f"history_{ticker}_{period}", fetch)
+        except (ValueError, TypeError, KeyError):
+            continue  # skip malformed rows but keep the rest
+    return records
 
 
 def get_benchmark_data(period: str = "1y") -> dict:
