@@ -96,6 +96,16 @@ export default function Navbar() {
             >
               Watchlist
             </Link>
+            <Link
+              to="/symbols-to-buy"
+              className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${
+                (isActive('/symbols-to-buy') || location.pathname.startsWith('/symbol/'))
+                  ? 'bg-emerald-500 text-black shadow-lg shadow-emerald-500/20'
+                  : 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 hover:text-emerald-200'
+              }`}
+            >
+              Symbols to Buy
+            </Link>
           </div>
         </div>
       </div>
