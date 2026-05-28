@@ -596,6 +596,74 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v1 error (non-fatal): {e}")
 
 
+# --- HPE PHANTOM TRADE REPAIR (2026-05-28) ---
+# Bug: yfinance returned $2.94 for HPE on 2026-05-28 (real price ~$22).
+# System opened short at $2.94, WIN-LOCK closed at real $36.78 two
+# minutes later, booked phantom -$23,688 loss.  pnl_pct was -1151%
+# (mathematically impossible for an equity in one day).  Set the
+# specific trade's pnl to 0 so it does not poison the displayed
+# Sharpe/Sortino/win-rate.  The cash math already settled at the
+# real exit price so cash itself is reconciled correctly.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_hpe, set_trading_state as _set_state_hpe,
+    )
+    import sqlite3 as _sql_hpe
+    _hpe_done = _get_state_hpe("hpe_phantom_repair_v1_done", "0")
+    if _hpe_done != "1":
+        try:
+            from predictions.models import DB_PATH as _DBP
+            with _sql_hpe.connect(_DBP) as _con:
+                _cur = _con.execute(
+                    "SELECT id, entry_price, exit_price, pnl_pct, pnl_dollars "
+                    "FROM paper_trades WHERE ticker='HPE' AND direction='short' "
+                    "AND ABS(pnl_pct) > 100 ORDER BY id DESC LIMIT 1"
+                )
+                _row = _cur.fetchone()
+                if _row:
+                    _tid = _row[0]
+                    _con.execute(
+                        "UPDATE paper_trades SET pnl_pct = 0, pnl_dollars = 0, "
+                        "exit_reason = COALESCE(exit_reason,'') || ' [phantom: yfinance bad price]' "
+                        "WHERE id = ?", (_tid,)
+                    )
+                    _con.commit()
+                    logger.warning(
+                        f"HPE PHANTOM REPAIR: zeroed pnl on trade id={_tid} "
+                        f"(was {_row[3]}% / ${_row[4]} on fake entry ${_row[1]}); "
+                        f"cash unaffected"
+                    )
+                else:
+                    logger.info("HPE phantom repair: no matching trade found, nothing to do")
+        except Exception as _hpe_db_err:
+            logger.warning(f"HPE phantom repair DB error: {_hpe_db_err}")
+        _set_state_hpe("hpe_phantom_repair_v1_done", "1")
+except Exception as e:
+    logger.warning(f"HPE phantom repair (non-fatal): {e}")
+
+
+# --- STATS EPOCH RESET V3 (2026-05-28) ---
+# After HPE phantom repair, kick the displayed Sharpe/Sortino/win-rate
+# back to zero so the user sees a clean slate.  Underlying trade
+# history preserved (learner still has full data).
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev3, set_trading_state as _set_state_sev3,
+    )
+    _sev3_done = _get_state_sev3("stats_epoch_reset_v3_done", "0")
+    if _sev3_done != "1":
+        from datetime import datetime as _dt_sev3
+        _epoch_iso_v3 = _dt_sev3.utcnow().isoformat()
+        _set_state_sev3("stats_epoch", _epoch_iso_v3)
+        _set_state_sev3("stats_epoch_reset_v3_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v3: visual stats reset to 0 after HPE "
+            f"phantom repair; collecting from {_epoch_iso_v3}."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v3 error (non-fatal): {e}")
+
+
 # --- STATS EPOCH RESET V2 (2026-05-27) ---
 # Same idea as v1, fresh epoch so the displayed Sharpe/Sortino/win-rate
 # /total-pnl reset to zero AGAIN.  The Memorial-Day fake trades plus the

@@ -3374,6 +3374,40 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
 
+            # ---------- PRICE SANITY CHECK (HPE incident defense) ----------
+            # Bug 2026-05-28: yfinance returned $2.94 for HPE (real price ~$22).
+            # Pick was stored with the bad price. A short was opened at $2.94.
+            # 2 minutes later WIN-LOCK saw a huge "loss" against the real
+            # $36 market price and closed for a phantom -$23,688.
+            # Defense: re-fetch the LIVE price and reject the trade if it
+            # disagrees with the cached pick price by more than 10%.
+            try:
+                from analysis.market_data import get_stock_info as _gsi_psc
+                _live = _gsi_psc(symbol) or {}
+                _live_price = _live.get("current_price") or _live.get("price")
+                if _live_price and price and price > 0:
+                    _div = abs(_live_price - price) / price
+                    if _div > 0.10:
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": (
+                                f"PRICE SANITY: cached pick price ${price:.2f} "
+                                f"vs live ${_live_price:.2f} = {_div*100:.0f}% "
+                                f"divergence. Possible stale/corrupt data — "
+                                f"trade rejected to prevent fake-PnL incident."
+                            ),
+                        })
+                        logger.warning(
+                            f"PRICE SANITY REJECT {symbol}: cached=${price:.2f} "
+                            f"live=${_live_price:.2f} divergence={_div*100:.0f}%"
+                        )
+                        continue
+                    # Live price is sane and recent — use it (more accurate)
+                    if _div > 0.02:
+                        price = _live_price
+            except Exception as _psc_err:
+                logger.debug(f"price sanity check skipped for {symbol}: {_psc_err}")
+
             # ----- TACO REVERSAL EFFECTS (per-pick application) -----
             # If TACO signal is active:
             #   - LONGS in any sector get a confidence boost (panic = opportunity)
@@ -4906,6 +4940,25 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             else:
                 pnl_pct = ((entry_price / price) - 1) * 100
                 target_achieved = (entry_price - price) / (entry_price - target + 0.01) if entry_price > target else 1.0
+
+            # ---------- PnL SANITY GUARD (HPE incident defense) ----------
+            # Bug 2026-05-28: HPE short closed at -1151% because entry was
+            # stored at $2.94 (corrupted yfinance) and exit was at $36.78
+            # (real price).  A real equity trade simply cannot move 50%+
+            # in a single day on a mid/large cap.  If we see that, the
+            # entry_price is almost certainly corrupted.  Refuse to close;
+            # log loudly so the position can be reconciled manually.
+            try:
+                if abs(pnl_pct) > 50.0:
+                    logger.error(
+                        f"PnL SANITY VETO: {ticker} {direction} entry=${entry_price} "
+                        f"current=${price} would book pnl={pnl_pct:+.1f}% — "
+                        f"refusing to close (likely corrupted entry_price)."
+                    )
+                    kept_count += 1
+                    continue
+            except Exception:
+                pass
 
             should_sell = (
                 hold_class == "intraday" or
