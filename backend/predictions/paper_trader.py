@@ -2687,7 +2687,25 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     regime = quant_picks.get("regime", {}).get("regime", "SIDEWAYS")
 
     # --- Step 1: Check exits for open positions ---
-    if open_trades:
+    # GHOST-CLOSE GUARD (2026-05-28 fix): only check exits when the
+    # market is actually open. Outside market hours, yfinance returns
+    # the stale 4 PM close — comparing that to stop_loss/target_price
+    # was firing fake stops at the prior day's close price.  The same
+    # guard is also applied in main._exit_checker for the separate
+    # 5-minute scheduled exit job.
+    try:
+        import pytz as _pytz_ec
+        _now_et = datetime.now(_pytz_ec.timezone("US/Eastern"))
+        _is_holiday = is_us_market_holiday(_now_et)
+        _is_weekend = _now_et.weekday() >= 5
+        _mm = _now_et.hour * 60 + _now_et.minute
+        _market_open_now = (not _is_weekend) and (not _is_holiday) and (9 * 60 + 30 <= _mm < 16 * 60)
+    except Exception:
+        # If the time check itself fails, fail CLOSED (skip exits) —
+        # we'd rather miss a stop than fire a ghost close at stale prices.
+        _market_open_now = False
+
+    if open_trades and _market_open_now:
         exit_symbols = list(set(t["ticker"] for t in open_trades))
         current_prices = _get_current_prices(exit_symbols)
 

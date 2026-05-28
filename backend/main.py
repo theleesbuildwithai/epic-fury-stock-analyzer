@@ -1419,11 +1419,62 @@ scheduler.add_job(
     coalesce=True,
 )
 
-# INDEPENDENT EXIT CHECKER — runs every 5 minutes, even on weekends
-# This is SEPARATE from the smart monitor so stop-losses ALWAYS fire
+# INDEPENDENT EXIT CHECKER — runs every 5 minutes DURING MARKET HOURS ONLY
+# Previously this ran 24/7 with no guard, which is exactly how the
+# 2026-05-27 22:54 ET ghost closes happened on TJX & VZ: the checker
+# fired after hours, called yfinance which returns the stale 4 PM close,
+# compared that stale price to stop_loss, and triggered exits at $0 of
+# real price movement.  The "ghost" PnL got booked using the prior
+# day's close as the exit_price.
+#
+# NEW BEHAVIOR — exits only fire 9:30 AM - 4:00 PM ET on a real
+# trading day (no weekends, no NYSE holidays):
+#   - Weekend → skip
+#   - NYSE full-close holiday → skip
+#   - Off-hours (before 9:30 or after 4:00 ET) → skip
+#   - During market hours → check normally
+# Hold-duration exits also wait until market hours for consistency
+# (otherwise we'd close them at stale prices anyway).
+#
+# Manual /api/admin/force-* endpoints still work — they call
+# close_paper_trade() directly and bypass this scheduled checker.
+def _market_open_for_exits() -> tuple:
+    """Returns (is_open: bool, reason: str). Stricter than the entry
+    gate — no avoid window, no force flags — just open or closed."""
+    try:
+        import pytz
+        et = pytz.timezone("US/Eastern")
+        now_et = dt.now(et)
+        if now_et.weekday() >= 5:
+            return False, "weekend"
+        # Reuse the holiday set defined in paper_trader so we don't
+        # have two lists of holidays drifting apart over time.
+        try:
+            from predictions.paper_trader import is_us_market_holiday
+            if is_us_market_holiday(now_et):
+                return False, "nyse_holiday"
+        except Exception:
+            pass
+        minutes_since_midnight = now_et.hour * 60 + now_et.minute
+        if minutes_since_midnight < 9 * 60 + 30:
+            return False, "pre_market"
+        if minutes_since_midnight >= 16 * 60:
+            return False, "after_hours"
+        return True, "open"
+    except Exception as _e:
+        # If the guard itself crashes, fail CLOSED (block exits) — we'd
+        # rather miss a stop than fire a ghost close.
+        return False, f"guard_error:{_e}"
+
 def _exit_checker():
     """Check all open positions for stop-loss/target/hold-duration exits.
-    Runs independently — never coupled to entry decisions."""
+    Runs independently — never coupled to entry decisions.
+    Guarded to fire only during real US market hours so stop checks
+    always use live prices instead of stale after-hours closes."""
+    is_open, reason = _market_open_for_exits()
+    if not is_open:
+        # Silent skip — runs 12x/hr, don't spam logs
+        return
     try:
         regime_data = detect_market_regime()
         regime = regime_data.get("regime", "SIDEWAYS")
