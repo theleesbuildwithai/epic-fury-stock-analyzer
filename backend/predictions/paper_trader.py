@@ -397,7 +397,14 @@ def _get_min_confidence() -> int:
     AUTO-TUNE 2026-05-16: applies rolling 30-day win-rate-driven shift
     on top of the base threshold.  Clamped to [base-3, base+5]."""
     if _is_live_safety_mode():
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 45))
+        # Lowered base 45 → 40 on 2026-05-28 after calibration moved
+        # confidence values down by ~25-30 percentage points (raw 70 =
+        # calibrated 40-45).  With the auto-tune +5 max shift, the
+        # effective ceiling stays at 45 — matching user's choice "B"
+        # so the system trades on calibrated probabilities >= 45%
+        # instead of being silently locked out by the pre-calibration
+        # threshold of 50.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 40))
     elif _is_preservation_mode():
         base = 50
     else:
