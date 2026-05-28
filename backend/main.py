@@ -5078,8 +5078,23 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
 
         all_longs  = [p for p in all_longs  if _safe_pick(p, True)]
         all_shorts = [p for p in all_shorts if _safe_pick(p, False)]
-        all_longs.sort(key=lambda p: -float(p.get("composite_score", 0) or 0))
-        all_shorts.sort(key=lambda p: float(p.get("composite_score", 0) or 0))
+
+        # RANK BEST-TO-WORST using a quality score = conviction × score
+        # magnitude. A pick with high confidence AND high |composite_score|
+        # is the best bet; either alone is weaker. This surfaces the
+        # picks the model is BOTH directionally sure of AND has high-
+        # conviction probability on. Ties are broken by score magnitude
+        # (more extreme signal wins).
+        def _quality(p):
+            try:
+                c = float(p.get("confidence", 0) or 0)
+                s = abs(float(p.get("composite_score", 0) or 0))
+            except (TypeError, ValueError):
+                return 0.0
+            return c * s
+
+        all_longs.sort(key=lambda p: (-_quality(p), -float(p.get("composite_score", 0) or 0)))
+        all_shorts.sort(key=lambda p: (-_quality(p), float(p.get("composite_score", 0) or 0)))
 
         # Sector cap: ≤5 per sector so the user isn't shown 25 Industrials.
         # Looser than the trading-execution cap (4) because this is for
@@ -5125,7 +5140,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             except Exception:
                 return None, None
 
-        def _format(p, direction: str):
+        def _format(p, direction: str, rank: int):
             px = float(p.get("price", 0) or 0)
             stop_dist, tgt_dist = _swing_levels(p)
             # Use `is not None` so a freak 0.0 distance still computes
@@ -5139,6 +5154,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 stop = round(px + stop_dist, 2) if has_stop else None
                 target = round(px - tgt_dist, 2) if has_tgt else None
             return {
+                "rank": rank,
                 "ticker": p.get("ticker") or p.get("symbol"),
                 "sector": p.get("sector") or "Unknown",
                 "direction": direction.upper(),
@@ -5151,6 +5167,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                                        if (has_stop and has_tgt and stop_dist > 0) else None),
                 "confidence": p.get("confidence"),
                 "composite_score": p.get("composite_score"),
+                "quality_rank_score": round(_quality(p), 2),
                 "rsi14": p.get("rsi14"),
                 "volatility_60d_pct": p.get("volatility_60d"),
                 "momentum_pct": p.get("momentum_pct"),
@@ -5165,8 +5182,8 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             "cache_age_seconds": round(cache_age, 1) if cache_age is not None else None,
             "regime": (data.get("regime") or {}).get("regime", "unknown"),
             "regime_confidence": (data.get("regime") or {}).get("confidence", 0),
-            "long_picks": [_format(p, "long") for p in top_longs],
-            "short_picks": [_format(p, "short") for p in top_shorts],
+            "long_picks": [_format(p, "long", i + 1) for i, p in enumerate(top_longs)],
+            "short_picks": [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)],
             "long_count": len(top_longs),
             "short_count": len(top_shorts),
             "universe_size": data.get("universe_size", 0),
