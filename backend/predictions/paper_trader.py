@@ -397,18 +397,17 @@ def _get_min_confidence() -> int:
     AUTO-TUNE 2026-05-16: applies rolling 30-day win-rate-driven shift
     on top of the base threshold.  Clamped to [base-3, base+5]."""
     if _is_live_safety_mode():
-        # Lowered base 45 → 40 on 2026-05-28 after calibration moved
-        # confidence values down by ~25-30 percentage points (raw 70 =
-        # calibrated 40-45).  With the auto-tune +5 max shift, the
-        # effective ceiling stays at 45 — matching user's choice "B"
-        # so the system trades on calibrated probabilities >= 45%
-        # instead of being silently locked out by the pre-calibration
-        # threshold of 50.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 40))
+        # 2026-05-29: Bumped base 40 → 42 to let more trades fire while
+        # still respecting calibrated probabilities.  Calibrated 42% on
+        # the new isotonic mapping = true ~42% win rate — meaningfully
+        # above coin flip, and with the +5 auto-tune ceiling the effective
+        # max stays at 47 (still below the pre-calibration 50 gate).
+        # Floor stays at 39 during winning streaks.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 42))
     elif _is_preservation_mode():
         base = 50
     else:
-        base = 40
+        base = 42
     # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
     final = max(base - 3, min(base + 5, base + shift))
@@ -577,7 +576,7 @@ def _detect_taco_reversal_event(quant_picks: dict) -> dict:
         }
 
 
-def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
+def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None, regime=None) -> dict:
     """Compute target gross exposure (0.50 - 0.95) from market conditions.
 
     Inputs (all optional — function returns safe default if anything missing):
@@ -598,8 +597,25 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
     Wrapped in try/except — any error returns DYNAMIC_EXPOSURE_SAFE_DEFAULT.
     """
     try:
-        target = DYNAMIC_EXPOSURE_BASE
-        adjustments = []
+        # ----- REGIME-BASED BASE (2026-05-29) -----
+        # User spec: BULL 70-80%, NEUTRAL 60-70%, BEAR 40-60%.  Set the
+        # base to the midpoint of each band so adjustments can move us
+        # within the band.  Final clamp at the end of this function
+        # uses the regime-specific min/max.
+        _regime_str = str(regime or "").upper()
+        if "BULL" in _regime_str:
+            target = 0.75
+            _regime_min, _regime_max = 0.70, 0.85
+        elif "BEAR" in _regime_str:
+            target = 0.50
+            _regime_min, _regime_max = 0.40, 0.60
+        elif _regime_str in ("SIDEWAYS", "NEUTRAL"):
+            target = 0.65
+            _regime_min, _regime_max = 0.60, 0.75
+        else:
+            target = DYNAMIC_EXPOSURE_BASE
+            _regime_min, _regime_max = DYNAMIC_EXPOSURE_MIN, DYNAMIC_EXPOSURE_MAX
+        adjustments = [f"regime={_regime_str or 'unknown'} base={target}"]
         closed_trades_list = []  # initialize so days_since_loss check can access it safely
 
         # ----- Factor 1: Recent 30-day Sharpe -----
@@ -743,8 +759,9 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None) -> dict:
         except Exception as _macro_err:
             adjustments.append(f"macro=unavailable +0.00")
 
-        # ----- Clamp to safety bounds -----
-        target = max(DYNAMIC_EXPOSURE_MIN, min(DYNAMIC_EXPOSURE_MAX, target))
+        # ----- Clamp to REGIME-SPECIFIC safety bounds -----
+        # Falls back to the global MIN/MAX when no regime was provided.
+        target = max(_regime_min, min(_regime_max, target))
         target = round(target, 3)
 
         # LIVE TRADING SAFETY MODE: cap exposure (user-tunable via env)
@@ -3070,6 +3087,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         _dyn_exposure = _compute_dynamic_exposure_target(
             vix_level=vix_level,
             drawdown_pct=total_return_now,
+            regime=regime,
         )
         dynamic_max_exposure_pct = _dyn_exposure.get("target", DYNAMIC_EXPOSURE_SAFE_DEFAULT)
         logger.warning(

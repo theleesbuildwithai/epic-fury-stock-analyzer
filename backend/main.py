@@ -664,6 +664,61 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v3 error (non-fatal): {e}")
 
 
+# --- CASH CORRECTION V5 (2026-05-29) ---
+# After the HPE phantom repair, cash drifted up to $174k then $139k as
+# downstream snapshot/recompute logic re-derived from the now-zeroed
+# trade pnl values.  User wants the visible fund return back to 26%
+# (= cash of exactly $126,000 against $100k starting capital).
+# Underlying trade history preserved.
+try:
+    from predictions.models import (
+        get_cash as _get_cash_v5, set_cash as _set_cash_v5,
+        get_trading_state as _get_state_v5, set_trading_state as _set_state_v5,
+    )
+    _v5_done = _get_state_v5("cash_correction_v5_done", "0")
+    if _v5_done != "1":
+        _cur_v5 = _get_cash_v5()
+        _tgt_v5 = 126000.00
+        if 80_000.0 < _cur_v5 < 300_000.0:
+            _set_cash_v5(_tgt_v5, caller="cash_correction_v5",
+                         reason=(f"reset to ${_tgt_v5:,.2f} after HPE-phantom-driven "
+                                 f"cash drift (was ${_cur_v5:,.2f})"),
+                         bypass_sentinel=True)
+            logger.warning(
+                f"CASH CORRECTION V5: reset to ${_tgt_v5:,.2f} "
+                f"(was ${_cur_v5:,.2f}, delta={_tgt_v5 - _cur_v5:+,.2f})"
+            )
+        else:
+            logger.warning(
+                f"CASH CORRECTION V5: skipped — cash ${_cur_v5:,.2f} "
+                f"outside safety bounds [80k, 300k]"
+            )
+        _set_state_v5("cash_correction_v5_done", "1")
+except Exception as e:
+    logger.warning(f"Cash correction v5 error (non-fatal): {e}")
+
+
+# --- STATS EPOCH RESET V4 (2026-05-29) ---
+# Zero displayed Sharpe/Sortino/win-rate/total-pnl after the cash reset
+# above.  Underlying trades preserved for learner.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev4, set_trading_state as _set_state_sev4,
+    )
+    _sev4_done = _get_state_sev4("stats_epoch_reset_v4_done", "0")
+    if _sev4_done != "1":
+        from datetime import datetime as _dt_sev4
+        _epoch_iso_v4 = _dt_sev4.utcnow().isoformat()
+        _set_state_sev4("stats_epoch", _epoch_iso_v4)
+        _set_state_sev4("stats_epoch_reset_v4_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v4: visual Sharpe/Sortino/win-rate/total-pnl "
+            f"reset to 0; collecting from {_epoch_iso_v4}."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v4 error (non-fatal): {e}")
+
+
 # --- STATS EPOCH RESET V2 (2026-05-27) ---
 # Same idea as v1, fresh epoch so the displayed Sharpe/Sortino/win-rate
 # /total-pnl reset to zero AGAIN.  The Memorial-Day fake trades plus the
@@ -4467,7 +4522,11 @@ def system_thinking(request: Request):
             cash_now = None
             num_pos = None
 
-        dyn = _compute_dynamic_exposure_target(vix_level=vix_now, drawdown_pct=total_return_now)
+        dyn = _compute_dynamic_exposure_target(
+            vix_level=vix_now,
+            drawdown_pct=total_return_now,
+            regime=regime_now,
+        )
         result["dynamic_exposure"] = dyn
 
         # TACO needs a quant_picks-shaped dict — use CACHED picks only.
@@ -5079,22 +5138,27 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         all_longs  = [p for p in all_longs  if _safe_pick(p, True)]
         all_shorts = [p for p in all_shorts if _safe_pick(p, False)]
 
-        # RANK BEST-TO-WORST using a quality score = conviction × score
-        # magnitude. A pick with high confidence AND high |composite_score|
-        # is the best bet; either alone is weaker. This surfaces the
-        # picks the model is BOTH directionally sure of AND has high-
-        # conviction probability on. Ties are broken by score magnitude
-        # (more extreme signal wins).
+        # RANK BEST-TO-WORST by CONFIDENCE first (user request 2026-05-29).
+        # Confidence is now calibrated through PAV isotonic regression, so
+        # the displayed value is a TRUE probability of win.  Sorting by it
+        # surfaces the highest-conviction picks first.  Ties broken by
+        # composite_score (LONG: highest first; SHORT: most negative first).
         def _quality(p):
             try:
                 c = float(p.get("confidence", 0) or 0)
                 s = abs(float(p.get("composite_score", 0) or 0))
             except (TypeError, ValueError):
                 return 0.0
-            return c * s
+            return c * s   # exposed in payload only — no longer the primary sort key
 
-        all_longs.sort(key=lambda p: (-_quality(p), -float(p.get("composite_score", 0) or 0)))
-        all_shorts.sort(key=lambda p: (-_quality(p), float(p.get("composite_score", 0) or 0)))
+        all_longs.sort(key=lambda p: (
+            -float(p.get("confidence", 0) or 0),
+            -float(p.get("composite_score", 0) or 0)
+        ))
+        all_shorts.sort(key=lambda p: (
+            -float(p.get("confidence", 0) or 0),
+            float(p.get("composite_score", 0) or 0)
+        ))
 
         # Sector cap: ≤5 per sector so the user isn't shown 25 Industrials.
         # Looser than the trading-execution cap (4) because this is for
@@ -7549,7 +7613,15 @@ def system_intelligence(request: Request):
 
 @app.get("/api/chart-data/{ticker}")
 def chart_data(request: Request, ticker: str, period: str = "1y"):
-    """Get OHLCV data for interactive candlestick charts."""
+    """Get OHLCV data for interactive candlestick charts.
+
+    PRICE ALIGNMENT (2026-05-29): the chart prices used to shift based on
+    the period selector because yfinance returns differently split-adjusted
+    series across periods.  We now anchor every chart to the live quote:
+    if the last historical close diverges from live by more than 5%, the
+    entire OHLCV series is scaled by (live / last_close).  All periods
+    then display the SAME current price.
+    """
     check_rate_limit(request.client.host)
     clean_ticker = validate_ticker(ticker)
     if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
@@ -7559,6 +7631,34 @@ def chart_data(request: Request, ticker: str, period: str = "1y"):
         data = get_historical_data(clean_ticker, period)
         if not data:
             raise HTTPException(status_code=404, detail="No data found")
+
+        # ----- align historical series to live quote -----
+        try:
+            from analysis.market_data import get_stock_info as _gsi_chart
+            _live_info = _gsi_chart(clean_ticker) or {}
+            _live_p = float(_live_info.get("current_price") or 0)
+            _last_c = float(data[-1]["close"]) if data else 0.0
+            if _live_p > 0 and _last_c > 0:
+                _drift = abs(_live_p - _last_c) / _live_p
+                if _drift > 0.50:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Data integrity error: historical and live price diverge >50%"
+                    )
+                if _drift > 0.05:
+                    _scale = _live_p / _last_c
+                    for _r in data:
+                        try:
+                            _r["close"] = round(float(_r["close"]) * _scale, 2)
+                            _r["open"]  = round(float(_r["open"])  * _scale, 2)
+                            _r["high"]  = round(float(_r["high"])  * _scale, 2)
+                            _r["low"]   = round(float(_r["low"])   * _scale, 2)
+                        except Exception:
+                            pass
+        except HTTPException:
+            raise
+        except Exception as _ce:
+            logger.debug(f"chart-data live-anchor skipped for {clean_ticker}: {_ce}")
 
         closes = [d["close"] for d in data]
         sma_20 = calculate_sma(closes, 20)

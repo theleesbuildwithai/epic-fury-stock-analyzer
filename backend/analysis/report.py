@@ -50,25 +50,64 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     volumes = [d["volume"] for d in history]
     dates = [d["date"] for d in history]
 
-    # DATA INTEGRITY SANITY: detect corrupt historical data BEFORE building the
-    # report.  Symptom: yfinance occasionally returns stale/split-broken closes
-    # for popular tickers (e.g. AAPL showed closes[-1] = $11.44 while the live
-    # quote was $308.82).  When this happens every downstream metric (forecast,
-    # vol, MACD, trend, signal) is poisoned and the cached answer becomes a
-    # permanent wrong "Strong Sell".  Reject these reports so we never cache
-    # bad data and the user sees a clean retry.
+    # DATA INTEGRITY SANITY + RESCALE: detect corrupt historical data and
+    # normalize bars to the live current price when yfinance returns a
+    # different split-adjustment than the live quote.
+    #
+    # Two problems this solves:
+    #   1. (Was a 404 epidemic 2026-05-29): the 10% drift threshold was
+    #      too tight — split adjustments and EOD/realtime feed mismatches
+    #      legitimately cross 10% — every common ticker was 404'ing.
+    #   2. (Chart price changing with lookback): different periods (1mo,
+    #      1y, 2y) sometimes return different split-adjusted series, so
+    #      the "current" price displayed on the chart shifted depending
+    #      on the user's period selector.
+    #
+    # New policy:
+    #   - drift > 50%  -> true corruption, return error (still 404s)
+    #   - drift 5-50%  -> warning surfaced in _data_drift, AND historical
+    #                     series gets multiplied by (live_p / last_close)
+    #                     so all displayed prices align with the live quote
+    #                     regardless of which period the user selected
+    #   - drift < 5%   -> silent pass, normal flow
+    data_drift_info = None
     try:
         live_p = float((info or {}).get("current_price") or 0)
         last_close = float(closes[-1]) if closes else 0.0
         if live_p > 0 and last_close > 0:
             drift = abs(live_p - last_close) / live_p
-            if drift > 0.10:  # >10% gap between live quote and last historical close
+            if drift > 0.50:
                 return {"error": (
                     f"Data integrity check failed for {ticker}: "
                     f"live ${live_p:.2f} vs last close ${last_close:.2f} "
                     f"(drift {drift*100:.1f}%). Refusing to cache corrupt data — "
                     f"please retry in a moment."
                 )}
+            if drift > 0.05:
+                # Re-scale the historical series so chart + analytics line up
+                # with the live quote.  Multiply all OHLC by live/last so the
+                # series is structure-preserving but anchored to today.
+                _scale = live_p / last_close
+                closes = [round(c * _scale, 2) for c in closes]
+                highs = [round(h * _scale, 2) for h in highs]
+                lows  = [round(l * _scale, 2) for l in lows]
+                # Also rewrite history records so downstream chart endpoint
+                # serves the same numbers
+                for _h in history:
+                    try:
+                        _h["close"] = round(float(_h["close"]) * _scale, 2)
+                        _h["open"]  = round(float(_h["open"])  * _scale, 2)
+                        _h["high"]  = round(float(_h["high"])  * _scale, 2)
+                        _h["low"]   = round(float(_h["low"])   * _scale, 2)
+                    except Exception:
+                        pass
+                data_drift_info = {
+                    "drift_pct": round(drift * 100, 2),
+                    "live_price": round(live_p, 2),
+                    "last_close_before_rescale": round(last_close, 2),
+                    "scale_applied": round(_scale, 4),
+                    "note": "Historical bars rescaled to align with live quote.",
+                }
     except Exception:
         pass  # never block analysis on the sanity check itself
 
@@ -143,6 +182,7 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
 
     return {
         "info": info,
+        "_data_drift": data_drift_info,
         "signal": signal,
         "forecast": forecast,
         "trend": trend,
