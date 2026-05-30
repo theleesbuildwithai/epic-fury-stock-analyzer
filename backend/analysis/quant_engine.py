@@ -1166,15 +1166,52 @@ def detect_market_regime() -> dict:
             bear_score += 3.5
 
         net = bull_score - bear_score
+
+        # ----- INPUT COVERAGE GUARD (2026-05-30) -----
+        # User caught regime showing BULL 95% confidence with breadth/trend
+        # data missing.  Cap confidence based on how many of the three core
+        # inputs (sp500_trend, vix, breadth) actually produced a real
+        # contribution this cycle.  When inputs are missing the regime call
+        # is still our best guess, but the displayed confidence should
+        # reflect how much evidence backed it.
+        inputs_present = 0
+        inputs_total = 3
+        if regime_data.get("sp500_trend") in ("bullish", "bearish", "neutral"):
+            inputs_present += 1
+        if isinstance(regime_data.get("vix_level"), (int, float)) and regime_data["vix_level"] > 0:
+            inputs_present += 1
+        if isinstance(regime_data.get("breadth_pct"), (int, float)):
+            inputs_present += 1
+        coverage_ratio = inputs_present / inputs_total
+        if inputs_present == 0:
+            coverage_cap = 0      # no data -> no confidence
+        elif inputs_present == 1:
+            coverage_cap = 65
+        elif inputs_present == 2:
+            coverage_cap = 80
+        else:
+            coverage_cap = 95
+
         if net >= 3:
             regime_data["regime"] = "BULL"
-            regime_data["confidence"] = min(95, 60 + int(net * 5))
+            raw_conf = min(95, 60 + int(net * 5))
         elif net <= -3:
             regime_data["regime"] = "BEAR"
-            regime_data["confidence"] = min(95, 60 + int(abs(net) * 5))
+            raw_conf = min(95, 60 + int(abs(net) * 5))
         else:
             regime_data["regime"] = "SIDEWAYS"
-            regime_data["confidence"] = max(40, 70 - int(abs(net) * 5))
+            raw_conf = max(40, 70 - int(abs(net) * 5))
+
+        # Apply coverage cap so missing-data calls don't display 95%.
+        final_conf = min(raw_conf, coverage_cap)
+        if inputs_present == 0:
+            # No real evidence -> mark as UNKNOWN so downstream consumers
+            # (exposure controller, picks) can handle gracefully.
+            regime_data["regime"] = "UNKNOWN"
+        regime_data["confidence"] = final_conf
+        regime_data["inputs_present"] = inputs_present
+        regime_data["inputs_total"] = inputs_total
+        regime_data["data_coverage_pct"] = round(coverage_ratio * 100, 0)
 
         regime_data["bull_score"] = round(bull_score, 1)
         regime_data["bear_score"] = round(bear_score, 1)
