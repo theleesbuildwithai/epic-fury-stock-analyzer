@@ -3320,6 +3320,32 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
     try:
         report = generate_full_report(clean_ticker, period)
         if "error" in report:
+            # FINAL SAFETY NET (2026-05-31): before 404'ing, look back
+            # up to 14 days in the persistent analyze cache.  If
+            # today's fetch failed but we analyzed this ticker any
+            # time in the last two weeks, serve THAT rather than 404
+            # the user.  Tagged _stale_days so the UI can warn.
+            try:
+                from predictions.models import get_trading_state as _gts2
+                from datetime import datetime as _dt2, timedelta as _td2
+                base = _dt2.utcnow()
+                for back in range(1, 15):
+                    pk = f"analyze:{clean_ticker}:{period}:{(base - _td2(days=back)).strftime('%Y-%m-%d')}"
+                    raw = _gts2(pk, "")
+                    if raw:
+                        try:
+                            stale = _json_an.loads(raw)
+                            stale["_cache_source"] = "stale_lookback"
+                            stale["_stale_days"] = back
+                            stale["_stale_note"] = (
+                                f"Live data unavailable today; serving cached "
+                                f"analysis from {back} day(s) ago."
+                            )
+                            return stale
+                        except Exception:
+                            continue
+            except Exception as _le:
+                logger.debug(f"stale lookback failed: {_le}")
             raise HTTPException(status_code=404, detail="Stock not found")
         # Write to BOTH layers
         try:
