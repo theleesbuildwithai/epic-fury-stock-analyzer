@@ -190,6 +190,24 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
             except Exception:
                 continue
 
+    # Tier 2.5: yfinance.Ticker(...).history() uses a DIFFERENT API
+    # endpoint than yf.download() — when yf.download fails on a
+    # specific ticker (e.g. AMAT consistently 404'd while AAPL/HPE
+    # worked), Ticker.history often still succeeds.  This was the
+    # ticker-specific failure mode that caused the AMAT analyze 404.
+    if not data:
+        for fp in (period, "6mo", "3mo", "1mo"):
+            _throttle()
+            try:
+                tk = yf.Ticker(ticker)
+                df = tk.history(period=fp, auto_adjust=True)
+                if df is not None and not df.empty:
+                    data = _df_to_records(df)
+                    if data:
+                        break
+            except Exception:
+                continue
+
     # Tier 3: serve last-known good data for ANY period of this ticker.
     # No 404 when yfinance is temporarily down.  Returns a COPY so a
     # downstream mutation can't corrupt the fallback store.
