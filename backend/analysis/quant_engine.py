@@ -918,6 +918,93 @@ SECTOR_MAP = {
 #  1. MARKET REGIME DETECTION
 # ============================================================
 
+
+def _validate_vix(raw_value) -> tuple:
+    """FAILPROOF VIX validator.  Returns (validated_value, was_corrupt).
+
+    Five layers of defence — designed so that EVERY failure mode falls
+    through to a safe value without crashing the caller:
+
+      Layer 1  Absolute bounds: VIX must be in (5, 90).  Real-life all-time
+               intraday high is 89.53 (2008-10-24); below 5 is impossible.
+
+      Layer 2  Persistent last-good-value lookup from trading_state.
+               If trading_state lookup fails (e.g. cold start, disk error),
+               last_good = None and we skip the jump check.
+
+      Layer 3  Jump detection: if last_good exists and the new reading is
+               >2x or <0.5x the last good value, treat as corrupt and
+               return the last good value.  100% single-reading moves don't
+               happen in real markets except over multi-day windows.
+
+      Layer 4  Staleness: if last_good is older than 7 days, distrust it
+               and accept the new value (markets really can have moved).
+
+      Layer 5  Any exception inside the guard returns the input unchanged
+               so we never break upstream callers.  Hard fallback to 18.0
+               if even the input is unusable.
+
+    The guard PERSISTS the validated value to trading_state for next call.
+    """
+    try:
+        v = float(raw_value or 0)
+    except (TypeError, ValueError):
+        return 18.0, True
+
+    # Layer 1 — absolute bounds
+    if not (5 < v < 90):
+        try:
+            from predictions.models import get_trading_state
+            last = float(get_trading_state("vix_last_good", "") or 0)
+            if 5 < last < 90:
+                return last, True
+        except Exception:
+            pass
+        return 18.0, True
+
+    # Layer 2 — fetch last good (with timestamp)
+    last_good = None
+    last_good_ts = None
+    try:
+        from predictions.models import get_trading_state, set_trading_state
+        lg_str = get_trading_state("vix_last_good", "") or ""
+        if lg_str:
+            last_good = float(lg_str)
+        ts_str = get_trading_state("vix_last_good_ts", "") or ""
+        if ts_str:
+            last_good_ts = float(ts_str)
+    except Exception:
+        pass
+
+    # Layer 4 — staleness check (>7 days = distrust cached value)
+    import time as _t_vix
+    now_ts = _t_vix.time()
+    cache_age_days = ((now_ts - last_good_ts) / 86400.0) if last_good_ts else None
+    if cache_age_days is not None and cache_age_days > 7:
+        last_good = None  # too stale, can't use for jump check
+
+    # Layer 3 — jump detection (only if we have a fresh-enough last_good)
+    if last_good is not None and 5 < last_good < 90:
+        try:
+            ratio = max(v, last_good) / min(v, last_good)
+            if ratio > 2.0:
+                # Implausible jump.  Return last good, mark as corrupt.
+                # Don't persist the bad value.
+                return last_good, True
+        except (ZeroDivisionError, ValueError):
+            pass
+
+    # Layer 5 — passed all checks, persist as new last good
+    try:
+        from predictions.models import set_trading_state
+        set_trading_state("vix_last_good", str(round(v, 2)))
+        set_trading_state("vix_last_good_ts", str(round(now_ts, 0)))
+    except Exception:
+        pass
+
+    return v, False
+
+
 def detect_market_regime() -> dict:
     """
     Detect the current market regime: BULL, BEAR, or SIDEWAYS.
@@ -1013,27 +1100,33 @@ def detect_market_regime() -> dict:
         except Exception as e:
             logger.warning(f"Regime: S&P 500 data failed: {e}")
 
-        # --- Signal 2: VIX level ---
+        # --- Signal 2: VIX level (with FAILPROOF guard, see _validate_vix below) ---
         try:
             _throttle()
             vix_df = yf.download("^VIX", period="5d", progress=False)
             if vix_df is not None and not vix_df.empty:
-                vix_val = float(_safe_close(vix_df).dropna().iloc[-1])
-                # SANITY CHECK: VIX intraday lifetime high is 89.53 (2008-10-24)
-                # but in normal operation > 60 has only happened in 2008/2020/2022.
-                # We tighten to 60 because the production bug observed VIX=76.36
-                # while real VIX was ~18 — a clear corruption pattern.  False
-                # negative on a real once-a-decade crisis is acceptable (system
-                # treats as "normal" — conservative for risk).
-                if not (5 < vix_val < 60):
+                vix_raw = float(_safe_close(vix_df).dropna().iloc[-1])
+                # Guard returns (validated_value, was_corrupt) — see _validate_vix
+                vix_val, was_corrupt = _validate_vix(vix_raw)
+                if was_corrupt:
                     logger.warning(
-                        f"Regime: implausible VIX {vix_val} — discarded; "
-                        f"using neutral 'normal' zone"
+                        f"Regime: VIX guard fired — raw={vix_raw:.2f} "
+                        f"→ validated={vix_val:.2f} (corrupt or jumped)"
                     )
-                    regime_data["vix_level"] = 18.0  # neutral fallback
+                    regime_data["details"].append(
+                        f"VIX raw {vix_raw:.1f} flagged by guard — using {vix_val:.1f}"
+                    )
+                # Old simple-bounds check kept as last-resort guardrail in case
+                # validator returns something nonsense (defense in depth).
+                if not (5 < vix_val < 90):
+                    logger.error(
+                        f"Regime: even guarded VIX {vix_val} out of bounds; "
+                        f"hard-fallback to 18.0"
+                    )
+                    regime_data["vix_level"] = 18.0
                     regime_data["vix_zone"] = "normal"
                     regime_data["details"].append(
-                        f"VIX read {vix_val:.1f} discarded as corrupt — using neutral"
+                        f"VIX hard-fallback after guard returned {vix_val:.1f}"
                     )
                 else:
                     regime_data["vix_level"] = round(vix_val, 2)
