@@ -623,9 +623,24 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None, regime=N
         # Low/negative Sharpe = system is wrong = pull back
         recent_sharpe = None
         try:
-            from predictions.models import get_closed_trades
+            from predictions.models import get_closed_trades, get_trading_state
             from datetime import timedelta as _td_dyn
             closed_trades_list = get_closed_trades(limit=200) or []
+            # Respect stats_epoch reset — only count POST-epoch trades for
+            # exposure adjustments. Same filter logic that
+            # get_performance_analytics applies to displayed stats. Without
+            # this, pre-epoch contaminated Sharpe (-0.74) was throttling
+            # BULL exposure from 0.75 base down to the 0.70 floor and the
+            # days_since_loss penalty was firing off ancient losses.
+            try:
+                _stats_epoch = get_trading_state("stats_epoch", "") or ""
+            except Exception:
+                _stats_epoch = ""
+            if _stats_epoch:
+                closed_trades_list = [
+                    t for t in closed_trades_list
+                    if (t.get("exit_date") or "") >= _stats_epoch
+                ]
             if len(closed_trades_list) >= 10:
                 cutoff = datetime.now() - _td_dyn(days=30)
                 recent = []
