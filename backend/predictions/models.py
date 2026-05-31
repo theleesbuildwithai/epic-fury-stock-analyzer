@@ -850,18 +850,30 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 pnl_dollars = (entry_premium - exit_premium) * num_contracts * multiplier
                 pnl_pct = ((entry_premium - exit_premium) / entry_premium) * 100 if entry_premium > 0 else 0
             if direction == "long":
-                # Bought option: we paid premium at entry (cash deducted)
-                # At exit: we sell the option, get back exit_premium * contracts * 100
+                # Bought option: we paid premium at entry (cash deducted).
+                # At exit: we sell the option, get back exit_premium * contracts * 100.
+                # Net cash impact = pnl_dollars (correct).
                 cash_returned = max(0, exit_premium * num_contracts * multiplier)
             else:
-                # Sold option: we collected premium at entry (cash was NOT deducted —
-                # instead, collateral equal to premium was reserved by deducting cash)
-                # At exit: we buy back the option. Cash returned = collateral - buyback cost
-                # = entry_premium * contracts * 100 - exit_premium * contracts * 100 + pnl
-                # Simplified: just return the net P&L (collateral was already in cash)
-                buyback_cost = exit_premium * num_contracts * multiplier
+                # Sold option: on open, save_paper_trade deducted
+                #   cost = entry_premium * contracts * 100  (treated as collateral).
+                # On close we must release that collateral AND book the P&L:
+                #   cash_returned = collateral + pnl_dollars
+                #                = entry_premium*c*100 + (entry-exit)*c*100
+                # Net cash impact across open+close = pnl_dollars ✓
+                #
+                # PREVIOUS BUG (fixed 2026-05-31): the formula was
+                #   max(0, collateral - buyback_cost + pnl_dollars)
+                # but algebraically collateral - buyback_cost == pnl_dollars
+                # so this evaluated to max(0, 2 * pnl_dollars).  Winning shorts
+                # inflated cash to 2x the profit; losing shorts had the loss
+                # hidden by the max(0,...) clamp.
+                #
+                # NO max(0,...) clamp: a short option can lose more than the
+                # premium collateral.  Negative cash_returned correctly debits
+                # the additional loss via SQL `cash = cash + (-N)`.
                 collateral = entry_premium * num_contracts * multiplier
-                cash_returned = max(0, collateral - buyback_cost + pnl_dollars)
+                cash_returned = collateral + pnl_dollars
         else:
             # Equity P&L
             if direction == "long":
