@@ -880,7 +880,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                   LONG Queue ({queuedTrades.queued_longs.filter(t => t.status === 'queued').length})
                 </h4>
                 <div className="space-y-1">
-                  {queuedTrades.queued_longs.filter(t => t.status === 'queued').slice(0, 10).map(t => (
+                  {queuedTrades.queued_longs.filter(t => t.status === 'queued').map(t => (
                     <div key={t.symbol} className="flex items-center justify-between bg-neutral-900 rounded-lg px-3 py-2">
                       <div className="flex items-center gap-2">
                         <span className="text-white font-bold text-sm">{t.symbol}</span>
@@ -903,7 +903,7 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                   SHORT Queue ({queuedTrades.queued_shorts.filter(t => t.status === 'queued').length})
                 </h4>
                 <div className="space-y-1">
-                  {queuedTrades.queued_shorts.filter(t => t.status === 'queued').slice(0, 10).map(t => (
+                  {queuedTrades.queued_shorts.filter(t => t.status === 'queued').map(t => (
                     <div key={t.symbol} className="flex items-center justify-between bg-neutral-900 rounded-lg px-3 py-2">
                       <div className="flex items-center gap-2">
                         <span className="text-white font-bold text-sm">{t.symbol}</span>

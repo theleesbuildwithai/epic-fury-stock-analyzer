@@ -910,8 +910,101 @@ SECTOR_MAP = {
     "DIA": "ETF", "MTUM": "ETF", "VLUE": "ETF", "QUAL": "ETF",
     "SIZE": "ETF", "XLY": "ETF", "XLC": "ETF", "XLB": "ETF",
     "XLRE": "ETF", "KWEB": "ETF", "EEM": "ETF", "FXI": "ETF",
-    "EWZ": "ETF", "EWJ": "ETF",
+    "EWZ": "ETF", "EWJ": "ETF", "EWC": "ETF", "EWG": "ETF",
+    "EWU": "ETF", "EWA": "ETF", "EWT": "ETF", "EWY": "ETF",
+    "EWH": "ETF", "EWL": "ETF", "EWP": "ETF", "EWO": "ETF",
+    "EWQ": "ETF", "INDA": "ETF", "ASHR": "ETF", "MCHI": "ETF",
+    "VEA": "ETF", "VWO": "ETF", "ACWX": "ETF", "ARKK": "ETF",
+    "ARKW": "ETF", "ARKG": "ETF", "ARKF": "ETF", "ARKQ": "ETF",
+    # Missing names observed in production picks (ROIV, RCI, etc.)
+    "ROIV": "Healthcare", "RVMD": "Healthcare", "TEVA": "Healthcare",
+    "BIIB": "Healthcare", "ALNY": "Healthcare", "VRTX": "Healthcare",
+    "EXAS": "Healthcare", "MRNA": "Healthcare", "SRPT": "Healthcare",
+    "RCI": "Communication", "BCE": "Communication", "TU": "Communication",
+    "SEDG": "Technology", "ENPH": "Technology", "RUN": "Technology",
+    "AES": "Utilities", "BEPC": "Utilities", "BEP": "Utilities",
+    "NFG": "Utilities", "AVA": "Utilities",
 }
+
+
+# Persistent fallback cache for sectors not in SECTOR_MAP.  Populated
+# on-demand from yfinance .info.sector; survives restarts via trading_state.
+# Key: ticker, value: sector string.  Loaded lazily on first lookup.
+_sector_fallback_cache = {}
+_sector_fallback_loaded = False
+
+
+def _get_sector_with_fallback(symbol: str) -> str:
+    """Three-tier sector lookup:
+       1. Static SECTOR_MAP (fast, in-memory, covers ~600 common tickers)
+       2. Persistent fallback cache (trading_state — survives restarts)
+       3. Live yfinance .info.sector (slow, only when needed; persisted)
+
+    Returns the sector string, or "Unknown" if all three tiers fail.
+    Safe against every failure mode: any exception returns "Unknown".
+    """
+    if not symbol:
+        return "Unknown"
+    sym = symbol.upper()
+
+    # Tier 1: static map (fast path)
+    if sym in SECTOR_MAP:
+        return SECTOR_MAP[sym]
+
+    # Tier 2: load persistent cache if first time
+    global _sector_fallback_loaded
+    if not _sector_fallback_loaded:
+        try:
+            from predictions.models import get_trading_state
+            import json as _json_sf
+            raw = get_trading_state("sector_fallback_v1", "") or ""
+            if raw:
+                try:
+                    loaded = _json_sf.loads(raw)
+                    if isinstance(loaded, dict):
+                        _sector_fallback_cache.update(loaded)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _sector_fallback_loaded = True
+
+    if sym in _sector_fallback_cache:
+        cached = _sector_fallback_cache[sym]
+        if cached and cached != "Unknown":
+            return cached
+
+    # Tier 3: live yfinance fetch (slow — minimise spam by throttling)
+    try:
+        _throttle()
+        info = yf.Ticker(sym).info or {}
+        s = info.get("sector") or info.get("category") or ""
+        s = str(s).strip()
+        if s and s != "Unknown":
+            # Normalise yfinance sectors to our canonical names
+            norm_map = {
+                "Communication Services": "Communication",
+                "Consumer Cyclical": "Consumer Discretionary",
+                "Consumer Defensive": "Consumer Staples",
+                "Financial Services": "Financials",
+            }
+            normalised = norm_map.get(s, s)
+            _sector_fallback_cache[sym] = normalised
+            # Persist (best-effort, batch-friendly: serialise whole dict)
+            try:
+                from predictions.models import set_trading_state
+                import json as _json_sf2
+                set_trading_state("sector_fallback_v1",
+                                  _json_sf2.dumps(_sector_fallback_cache))
+            except Exception:
+                pass
+            return normalised
+    except Exception:
+        pass
+
+    # All three tiers failed — mark Unknown so we don't refetch every call
+    _sector_fallback_cache[sym] = "Unknown"
+    return "Unknown"
 
 
 # ============================================================
@@ -2861,7 +2954,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             raw_factors.append({
                 "symbol": symbol,
                 "price": round(current_price, 2),
-                "sector": SECTOR_MAP.get(symbol, "Unknown"),
+                # Use 3-tier helper so unknown tickers fall back to yfinance
+                # .info.sector instead of permanently displaying "Unknown".
+                # First call may be slow for an unknown ticker but result is
+                # persisted to trading_state for instant lookup next time.
+                "sector": _get_sector_with_fallback(symbol),
                 "momentum_raw": momentum_raw,
                 "value_raw": value_raw,
                 "quality_raw": quality_raw,
@@ -4644,8 +4741,10 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         if bb_position < 20: score += 1  # near lower band
         elif bb_position > 80: score -= 1  # near upper band
 
-        # Macro adjustment
-        sector = SECTOR_MAP.get(symbol, "Unknown")
+        # Macro adjustment — use 3-tier sector lookup so unknown tickers
+        # get the same macro treatment as known ones (instead of getting
+        # zero adjustment because their sector defaulted to "Unknown").
+        sector = _get_sector_with_fallback(symbol)
         macro_adj = 0
         if macro and "sector_adjustments" in macro:
             macro_adj = macro["sector_adjustments"].get(sector, 0)
