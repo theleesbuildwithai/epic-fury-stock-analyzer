@@ -3959,12 +3959,20 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                             premium = strike_info["premium"]
                             # Position sizing: same dollar amount as equity trade
                             max_opts_cost = position_value  # Same $ as would use for equity
+                            # OPTIONS BUDGET — use the same _sizing_base
+                            # (clamped) instead of raw total_value so that
+                            # an inflated snapshot can't blow up options
+                            # exposure too.  See same fix on equity sizing.
+                            _opts_base = max(50_000.0, min(total_value, ORIGINAL_CAPITAL * 5.0))
                             # Check options exposure limit (25% of portfolio)
                             opts_exp = get_options_exposure()
-                            remaining_opts_budget = max(0, (total_value * 0.25) - opts_exp["total_premium_deployed"])
+                            remaining_opts_budget = max(0, (_opts_base * 0.25) - opts_exp["total_premium_deployed"])
                             max_opts_cost = min(max_opts_cost, remaining_opts_budget)
                             # Single option trade limit: 5% of portfolio
-                            max_opts_cost = min(max_opts_cost, total_value * 0.05)
+                            max_opts_cost = min(max_opts_cost, _opts_base * 0.05)
+                            # HARD CAP: also bound by 15% of ORIGINAL_CAPITAL
+                            # (same ceiling as equity opens)
+                            max_opts_cost = min(max_opts_cost, ORIGINAL_CAPITAL * 0.15)
 
                             if max_opts_cost > premium * 100:  # At least 1 contract worth
                                 num_contracts = max(1, int(max_opts_cost / (premium * 100)))
@@ -5119,12 +5127,21 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         )
         total_value = cash + positions_val_after
         cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-        # ROUTE THROUGH TRUTH ENGINE — bulletproof sp500 + carry-forward
-        try:
-            from predictions.truth_engine import safe_save_snapshot as _safe_snap_wl
-            _safe_snap_wl()
-        except Exception:
-            save_portfolio_snapshot(total_value, cash, remaining_positions, daily_gain, cum_ret, 0, 0, 0)
+        # SNAPSHOT SANITY BOUND — same guard applied to main snapshot call.
+        # Reject total_value outside [10k, 5x_original] so a transient
+        # accounting glitch can't poison the equity curve.
+        if not (10_000.0 <= total_value <= ORIGINAL_CAPITAL * 5.0):
+            logger.error(
+                f"WINLOCK SNAPSHOT GUARD: total_value=${total_value:,.0f} "
+                f"out of bounds — skipping save to protect equity curve"
+            )
+        else:
+            # ROUTE THROUGH TRUTH ENGINE — bulletproof sp500 + carry-forward
+            try:
+                from predictions.truth_engine import safe_save_snapshot as _safe_snap_wl
+                _safe_snap_wl()
+            except Exception:
+                save_portfolio_snapshot(total_value, cash, remaining_positions, daily_gain, cum_ret, 0, 0, 0)
         return {"closed": closed, "checked": len(open_trades), "kept": kept_count, "win_lock": True, "winlock_info": winlock}
 
     # Cache VIX once per cycle for the per-position win-lock
@@ -5531,12 +5548,25 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             )
             total_value = cash + positions_value
             cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-            # ROUTE THROUGH TRUTH ENGINE — bulletproof sp500 + carry-forward
-            try:
-                from predictions.truth_engine import safe_save_snapshot as _safe_snap_ec
-                _safe_snap_ec()
-            except Exception:
-                save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
+            # SNAPSHOT SANITY BOUND — same guard as the two other callsites.
+            # If total_value is out of [10k, 5x_original], skip the save
+            # so the equity curve never persists a corrupt data point.
+            # NOTE: this path treats SHORTS incorrectly (positions_value
+            # adds abs(shares*price) for all directions), so a portfolio
+            # with shorts mid-cycle could trip the bound — that's a
+            # FEATURE: we'd rather skip than persist wrong data.
+            if not (10_000.0 <= total_value <= ORIGINAL_CAPITAL * 5.0):
+                logger.error(
+                    f"END-CYCLE SNAPSHOT GUARD: total_value=${total_value:,.0f} "
+                    f"out of bounds — skipping save to protect equity curve"
+                )
+            else:
+                # ROUTE THROUGH TRUTH ENGINE — bulletproof sp500 + carry-forward
+                try:
+                    from predictions.truth_engine import safe_save_snapshot as _safe_snap_ec
+                    _safe_snap_ec()
+                except Exception:
+                    save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
         except Exception:
             pass
 
