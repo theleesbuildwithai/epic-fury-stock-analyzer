@@ -2274,11 +2274,33 @@ def get_portfolio_state() -> dict:
                     if direction == "long":
                         unrealized_pnl = (current_price - entry_price) * shares
                         unrealized_pct = ((current_price / entry_price) - 1) * 100
+                        # Long: market value of the asset
+                        position_value = abs(shares * current_price)
+                        positions_value += position_value
                     else:
                         unrealized_pnl = (entry_price - current_price) * shares
                         unrealized_pct = ((entry_price / current_price) - 1) * 100
-                    position_value = abs(shares * current_price)
-                    positions_value += position_value
+                        # Short: position_value shown for display = current
+                        # market exposure (what we'd pay to cover).  BUT the
+                        # contribution to total_value must account for the
+                        # short-sale convention:
+                        #   - save_paper_trade DEBITED cash by entry_value
+                        #     on open (it treats shorts like buys in
+                        #     cash flow)
+                        #   - On close, cash is CREDITED by (2*entry -
+                        #     current)*shares in close_paper_trade
+                        #     (collateral + pnl)
+                        #   - So mid-flight, the correct unrealized
+                        #     contribution to total_value is:
+                        #         entry_value + unrealized_pnl_short
+                        #     which equals (2*entry - current) * shares
+                        # Previously code added abs(shares*current) which
+                        # made profits look like losses (and inflated
+                        # losing-short portfolios — the $1.9M phantom
+                        # spike came from this).
+                        position_value = abs(shares * current_price)  # display value
+                        short_contribution = (2 * entry_price - current_price) * shares
+                        positions_value += short_contribution
 
                 try:
                     entry_date = datetime.fromisoformat(trade["entry_date"])
@@ -3809,8 +3831,43 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                                 var_multiplier * corr_multiplier * sector_streak_mod *
                                 quality_mult)
             _reducer_product = max(POSITION_SIZE_MULT_FLOOR, _reducer_product)
-            position_value = total_value * size_pct * _reducer_product
+
+            # PERMANENT SAFETY GUARDS (2026-06-02 — cash_correction_v6):
+            # Anchor sizing to a SANE base, not the live total_value.
+            # total_value can be inflated by short-accounting bugs (we've
+            # seen $1.9M snapshots when real NAV was $126k) which then
+            # made the very next position $171k = 135% of real NAV.
+            # Use a windowed base = clamp(total_value, [50k, 5x_original]).
+            _sizing_base = max(50_000.0, min(total_value, ORIGINAL_CAPITAL * 5.0))
+            position_value = _sizing_base * size_pct * _reducer_product
+
+            # HARD CAP: NO single position may exceed 15% of ORIGINAL_CAPITAL
+            # ($15k on $100k start). This is an absolute ceiling. Even if
+            # Kelly + multipliers + base all conspire to demand more, this
+            # caps it. Prevents the 62% single-position concentration we saw.
+            _max_position_dollars = ORIGINAL_CAPITAL * 0.15
+            if position_value > _max_position_dollars:
+                logger.warning(
+                    f"POSITION SIZE GUARD {symbol}: clamped "
+                    f"${position_value:,.0f} → ${_max_position_dollars:,.0f} "
+                    f"(15% of ${ORIGINAL_CAPITAL:,.0f} hard cap)"
+                )
+                position_value = _max_position_dollars
+
             shares = round(position_value / price, 4)
+
+            # CASH FLOOR GUARD: never let an open push cash below $1,000.
+            # Previously "shares * price > cash" allowed cash → $0; the
+            # subsequent cycle could then overshoot into negative territory
+            # because positions_value still inflated the sizing base.
+            _cash_after_open = cash - (shares * price)
+            if _cash_after_open < 1000.0:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": (f"Cash floor: opening would leave cash at "
+                               f"${_cash_after_open:,.0f} (floor $1,000)"),
+                })
+                continue
 
             if shares * price > cash:
                 # Not enough cash
@@ -4096,6 +4153,39 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if sp500_cum == 0 and snapshots:
                 sp500_cum = float(snapshots[-1].get("sp500_cumulative_return_pct") or 0)
                 sp500_daily = 0.0
+
+            # PERMANENT SNAPSHOT SANITY BOUND (2026-06-02):
+            # The equity curve showed catastrophic spikes — $1.9M on
+            # 2026-06-01 then $25k two days later.  Those snapshots
+            # poisoned downstream sizing (position calc used total_value).
+            # Bound the snapshot to a sane range so a transient
+            # short-accounting glitch or bad price feed cannot persist as
+            # a permanent corrupt data point.  If the live total_value is
+            # outside [10k, 5x_original], log loudly and carry forward the
+            # last good snapshot instead — better stale than wildly wrong.
+            _snap_lo = 10_000.0
+            _snap_hi = ORIGINAL_CAPITAL * 5.0
+            if not (_snap_lo <= total_value <= _snap_hi):
+                _last_val = None
+                try:
+                    if snapshots:
+                        _last_val = float(snapshots[-1].get("total_value") or 0)
+                except Exception:
+                    _last_val = None
+                _carryforward = (_last_val if (_last_val
+                                               and _snap_lo <= _last_val <= _snap_hi)
+                                 else ORIGINAL_CAPITAL)
+                logger.error(
+                    f"SNAPSHOT GUARD: total_value=${total_value:,.0f} outside "
+                    f"sane bounds [${_snap_lo:,.0f}, ${_snap_hi:,.0f}] — "
+                    f"carrying forward ${_carryforward:,.0f}. Investigate "
+                    f"position accounting (likely short-as-asset double-count)."
+                )
+                total_value = _carryforward
+                # Recompute cum_return from the corrected value
+                cum_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
+                daily_return = 0.0  # treat as no-change day
+
             save_portfolio_snapshot(
                 total_value=round(total_value, 2),
                 cash=round(cash, 2),
