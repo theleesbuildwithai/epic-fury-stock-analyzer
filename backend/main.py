@@ -830,6 +830,49 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v5 error (non-fatal): {e}")
 
 
+# --- EQUITY-CURVE PHANTOM CLEANUP v1 (2026-06-04) ---
+# Three corrupted points sat in portfolio_snapshots after the cash-inflation
+# era:
+#   2026-06-01 $1,895,780  (+1796%) — the headline HPE phantom
+#   2026-05-30 $271,880    (+172%)  — pre-phantom over-credit
+#   2026-06-03 $25,400     (-75%)   — post-phantom undercount
+# The runtime guards added in commits 04dff7f + 698008c prevent FUTURE
+# phantoms from being saved, but they don't repair the existing rows.
+# This one-shot deletes rows whose total_value is outside [10k, 5x_original]
+# so the equity curve renders cleanly.  The underlying paper_trades data
+# is untouched.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_eq, set_trading_state as _set_state_eq,
+        get_db as _get_db_eq,
+    )
+    _eq_done = _get_state_eq("equity_curve_cleanup_v1_done", "0")
+    if _eq_done != "1":
+        _conn_eq = _get_db_eq()
+        # Identify phantoms BEFORE deleting (for the log line)
+        _phantoms = _conn_eq.execute(
+            "SELECT snapshot_date, total_value FROM portfolio_snapshots "
+            "WHERE total_value < 10000 OR total_value > 500000"
+        ).fetchall()
+        if _phantoms:
+            _conn_eq.execute(
+                "DELETE FROM portfolio_snapshots "
+                "WHERE total_value < 10000 OR total_value > 500000"
+            )
+            _conn_eq.commit()
+            for _row in _phantoms:
+                logger.warning(
+                    f"EQUITY CURVE CLEANUP v1: removed phantom snapshot "
+                    f"{_row['snapshot_date']} = ${_row['total_value']:,.0f}"
+                )
+        else:
+            logger.info("EQUITY CURVE CLEANUP v1: no phantoms found")
+        _conn_eq.close()
+        _set_state_eq("equity_curve_cleanup_v1_done", "1")
+except Exception as e:
+    logger.warning(f"Equity curve cleanup v1 error (non-fatal): {e}")
+
+
 # --- STATS EPOCH RESET V2 (2026-05-27) ---
 # Same idea as v1, fresh epoch so the displayed Sharpe/Sortino/win-rate
 # /total-pnl reset to zero AGAIN.  The Memorial-Day fake trades plus the
