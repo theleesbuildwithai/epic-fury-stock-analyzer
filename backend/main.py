@@ -830,6 +830,31 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v5 error (non-fatal): {e}")
 
 
+# --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
+# The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
+# same deploy. If any prior pause flag survived in trading_state, it must
+# be cleared on boot or the system would still refuse to trade today
+# even though the new code never sets paused=True. This one-shot wipes
+# any pre-existing pause state so the new behavior takes effect cleanly.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_pc2, set_trading_state as _set_state_pc2,
+    )
+    _pc2_done = _get_state_pc2("daily_pause_clear_v2_done", "0")
+    if _pc2_done != "1":
+        _saved_p = _get_state_pc2("daily_pause_date", "")
+        if _saved_p:
+            _set_state_pc2("daily_pause_date", "")
+            _set_state_pc2("daily_pause_reason", "")
+            logger.warning(
+                f"DAILY PAUSE CLEAR v2: cleared stale pause (was {_saved_p}) — "
+                f"new no-pause behavior now active"
+            )
+        _set_state_pc2("daily_pause_clear_v2_done", "1")
+except Exception as e:
+    logger.warning(f"Daily pause clear v2 error (non-fatal): {e}")
+
+
 # --- EQUITY-CURVE PHANTOM CLEANUP v1 (2026-06-04) ---
 # Three corrupted points sat in portfolio_snapshots after the cash-inflation
 # era:
@@ -2307,10 +2332,32 @@ def _check_daily_profit_limit():
                 )
                 return  # Skip pause — this is not a real trading gain
 
-            if daily_return >= 2.5:
-                logger.warning(f"DAILY PROFIT LIMIT HIT: +{daily_return:.2f}% today — selective sell + pause new trades")
+            # DAILY PROFIT BEHAVIOR (rewritten 2026-06-04 after user feedback:
+            # "we start strong, sell off, no re-buying — trading day ends by
+            # noon"). Three changes from the prior behavior:
+            #
+            #   1. Threshold raised 2.5% → 5%.  At 9% Kelly per position with
+            #      a typical 50-70% gross exposure, 5 positions up +5% drives
+            #      portfolio +2.25% — that's a NORMAL good morning, not a
+            #      "limit-hit" event.  5% is the real "exceptional day" line.
+            #
+            #   2. NEVER pauses new entries.  The pause flag was killing the
+            #      afternoon trading day.  System now keeps firing new picks
+            #      after a profit-lock sweep — exactly what the user wants.
+            #
+            #   3. Only sells INTRADAY winners.  Losers stay until they hit
+            #      their natural stops (not flushed prematurely).  Multi-day
+            #      swing/position holds stay open.  This locks in intraday
+            #      gains without forcing premature exit on losers.
+            DAILY_PROFIT_THRESHOLD = 5.0
+            if daily_return >= DAILY_PROFIT_THRESHOLD:
+                logger.warning(
+                    f"DAILY PROFIT EVENT: +{daily_return:.2f}% today — locking "
+                    f"intraday winners (trading continues, no pause)"
+                )
 
-                # Selective sell: close intraday trades and losers, keep multi-day holds
+                # Selective profit-lock: close intraday trades that are PROFITABLE
+                # only.  Keep losers (let stops handle them), keep multi-day holds.
                 from predictions.models import get_open_trades, close_paper_trade
                 from predictions.paper_trader import _get_current_prices
                 open_trades = get_open_trades()
@@ -2323,28 +2370,27 @@ def _check_daily_profit_limit():
                     hold_class = trade.get("hold_class", "swing")
                     entry = trade["entry_price"]
                     direction = trade["direction"]
-                    pnl_pct = ((price / entry) - 1) * 100 if direction == "long" else ((entry / price) - 1) * 100
+                    if direction == "long":
+                        pnl_pct = ((price / entry) - 1) * 100 if entry else 0
+                    else:
+                        pnl_pct = ((entry / price) - 1) * 100 if price else 0
 
-                    # Sell intraday trades and losing positions; keep profitable swing/position
-                    if hold_class == "intraday" or pnl_pct < 0:
+                    # PROFIT-LOCK SWEEP: only flatten INTRADAY trades that are
+                    # already in profit.  Losers ride to their stops.  Swing
+                    # and position holds always survive this sweep.
+                    if hold_class == "intraday" and pnl_pct > 0.5:
                         try:
                             close_paper_trade(trade["id"], price)
                             sold_count += 1
                         except Exception:
                             pass
 
-                _daily_paused["paused"] = True
-                _daily_paused["pause_date"] = today_str
-                _daily_paused["reason"] = f"Daily gain +{daily_return:.2f}% exceeded 2.5% limit"
-                logger.warning(f"Sold {sold_count} trades (intraday + losers). Kept multi-day holds. Trading paused until tomorrow.")
-
-                # Persist to DB (survives restarts)
-                try:
-                    from predictions.models import set_trading_state
-                    set_trading_state("daily_pause_date", today_str)
-                    set_trading_state("daily_pause_reason", _daily_paused["reason"])
-                except Exception:
-                    pass
+                # DO NOT SET _daily_paused — trading continues.  The cycle
+                # will pick fresh entries on the next 5-minute scan.
+                logger.warning(
+                    f"Locked {sold_count} intraday winners. Losers + multi-day "
+                    f"holds untouched. NEW TRADES CONTINUE FIRING this afternoon."
+                )
 
                 try:
                     backup_db_to_s3()
@@ -3500,6 +3546,49 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
                             continue
             except Exception as _le:
                 logger.debug(f"stale lookback failed: {_le}")
+            # FINAL FALLBACK — instead of 404, build a degraded analyze
+            # response from picks-engine data + last known quote.  The
+            # picks engine has ticker/price/score/confidence/sector — enough
+            # to render a useful page for the user.  This is the last line
+            # of defense against the HPE-style 404 that the user keeps
+            # seeing on stocks the live yfinance pull fails for.
+            try:
+                from analysis.quant_engine import _quant_cache as _qc
+                _cache_entry = _qc.get("quant_picks")
+                if _cache_entry and _cache_entry.get("data"):
+                    _pdata = _cache_entry["data"]
+                    _all_picks = (_pdata.get("long_picks", []) or []) + \
+                                 (_pdata.get("short_picks", []) or [])
+                    _match = next(
+                        (p for p in _all_picks if (p.get("ticker") or "").upper() == clean_ticker),
+                        None
+                    )
+                    if _match:
+                        _degraded = {
+                            "ticker": clean_ticker,
+                            "info": {
+                                "symbol": clean_ticker,
+                                "current_price": _match.get("price"),
+                                "sector": _match.get("sector") or "Unknown",
+                                "_source": "picks_engine_fallback",
+                            },
+                            "signal": {
+                                "direction": _match.get("direction", "neutral"),
+                                "confidence": _match.get("confidence"),
+                                "composite_score": _match.get("composite_score"),
+                            },
+                            "history": [],
+                            "indicators": {},
+                            "_cache_source": "degraded_picks_fallback",
+                            "_stale_note": (
+                                "Live data temporarily unavailable. Showing "
+                                "today's picks-engine data for this ticker. "
+                                "Chart/history will return after data feed recovers."
+                            ),
+                        }
+                        return _degraded
+            except Exception as _df:
+                logger.debug(f"degraded fallback failed: {_df}")
             raise HTTPException(status_code=404, detail="Stock not found")
         # Write to BOTH layers
         try:
