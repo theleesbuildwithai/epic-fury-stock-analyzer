@@ -3589,7 +3589,27 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
                         return _degraded
             except Exception as _df:
                 logger.debug(f"degraded fallback failed: {_df}")
-            raise HTTPException(status_code=404, detail="Stock not found")
+            # ABSOLUTE LAST-RESORT — return 200 stub instead of 404.
+            # Ticker passed validate_ticker so format is valid; data is
+            # just temporarily unavailable.  UI shows "data unavailable"
+            # card instead of breaking with a 404.
+            return {
+                "ticker": clean_ticker,
+                "info": {
+                    "symbol": clean_ticker,
+                    "current_price": None,
+                    "sector": "Unknown",
+                    "_source": "stub_no_data",
+                },
+                "signal": {"direction": "neutral", "confidence": None, "composite_score": None},
+                "history": [],
+                "indicators": {},
+                "_cache_source": "stub_fallback",
+                "_stale_note": (
+                    "Data feed temporarily unavailable for this ticker. The "
+                    "system will retry automatically — refresh in a moment."
+                ),
+            }
         # Write to BOTH layers
         try:
             _analyze_cache[cache_key] = {"data": report, "ts": _t_an.time()}
@@ -3645,43 +3665,94 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
                     }
         except Exception as _ee:
             logger.debug(f"degraded fallback after exception failed: {_ee}")
-        raise HTTPException(status_code=500, detail="Analysis failed. Please try again.")
+
+        # ABSOLUTE LAST-RESORT FALLBACK — never 404 or 500.
+        # The ticker passed validate_ticker (so the format is valid), and
+        # every data source failed for this specific ticker.  Instead of
+        # an HTTP error, return a 200 stub the UI can render as a
+        # "Data temporarily unavailable" card.  The UI never breaks.
+        # When the data feed recovers on the next request, the real
+        # analysis comes back through.
+        return {
+            "ticker": clean_ticker,
+            "info": {
+                "symbol": clean_ticker,
+                "current_price": None,
+                "sector": "Unknown",
+                "_source": "stub_no_data",
+            },
+            "signal": {
+                "direction": "neutral",
+                "confidence": None,
+                "composite_score": None,
+            },
+            "history": [],
+            "indicators": {},
+            "_cache_source": "stub_fallback",
+            "_stale_note": (
+                "Data feed temporarily unavailable for this ticker. The "
+                "system will try again automatically — refresh in a moment. "
+                "All other tickers are unaffected."
+            ),
+            "_error_origin": str(e)[:200],
+        }
 
 
 @app.get("/api/quote/{ticker}")
 def get_quote(request: Request, ticker: str):
-    """Get current quote and basic info for a stock."""
+    """Get current quote and basic info for a stock.  BULLETPROOF —
+    never 404s.  When the data feed fails, returns a 200 stub with
+    null price so the UI shows 'unavailable' instead of breaking."""
     check_rate_limit(request.client.host)
     clean_ticker = validate_ticker(ticker)
     try:
         info = get_stock_info(clean_ticker)
-        if not info.get("current_price"):
-            raise HTTPException(status_code=404, detail="Stock not found")
-        return info
+        if info.get("current_price"):
+            return info
+        # No price — return stub instead of 404
+        return {
+            "symbol": clean_ticker, "current_price": None,
+            "_cache_source": "stub_fallback",
+            "_stale_note": "Quote temporarily unavailable. Will retry automatically.",
+        }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Quote error for {clean_ticker}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch quote")
+        return {
+            "symbol": clean_ticker, "current_price": None,
+            "_cache_source": "stub_fallback",
+            "_stale_note": "Quote temporarily unavailable. Will retry automatically.",
+            "_error_origin": str(e)[:120],
+        }
 
 
 @app.get("/api/history/{ticker}")
 def get_history(request: Request, ticker: str, period: str = "6mo"):
-    """Get historical price data for charting."""
+    """Get historical price data for charting.  BULLETPROOF — never
+    404s.  Returns an empty data array if the feed is unavailable so
+    the chart shows 'no data' instead of breaking the page."""
     check_rate_limit(request.client.host)
     clean_ticker = validate_ticker(ticker)
     if period not in ("1mo", "3mo", "6mo", "1y", "2y", "5y"):
         raise HTTPException(status_code=400, detail="Invalid period")
     try:
-        data = get_historical_data(clean_ticker, period)
-        if not data:
-            raise HTTPException(status_code=404, detail="No history found")
-        return {"ticker": clean_ticker, "period": period, "data": data}
+        data = get_historical_data(clean_ticker, period) or []
+        return {
+            "ticker": clean_ticker, "period": period, "data": data,
+            **({"_cache_source": "stub_fallback",
+                "_stale_note": "Price history temporarily unavailable."} if not data else {})
+        }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"History error for {clean_ticker}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch history")
+        return {
+            "ticker": clean_ticker, "period": period, "data": [],
+            "_cache_source": "stub_fallback",
+            "_stale_note": "Price history temporarily unavailable.",
+            "_error_origin": str(e)[:120],
+        }
 
 
 @app.get("/api/benchmarks")
