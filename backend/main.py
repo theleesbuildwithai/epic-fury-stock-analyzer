@@ -3605,6 +3605,46 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
         raise
     except Exception as e:
         logger.error(f"Analysis error for {clean_ticker}: {e}")
+        # HARD FAILURE FALLBACK — same picks-engine degraded response
+        # that the soft 404 path uses.  generate_full_report can throw
+        # at any layer (yfinance timeout, math error in indicators, etc).
+        # Without this, the user sees a 500.  With this, if the ticker
+        # is in today's quant picks we serve the degraded card and the
+        # UI never breaks.
+        try:
+            from analysis.quant_engine import _quant_cache as _qc_exc
+            _ce = _qc_exc.get("quant_picks")
+            if _ce and _ce.get("data"):
+                _pdata = _ce["data"]
+                _all = (_pdata.get("long_picks", []) or []) + \
+                       (_pdata.get("short_picks", []) or [])
+                _match = next((p for p in _all
+                               if (p.get("ticker") or "").upper() == clean_ticker), None)
+                if _match:
+                    return {
+                        "ticker": clean_ticker,
+                        "info": {
+                            "symbol": clean_ticker,
+                            "current_price": _match.get("price"),
+                            "sector": _match.get("sector") or "Unknown",
+                            "_source": "picks_engine_fallback_after_exception",
+                        },
+                        "signal": {
+                            "direction": _match.get("direction", "neutral"),
+                            "confidence": _match.get("confidence"),
+                            "composite_score": _match.get("composite_score"),
+                        },
+                        "history": [],
+                        "indicators": {},
+                        "_cache_source": "degraded_picks_fallback_after_exception",
+                        "_stale_note": (
+                            "Live data temporarily unavailable. Showing today's "
+                            "picks-engine data. Chart/history returns when "
+                            "data feed recovers."
+                        ),
+                    }
+        except Exception as _ee:
+            logger.debug(f"degraded fallback after exception failed: {_ee}")
         raise HTTPException(status_code=500, detail="Analysis failed. Please try again.")
 
 
