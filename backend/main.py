@@ -4168,7 +4168,7 @@ def ai_analyst(request: Request, q: str = ""):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-quant-picks-500-v5-safe-serialize",
+        "commit_marker": "fix-quant-picks-500-v6-nan-scrub",
         "date": "2026-06-05",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4220,14 +4220,31 @@ def quant_picks(force_refresh: bool = False):
     # json.dumps(default=str) which converts everything to strings.
     from fastapi.responses import JSONResponse
     import json as _json_q
+    import math as _math_q
+
+    def _scrub_nan(obj):
+        """Recursively replace NaN/Inf floats with None (JSON-safe).
+        v5 confirmed the cache has NaN values that JSONResponse can't
+        serialize. This walker converts them BEFORE serialization."""
+        if isinstance(obj, float):
+            if _math_q.isnan(obj) or _math_q.isinf(obj):
+                return None
+            return obj
+        if isinstance(obj, dict):
+            return {k: _scrub_nan(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_scrub_nan(v) for v in obj]
+        if isinstance(obj, tuple):
+            return [_scrub_nan(v) for v in obj]
+        return obj
 
     def _safe_serialize(payload):
-        """Convert any payload to JSON-safe Python types."""
+        """Convert any payload to JSON-safe Python types, including NaN."""
         try:
             from fastapi.encoders import jsonable_encoder
-            return jsonable_encoder(payload)
+            return _scrub_nan(jsonable_encoder(payload))
         except Exception:
-            return _json_q.loads(_json_q.dumps(payload, default=str))
+            return _scrub_nan(_json_q.loads(_json_q.dumps(payload, default=str)))
 
     try:
         from analysis.quant_engine import _quant_cache
@@ -4235,7 +4252,7 @@ def quant_picks(force_refresh: bool = False):
         if cache_entry and cache_entry.get("data"):
             result = dict(cache_entry["data"])
             result["cache_status"] = "cached"
-            result["_endpoint_version"] = "v5-safe-serialize"
+            result["_endpoint_version"] = "v6-nan-scrub"
             try:
                 return JSONResponse(content=_safe_serialize(result))
             except Exception as _ser_e:
@@ -4250,7 +4267,7 @@ def quant_picks(force_refresh: bool = False):
             if _raw:
                 _snap = _json_q.loads(_raw)
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v5-safe-serialize"
+                _snap["_endpoint_version"] = "v6-nan-scrub"
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
@@ -4259,7 +4276,7 @@ def quant_picks(force_refresh: bool = False):
             "long_picks": [],
             "short_picks": [],
             "cache_status": "cold",
-            "_endpoint_version": "v5-safe-serialize",
+            "_endpoint_version": "v6-nan-scrub",
         })
     except Exception as e:
         import traceback as _tb
@@ -4269,7 +4286,7 @@ def quant_picks(force_refresh: bool = False):
             "long_picks": [],
             "short_picks": [],
             "cache_status": "error",
-            "_endpoint_version": "v5-safe-serialize",
+            "_endpoint_version": "v6-nan-scrub",
             "_route_error": str(e)[:200],
         })
 
