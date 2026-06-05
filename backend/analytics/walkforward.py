@@ -191,10 +191,18 @@ def stress_test_portfolio(current_positions: list, market_drawdown_pct: float,
     Apply a hypothetical market drawdown to current portfolio.
     Simple linear: portfolio_pnl = beta * market_dd.
 
-    Returns expected $loss and equity change.
+    Returns expected $loss and equity change. Field names are
+    consistent across empty and populated portfolio cases so
+    downstream consumers can rely on them.
     """
     if not current_positions:
-        return {"expected_loss_pct": 0.0, "expected_loss_dollars": 0.0}
+        return {
+            "scenario_market_dd_pct": market_drawdown_pct,
+            "assumed_avg_beta": avg_beta,
+            "expected_portfolio_loss_pct": 0.0,
+            "expected_portfolio_loss_dollars": 0.0,
+            "current_portfolio_value": 0.0,
+        }
     total_value = sum(safe_float(p.get("shares"), 0) *
                        safe_float(p.get("current_price") or p.get("entry_price"), 0)
                        for p in current_positions)
