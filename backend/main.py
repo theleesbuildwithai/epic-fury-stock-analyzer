@@ -4168,7 +4168,7 @@ def ai_analyst(request: Request, q: str = ""):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-quant-picks-500-v4-simple-rewrite",
+        "commit_marker": "fix-quant-picks-500-v5-safe-serialize",
         "date": "2026-06-05",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4210,48 +4210,68 @@ def quant_picks(force_refresh: bool = False):
     version. This endpoint is now the absolute simplest possible
     picks reader.
     """
-    # 2026-06-05 SIMPLE PATH: just return the cache or empty 200.
-    # No overlay, no BG threads, no rate limit, no Request dependency.
-    # If overlay/diversification needed, /api/symbols-to-buy has it.
+    # 2026-06-05 v5 SAFE-SERIALIZE: diag endpoint works (route system
+    # OK), so the 500 must be in returning the cache data itself.
+    # Likely cause: cache contains numpy values, datetime objects, or
+    # other non-JSON-serializable types that FastAPI's default encoder
+    # chokes on. Use fastapi.encoders.jsonable_encoder + JSONResponse
+    # which handle all those gracefully. The serialize step is wrapped
+    # in its own try/except — if even that fails, fall back to
+    # json.dumps(default=str) which converts everything to strings.
+    from fastapi.responses import JSONResponse
+    import json as _json_q
+
+    def _safe_serialize(payload):
+        """Convert any payload to JSON-safe Python types."""
+        try:
+            from fastapi.encoders import jsonable_encoder
+            return jsonable_encoder(payload)
+        except Exception:
+            return _json_q.loads(_json_q.dumps(payload, default=str))
+
     try:
         from analysis.quant_engine import _quant_cache
         cache_entry = _quant_cache.get("quant_picks")
         if cache_entry and cache_entry.get("data"):
-            result = dict(cache_entry["data"])  # shallow copy to avoid mutation
+            result = dict(cache_entry["data"])
             result["cache_status"] = "cached"
-            result["_endpoint_version"] = "v4-simple"
-            return result
-        # Try S3 fallback
+            result["_endpoint_version"] = "v5-safe-serialize"
+            try:
+                return JSONResponse(content=_safe_serialize(result))
+            except Exception as _ser_e:
+                logger.error(f"Cache serialize failed: {_ser_e}")
+                # Last resort: dump with default=str, reload as dict
+                return JSONResponse(content=_json_q.loads(
+                    _json_q.dumps(result, default=str)
+                ))
         try:
             from predictions.models import get_trading_state as _gts
-            import json as _json
             _raw = _gts("picks_s3_snapshot", "")
             if _raw:
-                _snap = _json.loads(_raw)
+                _snap = _json_q.loads(_raw)
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v4-simple"
-                return _snap
+                _snap["_endpoint_version"] = "v5-safe-serialize"
+                return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
-        # Empty state (200, never 500)
-        return {
+        return JSONResponse(content={
             "regime": {"regime": "LOADING", "description": "Picks engine warming up"},
             "long_picks": [],
             "short_picks": [],
             "cache_status": "cold",
-            "_endpoint_version": "v4-simple",
-        }
+            "_endpoint_version": "v5-safe-serialize",
+        })
     except Exception as e:
         import traceback as _tb
-        logger.error(f"/api/quant-picks v4 error: {e}\n{_tb.format_exc()}")
-        return {
+        logger.error(f"/api/quant-picks v5 error: {e}\n{_tb.format_exc()}")
+        return JSONResponse(content={
             "regime": {"regime": "ERROR"},
             "long_picks": [],
             "short_picks": [],
             "cache_status": "error",
-            "_endpoint_version": "v4-simple",
+            "_endpoint_version": "v5-safe-serialize",
             "_route_error": str(e)[:200],
-        }
+        })
 
 
 # 2026-06-05: Old quant-picks logic with overlay/diversification kept
