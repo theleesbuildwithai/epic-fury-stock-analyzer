@@ -4161,6 +4161,30 @@ def ai_analyst(request: Request, q: str = ""):
 #  QUANT HEDGE FUND ENDPOINTS
 # ============================================================
 
+# 2026-06-05: Build version marker — proves which commit is deployed.
+# When the user says "deploy done" and we still see 500 errors, we can
+# hit this endpoint to verify if the fix is actually in the deployed
+# code. Updated on each deploy that touches main.py.
+@app.get("/api/build-version")
+def build_version():
+    return {
+        "commit_marker": "fix-quant-picks-500-v2",
+        "date": "2026-06-05",
+        "fixes_in_build": [
+            "quant_picks_500_fallback_with_S3",
+            "bulletproof_stub_full_fields",
+            "cash_correction_v7",
+            "stats_epoch_reset_v6",
+            "min_confidence_60",
+            "min_composite_score_2.0",
+            "MAX_TRADES_PER_CYCLE_5",
+            "min_hold_24h_gate",
+            "profit_lock_30pct",
+            "time_decay_70pct",
+        ],
+    }
+
+
 @app.get("/api/quant-picks")
 def quant_picks(request: Request, force_refresh: bool = False):
     """Get quantitative LONG/SHORT picks. Returns cached data instantly.
