@@ -3645,25 +3645,73 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
             except Exception as _df:
                 logger.debug(f"degraded fallback failed: {_df}")
             # ABSOLUTE LAST-RESORT — return 200 stub instead of 404.
-            # Ticker passed validate_ticker so format is valid; data is
-            # just temporarily unavailable.  UI shows "data unavailable"
-            # card instead of breaking with a 404.
+            # 2026-06-05: Enhanced to populate ALL fields the analyze page
+            # renders, so the user sees "data temporarily unavailable" with
+            # a usable layout rather than the broken "no data" rendering.
+            #
+            # Strategy: try ONE more time to scrape ANY recent persistent
+            # cache entry (across periods + dates) before giving up.
+            _last_resort_price = None
+            try:
+                from predictions.models import get_trading_state as _gts_lr
+                from datetime import timedelta as _td_lr
+                _base = datetime.now()
+                for _periods in ("1y", "6mo", "3mo", "1mo"):
+                    for _back in range(0, 30):
+                        try:
+                            _key = f"analyze:{clean_ticker}:{_periods}:{(_base - _td_lr(days=_back)).strftime('%Y-%m-%d')}"
+                            _raw = _gts_lr(_key, "")
+                            if _raw:
+                                import json as _json_lr
+                                _last = _json_lr.loads(_raw)
+                                _last["_cache_source"] = f"stub_old_cache_back{_back}d"
+                                _last["_stale_note"] = (
+                                    f"Live data unavailable. Showing analysis "
+                                    f"from {_back} day(s) ago. Refresh later."
+                                )
+                                return _last
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+            # Truly nothing — return a fully-populated stub so the UI
+            # renders the empty-state card cleanly.  Sentinel values
+            # (price=0, confidence=50) chosen so frontend math doesn't
+            # NaN out.  Sector "Unknown" is filtered out client-side.
             return {
                 "ticker": clean_ticker,
                 "info": {
                     "symbol": clean_ticker,
-                    "current_price": None,
+                    "current_price": 0,
                     "sector": "Unknown",
+                    "industry": "",
+                    "market_cap": 0,
                     "_source": "stub_no_data",
                 },
-                "signal": {"direction": "neutral", "confidence": None, "composite_score": None},
+                "signal": {
+                    "direction": "neutral",
+                    "confidence": 50,
+                    "composite_score": 0,
+                    "strength": "no signal",
+                    "reasons": ["Data feed temporarily unavailable"],
+                },
                 "history": [],
-                "indicators": {},
+                "indicators": {
+                    "rsi14": 50, "sma20": 0, "sma50": 0, "sma200": 0,
+                    "macd": 0, "macd_signal": 0, "macd_hist": 0,
+                    "atr14": 0, "bb_upper": 0, "bb_lower": 0, "bb_middle": 0,
+                    "volume_ratio_20d": 1.0, "obv": 0,
+                },
+                "risk_score": 50,
+                "drift_signal": "neutral",
+                "options_picks": [],
                 "_cache_source": "stub_fallback",
                 "_stale_note": (
-                    "Data feed temporarily unavailable for this ticker. The "
-                    "system will retry automatically — refresh in a moment."
+                    "Data feed temporarily unavailable for this ticker. "
+                    "Auto-retries every cycle. Refresh in 1-2 minutes."
                 ),
+                "_degraded": True,
             }
         # Write to BOTH layers
         try:
