@@ -12,6 +12,7 @@ import IBKRDashboard from './pages/IBKRDashboard'
 import BacktestDashboard from './pages/BacktestDashboard'
 import SymbolsToBuy from './pages/SymbolsToBuy'
 import SymbolDetail from './pages/SymbolDetail'
+import SystemIntelligence from './pages/SystemIntelligence'
 import CookieConsent from './components/CookieConsent'
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="/backtest" element={<BacktestDashboard />} />
           <Route path="/symbols-to-buy" element={<SymbolsToBuy />} />
           <Route path="/symbol/:ticker" element={<SymbolDetail />} />
+          <Route path="/system-intelligence" element={<SystemIntelligence />} />
         </Routes>
         <CookieConsent />
       </div>

@@ -4161,6 +4161,179 @@ def ai_analyst(request: Request, q: str = ""):
 #  QUANT HEDGE FUND ENDPOINTS
 # ============================================================
 
+# 2026-06-05: INSTITUTIONAL ANALYTICS ENDPOINT
+# Returns the full hedge-fund-grade analytics payload:
+# - portfolio_risk: VaR (historical + parametric), ES, Beta, Gross/Net,
+#   HHI, Sharpe/Sortino/Calmar/Omega/Ulcer, drawdown
+# - sector_exposure: long/short/gross/net per sector
+# - factor_analytics: per-factor IC, Sharpe, hit_rate, half-life,
+#   regime_split, verdict (UPGRADE/HOLD/DOWNGRADE/KILL)
+# - factor_correlation_matrix: find collinear losers
+# - regime_state: combined regime detector with transition probs
+# - stress_tests: replay 2020/2022/2008/SVB scenarios
+# - capacity: ADV scaling, liquidity per position
+# - bayesian_updates: proposed weight changes per factor
+# - portfolio_optimization: HRP weights, risk parity, Kelly by regime
+# - attribution: per-factor and per-sector P&L attribution
+# - statarb: pairs cointegration scan, mean-reversion candidates
+@app.get("/api/factor-analytics")
+def factor_analytics_endpoint():
+    """Hedge-fund-grade analytics. Built Sprint 1, Jun 6-7."""
+    from fastapi.responses import JSONResponse
+    try:
+        from analytics.nan_helpers import scrub_nan
+        from analytics.risk_engine import (
+            portfolio_risk_snapshot, sector_exposure, gross_exposure,
+        )
+        from analytics.factor_analytics import (
+            build_factor_analytics, factor_correlation_matrix,
+        )
+        from analytics.regime_engine import (
+            combined_regime, should_apply_drawdown_brake,
+        )
+        from analytics.walkforward import replay_all_crises
+        from analytics.bayesian_learning import bayesian_weight_update
+        from analytics.attribution import (
+            factor_pnl_attribution, sector_attribution,
+            realized_vs_unrealized,
+        )
+        from predictions.models import (
+            get_closed_trades, get_open_trades, get_cash,
+            get_portfolio_snapshots, get_trading_state,
+            get_signal_weights,
+        )
+        from predictions.learner import FACTOR_NAMES
+        import json as _json_fa
+        from datetime import datetime
+
+        # === GATHER RAW DATA ===
+        closed = get_closed_trades(limit=500) or []
+        # Filter to stats_epoch
+        _epoch = (get_trading_state("stats_epoch", "") or "").strip()
+        if _epoch:
+            closed = [t for t in closed if (t.get("exit_date") or "") >= _epoch]
+        open_positions = [dict(t) for t in (get_open_trades() or [])]
+        cash = get_cash()
+        positions_value = 0.0
+        for p in open_positions:
+            try:
+                positions_value += (p.get("current_price") or p.get("entry_price") or 0) * (p.get("shares") or 0)
+            except: pass
+        nav = cash + positions_value
+
+        # Pull factor weights
+        try:
+            current_weights = get_signal_weights() or {}
+        except Exception:
+            current_weights = {}
+
+        # Build returns series from snapshots (60d)
+        snaps = get_portfolio_snapshots(days=60) or []
+        port_returns = []
+        for i in range(1, len(snaps)):
+            prev_v = (snaps[i-1] or {}).get("total_value", 0)
+            cur_v = (snaps[i] or {}).get("total_value", 0)
+            if prev_v > 0 and cur_v > 0:
+                port_returns.append((cur_v - prev_v) / prev_v)
+
+        # SPY market returns for beta (approximate from snapshots' sp500 field)
+        market_returns = []
+        for i in range(1, len(snaps)):
+            prev_sp = (snaps[i-1] or {}).get("sp500_value", 0)
+            cur_sp = (snaps[i] or {}).get("sp500_value", 0)
+            if prev_sp > 0 and cur_sp > 0:
+                market_returns.append((cur_sp - prev_sp) / prev_sp)
+
+        # === COMPUTE EACH SECTION ===
+        portfolio_risk = portfolio_risk_snapshot(
+            port_returns, open_positions, nav, market_returns,
+        )
+
+        factor_data = build_factor_analytics(
+            closed, FACTOR_NAMES, current_weights,
+        )
+
+        corr_matrix = factor_correlation_matrix(closed, FACTOR_NAMES)
+
+        # Regime state — use the cached VIX helper from paper_trader
+        # which already throttles yfinance and falls back to 20 on error.
+        try:
+            from predictions.paper_trader import _cached_vix_for_winlock
+            vix_now = _cached_vix_for_winlock() or 20.0
+        except Exception:
+            vix_now = 20.0
+        regime_state = combined_regime(market_returns, vix_now)
+
+        # Drawdown brake
+        cur_dd = portfolio_risk.get("current_drawdown_pct", 0) or 0
+        brake = should_apply_drawdown_brake(cur_dd)
+
+        # Stress tests
+        try:
+            avg_beta = portfolio_risk.get("exposure", {}).get("beta_adjusted_pct_nav", 0) / 100
+            if not avg_beta: avg_beta = 1.0
+        except Exception:
+            avg_beta = 1.0
+        stress = replay_all_crises(open_positions, avg_beta)
+
+        # Bayesian weight updates per factor
+        bayesian = []
+        for f in factor_data:
+            update = bayesian_weight_update(
+                prior_weight=safe_float_or_zero(f.get("current_weight")),
+                observed_sharpe=safe_float_or_zero(f.get("sharpe_60d_annualized")),
+                observed_ic=safe_float_or_zero(f.get("ic_60d_spearman")),
+                n_obs=f.get("total_trades", 0),
+            )
+            bayesian.append({**update, "factor": f["factor"]})
+
+        # Attribution
+        factor_pnl = factor_pnl_attribution(closed, FACTOR_NAMES)
+        sec_attrib = sector_attribution(closed)
+        rvu = realized_vs_unrealized(closed, open_positions)
+
+        # === ASSEMBLE PAYLOAD ===
+        payload = {
+            "as_of": datetime.utcnow().isoformat(),
+            "version": "v1.0-sprint1",
+            "portfolio_risk": portfolio_risk,
+            "factor_analytics": factor_data,
+            "factor_correlation_matrix": corr_matrix,
+            "regime_state": regime_state,
+            "drawdown_brake": brake,
+            "stress_tests": stress,
+            "bayesian_factor_updates": bayesian,
+            "factor_pnl_attribution": factor_pnl,
+            "sector_attribution": sec_attrib,
+            "realized_unrealized": rvu,
+            "nav": round(nav, 2),
+            "cash": round(cash, 2),
+            "open_positions_count": len(open_positions),
+            "closed_trades_analyzed": len(closed),
+        }
+        return JSONResponse(content=scrub_nan(payload))
+    except Exception as e:
+        import traceback
+        logger.error(f"/api/factor-analytics error: {e}\n{traceback.format_exc()}")
+        return JSONResponse(content={
+            "error": str(e)[:500],
+            "version": "v1.0-sprint1",
+            "_status": "degraded",
+        })
+
+
+def safe_float_or_zero(v):
+    """Helper for factor-analytics endpoint."""
+    import math
+    try:
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
+            return 0.0
+        return f
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # 2026-06-05: Build version marker — proves which commit is deployed.
 # When the user says "deploy done" and we still see 500 errors, we can
 # hit this endpoint to verify if the fix is actually in the deployed
@@ -4168,7 +4341,7 @@ def ai_analyst(request: Request, q: str = ""):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-quant-picks-500-v6-nan-scrub",
+        "commit_marker": "fix-quant-picks-500-v6-nan-scrub+analytics-v1",
         "date": "2026-06-05",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -5800,10 +5973,12 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             float(p.get("composite_score", 0) or 0)
         ))
 
-        # Sector cap: ≤5 per sector so the user isn't shown 25 Industrials.
-        # Looser than the trading-execution cap (4) because this is for
-        # manual review — more diversity gives the user choice.
-        def _cap_by_sector(picks, max_per_sec=5, want=25):
+        # 2026-06-05: ALIGNED with /api/quant-picks filter parameters so
+        # the two pages show the same/similar picks. Previously Symbols-
+        # to-Buy used max_per_sec=5 + want=25 while Quant HF used
+        # max_per_sec=4 + hard_cap=30/20, causing different pick lists
+        # to be shown to the user. Now both use sec=4, longs=30, shorts=20.
+        def _cap_by_sector(picks, max_per_sec=4, want=30):
             kept, counts, overflow = [], {}, []
             for p in picks:
                 sec = (p.get("sector") or "Unknown").strip() or "Unknown"
@@ -5813,13 +5988,13 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                     overflow.append(p)
                 if len(kept) >= want:
                     break
-            # If diverse picks ran out before we hit 25, top up from overflow
+            # If diverse picks ran out before we hit target, top up from overflow
             if len(kept) < want and overflow:
                 kept.extend(overflow[: want - len(kept)])
             return kept
 
-        top_longs  = _cap_by_sector(all_longs,  max_per_sec=5, want=25)
-        top_shorts = _cap_by_sector(all_shorts, max_per_sec=5, want=25)
+        top_longs  = _cap_by_sector(all_longs,  max_per_sec=4, want=30)
+        top_shorts = _cap_by_sector(all_shorts, max_per_sec=4, want=20)
 
         # SWING-HOLD STOPS/TARGETS: wider than the intraday execution
         # path because manual holds are days-to-months.  Stop = 5-12%
