@@ -4337,7 +4337,15 @@ def quant_picks(request: Request, force_refresh: bool = False):
             except Exception as _div_e:
                 logger.debug(f"Read-time sector diversification soft-fail: {_div_e}")
 
-            return {k: v for k, v in result.items() if not k.startswith("_")}
+            # Safe key filter — gracefully handle non-string keys.
+            try:
+                return {k: v for k, v in result.items()
+                        if not (isinstance(k, str) and k.startswith("_"))}
+            except Exception as _filt_e:
+                logger.warning(f"Final key filter failed (returning raw result): {_filt_e}")
+                # If even the dict comp fails, return result as-is.
+                # Better stale data than a 500.
+                return result
 
         return {
             "regime": {"regime": "LOADING", "description": "Analyzing 500+ stocks..."},
@@ -4348,8 +4356,37 @@ def quant_picks(request: Request, force_refresh: bool = False):
             "message": "Quant engine is analyzing 500+ stocks. Data will be available after the next trade cycle (runs every few minutes).",
         }
     except Exception as e:
-        logger.error(f"Quant picks error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate quant picks")
+        # 2026-06-05: NEVER return 500 from this endpoint — it's the
+        # critical path for the trading system and the UI.  Log the
+        # full traceback for diagnosis, then try one last fallback:
+        # serve picks directly from S3 persistent cache.
+        import traceback as _tb_qp
+        logger.error(
+            f"Quant picks error: {e}\nFULL TRACEBACK:\n{_tb_qp.format_exc()}"
+        )
+        # Last-resort fallback — read picks straight from S3 persistence
+        # so even a route-handler crash doesn't lock the UI out.
+        try:
+            from predictions.models import get_trading_state as _gts_qp
+            import json as _json_qp
+            _raw = _gts_qp("picks_s3_snapshot", "")
+            if _raw:
+                _snap = _json_qp.loads(_raw)
+                _snap["_cache_status"] = "fallback_from_s3"
+                _snap["_route_error"] = str(e)[:200]
+                return _snap
+        except Exception as _fb_e:
+            logger.warning(f"S3 fallback also failed: {_fb_e}")
+        # If S3 fallback also fails, return empty-but-200 so the UI
+        # shows "loading" instead of breaking with 500.
+        return {
+            "regime": {"regime": "ERROR", "description": "Picks service degraded — retrying"},
+            "long_picks": [],
+            "short_picks": [],
+            "cache_status": "error",
+            "_route_error": str(e)[:200],
+            "message": "Picks engine encountered an error. Auto-retry in next cycle.",
+        }
 
 
 @app.get("/api/paper-portfolio")
