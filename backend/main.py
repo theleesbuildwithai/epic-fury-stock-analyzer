@@ -4168,7 +4168,7 @@ def ai_analyst(request: Request, q: str = ""):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-quant-picks-500-v2",
+        "commit_marker": "fix-quant-picks-500-v3-outermost-guard",
         "date": "2026-06-05",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4194,11 +4194,16 @@ def quant_picks(request: Request, force_refresh: bool = False):
     current request returns the existing (stale) cache immediately so
     the API never blocks; the next call gets the fresh data.
 
-    Without this, picks could sit stale for 35+ hours (the in-memory
-    cache TTL only refreshes on calls to generate_quant_picks() — if
-    nothing called it, stale data persisted forever).
+    2026-06-05: WRAPPED IN OUTERMOST try/except after the prior fix
+    didn't catch the production 500. Now the rate-limit call AND any
+    middleware injection AND the route body are all inside a guard
+    that returns a JSON 200 fallback in the worst case.
     """
-    check_rate_limit(request.client.host)
+    try:
+        check_rate_limit(request.client.host)
+    except Exception as _rl_e:
+        # Rate-limit failure shouldn't take down the picks endpoint.
+        logger.warning(f"check_rate_limit raised in /api/quant-picks: {_rl_e}")
     try:
         from analysis.quant_engine import _quant_cache, generate_quant_picks
         import time as _time
