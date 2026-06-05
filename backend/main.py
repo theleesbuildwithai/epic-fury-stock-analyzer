@@ -830,6 +830,61 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v5 error (non-fatal): {e}")
 
 
+# --- CASH CORRECTION V7 (2026-06-05): DOCN-harpoon cleanup ---
+# User: "Reset cash to 132k because 32% total return". The DOCN -$733
+# single-trade loss yesterday harpooned the day. Reset to $132k as a
+# clean baseline before the quality-over-quantity upgrade goes live.
+# Idempotent — fires once via DB flag.
+try:
+    from predictions.models import (
+        get_cash as _get_cash_v7, set_cash as _set_cash_v7,
+        get_trading_state as _get_state_v7, set_trading_state as _set_state_v7,
+    )
+    _v7_done = _get_state_v7("cash_correction_v7_done", "0")
+    if _v7_done != "1":
+        _cur_v7 = _get_cash_v7()
+        _tgt_v7 = 132_000.00
+        if -500_000.0 < _cur_v7 < 2_000_000.0:
+            _set_cash_v7(_tgt_v7, caller="cash_correction_v7",
+                         reason=(f"DOCN-harpoon cleanup + quality-over-quantity "
+                                 f"reset: $132k (was ${_cur_v7:,.2f})"),
+                         bypass_sentinel=True)
+            logger.warning(
+                f"CASH CORRECTION V7: reset cash to ${_tgt_v7:,.2f} "
+                f"(was ${_cur_v7:,.2f}, delta={_tgt_v7 - _cur_v7:+,.2f})"
+            )
+        else:
+            logger.warning(
+                f"CASH CORRECTION V7: skipped — cash ${_cur_v7:,.2f} "
+                f"outside safety bounds [-500k, 2M]"
+            )
+        _set_state_v7("cash_correction_v7_done", "1")
+except Exception as e:
+    logger.warning(f"Cash correction v7 error (non-fatal): {e}")
+
+
+# --- STATS EPOCH RESET V6 (2026-06-05) ---
+# Zero visible stats again after the v7 cash reset.  Clean slate for
+# the new quality-over-quantity execution model (conf 60, score 2.0,
+# max 5/cycle, 24h min hold).  Underlying trade history preserved.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev6, set_trading_state as _set_state_sev6,
+    )
+    _sev6_done = _get_state_sev6("stats_epoch_reset_v6_done", "0")
+    if _sev6_done != "1":
+        from datetime import datetime as _dt_sev6
+        _epoch_iso_v6 = _dt_sev6.utcnow().isoformat()
+        _set_state_sev6("stats_epoch", _epoch_iso_v6)
+        _set_state_sev6("stats_epoch_reset_v6_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v6: visual stats reset to 0; collecting "
+            f"from {_epoch_iso_v6}.  Quality-over-quantity model active."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v6 error (non-fatal): {e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must

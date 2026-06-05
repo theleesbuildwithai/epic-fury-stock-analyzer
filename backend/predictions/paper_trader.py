@@ -397,17 +397,18 @@ def _get_min_confidence() -> int:
     AUTO-TUNE 2026-05-16: applies rolling 30-day win-rate-driven shift
     on top of the base threshold.  Clamped to [base-3, base+5]."""
     if _is_live_safety_mode():
-        # 2026-05-29: Bumped base 40 → 42 to let more trades fire while
-        # still respecting calibrated probabilities.  Calibrated 42% on
-        # the new isotonic mapping = true ~42% win rate — meaningfully
-        # above coin flip, and with the +5 auto-tune ceiling the effective
-        # max stays at 47 (still below the pre-calibration 50 gate).
-        # Floor stays at 39 during winning streaks.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 42))
+        # 2026-06-05: QUALITY-OVER-QUANTITY upgrade. Bumped base 42 → 60.
+        # User feedback: trades later in day weak, picks degrade,
+        # DOCN -55% single trade harpooned the day.  Floor of 60 means
+        # only A-grade picks fire (vs B-grade noise before).  Expected
+        # trade count drops from 22/day to 5-12/day — fewer but better.
+        # Auto-tune range -3/+5 preserved so floor still flexes 57-65
+        # based on recent win rate.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 60))
     elif _is_preservation_mode():
-        base = 50
+        base = 65
     else:
-        base = 42
+        base = 60
     # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
     final = max(base - 3, min(base + 5, base + shift))
@@ -425,14 +426,59 @@ def _get_min_composite_score() -> float:
     Quality is still enforced by: Kelly sizing, calibration, sector cap,
     direction safety, auto-tune confidence, and the picks engine's own
     sector/factor filters."""
+    # 2026-06-05: QUALITY UPGRADE. Bumped 1.0 → 2.0 across all modes.
+    # Combined with conf floor 60, this ensures only the strongest
+    # multi-factor signals get traded.  Score 2.0 represents ~2 std
+    # deviations on the 22-factor composite — the top ~15% of the
+    # universe.  Fewer trades, higher conviction.
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 1.0)
+        return _live_safety_float("LIVE_MIN_SCORE", 2.0)
     if _is_preservation_mode():
-        return 2.0
-    return 1.0
+        return 2.5
+    return 2.0
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
+
+# 2026-06-05: Cap entries per cycle so we never over-concentrate on
+# one batch of picks. With ~3 trade cycles per day, this gives a
+# theoretical max of 15 trades/day (vs the 22 yesterday that included
+# DOCN's -55% harpoon). Real expected: 5-12/day.
+MAX_TRADES_PER_CYCLE = 5
+
+# 2026-06-05: Minimum hours an EQUITY position must be held before
+# any soft exit (profit-lock, time-decay, bear-protection) can fire.
+# STOP LOSS and TARGET PRICE are not gated by this — they always fire
+# for safety. Options have no min hold (premium decay risk too high).
+# Set to 24 hours = 1 trading day, so positions get at least one
+# overnight to develop before quick-flip logic kicks in.
+MIN_HOLD_HOURS_BEFORE_SOFT_EXIT = 24.0
+
+
+def _can_soft_exit(trade) -> bool:
+    """Gate for SOFT exit logic (profit-lock, time-decay, bear-protect).
+    Returns True if the position has been held long enough to allow
+    discretionary exits.  Hard exits (stop_loss, target) bypass this.
+
+    For options: always True (no min hold — premium decay risk).
+    For equity: True only after MIN_HOLD_HOURS_BEFORE_SOFT_EXIT.
+
+    This is what stops the same-day-flip behavior that lost us
+    DOCN -55% yesterday — the system opened a stale-data position
+    and closed it within hours instead of holding through the noise.
+    """
+    try:
+        inst = (trade.get("instrument_type") or "equity").lower()
+        if inst in ("call", "put"):
+            return True
+        from datetime import datetime as _dt_mh
+        entry_date = datetime.fromisoformat(trade["entry_date"])
+        hours_held = (_dt_mh.now() - entry_date).total_seconds() / 3600.0
+        return hours_held >= MIN_HOLD_HOURS_BEFORE_SOFT_EXIT
+    except Exception:
+        # If we can't determine hold time, default to allowing the exit
+        # (don't block safety logic on a data error).
+        return True
 
 
 # ============================================================
@@ -2862,28 +2908,30 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # AUTONOMOUS TAKE PROFIT — based on stock's target (set at entry)
             # The target was already calculated by _autonomous_stop_and_target()
             # at entry time and stored in trade["target_price"]. We check it above.
-            # But if somehow the stock is up 20%+ and target wasn't hit, lock it.
-            # Lower profit lock in preservation mode (10% vs 15%)
-            profit_lock_threshold = 10.0 if _is_preservation_mode() else 15.0
-            if not should_close and pnl_pct >= profit_lock_threshold:
+            # 2026-06-05: Raised 10/15% → 25/30%. With min-hold gate, we don't
+            # need to dump on small gains anymore — we can let winners run.
+            # Also gated by _can_soft_exit so it can't fire same-day (prevents
+            # the day-trading behavior that hit DOCN).
+            profit_lock_threshold = 25.0 if _is_preservation_mode() else 30.0
+            if not should_close and _can_soft_exit(trade) and pnl_pct >= profit_lock_threshold:
                 should_close = True
-                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — gain secured (threshold: {profit_lock_threshold}%{'  [PRESERVATION MODE]' if profit_lock_threshold == 10 else ''})"
+                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — gain secured (threshold: {profit_lock_threshold}%{'  [PRESERVATION MODE]' if profit_lock_threshold == 25 else ''})"
 
-            # TIME DECAY EXIT: If trade hasn't moved in our favor after 50% of hold time, cut it
-            # This prevents dead-weight trades from sitting and eventually hitting stop loss
-            if not should_close:
+            # TIME DECAY EXIT: If trade hasn't moved in our favor after 70%
+            # of hold time, cut it.  Raised 50% → 70% so we give positions
+            # more time to develop.  Also gated by _can_soft_exit.
+            if not should_close and _can_soft_exit(trade):
                 try:
                     entry_date = datetime.fromisoformat(trade["entry_date"])
                     days_held = (datetime.now() - entry_date).days
                     max_hold = trade.get("hold_duration_days", DEFAULT_HOLD_DAYS)
-                    # Cut flat trades faster in preservation mode (40% vs 50% of hold time)
-                    decay_frac = 0.4 if _is_preservation_mode() else 0.5
-                    half_hold = max(2, int(max_hold * decay_frac))
+                    # 2026-06-05: 0.4/0.5 → 0.6/0.7 (more patience)
+                    decay_frac = 0.6 if _is_preservation_mode() else 0.7
+                    half_hold = max(3, int(max_hold * decay_frac))
                     if days_held >= half_hold and pnl_pct <= 0.5:
-                        # Held for half the expected time and still flat or losing
                         should_close = True
                         close_reason = (
-                            f"TIME DECAY: {days_held}d held (half of {max_hold}d), "
+                            f"TIME DECAY: {days_held}d held ({int(decay_frac*100)}%+ of {max_hold}d), "
                             f"only {pnl_pct:+.1f}% — cutting dead weight"
                         )
                 except Exception:
@@ -3431,7 +3479,20 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 key = f"{t.get('sector', 'Unknown')}_{t['direction']}"
                 sector_counts[key] = sector_counts.get(key, 0) + 1
 
+        # 2026-06-05: HARD cap entries this cycle to MAX_TRADES_PER_CYCLE.
+        # Combined with the new quality gates (conf 60, score 2.0) this
+        # is the "quality over quantity" lever: even if 20 picks pass
+        # the gates, we only fire on the top MAX_TRADES_PER_CYCLE.
+        _cycle_open_count = 0
+
         for pick in all_picks[:available_slots]:
+            if _cycle_open_count >= MAX_TRADES_PER_CYCLE:
+                logger.info(
+                    f"MAX_TRADES_PER_CYCLE ({MAX_TRADES_PER_CYCLE}) reached — "
+                    f"skipping remaining {len(all_picks) - all_picks.index(pick)} picks "
+                    f"this cycle for quality concentration"
+                )
+                break
             symbol = pick["symbol"]
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
@@ -4059,6 +4120,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 open_tickers.add(symbol)
                 current_positions += 1
                 sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
+                _cycle_open_count += 1  # Counts toward MAX_TRADES_PER_CYCLE
 
                 results["opened"].append({
                     "trade_id": trade_id,
