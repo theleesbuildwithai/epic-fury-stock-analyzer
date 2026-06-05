@@ -194,9 +194,16 @@ def combined_regime(market_returns: list, vix_level: float, prices: list = None,
         votes["BULL"] += 1
     elif breadth["regime"] == "DETERIORATING":
         votes["BEAR"] += 2
-    winner = max(votes, key=votes.get)
-    total_votes = sum(votes.values()) or 1
-    confidence = int(votes[winner] / total_votes * 100)
+    # If no votes (HMM unknown + vol unknown + trend unknown +
+    # breadth unknown), default to SIDEWAYS at 0% confidence rather
+    # than alphabetical first regime with a meaningless 0% score.
+    total_votes = sum(votes.values())
+    if total_votes == 0:
+        winner = "SIDEWAYS"
+        confidence = 0
+    else:
+        winner = max(votes, key=votes.get)
+        confidence = int(votes[winner] / total_votes * 100)
     return {
         "regime": winner,
         "confidence_pct": confidence,

@@ -31,9 +31,16 @@ def bayesian_weight_update(prior_weight: float, observed_sharpe: float,
     sh = safe_float(observed_sharpe, 0)
     ic = safe_float(observed_ic, 0)
     if n_obs < 10:
-        # Not enough data to move from prior
-        return {"posterior_weight": prior, "change_pct": 0.0,
-                "evidence_strength": "WEAK"}
+        # Not enough data to move from prior. Return same shape as the
+        # populated case so downstream consumers (UI, attribution) don't
+        # have to handle two different schemas.
+        return {
+            "prior_weight": round(prior, 4),
+            "posterior_weight": round(prior, 4),
+            "change_pct": 0.0,
+            "evidence_strength": "WEAK",
+            "implied_win_rate": 0.5,
+        }
     # Convert Sharpe to win_rate equivalent using standard normal CDF
     # If Sharpe = 1.0, implied win_rate ≈ 0.5 + 1.0/(σ * √(2π))
     implied_wr = 0.5 + 0.5 * math.tanh(sh)  # bounded transform

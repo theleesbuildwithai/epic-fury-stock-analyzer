@@ -4227,22 +4227,35 @@ def factor_analytics_endpoint():
         except Exception:
             current_weights = {}
 
-        # Build returns series from snapshots (60d)
+        # Build returns series from snapshots (60d), with outlier filter.
+        # 2026-06-05: Snapshots include cash_correction events (v1-v7
+        # resets) and snapshot-guard skips that produce phantom +30% /
+        # -50% "daily returns" that poison VaR / Sharpe / drawdown math.
+        # Filter any return outside ±15% as an artifact, not a real
+        # trading day. Real equity portfolios rarely move >5% in a day;
+        # 15% is the upper bound for legitimate single-day swings even
+        # in 2020 COVID-style chaos.
         snaps = get_portfolio_snapshots(days=60) or []
+        OUTLIER_BOUND = 0.15  # ±15% — anything beyond is a data artifact
         port_returns = []
         for i in range(1, len(snaps)):
             prev_v = (snaps[i-1] or {}).get("total_value", 0)
             cur_v = (snaps[i] or {}).get("total_value", 0)
             if prev_v > 0 and cur_v > 0:
-                port_returns.append((cur_v - prev_v) / prev_v)
+                r = (cur_v - prev_v) / prev_v
+                if abs(r) <= OUTLIER_BOUND:
+                    port_returns.append(r)
 
-        # SPY market returns for beta (approximate from snapshots' sp500 field)
+        # SPY market returns — same outlier filter (snapshot reset
+        # could also corrupt sp500_value field).
         market_returns = []
         for i in range(1, len(snaps)):
             prev_sp = (snaps[i-1] or {}).get("sp500_value", 0)
             cur_sp = (snaps[i] or {}).get("sp500_value", 0)
             if prev_sp > 0 and cur_sp > 0:
-                market_returns.append((cur_sp - prev_sp) / prev_sp)
+                r = (cur_sp - prev_sp) / prev_sp
+                if abs(r) <= OUTLIER_BOUND:
+                    market_returns.append(r)
 
         # === COMPUTE EACH SECTION ===
         portfolio_risk = portfolio_risk_snapshot(
