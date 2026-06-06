@@ -4296,15 +4296,16 @@ def factor_analytics_endpoint():
             current_weights = {}
 
         # Build returns series from snapshots (60d), with outlier filter.
-        # 2026-06-05: Snapshots include cash_correction events (v1-v7
-        # resets) and snapshot-guard skips that produce phantom +30% /
-        # -50% "daily returns" that poison VaR / Sharpe / drawdown math.
-        # Filter any return outside ±15% as an artifact, not a real
-        # trading day. Real equity portfolios rarely move >5% in a day;
-        # 15% is the upper bound for legitimate single-day swings even
-        # in 2020 COVID-style chaos.
+        # Snapshots include cash_correction events and snapshot-guard
+        # skips that produce phantom "daily returns" that poison
+        # VaR / Sharpe / drawdown math. Bound aligned with the new
+        # models.SNAPSHOT_BOGUS_DAILY_RETURN_PCT = 10% — real equity
+        # books with stops + sector caps don't move 10%+ in a single
+        # trading day. Triple defense: save-side reject in
+        # save_portfolio_snapshot, read-side filter in
+        # get_portfolio_snapshots, plus this belt at endpoint level.
         snaps = get_portfolio_snapshots(days=60) or []
-        OUTLIER_BOUND = 0.15  # ±15% — anything beyond is a data artifact
+        OUTLIER_BOUND = 0.10  # ±10% — aligned with snapshot bogus threshold
         port_returns = []
         for i in range(1, len(snaps)):
             prev_v = (snaps[i-1] or {}).get("total_value", 0)

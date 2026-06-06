@@ -991,11 +991,40 @@ def get_options_exposure() -> dict:
     }
 
 
+# 2026-06-05: 10% threshold for "bogus day" detection. Real equity
+# portfolios with stops + sector caps don't move > 10% in a single
+# trading day. Anything beyond is a cash_correction event, a
+# snapshot-guard skip, or some other accounting artifact - NOT a
+# legit trading return. We reject these at save time AND filter
+# them out at read time. Triple defense.
+SNAPSHOT_BOGUS_DAILY_RETURN_PCT = 10.0
+
+
 def save_portfolio_snapshot(total_value: float, cash: float,
                             positions_value: float, daily_ret: float,
                             cum_ret: float, sp500_daily: float,
                             sp500_cum: float, num_pos: int):
-    """Save a daily portfolio snapshot."""
+    """Save a daily portfolio snapshot.
+
+    SAVE-SIDE GUARD: refuses to save any snapshot whose daily_return_pct
+    exceeds ±10%. These are guaranteed to be artifacts (cash correction,
+    phantom guard skip, units mismatch) and would poison every downstream
+    VaR / Sharpe / Drawdown calculation. Logs a warning so the underlying
+    cause can be diagnosed.
+    """
+    try:
+        if abs(float(daily_ret or 0)) > SNAPSHOT_BOGUS_DAILY_RETURN_PCT:
+            import logging as _log
+            _log.getLogger("paper_trader.snapshot").warning(
+                f"SNAPSHOT REJECTED: daily_return_pct={daily_ret:.2f}% "
+                f"exceeds ±{SNAPSHOT_BOGUS_DAILY_RETURN_PCT}% bogus threshold. "
+                f"Likely cause: cash_correction or phantom guard. "
+                f"Not saved to prevent VaR/Sharpe/DD contamination."
+            )
+            return
+    except (TypeError, ValueError):
+        # If daily_ret can't be parsed as float, save anyway (NULL/None is ok)
+        pass
     conn = get_db()
     today = datetime.now().strftime("%Y-%m-%d")
     conn.execute(
@@ -1012,14 +1041,30 @@ def save_portfolio_snapshot(total_value: float, cash: float,
 
 
 def get_portfolio_snapshots(days: int = 365) -> list:
-    """Get portfolio snapshots for equity curve."""
+    """Get portfolio snapshots for equity curve.
+
+    READ-SIDE FILTER: any row whose daily_return_pct exceeds ±10% is
+    excluded from the returned list. Belt-and-suspenders defense in
+    case bogus rows ever land in the table (legacy data, manual SQL,
+    pre-guard saves, etc.).
+    """
     conn = get_db()
     rows = conn.execute(
         """SELECT * FROM portfolio_snapshots
            ORDER BY snapshot_date DESC LIMIT ?""", (days,)
     ).fetchall()
     conn.close()
-    return [dict(row) for row in reversed(rows)]
+    clean = []
+    for row in reversed(rows):
+        r = dict(row)
+        try:
+            dr = r.get("daily_return_pct")
+            if dr is not None and abs(float(dr)) > SNAPSHOT_BOGUS_DAILY_RETURN_PCT:
+                continue  # skip bogus
+        except (TypeError, ValueError):
+            pass
+        clean.append(r)
+    return clean
 
 
 def update_snapshot_sp500(snapshot_date: str, sp500_cum: float, sp500_daily: float = None):
