@@ -109,17 +109,41 @@ def get_vix_safe() -> dict:
                        rejected_reason="out_of_bounds_no_cache")
 
     # === Case 3: Relative move check (vs last-known-good) ===
+    # IMPORTANT: only reject the LIVE reading if (a) the move is suspicious
+    # AND (b) the cached value is more plausible than the live one.
+    #
+    # 2026-06-06 bug fix: previously this check would reject any large
+    # move regardless of direction. When VIX dropped from cached 62.6
+    # (last week's crisis) to live 21.5 (recovery), the guard rejected
+    # the recovery and kept reporting 62.6. We need to allow legitimate
+    # recoveries from CRISIS back to normal.
+    #
+    # The rule: if the cached value is in CRISIS territory (>30) AND the
+    # live reading is in normal territory (<25), this is a legitimate
+    # mean-reversion — trust the live reading. Only reject when both
+    # values are plausible AND the move is too large.
     if last_good > 0 and age_hours < LAST_GOOD_TRUST_HOURS:
         abs_move = abs(raw - last_good)
         pct_move = (abs_move / last_good) * 100.0
+        # NEW: legitimate CRISIS → normal recovery (raw is the more
+        # "stable" / normal-distribution value, cached was the spike)
+        is_crisis_recovery = (last_good > 30 and raw < 25)
+        # NEW: spike INTO crisis is also legitimate (real shock event)
+        is_crisis_onset = (last_good < 20 and raw > 35)
         if (pct_move > VIX_MAX_SINGLE_FETCH_MOVE_PCT
                 or abs_move > VIX_MAX_SINGLE_FETCH_MOVE_ABS):
-            # Reject as suspicious — likely rate-limit artifact or stale
-            # data, not a real intraday VIX move
-            return _result(last_good, "cached_last_good", "MEDIUM",
-                           raw_attempted=raw,
-                           rejected_reason=f"suspicious_move "
-                                          f"{pct_move:.0f}% / {abs_move:.1f}pts")
+            if is_crisis_recovery:
+                # Legitimate mean-reversion — accept live reading
+                pass  # falls through to Case 4 (accept + persist)
+            elif is_crisis_onset:
+                # Real shock event — accept live reading
+                pass  # falls through to Case 4 (accept + persist)
+            else:
+                # Both values plausible AND move suspicious → reject
+                return _result(last_good, "cached_last_good", "MEDIUM",
+                               raw_attempted=raw,
+                               rejected_reason=f"suspicious_move "
+                                              f"{pct_move:.0f}% / {abs_move:.1f}pts")
 
     # === Case 4: Reading passed all checks — persist + return ===
     _persist_last_good(raw)
