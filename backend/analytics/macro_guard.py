@@ -164,8 +164,17 @@ def detect_macro_shocks() -> dict:
     rate_result = results.get("10y_yield", {})
     if rate_result.get("day_change_pct") is not None:
         last_yield = rate_result.get("raw_attempted") or rate_result.get("value")
-        prev_yield = last_yield / (1 + rate_result.get("day_change_pct") / 100)
-        rate_shock_bps = (last_yield - prev_yield) * 100  # 1% = 100bps
+        # Defensive: skip math if last_yield is None or day_change_pct
+        # would cause divide-by-zero. The day_change_pct guard means
+        # we have a number, but raw_attempted can still be None if the
+        # value came from cached fallback only.
+        if (last_yield is not None and last_yield > 0
+                and rate_result.get("day_change_pct") != -100):
+            try:
+                prev_yield = last_yield / (1 + rate_result["day_change_pct"] / 100)
+                rate_shock_bps = (last_yield - prev_yield) * 100  # 1% = 100bps
+            except (ZeroDivisionError, TypeError):
+                rate_shock_bps = None
 
     # Determine regime modifier
     regime_modifier = "NONE"
@@ -224,6 +233,7 @@ def _multi_source_fetch(ticker: str, key: str) -> tuple:
 
 
 def _try_yfinance(ticker: str) -> tuple:
+    import math as _m
     try:
         import yfinance as yf
         df = yf.download(ticker, period="5d", progress=False)
@@ -234,6 +244,9 @@ def _try_yfinance(ticker: str) -> tuple:
             if hasattr(close, "columns"):
                 close = close.iloc[:, 0]
             val = float(close.dropna().iloc[-1])
+            # Reject NaN/Inf FIRST — bounds checks silently pass NaN.
+            if _m.isnan(val) or _m.isinf(val):
+                return None, f"nan_or_inf:{val}"
             # Catch obvious corruption (the VIX=7499 pattern)
             if val < 0 or val > 100000:
                 return None, f"corrupt:{val:.0f}"
@@ -244,7 +257,9 @@ def _try_yfinance(ticker: str) -> tuple:
 
 
 def _try_stooq(ticker: str, key: str) -> tuple:
-    """Stooq fallback. Maps our ticker to Stooq's URL convention."""
+    """Stooq fallback. Maps our ticker to Stooq's URL convention.
+    Same NaN/corruption defenses as yfinance path."""
+    import math as _m
     # Stooq uses different ticker symbols
     stooq_map = {
         "CL=F": "cl.f",
@@ -273,9 +288,11 @@ def _try_stooq(ticker: str, key: str) -> tuple:
         if len(cols) < 7:
             return None, "stooq_malformed"
         close_str = cols[6].strip()
-        if close_str in ("N/D", "", "0"):
+        if close_str in ("N/D", "", "0", "nan", "NaN"):
             return None, "stooq_no_close"
         val = float(close_str)
+        if _m.isnan(val) or _m.isinf(val):
+            return None, f"stooq_nan_or_inf:{val}"
         if val < 0 or val > 100000:
             return None, f"stooq_corrupt:{val:.0f}"
         return val, None

@@ -123,7 +123,7 @@ def get_vix_safe() -> dict:
 
     # === Case 4: Reading passed all checks — persist + return ===
     _persist_last_good(raw)
-    return _result(raw, "yfinance_live", "HIGH",
+    return _result(raw, fetch_source or "yfinance_live", "HIGH",
                    raw_attempted=raw, rejected_reason=None)
 
 
@@ -134,6 +134,7 @@ def get_vix_safe() -> dict:
 def _try_fetch_yfinance(ticker: str = "^VIX") -> tuple:
     """Returns (value or None, error_message). Ticker param lets us
     use this for VIX + proxies (VXX) without duplicating code."""
+    import math as _m
     try:
         import yfinance as yf
         df = yf.download(ticker, period="2d", progress=False)
@@ -146,9 +147,11 @@ def _try_fetch_yfinance(ticker: str = "^VIX") -> tuple:
                     close = close.iloc[:, 0]
                 val = float(close.dropna().iloc[-1])
                 # CRITICAL: morning check found VIX = 7499. yfinance
-                # can return scaled values where decimal is lost or
-                # column mapping is off. Reject anything absurd at this
-                # layer before bounds-check fires.
+                # can also return NaN/Inf from corrupted columns. Reject
+                # all three before the bounds check (which would silently
+                # pass NaN because NaN comparisons always return False).
+                if _m.isnan(val) or _m.isinf(val):
+                    return None, f"nan_or_inf:{val}"
                 if val > 1000 or val < 0:
                     return None, f"scaled_corrupt:{val:.0f}"
                 return val, None
@@ -162,6 +165,7 @@ def _try_fetch_yfinance(ticker: str = "^VIX") -> tuple:
 def _try_fetch_stooq() -> tuple:
     """Stooq is a free alternative data source. No API key needed.
     Returns (value or None, error_message)."""
+    import math as _m
     try:
         import urllib.request
         url = "https://stooq.com/q/l/?s=^vix&f=sd2t2ohlcv&h&e=csv"
@@ -177,9 +181,11 @@ def _try_fetch_stooq() -> tuple:
         if len(cols) < 7:
             return None, "stooq_malformed"
         close_str = cols[6].strip()
-        if close_str in ("N/D", "", "0"):
+        if close_str in ("N/D", "", "0", "nan", "NaN"):
             return None, "stooq_no_close"
         val = float(close_str)
+        if _m.isnan(val) or _m.isinf(val):
+            return None, f"stooq_nan_or_inf:{val}"
         if val > 1000 or val < 0:
             return None, f"stooq_scaled_corrupt:{val:.0f}"
         return val, None

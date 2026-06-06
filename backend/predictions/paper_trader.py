@@ -1183,6 +1183,24 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
     except Exception:
         pass
 
+    # 2026-06-06 Sprint 2: Economic-event sizing override.
+    # If we're in pre-release pause window (30 min before NFP/CPI,
+    # 60 min before FOMC), scale Kelly by the event-specific
+    # multiplier (0.0 for FOMC = no trades, 0.5 for NFP/CPI).
+    # Always reducing, never increasing.
+    try:
+        from analytics.economic_calendar import get_active_event
+        event_state = get_active_event()
+        if event_state.get("in_pre_release_pause"):
+            event_mult = event_state.get("sizing_multiplier", 1.0)
+            kelly_adjusted *= event_mult
+            logger.warning(
+                f"PRE_RELEASE_PAUSE: {event_state.get('rationale')} "
+                f"applied sizing×{event_mult} to {confidence}% conf trade"
+            )
+    except Exception as _ev_e:
+        logger.debug(f"Economic calendar lookup failed (non-fatal): {_ev_e}")
+
     logger.debug(f"KELLY: p={p:.2f} b={b:.2f} full={kelly_full:.3f} half={kelly_half:.3f} "
                  f"adj={kelly_adjusted:.3f} conf={confidence} "
                  f"calibrated_p={calibrated_p}")
