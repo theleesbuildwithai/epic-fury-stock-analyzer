@@ -77,14 +77,16 @@ def get_vix_safe() -> dict:
         else:
             fetch_error = f"{fetch_error} | {err_stooq}"
 
-    # Source 3: VXX proxy (last resort directional indicator)
-    if raw is None:
-        raw_vxx, err_vxx = _try_fetch_vxx_proxy()
-        if raw_vxx is not None:
-            raw = raw_vxx
-            fetch_source = "vxx_proxy"
-        else:
-            fetch_error = f"{fetch_error} | {err_vxx}"
+    # Source 3: VXX proxy DISABLED 2026-06-06.
+    # The VXX/VIX scale of 0.55 was empirically wrong — VXX is a
+    # futures ETF and its dollar price doesn't have a linear ratio
+    # to VIX. Live test showed VXX=$21.55 → proxy returned 39.18
+    # (would be read as ELEVATED/CRISIS) when real VIX was ~21.
+    # Better to fall through to cached or hardcoded neutral than
+    # produce a misleading value. If both yfinance and Stooq fail
+    # AND we have no recent cache, the system uses HARDCODED_NEUTRAL
+    # (20.0) which keeps regime in NORMAL territory.
+    pass  # VXX proxy removed
 
     # === Case 1: No reading at all ===
     if raw is None:
