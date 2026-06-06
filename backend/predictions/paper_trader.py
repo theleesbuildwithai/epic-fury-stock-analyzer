@@ -1987,7 +1987,12 @@ def _per_position_quick_loss_cut(trade: dict, pnl_pct: float, vix: float = 20.0,
 def _cached_vix_for_winlock() -> float:
     """Light VIX getter for the per-position win-lock. Falls back to 20
     on any error so the lock still works. Uses a 5-minute process-local
-    cache to avoid hammering yfinance on every exit cycle."""
+    cache to avoid hammering yfinance on every exit cycle.
+
+    2026-06-06: Now routes through analytics.vix_guard.get_vix_safe()
+    which catches yfinance rate-limit / stale-data inflation. The 5-min
+    process-local cache still avoids redundant calls in the same cycle.
+    """
     global _vix_winlock_cache
     try:
         import time as _t
@@ -1996,13 +2001,22 @@ def _cached_vix_for_winlock() -> float:
             _vix_winlock_cache = {"vix": 20.0, "ts": 0}
         if (now - _vix_winlock_cache.get("ts", 0)) < 300:
             return _vix_winlock_cache.get("vix", 20.0)
-        _throttle()
-        df = yf.download("^VIX", period="2d", progress=False)
-        if df is not None and not df.empty:
-            v = float(_safe_col(df, "Close").dropna().iloc[-1])
-            if 0 < v < 200:
-                _vix_winlock_cache = {"vix": v, "ts": now}
-                return v
+        try:
+            from analytics.vix_guard import get_vix_safe
+            result = get_vix_safe()
+            v = result.get("value", 20.0)
+            # If the guard rejected the live reading, log it once per cycle
+            if result.get("rejected_reason"):
+                logger.warning(
+                    f"VIX guard rejected reading: "
+                    f"raw={result.get('raw_attempted')} → "
+                    f"used={v} ({result.get('source')}, "
+                    f"{result.get('rejected_reason')})"
+                )
+            _vix_winlock_cache = {"vix": v, "ts": now}
+            return v
+        except Exception as _e:
+            logger.debug(f"VIX guard call failed, falling back: {_e}")
     except Exception:
         pass
     return 20.0

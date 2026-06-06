@@ -194,6 +194,23 @@ def combined_regime(market_returns: list, vix_level: float, prices: list = None,
         votes["BULL"] += 1
     elif breadth["regime"] == "DETERIORATING":
         votes["BEAR"] += 2
+
+    # 2026-06-06: Macro shock integration. Detects abnormal day-over-day
+    # moves in 10Y yield / SPY / oil / gold that suggest NFP, CPI, or
+    # FOMC-style surprise. We can't read economic releases directly
+    # without paid APIs, but we CAN detect their downstream effect on
+    # rates and proxies. Hot data = yields up = equity selloff risk.
+    macro_shock = {"regime_modifier": "NONE", "summary": "not_checked"}
+    try:
+        from .macro_guard import detect_macro_shocks
+        macro_shock = detect_macro_shocks()
+        if macro_shock["regime_modifier"] == "ADD_BEAR":
+            votes["BEAR"] += 3  # Heavy weight — macro events drive markets
+        elif macro_shock["regime_modifier"] == "ADD_BULL":
+            votes["BULL"] += 3
+    except Exception:
+        pass  # If macro guard fails, regime detection continues without it
+
     # If no votes (HMM unknown + vol unknown + trend unknown +
     # breadth unknown), default to SIDEWAYS at 0% confidence rather
     # than alphabetical first regime with a meaningless 0% score.
@@ -212,6 +229,7 @@ def combined_regime(market_returns: list, vix_level: float, prices: list = None,
             "volatility": vol,
             "trend": trend,
             "breadth": breadth,
+            "macro_shock": macro_shock,
         },
         "votes": votes,
     }
