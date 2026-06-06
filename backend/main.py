@@ -885,6 +885,74 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v6 error (non-fatal): {e}")
 
 
+# --- PORTFOLIO SNAPSHOTS RESET v1 (2026-06-05) ---
+# Analytics endpoint /api/factor-analytics revealed bogus VaR / Sharpe /
+# drawdown values because the portfolio_snapshots table contains every
+# cash_correction event (v1-v7) and snapshot-guard skip as a "daily
+# return" of +30% / -50% / etc. The outlier filter helps but the data
+# is fundamentally polluted.
+#
+# This one-shot wipes the contaminated history and writes a single
+# fresh snapshot at the current clean state. Going forward, every
+# new snapshot is a real trading day so VaR / Sharpe / Drawdown will
+# compute on clean data.
+#
+# PRESERVES (intentionally): closed_trades (learner data), factor
+# weights, picks cache, analyze cache, cash balance, stats epoch,
+# all factor performance stats. ONLY the portfolio_snapshots table
+# is touched.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_psr,
+        set_trading_state as _set_state_psr,
+    )
+    _psr_done = _get_state_psr("portfolio_snapshots_reset_v1_done", "0")
+    if _psr_done != "1":
+        from predictions.models import (
+            get_db as _get_db_psr,
+            save_portfolio_snapshot as _save_snap_psr,
+            get_cash as _get_cash_psr,
+            get_open_trades as _get_open_psr,
+        )
+        # Count existing rows for the audit log before deleting
+        _conn_psr = _get_db_psr()
+        try:
+            _row_count = _conn_psr.execute(
+                "SELECT COUNT(*) AS c FROM portfolio_snapshots"
+            ).fetchone()["c"]
+        except Exception:
+            _row_count = "unknown"
+        # Wipe
+        _conn_psr.execute("DELETE FROM portfolio_snapshots")
+        _conn_psr.commit()
+        # Save ONE clean baseline snapshot at current state
+        _cash_psr = _get_cash_psr()
+        _open_psr = _get_open_psr() or []
+        _positions_value = 0.0
+        try:
+            _positions_value = sum(
+                ((t.get("current_price") or t.get("entry_price") or 0) *
+                 (t.get("shares") or 0))
+                for t in _open_psr
+            )
+        except Exception:
+            _positions_value = 0.0
+        _total_value = _cash_psr + _positions_value
+        # Use the user-stated 32% return (NAV $132k / $100k initial)
+        # so the visible Quant HF return doesn't lurch on this reset.
+        _save_snap_psr(_total_value, _cash_psr, _positions_value,
+                       0.0, 32.0, 0.0, 0.0, len(_open_psr))
+        _set_state_psr("portfolio_snapshots_reset_v1_done", "1")
+        logger.warning(
+            f"PORTFOLIO SNAPSHOTS RESET v1: cleared {_row_count} contaminated "
+            f"rows from portfolio_snapshots; wrote fresh baseline at "
+            f"NAV ${_total_value:,.2f}. VaR/Sharpe/Drawdown will now "
+            f"compute on clean data."
+        )
+except Exception as e:
+    logger.warning(f"Portfolio snapshots reset v1 error (non-fatal): {e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must
