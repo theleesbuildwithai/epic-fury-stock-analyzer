@@ -3177,29 +3177,46 @@ def _prewarm_picks_bg():
                     s3_restore = restore_picks_from_s3()
                     if s3_restore.get("ok") and s3_restore.get("picks"):
                         _s3_picks = s3_restore["picks"]
-                        # Validate regime data plausibility
+                        # 2026-06-06: SANITIZE rather than REJECT.
+                        # Previous behavior: when VIX or SP500 in S3 cache was
+                        # corrupt (the morning VIX=7499 bug), the whole picks
+                        # set was rejected, leaving the endpoint cold for hours.
+                        # New behavior: sanitize the corrupt regime field to
+                        # None (so downstream handles "no signal" cleanly) and
+                        # serve the picks. The picks themselves are stock
+                        # tickers and don't depend on the saved regime context.
+                        # Next live regen will produce fresh picks with the
+                        # new vix_guard's validated VIX value.
                         _s3_regime = _s3_picks.get("regime") or {}
                         _s3_sp = _s3_regime.get("sp500_price")
                         _s3_vx = _s3_regime.get("vix_level")
-                        # sp500 must be None or in [1000, 20000]; vix must be None/0/in [5, 60]
                         _sp_ok = (_s3_sp is None) or (1000 < float(_s3_sp) < 20000)
                         _vx_ok = (_s3_vx is None) or (float(_s3_vx) == 0) or (5 < float(_s3_vx) < 60)
-                        if not (_sp_ok and _vx_ok):
+                        _sanitized = []
+                        if not _sp_ok:
+                            _s3_regime["sp500_price"] = None
+                            _sanitized.append(f"sp500={_s3_sp}→None")
+                        if not _vx_ok:
+                            _s3_regime["vix_level"] = None
+                            _sanitized.append(f"vix={_s3_vx}→None")
+                        if _sanitized:
+                            _s3_picks["regime"] = _s3_regime
                             logger.warning(
-                                f"PICKS S3 RESTORE REJECTED — corrupt regime "
-                                f"(sp500={_s3_sp}, vix={_s3_vx}). Waiting for live regen."
+                                f"PICKS S3 RESTORE — SANITIZED corrupt regime "
+                                f"({', '.join(_sanitized)}). Picks still served; "
+                                f"next live regen will produce fresh regime."
                             )
-                        else:
-                            from analysis.quant_engine import _quant_cache
-                            _quant_cache["quant_picks"] = {
-                                "data": _s3_picks,
-                                "time": _t.time(),
-                            }
-                            logger.warning(
-                                f"PICKS S3 RESTORE: {s3_restore.get('long_count')} longs + "
-                                f"{s3_restore.get('short_count')} shorts loaded from S3 backup "
-                                f"(regime sp500={_s3_sp}, vix={_s3_vx} — validated)"
-                            )
+                        from analysis.quant_engine import _quant_cache
+                        _quant_cache["quant_picks"] = {
+                            "data": _s3_picks,
+                            "time": _t.time(),
+                        }
+                        logger.warning(
+                            f"PICKS S3 RESTORE: {s3_restore.get('long_count')} longs + "
+                            f"{s3_restore.get('short_count')} shorts loaded from S3 backup "
+                            f"(regime sp500={_s3_regime.get('sp500_price')}, "
+                            f"vix={_s3_regime.get('vix_level')})"
+                        )
                 except Exception as _e:
                     logger.debug(f"S3 restore skipped (non-fatal): {_e}")
 
