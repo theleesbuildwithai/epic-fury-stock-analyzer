@@ -9008,52 +9008,89 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
 #  RENTECH API ENDPOINTS
 # ============================================================
 
+def _get_cached_picks():
+    """2026-06-07 fix: return cached quant picks without ever triggering a
+    synchronous generate_quant_picks() call (which takes 5-10 minutes and
+    would hang the web request to the App Runner timeout).
+
+    Order:
+      1. In-memory _quant_cache (warm)
+      2. S3 snapshot via trading_state (warm-restart fallback)
+      3. None (cold — caller should return placeholder)
+    """
+    try:
+        from analysis.quant_engine import _quant_cache
+        cache_entry = _quant_cache.get("quant_picks")
+        if cache_entry and cache_entry.get("data"):
+            return cache_entry["data"]
+    except Exception:
+        pass
+    try:
+        import json as _j
+        from predictions.models import get_trading_state as _gts
+        raw = _gts("picks_s3_snapshot", "")
+        if raw:
+            return _j.loads(raw)
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/api/rentech/pairs")
 def rentech_pairs(request: Request):
-    """Get current pairs trading opportunities (stat arb)."""
+    """Get current pairs trading opportunities (stat arb).
+    2026-06-07: reads from cached picks — never blocks on a fresh scan."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
+        picks = _get_cached_picks() or {}
         return {
             "pairs_trades": picks.get("pairs_trades", []),
             "regime": picks.get("regime", {}),
             "timestamp": picks.get("generated_at", ""),
+            "cache_status": "cached" if picks else "cold",
         }
     except Exception as e:
         logger.error(f"RenTech pairs error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get pairs data")
+        return {"pairs_trades": [], "regime": {}, "cache_status": "error",
+                "error": str(e)[:200]}
 
 
 @app.get("/api/rentech/risk")
 def rentech_risk(request: Request):
-    """Get portfolio risk assessment (sector concentration, beta, correlation)."""
+    """Get portfolio risk assessment (sector concentration, beta, correlation).
+    2026-06-07: reads from cached picks — never blocks on a fresh scan."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
+        picks = _get_cached_picks() or {}
         return {
             "portfolio_risk": picks.get("portfolio_risk", {}),
             "circuit_breaker": picks.get("circuit_breaker", {}),
             "regime": picks.get("regime", {}),
+            "cache_status": "cached" if picks else "cold",
         }
     except Exception as e:
         logger.error(f"RenTech risk error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get risk data")
+        return {"portfolio_risk": {}, "circuit_breaker": {}, "regime": {},
+                "cache_status": "error", "error": str(e)[:200]}
 
 
 @app.get("/api/rentech/mean-reversion")
 def rentech_mean_reversion(request: Request):
-    """Get mean reversion trade setups (RSI2 Connors, VWAP, Bollinger)."""
+    """Get mean reversion trade setups (RSI2 Connors, VWAP, Bollinger).
+    2026-06-07: reads from cached picks — never blocks on a fresh scan."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
+        picks = _get_cached_picks() or {}
         return {
             "mean_reversion_setups": picks.get("mean_reversion_setups", []),
             "regime": picks.get("regime", {}),
             "timestamp": picks.get("generated_at", ""),
+            "cache_status": "cached" if picks else "cold",
         }
     except Exception as e:
         logger.error(f"RenTech mean reversion error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get mean reversion data")
+        return {"mean_reversion_setups": [], "regime": {},
+                "cache_status": "error", "error": str(e)[:200]}
 
 
 @app.get("/api/rentech/alt-data/{ticker}")
@@ -9072,14 +9109,19 @@ def rentech_alt_data(request: Request, ticker: str):
 
 @app.get("/api/rentech/earnings-shield")
 def rentech_earnings_shield(request: Request):
-    """Get stocks blocked/warned due to imminent earnings."""
+    """Get stocks blocked/warned due to imminent earnings.
+    2026-06-07: reads from cached picks — never blocks on a fresh scan."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
-        return picks.get("earnings_shield", {"blocked": [], "warning": []})
+        picks = _get_cached_picks() or {}
+        result = picks.get("earnings_shield", {"blocked": [], "warning": []})
+        if isinstance(result, dict):
+            result["cache_status"] = "cached" if picks else "cold"
+        return result
     except Exception as e:
         logger.error(f"Earnings shield error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get earnings data")
+        return {"blocked": [], "warning": [],
+                "cache_status": "error", "error": str(e)[:200]}
 
 
 @app.get("/api/rentech/sector-rotation")
@@ -9148,10 +9190,11 @@ def rentech_options_flow(request: Request, ticker: str):
 
 @app.get("/api/rentech/dashboard")
 def rentech_dashboard(request: Request):
-    """Full RenTech dashboard — all data in one call."""
+    """Full RenTech dashboard — all data in one call.
+    2026-06-07: reads from cached picks — never blocks on a fresh scan."""
     check_rate_limit(request.client.host)
     try:
-        picks = generate_quant_picks()
+        picks = _get_cached_picks() or {}
         perf = get_performance_analytics()
         portfolio = get_portfolio_state()
 
@@ -9180,10 +9223,19 @@ def rentech_dashboard(request: Request):
             "top_longs": picks.get("long_picks", [])[:5],
             "top_shorts": picks.get("short_picks", [])[:5],
             "timestamp": picks.get("generated_at", ""),
+            "cache_status": "cached" if picks else "cold",
         }
     except Exception as e:
         logger.error(f"RenTech dashboard error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load RenTech dashboard")
+        # 2026-06-07: return graceful empty response instead of 500 so
+        # the dashboard UI can render placeholder cards instead of breaking.
+        return {
+            "regime": {}, "pairs_trades": [], "mean_reversion_setups": [],
+            "portfolio_risk": {}, "circuit_breaker": {},
+            "performance": {}, "portfolio": {},
+            "top_longs": [], "top_shorts": [],
+            "cache_status": "error", "error": str(e)[:200],
+        }
 
 
 # --- Serve Frontend (in production, the built React app is here) ---
