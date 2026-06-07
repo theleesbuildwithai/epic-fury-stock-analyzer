@@ -120,21 +120,38 @@ def get_vix_safe() -> dict:
     # the recovery and kept reporting 62.6. We need to allow legitimate
     # recoveries from CRISIS back to normal.
     #
-    # The rule: if the cached value is in CRISIS territory (>30) AND the
-    # live reading is in normal territory (<25), this is a legitimate
-    # mean-reversion — trust the live reading. Only reject when both
-    # values are plausible AND the move is too large.
+    # 2026-06-07 hardening: widened recovery/onset thresholds to catch
+    # more edge cases. Added stale-crisis override: if the cache is in
+    # CRISIS territory (>35) AND older than CRISIS_STALE_HOURS (4h),
+    # distrust it completely and accept any plausible live reading.
+    # Real VIX crises don't stay above 35 for days on end without being
+    # reflected in yfinance — a stale crisis cache is almost certainly
+    # a prior spike that has since recovered.
+    CRISIS_STALE_HOURS = 4.0   # cache in crisis zone + older than this → distrust it
     if last_good > 0 and age_hours < LAST_GOOD_TRUST_HOURS:
         abs_move = abs(raw - last_good)
         pct_move = (abs_move / last_good) * 100.0
-        # NEW: legitimate CRISIS → normal recovery (raw is the more
-        # "stable" / normal-distribution value, cached was the spike)
-        is_crisis_recovery = (last_good > 30 and raw < 25)
-        # NEW: spike INTO crisis is also legitimate (real shock event)
-        is_crisis_onset = (last_good < 20 and raw > 35)
+
+        # Layer A: stale-crisis override — if cached value is crisis-level
+        # AND it's been sitting there for > 4 hours without being refreshed,
+        # it's almost certainly a prior spike. Accept any sane live reading.
+        stale_crisis_cache = (last_good > 35 and age_hours > CRISIS_STALE_HOURS
+                              and VIX_ABSOLUTE_MIN <= raw <= VIX_ABSOLUTE_MAX)
+
+        # Layer B: legitimate CRISIS → normal recovery
+        # Wider threshold than before: cached > 30, live < 30 (was < 25)
+        is_crisis_recovery = (last_good > 30 and raw < 30)
+
+        # Layer C: spike INTO crisis is also legitimate (real shock event)
+        # Wider: cached < 25, live > 35 (was: cached < 20, live > 35)
+        is_crisis_onset = (last_good < 25 and raw > 35)
+
         if (pct_move > VIX_MAX_SINGLE_FETCH_MOVE_PCT
                 or abs_move > VIX_MAX_SINGLE_FETCH_MOVE_ABS):
-            if is_crisis_recovery:
+            if stale_crisis_cache:
+                # Stale crisis cache — always trust the live reading over it
+                pass  # falls through to Case 4 (accept + persist)
+            elif is_crisis_recovery:
                 # Legitimate mean-reversion — accept live reading
                 pass  # falls through to Case 4 (accept + persist)
             elif is_crisis_onset:

@@ -208,6 +208,17 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: add times_seen column to geo_events if missing (for existing DBs).
+    # Tracks how many times the same event_key has been re-detected from news,
+    # which drives the confidence tier upgrade logic in save_geo_event().
+    try:
+        conn.execute("SELECT times_seen FROM geo_events LIMIT 1")
+    except Exception:
+        try:
+            conn.execute("ALTER TABLE geo_events ADD COLUMN times_seen INTEGER DEFAULT 1")
+        except Exception:
+            pass
+
     # Initialize paper_cash if empty
     existing = conn.execute("SELECT cash FROM paper_cash WHERE id=1").fetchone()
     if not existing:
@@ -1126,30 +1137,85 @@ def get_signal_weights() -> dict:
 #  GEOPOLITICAL EVENT TRACKING
 # ============================================================
 
+_GEO_CONFIDENCE_TIERS = ["very_low", "low", "medium", "high"]
+
+def _geo_upgrade_confidence(current: str, incoming: str, times_seen: int) -> str:
+    """Confidence can only ever go UP, never down.
+
+    Three upgrade paths (any one is sufficient):
+      1. times_seen reaches a threshold (accumulated sightings over time)
+      2. incoming confidence is higher than the current stored value
+      3. Combined: being seen often AND having a better incoming reading
+
+    Thresholds (times_seen):
+      1-2   → no upgrade from this path alone
+      3-4   → at least 'low'
+      5-9   → at least 'medium'
+      10+   → at least 'high'
+    """
+    tier = lambda c: _GEO_CONFIDENCE_TIERS.index(c) if c in _GEO_CONFIDENCE_TIERS else 0
+    cur_idx = tier(current or "very_low")
+    inc_idx = tier(incoming or "very_low")
+    # Threshold-based minimum from times_seen
+    if times_seen >= 10:
+        floor_idx = tier("high")
+    elif times_seen >= 5:
+        floor_idx = tier("medium")
+    elif times_seen >= 3:
+        floor_idx = tier("low")
+    else:
+        floor_idx = 0
+    # Take the maximum of: current, incoming, and threshold floor
+    best_idx = max(cur_idx, inc_idx, floor_idx)
+    return _GEO_CONFIDENCE_TIERS[best_idx]
+
+
 def save_geo_event(event_key: str, event_type: str, region: str,
                    description: str, estimated_date: str, confidence: str = "low",
                    source_headline: str = "", source_feed: str = ""):
-    """Save or update a detected geopolitical event. Manual overrides are never overwritten."""
+    """Save or update a detected geopolitical event.
+
+    Safety rules:
+      - Manual overrides are never overwritten (only last_seen_at updated)
+      - Confidence can only ever increase, never decrease
+      - times_seen is incremented on every re-sighting and drives tier upgrades
+      - detected_at (first seen) is preserved on updates — INSERT OR REPLACE
+        would silently reset it to 'now', breaking the timeline
+    """
     conn = get_db()
     now = datetime.now().isoformat()
-    # Check if manual override exists — don't overwrite its date
     existing = conn.execute(
-        "SELECT is_manual_override, estimated_date FROM geo_events WHERE event_key=?",
+        "SELECT is_manual_override, confidence, times_seen, detected_at FROM geo_events WHERE event_key=?",
         (event_key,)
     ).fetchone()
+
     if existing and existing["is_manual_override"]:
-        # Just update last_seen_at, don't touch the date
+        # Manual override — only touch last_seen_at and headline, nothing else
         conn.execute(
             "UPDATE geo_events SET last_seen_at=?, source_headline=?, source_feed=? WHERE event_key=?",
             (now, source_headline, source_feed, event_key)
         )
-    else:
+    elif existing:
+        # Existing auto-detected event — increment sightings, upgrade confidence only
+        new_times = (existing["times_seen"] or 1) + 1
+        new_conf = _geo_upgrade_confidence(
+            existing["confidence"] or "very_low", confidence, new_times
+        )
         conn.execute(
-            """INSERT OR REPLACE INTO geo_events
+            """UPDATE geo_events
+               SET last_seen_at=?, source_headline=?, source_feed=?,
+                   times_seen=?, confidence=?
+               WHERE event_key=?""",
+            (now, source_headline, source_feed, new_times, new_conf, event_key)
+        )
+    else:
+        # Brand-new event — INSERT (detected_at = now, times_seen = 1)
+        conn.execute(
+            """INSERT INTO geo_events
                (event_key, event_type, region, description, estimated_date,
                 confidence, source_headline, source_feed, detected_at, last_seen_at,
-                outcome, is_manual_override)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)""",
+                outcome, is_manual_override, times_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 1)""",
             (event_key, event_type, region, description, estimated_date,
              confidence, source_headline, source_feed, now, now)
         )
@@ -1207,12 +1273,34 @@ def get_active_geo_events() -> list:
 
 
 def update_geo_event_outcome(event_key: str, outcome: str):
-    """Update the outcome of a geo event (positive, negative, expired_unknown)."""
+    """Update the outcome of a geo event (positive, negative, expired_unknown).
+
+    When a real outcome (positive/negative) is confirmed from news, the event
+    was clearly significant enough to produce a market reaction — bump confidence
+    to at least 'medium' so the learning system can weight it properly.
+    expired_unknown means the event passed with no detectable market signal,
+    so we leave confidence as-is (don't retroactively inflate it).
+    """
     conn = get_db()
-    conn.execute(
-        "UPDATE geo_events SET outcome=?, outcome_detected_at=? WHERE event_key=?",
-        (outcome, datetime.now().isoformat(), event_key)
-    )
+    now = datetime.now().isoformat()
+    if outcome in ("positive", "negative"):
+        # Confirmed real outcome — upgrade confidence to at least medium
+        conn.execute(
+            """UPDATE geo_events
+               SET outcome=?, outcome_detected_at=?,
+                   confidence = CASE
+                       WHEN confidence IN ('very_low', 'low') THEN 'medium'
+                       ELSE confidence
+                   END
+               WHERE event_key=?""",
+            (outcome, now, event_key)
+        )
+    else:
+        # expired_unknown or other — just record the outcome, leave confidence alone
+        conn.execute(
+            "UPDATE geo_events SET outcome=?, outcome_detected_at=? WHERE event_key=?",
+            (outcome, now, event_key)
+        )
     conn.commit()
     conn.close()
 
