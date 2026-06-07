@@ -5369,6 +5369,40 @@ def _cached_response(key: str, fn, ttl: int = _RESPONSE_CACHE_TTL):
             return {"ok": False, "reason": str(_e)[:200]}
 
 
+@app.post("/api/admin/vix-cache-reset")
+def admin_vix_cache_reset(request: Request):
+    """One-time admin: clear the persisted vix_guard last-known-good cache,
+    then immediately refetch a fresh value. Used to recover from a stale
+    crisis cache that the in-band stale-crisis layer can't auto-clear (e.g.,
+    weekend window when no fresh live reading is available to compare).
+
+    Returns the BEFORE state, the action taken, and the AFTER state from a
+    fresh get_vix_safe() call.
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_trading_state, set_trading_state
+        from analytics.vix_guard import (
+            get_vix_safe, LAST_GOOD_VIX_KEY, LAST_GOOD_VIX_TS_KEY,
+        )
+        before_val = get_trading_state(LAST_GOOD_VIX_KEY, "")
+        before_ts = get_trading_state(LAST_GOOD_VIX_TS_KEY, "")
+        # Clear: empty value + empty timestamp makes _load_last_good
+        # return (HARDCODED_NEUTRAL, 0.0) — clean slate. Then refetch
+        # immediately so the next call to system-thinking sees the new value.
+        set_trading_state(LAST_GOOD_VIX_KEY, "")
+        set_trading_state(LAST_GOOD_VIX_TS_KEY, "")
+        after = get_vix_safe()
+        return {
+            "ok": True,
+            "before": {"value": before_val, "timestamp": before_ts},
+            "action": "cleared LAST_GOOD_VIX + LAST_GOOD_VIX_TS, then refetched",
+            "after": after,
+        }
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:300]}
+
+
 @app.get("/api/trade-math-audit")
 def trade_math_audit(request: Request):
     """Live reconciliation of trade math. Flags phantom trades, inflated
