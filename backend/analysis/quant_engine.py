@@ -1193,61 +1193,67 @@ def detect_market_regime() -> dict:
         except Exception as e:
             logger.warning(f"Regime: S&P 500 data failed: {e}")
 
-        # --- Signal 2: VIX level (with FAILPROOF guard, see _validate_vix below) ---
+        # --- Signal 2: VIX level (routed through vix_guard.get_vix_safe) ---
+        # 2026-06-07 fix: previously this did its own raw yf.download('^VIX')
+        # which bypassed the bulletproof multi-source vix_guard. On weekend
+        # the raw call returned a stale 62.59 that nothing could correct,
+        # while vix_guard's persistent cache + multi-source fallback
+        # correctly held 21.51. NOW the single source of truth for VIX
+        # everywhere is get_vix_safe(). If it fails, falls back to neutral.
         try:
-            _throttle()
-            vix_df = yf.download("^VIX", period="5d", progress=False)
-            if vix_df is not None and not vix_df.empty:
-                vix_raw = float(_safe_close(vix_df).dropna().iloc[-1])
-                # Guard returns (validated_value, was_corrupt) — see _validate_vix
-                vix_val, was_corrupt = _validate_vix(vix_raw)
-                if was_corrupt:
-                    logger.warning(
-                        f"Regime: VIX guard fired — raw={vix_raw:.2f} "
-                        f"→ validated={vix_val:.2f} (corrupt or jumped)"
-                    )
+            from analytics.vix_guard import get_vix_safe as _vix_safe_call
+            _vg = _vix_safe_call()
+            vix_val = float(_vg.get("value") or 20.0)
+            _vg_source = _vg.get("source", "unknown")
+            _vg_conf = _vg.get("confidence", "LOW")
+            _vg_rej = _vg.get("rejected_reason")
+            if _vg_rej:
+                logger.warning(
+                    f"Regime: vix_guard rejected raw — using {vix_val:.2f} "
+                    f"({_vg_source}, conf={_vg_conf}). Reason: {_vg_rej}"
+                )
+                regime_data["details"].append(
+                    f"VIX guard fell back to {vix_val:.1f} ({_vg_source})"
+                )
+            # Last-resort guardrail — vix_guard should never let an
+            # out-of-bounds value through, but defense in depth.
+            if not (5 < vix_val < 90):
+                logger.error(
+                    f"Regime: even vix_guard returned {vix_val} out of bounds; "
+                    f"hard-fallback to 18.0"
+                )
+                regime_data["vix_level"] = 18.0
+                regime_data["vix_zone"] = "normal"
+                regime_data["details"].append(
+                    f"VIX hard-fallback after guard returned {vix_val:.1f}"
+                )
+            else:
+                regime_data["vix_level"] = round(vix_val, 2)
+                if vix_val < 15:
+                    regime_data["vix_zone"] = "complacent"
                     regime_data["details"].append(
-                        f"VIX raw {vix_raw:.1f} flagged by guard — using {vix_val:.1f}"
+                        f"VIX at {vix_val:.1f} — low fear, possible complacency"
                     )
-                # Old simple-bounds check kept as last-resort guardrail in case
-                # validator returns something nonsense (defense in depth).
-                if not (5 < vix_val < 90):
-                    logger.error(
-                        f"Regime: even guarded VIX {vix_val} out of bounds; "
-                        f"hard-fallback to 18.0"
-                    )
-                    regime_data["vix_level"] = 18.0
+                elif vix_val < 20:
                     regime_data["vix_zone"] = "normal"
+                    regime_data["details"].append(f"VIX at {vix_val:.1f} — normal range")
+                elif vix_val < 25:
+                    regime_data["vix_zone"] = "elevated"
                     regime_data["details"].append(
-                        f"VIX hard-fallback after guard returned {vix_val:.1f}"
+                        f"VIX at {vix_val:.1f} — elevated uncertainty"
+                    )
+                elif vix_val < 35:
+                    regime_data["vix_zone"] = "fear"
+                    regime_data["details"].append(
+                        f"VIX at {vix_val:.1f} — significant fear in market"
                     )
                 else:
-                    regime_data["vix_level"] = round(vix_val, 2)
-                    if vix_val < 15:
-                        regime_data["vix_zone"] = "complacent"
-                        regime_data["details"].append(
-                            f"VIX at {vix_val:.1f} — low fear, possible complacency"
-                        )
-                    elif vix_val < 20:
-                        regime_data["vix_zone"] = "normal"
-                        regime_data["details"].append(f"VIX at {vix_val:.1f} — normal range")
-                    elif vix_val < 25:
-                        regime_data["vix_zone"] = "elevated"
-                        regime_data["details"].append(
-                            f"VIX at {vix_val:.1f} — elevated uncertainty"
-                        )
-                    elif vix_val < 35:
-                        regime_data["vix_zone"] = "fear"
-                        regime_data["details"].append(
-                            f"VIX at {vix_val:.1f} — significant fear in market"
-                        )
-                    else:
-                        regime_data["vix_zone"] = "crisis"
-                        regime_data["details"].append(
-                            f"VIX at {vix_val:.1f} — CRISIS level, extreme caution"
-                        )
+                    regime_data["vix_zone"] = "crisis"
+                    regime_data["details"].append(
+                        f"VIX at {vix_val:.1f} — CRISIS level, extreme caution"
+                    )
         except Exception as e:
-            logger.warning(f"Regime: VIX data failed: {e}")
+            logger.warning(f"Regime: vix_guard call failed: {e}")
 
         # --- Signal 3: Market Breadth ---
         # % of stocks in our universe above their 50-day SMA
