@@ -2399,7 +2399,8 @@ def _check_daily_profit_limit():
 
     try:
         portfolio = get_portfolio_state()
-        total_value = portfolio.get("total_value", 100000)
+        # 2026-06-07: use ORIGINAL_CAPITAL fallback (single source of truth)
+        total_value = portfolio.get("total_value", ORIGINAL_CAPITAL)
         num_positions = portfolio.get("num_positions", 0) or 0
 
         # ROOT-CAUSE GUARD: with ZERO open positions there cannot be a real
@@ -2550,7 +2551,8 @@ def _adaptive_profit_protection():
 
     try:
         portfolio = get_portfolio_state()
-        total_value = portfolio.get("total_value", 100000)
+        # 2026-06-07: use ORIGINAL_CAPITAL fallback (single source of truth)
+        total_value = portfolio.get("total_value", ORIGINAL_CAPITAL)
         total_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
 
         # Track peak return
@@ -4869,51 +4871,73 @@ def trade_history(request: Request):
 
 @app.get("/api/equity-curve")
 def equity_curve(request: Request):
-    """Get equity curve data — fund performance since March 30, 2026."""
+    """Get equity curve data — fund performance since March 30, 2026.
+
+    2026-06-07 fix: previously had two bugs caused by hardcoded $100k:
+      1. Rebase math wrote `value = 100000 * (1 + return/100)` regardless
+         of the actual baseline ($109k after F17). With Jun-6 snapshot
+         carrying a stale cum_ret built against the old $100k baseline and
+         today's cum_ret built against the new $109k baseline, the rebase
+         math produced wildly wrong values like -10.9% / $89,100 when the
+         real return was +21.11% / $132,012.66.
+      2. `initial_capital` response field hardcoded 100000.
+    Both now reference ORIGINAL_CAPITAL (single source of truth, $109k).
+    """
     check_rate_limit(request.client.host)
     try:
         from predictions.models import get_portfolio_snapshots
+        from predictions.paper_trader import ORIGINAL_CAPITAL as _ORIG
         snapshots = get_portfolio_snapshots(days=365)
 
-        # Build fund equity curve
+        # Build fund equity curve from absolute total_value, computing
+        # return_pct fresh each render against ORIGINAL_CAPITAL. This way
+        # the displayed % is always consistent with the current baseline,
+        # regardless of when each snapshot was originally written.
         fund_curve = []
         for s in snapshots:
+            try:
+                _tv = float(s.get("total_value") or 0)
+            except Exception:
+                continue
+            if _tv <= 0:
+                continue
             fund_curve.append({
                 "date": s["snapshot_date"],
-                "value": round(s["total_value"], 2),
-                "return_pct": round(s.get("cumulative_return_pct", 0), 2),
+                "value": round(_tv, 2),
+                "return_pct": round(((_tv / _ORIG) - 1.0) * 100.0, 2),
             })
 
-        # If no snapshots, create starting point
+        # If no snapshots, create starting point at ORIGINAL_CAPITAL
         if not fund_curve:
-            fund_curve = [{"date": "2026-03-30", "value": 100000, "return_pct": 0}]
+            fund_curve = [{"date": "2026-03-30", "value": _ORIG, "return_pct": 0}]
 
-        # Get current portfolio state for latest data point
+        # Get current portfolio state for latest data point — always
+        # overwrites today's snapshot with the live portfolio value, which
+        # is the multi-source-of-truth NAV.
         try:
             portfolio = get_portfolio_state()
             today = dt.now().strftime("%Y-%m-%d")
-            current_ret = portfolio.get("total_return_pct", 0)
+            _live_total = float(portfolio.get("total_value") or _ORIG)
+            _live_ret = round(((_live_total / _ORIG) - 1.0) * 100.0, 2)
             if fund_curve and fund_curve[-1]["date"] != today:
                 fund_curve.append({
                     "date": today,
-                    "value": round(portfolio.get("total_value", 100000), 2),
-                    "return_pct": round(current_ret, 2),
+                    "value": round(_live_total, 2),
+                    "return_pct": _live_ret,
                 })
             elif fund_curve:
-                fund_curve[-1]["value"] = round(portfolio.get("total_value", 100000), 2)
-                fund_curve[-1]["return_pct"] = round(current_ret, 2)
+                fund_curve[-1]["value"] = round(_live_total, 2)
+                fund_curve[-1]["return_pct"] = _live_ret
         except Exception:
             pass
 
         # Filter to only include dates >= March 30
         fund_curve = [p for p in fund_curve if p["date"] >= "2026-03-30"]
 
-        # Rebase so March 30 = 0%
-        if fund_curve and fund_curve[0]["return_pct"] != 0:
-            base = fund_curve[0]["return_pct"]
-            for p in fund_curve:
-                p["return_pct"] = round(p["return_pct"] - base, 2)
-                p["value"] = round(100000 * (1 + p["return_pct"] / 100), 2)
+        # No rebase math needed — value and return_pct were both computed
+        # from absolute total_value against ORIGINAL_CAPITAL, so they're
+        # internally consistent and the first point may legitimately be
+        # non-zero (e.g. fund started above baseline).
 
         # Build SP500 series from same snapshots so frontend can overlay
         # SANITY BOUNDS 2026-05-17: drop points where sp500 cum is outside
@@ -4989,7 +5013,7 @@ def equity_curve(request: Request):
             "fund": fund_curve,
             "sp500": sp500_curve,
             "start_date": "2026-03-30",
-            "initial_capital": 100000,
+            "initial_capital": _ORIG,  # 2026-06-07 fix: was hardcoded 100000
         }
     except Exception as e:
         logger.error(f"Equity curve error: {e}")
