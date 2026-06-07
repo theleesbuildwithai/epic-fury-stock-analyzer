@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import time
 import json
+import math
 import logging
 import threading
 from datetime import datetime, timedelta
@@ -231,8 +232,12 @@ def prewarm_benchmark_cache():
 
 
 # Portfolio configuration
-ORIGINAL_CAPITAL = 100_000.0  # What we ACTUALLY started with — used for total return calculation
-INITIAL_CAPITAL = 109_000.0   # Current capital level — used for cash init if no S3 restore
+# 2026-06-06 F17 fix: previously ORIGINAL_CAPITAL=100k and INITIAL_CAPITAL=109k
+# produced a phantom +9.0% return on a fresh DB with no trades. Aligning both
+# to 109k makes the displayed return reflect actual fund performance from the
+# real starting capital. Cash init = return baseline = same number.
+ORIGINAL_CAPITAL = 109_000.0  # Real starting capital — used for total return calc
+INITIAL_CAPITAL = 109_000.0   # Cash init level — kept equal to ORIGINAL_CAPITAL
 MAX_POSITIONS = 999  # No limit — only constrained by cash
 STOP_LOSS_PCT = 0.05  # Default fallback — overridden by per-stock ATR calculation
 DEFAULT_HOLD_DAYS = 30
@@ -255,6 +260,49 @@ DEFAULT_HOLD_DAYS = 30
 # Set to False to disable capital preservation and trade aggressively
 PRESERVATION_ENABLED = False
 PRESERVATION_THRESHOLD = 8.0  # Only matters when PRESERVATION_ENABLED = True
+
+def _short_aware_positions_value(open_trades, current_prices) -> float:
+    """Single source of truth for the position-side contribution to NAV.
+
+    F2/F3 fix (2026-06-06): three callsites used to compute this
+    inline with `sum(price * shares)`, which is correct for longs but
+    WRONG for shorts. For shorts, the contribution to NAV is the
+    short-sale convention: entry_value + unrealized_pnl_short, which
+    equals (2*entry - current) * shares. Using `price * shares` for
+    shorts gave winning shorts the appearance of losses and produced
+    the $1.9M phantom spike that poisoned the equity curve.
+
+    This helper mirrors the exact math used in get_portfolio_state()
+    so daily_gain / WIN-LOCK / snapshot saves all agree.
+    """
+    total = 0.0
+    for t in open_trades:
+        try:
+            ticker = t.get("ticker")
+            entry = float(t.get("entry_price") or 0)
+            shares = float(t.get("shares") or 0)
+            direction = (t.get("direction") or "long").lower()
+            if entry <= 0 or shares == 0:
+                continue
+            price = current_prices.get(ticker)
+            # F8 fix: if price is missing / non-finite, fall back to
+            # entry (treated as flat) rather than crashing or producing NaN
+            try:
+                if price is None or not math.isfinite(float(price)) or float(price) <= 0:
+                    price = entry
+                else:
+                    price = float(price)
+            except Exception:
+                price = entry
+            if direction == "long":
+                total += price * shares
+            else:
+                # Short-sale NAV contribution = (2*entry - current) * shares
+                total += (2 * entry - price) * shares
+        except Exception:
+            continue
+    return total
+
 
 def _is_preservation_mode() -> bool:
     """Check if we should be in capital preservation mode based on total return."""
@@ -2252,8 +2300,27 @@ def get_portfolio_state() -> dict:
                 if shares is None:
                     logger.warning(f"PORTFOLIO: skip trade {trade.get('id')} — shares is None")
                     continue
-                if current_price is None or current_price <= 0:
-                    current_price = entry_price  # fallback
+                # F8 fix: if ALL price tiers (Finnhub, Yahoo, CNBC, Stooq) failed,
+                # current_price is None or non-finite. Previously we silently
+                # fell back to entry_price, which made unrealized_pnl read 0%
+                # regardless of the real underlying move — masking moves that
+                # could have triggered stops. We still mark to entry to avoid
+                # NaN propagation, but we tag the position so the UI can show
+                # "price_unavailable" and downstream WIN-LOCK / stop-loss logic
+                # can skip these positions.
+                _price_unavailable = False
+                try:
+                    if current_price is None or not math.isfinite(float(current_price)) or float(current_price) <= 0:
+                        current_price = entry_price
+                        _price_unavailable = True
+                        logger.warning(
+                            f"PRICE UNAVAILABLE: {ticker} marked flat to entry "
+                            f"(all 4 tiers failed). Stops + WIN-LOCK will skip "
+                            f"this position until pricing recovers."
+                        )
+                except Exception:
+                    current_price = entry_price
+                    _price_unavailable = True
 
                 if instrument_type in ("call", "put"):
                     entry_premium = trade.get("premium_per_contract") or entry_price
@@ -2411,6 +2478,8 @@ def get_portfolio_state() -> dict:
                     "signal_score": trade.get("signal_score"),
                     "regime": trade.get("regime_at_entry"),
                     "sector": trade.get("sector"),
+                    # F8 fix: flag for UI / downstream consumers
+                    "price_unavailable": _price_unavailable,
                 }
 
                 if instrument_type in ("call", "put"):
@@ -2633,7 +2702,15 @@ def _smart_close_trade(trade: dict, equity_price: float):
     except Exception as e:
         logger.debug(f"_smart_close: get_current_premium failed for {ticker}: {e}")
 
-    # 2) Fallback: estimate from intrinsic + time-decay using equity_price
+    # 2) F7 fix: previously a synthetic estimate from intrinsic + made-up time
+    # decay was fed to _close_db. With an entry of $0.40 the synthetic could
+    # easily come back as $4.54 (11.35x) and slip past the 15x options
+    # validator — producing thousands of dollars of phantom pnl. We now:
+    #   a) compute a synthetic estimate ONLY for sanity reference
+    #   b) HARD-CAP that estimate at [entry_premium*0.3, entry_premium*3.0]
+    #   c) if intrinsic-based estimate is wildly outside that band, refuse
+    #      to close — leave the position open for the next cycle so the
+    #      real chain has another chance.
     if not premium or premium <= 0:
         try:
             if instrument_type == "call":
@@ -2649,15 +2726,46 @@ def _smart_close_trade(trade: dict, equity_price: float):
                     dte = 0
             if intrinsic > 0:
                 time_value = max(0.05, entry_premium * 0.1) if dte > 5 else 0.01
-                premium = intrinsic + time_value
+                _synth = intrinsic + time_value
             elif dte > 5 and entry_premium > 0:
                 decay = max(0.15, dte / 60.0)
-                premium = max(0.05, entry_premium * decay)
+                _synth = max(0.05, entry_premium * decay)
             else:
-                premium = max(0.03, intrinsic + 0.02)
+                _synth = max(0.03, intrinsic + 0.02)
+
+            # HARD-CAP — keep close within [0.3x, 3.0x] of entry premium.
+            # Outside that band we cannot trust the synthetic value.
+            if entry_premium and entry_premium > 0:
+                _low = entry_premium * 0.30
+                _high = entry_premium * 3.0
+                if _low <= _synth <= _high:
+                    premium = _synth
+                else:
+                    # REFUSE — don't close at a fabricated premium. Position
+                    # stays open. Loud log so we can see how often this fires.
+                    logger.error(
+                        f"OPTIONS CLOSE REFUSED: {ticker} {instrument_type} "
+                        f"chain unavailable; synthetic est ${_synth:.2f} is "
+                        f"outside trusted band [${_low:.2f}, ${_high:.2f}] of "
+                        f"entry premium ${entry_premium:.2f}. Leaving position "
+                        f"OPEN — will retry next cycle when chain returns."
+                    )
+                    return  # do NOT call _close_db
+            else:
+                # No entry premium on file → cannot bound a synthetic value.
+                # Refuse rather than guess.
+                logger.error(
+                    f"OPTIONS CLOSE REFUSED: {ticker} {instrument_type} has "
+                    f"no entry premium on file — cannot bound synthetic close. "
+                    f"Leaving position OPEN."
+                )
+                return
         except Exception as e:
             logger.warning(f"_smart_close: premium estimation failed for {ticker}: {e}")
-            premium = entry_premium  # 3) Last resort: close at entry (flat)
+            # 3) Last resort: close at entry (flat). This is the safest
+            # possible outcome — books zero pnl, returns the original
+            # premium to cash via the close pipeline.
+            premium = entry_premium
 
     _close_db(trade_id, premium)
 
@@ -2713,15 +2821,35 @@ def _get_current_prices(symbols: list) -> dict:
             if df is not None and not df.empty:
                 for sym in yahoo_symbols:
                     try:
+                        _val = None
                         if isinstance(df.columns, pd.MultiIndex):
                             if sym in df.columns.get_level_values(0):
                                 close = df[(sym, "Close")].dropna()
                                 if len(close) > 0:
-                                    prices[sym] = float(close.iloc[-1])
+                                    _val = float(close.iloc[-1])
                         elif len(yahoo_symbols) == 1:
                             close = df["Close"].dropna()
                             if len(close) > 0:
-                                prices[sym] = float(close.iloc[-1])
+                                _val = float(close.iloc[-1])
+                        # F8/F12 fix: NaN/Inf/non-positive REJECTED at source.
+                        # Previously these values silently flowed through and:
+                        #   - position_value = NaN * shares = NaN
+                        #   - total_value = cash + NaN = NaN  (poisoned snapshot)
+                        #   - stops never fire (NaN > stop is always False)
+                        # Better to leave the symbol UNFILLED so the next
+                        # fallback tier (CNBC/Stooq) can serve it, and
+                        # consuming code knows the price is missing.
+                        if _val is None or not math.isfinite(_val) or _val <= 0:
+                            continue
+                        # Also reject obviously-scaled corruption (we have
+                        # seen yfinance return 7499 for VIX, etc.).
+                        if _val > 1_000_000:
+                            logger.warning(
+                                f"PRICE REJECTED at Yahoo T1: {sym}=${_val:.2f} "
+                                f"looks scaled-corrupt — falling through to CNBC/Stooq"
+                            )
+                            continue
+                        prices[sym] = _val
                     except Exception:
                         continue
         except Exception as e:
@@ -3052,10 +3180,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     # The system decides its own lock threshold based on VIX + regime.
     # No hardcoded values — adapts to market conditions in real time.
     current_prices_for_winlock = _get_current_prices(list(open_tickers)) if open_tickers else {}
-    positions_value_now = sum(
-        current_prices_for_winlock.get(t["ticker"], t["entry_price"]) * t["shares"]
-        for t in get_open_trades()
-    )
+    # F2/F3 fix: use short-aware helper so daily_gain/total_return reflect
+    # the same NAV math as get_portfolio_state. Previous inline sum treated
+    # shorts as longs and could trip WIN-LOCK or DD halt on wrong direction.
+    _open_trades_snap = get_open_trades()
+    positions_value_now = _short_aware_positions_value(_open_trades_snap, current_prices_for_winlock)
     total_current_value = cash + positions_value_now
     total_return_now = ((total_current_value / ORIGINAL_CAPITAL) - 1) * 100
 
@@ -3077,6 +3206,21 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     daily_gain = 0
     if snapshots and current_positions > 0:
         yesterday_val = snapshots[-1].get("total_value", INITIAL_CAPITAL)
+        # F9 fix: bound yesterday_val to [10k, 5x_original] so a corrupt
+        # prior snapshot (e.g. transient $1.9M short-accounting glitch)
+        # can't drive daily_gain to ±90% and trip WIN-LOCK or DD halt.
+        try:
+            _yv = float(yesterday_val or 0)
+            if not math.isfinite(_yv) or _yv < 10_000.0 or _yv > ORIGINAL_CAPITAL * 5.0:
+                logger.warning(
+                    f"YESTERDAY_VAL out of bounds (${_yv:,.0f}) — "
+                    f"falling back to ORIGINAL_CAPITAL=${ORIGINAL_CAPITAL:,.0f}"
+                )
+                yesterday_val = ORIGINAL_CAPITAL
+            else:
+                yesterday_val = _yv
+        except Exception:
+            yesterday_val = ORIGINAL_CAPITAL
         daily_gain = ((total_current_value / yesterday_val) - 1) * 100
 
     # Dynamic WIN-LOCK: system decides based on VIX + regime
@@ -3105,11 +3249,15 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 t_pnl = ((t_entry / t_price) - 1) * 100
                 target_achieved = (t_entry - t_price) / (t_entry - t_target + 0.01) if t_entry > t_target else 1.0
 
-            # Sell if: intraday trade, OR 80%+ of target achieved, OR losing money
+            # F20 fix: dropped the `t_pnl < 0` predicate. Previous logic
+            # force-realized any losing position whenever the BOOK had an
+            # up day — converting paper losses into realized losses for
+            # no reason other than other positions did well. Stops and
+            # per-position loss-cut logic govern losers; WIN-LOCK should
+            # only lock WINS that are intraday or near target.
             should_sell = (
                 t_hold_class == "intraday" or
-                target_achieved >= 0.8 or
-                t_pnl < 0
+                target_achieved >= 0.8
             )
 
             if should_sell:
@@ -5192,10 +5340,13 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             except Exception:
                 pass
 
+            # F20 fix: dropped `pnl_pct < 0` predicate (see mid-cycle path
+            # for full rationale). WIN-LOCK should LOCK WINS, not realize
+            # losses on positions that happened to be down while the book
+            # was up.
             should_sell = (
                 hold_class == "intraday" or
-                target_achieved >= 0.8 or
-                pnl_pct < 0
+                target_achieved >= 0.8
             )
 
             if should_sell:
@@ -5214,11 +5365,12 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 logger.info(f"WIN-LOCK HOLD: Keeping {ticker} ({hold_class}, {pnl_pct:+.1f}%, target {target_achieved:.0%})")
 
         cash = get_cash()
-        remaining_positions = len(get_open_trades())
-        positions_val_after = sum(
-            current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
-            for t in get_open_trades()
-        )
+        _open_after = get_open_trades()
+        remaining_positions = len(_open_after)
+        # F2/F3 fix: route through short-aware helper so total_value is
+        # consistent with get_portfolio_state. Previous code summed
+        # raw price*shares which double-counted profitable shorts.
+        positions_val_after = _short_aware_positions_value(_open_after, current_prices)
         total_value = cash + positions_val_after
         cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
         # SNAPSHOT SANITY BOUND — same guard applied to main snapshot call.
@@ -5235,7 +5387,17 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                 from predictions.truth_engine import safe_save_snapshot as _safe_snap_wl
                 _safe_snap_wl()
             except Exception:
-                save_portfolio_snapshot(total_value, cash, remaining_positions, daily_gain, cum_ret, 0, 0, 0)
+                # F1 fix: previous call had `remaining_positions` (a COUNT)
+                # in the `positions_value` (DOLLAR) slot and 0 in the
+                # `num_positions` slot. Snapshots got corrupted with
+                # positions_value=7 instead of $80,000. Args now in correct
+                # order matching signature:
+                #   (total_value, cash, positions_value, daily_ret, cum_ret,
+                #    sp500_daily, sp500_cum, num_pos)
+                save_portfolio_snapshot(
+                    total_value, cash, positions_val_after,
+                    daily_gain, cum_ret, 0, 0, remaining_positions
+                )
         return {"closed": closed, "checked": len(open_trades), "kept": kept_count, "win_lock": True, "winlock_info": winlock}
 
     # Cache VIX once per cycle for the per-position win-lock
@@ -5636,19 +5798,13 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
     if closed:
         try:
             cash = get_cash()  # Refresh atomic cash after all closes
-            positions_value = sum(
-                current_prices.get(t["ticker"], t["entry_price"]) * t["shares"]
-                for t in get_open_trades()
-            )
+            _open_after_cycle = get_open_trades()
+            # F2/F3 fix: short-aware helper, so SHORTS contribute correctly
+            # to NAV and the sanity bound below isn't tripped by a profitable
+            # short portfolio.
+            positions_value = _short_aware_positions_value(_open_after_cycle, current_prices)
             total_value = cash + positions_value
             cum_ret = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
-            # SNAPSHOT SANITY BOUND — same guard as the two other callsites.
-            # If total_value is out of [10k, 5x_original], skip the save
-            # so the equity curve never persists a corrupt data point.
-            # NOTE: this path treats SHORTS incorrectly (positions_value
-            # adds abs(shares*price) for all directions), so a portfolio
-            # with shorts mid-cycle could trip the bound — that's a
-            # FEATURE: we'd rather skip than persist wrong data.
             if not (10_000.0 <= total_value <= ORIGINAL_CAPITAL * 5.0):
                 logger.error(
                     f"END-CYCLE SNAPSHOT GUARD: total_value=${total_value:,.0f} "
@@ -5660,7 +5816,10 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                     from predictions.truth_engine import safe_save_snapshot as _safe_snap_ec
                     _safe_snap_ec()
                 except Exception:
-                    save_portfolio_snapshot(total_value, cash, positions_value, 0, cum_ret, 0, 0, len(get_open_trades()))
+                    save_portfolio_snapshot(
+                        total_value, cash, positions_value,
+                        0, cum_ret, 0, 0, len(_open_after_cycle)
+                    )
         except Exception:
             pass
 

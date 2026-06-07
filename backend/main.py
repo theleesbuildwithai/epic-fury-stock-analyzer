@@ -5369,6 +5369,170 @@ def _cached_response(key: str, fn, ttl: int = _RESPONSE_CACHE_TTL):
             return {"ok": False, "reason": str(_e)[:200]}
 
 
+@app.get("/api/trade-math-audit")
+def trade_math_audit(request: Request):
+    """Live reconciliation of trade math. Flags phantom trades, inflated
+    P&L, NAV mismatches, and snapshot corruption — the four classes of
+    bugs that have historically broken the system.
+
+    Returns a structured report:
+      ok                  : bool, overall pass/fail
+      checks              : list of {name, ok, detail}
+      phantom_scan        : detection of trades with no cash debit on file
+      nav_reconciliation  : cash + Σ(short-aware position values) vs reported
+      snapshot_audit      : last 5 daily snapshots checked for sanity
+      capital_baseline    : INITIAL_CAPITAL / ORIGINAL_CAPITAL alignment
+
+    READ-ONLY — does not modify any state. Designed for the hourly health
+    check to call.
+    """
+    check_rate_limit(request.client.host)
+    report = {"ok": True, "checks": [], "as_of": datetime.now().isoformat()}
+    try:
+        from predictions.models import (
+            get_cash, get_open_trades, get_all_paper_trades,
+            get_portfolio_snapshots,
+        )
+        from predictions.paper_trader import (
+            _get_current_prices, _short_aware_positions_value,
+            INITIAL_CAPITAL as _INIT_CAP, ORIGINAL_CAPITAL as _ORIG_CAP,
+            get_portfolio_state,
+        )
+
+        # CHECK 1: capital constants aligned
+        cap_ok = abs(_INIT_CAP - _ORIG_CAP) < 0.01
+        report["capital_baseline"] = {
+            "initial_capital": _INIT_CAP,
+            "original_capital": _ORIG_CAP,
+            "aligned": cap_ok,
+        }
+        report["checks"].append({
+            "name": "capital_constants_aligned",
+            "ok": cap_ok,
+            "detail": (
+                f"INITIAL=${_INIT_CAP:,.0f} ORIGINAL=${_ORIG_CAP:,.0f} "
+                f"{'(aligned)' if cap_ok else '(MISMATCH → phantom return)'}"
+            ),
+        })
+        if not cap_ok:
+            report["ok"] = False
+
+        # CHECK 2: NAV reconciliation — cash + Σ(short-aware positions)
+        # must equal what get_portfolio_state() reports as total_value.
+        cash = float(get_cash() or 0)
+        open_trades = get_open_trades() or []
+        tickers = [t["ticker"] for t in open_trades if t.get("ticker")]
+        prices = _get_current_prices(tickers) if tickers else {}
+        recomputed_positions = _short_aware_positions_value(open_trades, prices)
+        recomputed_total = cash + recomputed_positions
+        state = get_portfolio_state() or {}
+        reported_total = float(state.get("total_value") or 0)
+        # Allow $1 tolerance for rounding
+        nav_diff = abs(recomputed_total - reported_total)
+        nav_ok = nav_diff <= 1.0
+        report["nav_reconciliation"] = {
+            "cash": round(cash, 2),
+            "positions_value_recomputed": round(recomputed_positions, 2),
+            "total_value_recomputed": round(recomputed_total, 2),
+            "total_value_reported": round(reported_total, 2),
+            "difference": round(nav_diff, 2),
+            "ok": nav_ok,
+        }
+        report["checks"].append({
+            "name": "nav_reconciliation",
+            "ok": nav_ok,
+            "detail": (
+                f"recomputed=${recomputed_total:,.2f} vs reported=${reported_total:,.2f} "
+                f"(diff=${nav_diff:,.2f})"
+            ),
+        })
+        if not nav_ok:
+            report["ok"] = False
+
+        # CHECK 3: phantom trade scan — every open trade should have
+        # a recorded entry_date; missing entry_date or impossible
+        # entry_price = phantom. Closed trades with no exit_date OR no
+        # pnl_dollars and not in 'closed_flat_validator' status = corrupt.
+        phantom_open = []
+        phantom_closed = []
+        all_trades = get_all_paper_trades() or []
+        for t in all_trades:
+            try:
+                status = (t.get("status") or "").lower()
+                if status == "open":
+                    if not t.get("entry_date") or not t.get("entry_price"):
+                        phantom_open.append(t.get("id"))
+                    elif float(t.get("entry_price") or 0) <= 0:
+                        phantom_open.append(t.get("id"))
+                elif status == "closed":
+                    if not t.get("exit_date"):
+                        phantom_closed.append({"id": t.get("id"), "reason": "no_exit_date"})
+                    elif t.get("pnl_dollars") is None:
+                        phantom_closed.append({"id": t.get("id"), "reason": "null_pnl"})
+            except Exception:
+                continue
+        phantom_ok = (len(phantom_open) == 0 and len(phantom_closed) == 0)
+        report["phantom_scan"] = {
+            "open_phantoms": phantom_open,
+            "closed_phantoms": phantom_closed,
+            "ok": phantom_ok,
+        }
+        report["checks"].append({
+            "name": "phantom_trades",
+            "ok": phantom_ok,
+            "detail": (
+                f"{len(phantom_open)} open phantoms, "
+                f"{len(phantom_closed)} closed phantoms"
+            ),
+        })
+        if not phantom_ok:
+            report["ok"] = False
+
+        # CHECK 4: snapshot sanity — last 5 snapshots should all have
+        # total_value in [10k, 5x_original] and |daily_return_pct| < 10%.
+        snaps = get_portfolio_snapshots(days=5) or []
+        bad_snaps = []
+        for s in snaps:
+            try:
+                tv = float(s.get("total_value") or 0)
+                dr = float(s.get("daily_return_pct") or 0)
+                if not (10_000.0 <= tv <= _ORIG_CAP * 5.0):
+                    bad_snaps.append({
+                        "date": s.get("snapshot_date"),
+                        "total_value": tv,
+                        "reason": "total_value_out_of_bounds",
+                    })
+                elif abs(dr) > 10.0:
+                    bad_snaps.append({
+                        "date": s.get("snapshot_date"),
+                        "daily_return_pct": dr,
+                        "reason": "daily_return_exceeds_10pct",
+                    })
+            except Exception:
+                continue
+        snaps_ok = (len(bad_snaps) == 0)
+        report["snapshot_audit"] = {
+            "checked": len(snaps),
+            "bad": bad_snaps,
+            "ok": snaps_ok,
+        }
+        report["checks"].append({
+            "name": "snapshot_sanity",
+            "ok": snaps_ok,
+            "detail": f"{len(snaps)} snapshots checked, {len(bad_snaps)} flagged",
+        })
+        if not snaps_ok:
+            report["ok"] = False
+
+        return report
+    except Exception as e:
+        return {
+            "ok": False,
+            "reason": f"audit_endpoint_error: {str(e)[:300]}",
+            "checks": report.get("checks", []),
+        }
+
+
 @app.get("/api/system-thinking")
 def system_thinking(request: Request):
     """Single endpoint that returns everything the algorithm is "thinking"

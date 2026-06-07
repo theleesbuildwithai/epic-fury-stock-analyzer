@@ -672,26 +672,68 @@ def save_paper_trade(ticker: str, direction: str, entry_price: float,
         # Duplicate guard failure must NEVER block a legitimate save
         _logger_save.warning(f"Duplicate guard error (proceeding with save): {_e}")
 
-    # Atomically: insert trade AND deduct cash in same transaction
-    cursor = conn.execute(
-        """INSERT INTO paper_trades
-           (ticker, direction, entry_price, shares, entry_date, signal_score,
-            regime_at_entry, factors_used, stop_loss_price, target_price,
-            hold_duration_days, sector, hold_class, status,
-            instrument_type, strike_price, expiration_date, contracts,
-            premium_per_contract, underlying_price_at_entry, option_delta, option_iv)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open',
-                   ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (ticker.upper(), direction, entry_price, shares,
-         datetime.now().isoformat(), signal_score, regime,
-         json.dumps(factors or {}), stop_loss, target_price, hold_days, sector,
-         hold_class,
-         instrument_type, strike_price, expiration_date, contracts,
-         premium_per_contract, underlying_price_at_entry, option_delta, option_iv)
-    )
-    trade_id = cursor.lastrowid
-    conn.execute("UPDATE paper_cash SET cash = cash - ? WHERE id=1", (cost,))
-    conn.commit()
+    # F6/F13 fix (2026-06-06): wrap INSERT trade + UPDATE cash in a single
+    # explicit IMMEDIATE transaction so that:
+    #   - both succeed together, or neither does (no phantom trade row
+    #     with no cash debit, and no phantom cash debit with no trade row)
+    #   - a concurrent caller hitting the unique index gets a clean
+    #     IntegrityError that we treat as duplicate-skip (no cash double-debit)
+    import sqlite3 as _sqlite3
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            """INSERT INTO paper_trades
+               (ticker, direction, entry_price, shares, entry_date, signal_score,
+                regime_at_entry, factors_used, stop_loss_price, target_price,
+                hold_duration_days, sector, hold_class, status,
+                instrument_type, strike_price, expiration_date, contracts,
+                premium_per_contract, underlying_price_at_entry, option_delta, option_iv)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open',
+                       ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ticker.upper(), direction, entry_price, shares,
+             datetime.now().isoformat(), signal_score, regime,
+             json.dumps(factors or {}), stop_loss, target_price, hold_days, sector,
+             hold_class,
+             instrument_type, strike_price, expiration_date, contracts,
+             premium_per_contract, underlying_price_at_entry, option_delta, option_iv)
+        )
+        trade_id = cursor.lastrowid
+        conn.execute("UPDATE paper_cash SET cash = cash - ? WHERE id=1", (cost,))
+        conn.commit()
+    except _sqlite3.IntegrityError as _ie:
+        # Hit the partial UNIQUE index for open positions → race lost to
+        # another caller. Roll back so cash is NOT debited and no orphan
+        # trade row is created. Treat as duplicate and return the
+        # existing trade's id.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            existing = conn.execute(
+                """SELECT id FROM paper_trades
+                   WHERE status='open' AND ticker=? AND direction=?
+                     AND COALESCE(instrument_type, 'equity') = COALESCE(?, 'equity')
+                     AND COALESCE(strike_price, 0) = COALESCE(?, 0)
+                     AND COALESCE(expiration_date, '') = COALESCE(?, '')""",
+                (ticker.upper(), direction, instrument_type, strike_price, expiration_date)
+            ).fetchone()
+        except Exception:
+            existing = None
+        _logger_save.warning(
+            f"DUPLICATE RACE: IntegrityError on save_paper_trade for "
+            f"{ticker.upper()} {direction} — treating as duplicate-skip "
+            f"(no cash debit, no orphan row). Lost to concurrent caller. {_ie}"
+        )
+        conn.close()
+        return existing["id"] if existing else -1
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise
     conn.close()
     return trade_id
 
@@ -825,11 +867,29 @@ def close_paper_trade(trade_id: int, exit_price: float):
                         )
 
                 if _reject:
+                    # F5 fix (2026-06-06): previously this path closed the
+                    # trade flat but NEVER REFUNDED THE ENTRY CASH. For a
+                    # LONG: open debited entry*shares from cash; rejected
+                    # close meant cash was permanently sequestered. NAV
+                    # showed a permanent drop with no recoverable cause.
+                    # Now: refund the original cost so the position cleanly
+                    # disappears at break-even.
+                    if instrument_type in ("call", "put"):
+                        _entry_prem = trade["premium_per_contract"] or entry
+                        _num_contracts = trade["contracts"] or 1
+                        _refund = _entry_prem * _num_contracts * 100
+                    else:
+                        # equity: long entry debited entry*shares; short
+                        # entry also debited entry*shares (collateral).
+                        # Refunding entry*shares brings cash back to where
+                        # it was before the open.
+                        _refund = entry * shares
                     _logger.error(
                         f"REJECTED IMPOSSIBLE PRICE RATIO on trade {trade_id} "
                         f"({trade['ticker']} {direction} {instrument_type}): "
                         f"entry=${entry:.4f} exit=${exit_price:.4f} — {_reject_reason}. "
-                        f"Closing FLAT (no pnl, no cash change) to prevent corruption."
+                        f"Closing FLAT with cash refund ${_refund:,.2f} to prevent "
+                        f"NAV sequestration."
                     )
                     conn.execute(
                         """UPDATE paper_trades
@@ -837,6 +897,10 @@ def close_paper_trade(trade_id: int, exit_price: float):
                                status='closed_flat_validator'
                            WHERE id=?""",
                         (entry, datetime.now().isoformat(), trade_id)
+                    )
+                    conn.execute(
+                        "UPDATE paper_cash SET cash = cash + ? WHERE id=1",
+                        (round(_refund, 2),)
                     )
                     conn.commit()
                     conn.close()
@@ -1038,6 +1102,46 @@ def save_portfolio_snapshot(total_value: float, cash: float,
         pass
     conn = get_db()
     today = datetime.now().strftime("%Y-%m-%d")
+    # F14 fix (2026-06-06): previously this was a blind INSERT OR REPLACE.
+    # Multiple cycles in one day overwrote each other; a corrupt mid-cycle
+    # snapshot could blow away a previously-correct end-of-day value.
+    # Now: if an existing row for `today` is sane AND the new value would
+    # be a drastic move from it (>30% change in total_value), REJECT the
+    # replace. The existing sane row stays. Loud log so any cause can
+    # be diagnosed.
+    try:
+        existing = conn.execute(
+            "SELECT total_value FROM portfolio_snapshots WHERE snapshot_date=?",
+            (today,)
+        ).fetchone()
+        if existing is not None:
+            try:
+                _existing_total = float(existing["total_value"] or 0)
+            except Exception:
+                _existing_total = 0
+            # Only guard if existing is in the sane range we expect a
+            # paper portfolio to occupy.
+            if 10_000.0 <= _existing_total <= 5_000_000.0:
+                try:
+                    _new_total = float(total_value or 0)
+                except Exception:
+                    _new_total = 0
+                if _new_total > 0:
+                    _pct_move = abs(_new_total - _existing_total) / _existing_total
+                    if _pct_move > 0.30:
+                        import logging as _log
+                        _log.getLogger("paper_trader.snapshot").error(
+                            f"SNAPSHOT REPLACE REJECTED for {today}: "
+                            f"existing total_value=${_existing_total:,.0f} vs "
+                            f"new ${_new_total:,.0f} would be a "
+                            f"{_pct_move*100:.0f}% move in one day. "
+                            f"Keeping existing row to protect equity curve."
+                        )
+                        conn.close()
+                        return
+    except Exception:
+        # Existence check failure must NEVER block a normal save
+        pass
     conn.execute(
         """INSERT OR REPLACE INTO portfolio_snapshots
            (snapshot_date, total_value, cash, positions_value, daily_return_pct,
