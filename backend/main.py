@@ -4066,33 +4066,58 @@ def earnings_calendar(request: Request):
     except Exception:
         pass
 
-    # Compute fresh
-    try:
-        result = get_earnings_calendar()
-        _earnings_cache["data"] = result
-        _earnings_cache["ts"] = now
-        # Write to persistent layer too
+    # 2026-06-07 fix: cold-cache fetch was blocking >60s and timing out
+    # the App Runner request. Now we ALWAYS return immediately — either
+    # with stale cached data, or a placeholder — and spawn a background
+    # thread to refresh the cache for the next call.
+    def _bg_earnings_refresh():
         try:
-            from predictions.models import set_trading_state as _sts_e
-            _sts_e(_EARNINGS_PERSIST_KEY,
-                   _j_ec.dumps({"data": result, "_ts": now}, default=str))
-        except Exception as _spe:
-            logger.debug(f"earnings persist write failed (non-fatal): {_spe}")
-        return result
-    except Exception as e:
-        logger.error(f"Earnings error: {e}")
-        if _earnings_cache["data"] is not None:
-            return _earnings_cache["data"]  # stale fallback
-        # Try one more time from persistent (even if stale, better than 500)
+            result = get_earnings_calendar()
+            _earnings_cache["data"] = result
+            _earnings_cache["ts"] = _t_ec.time()
+            try:
+                from predictions.models import set_trading_state as _sts_e
+                _sts_e(_EARNINGS_PERSIST_KEY,
+                       _j_ec.dumps({"data": result, "_ts": _t_ec.time()},
+                                   default=str))
+            except Exception as _spe:
+                logger.debug(f"earnings persist write failed (non-fatal): {_spe}")
+        except Exception as _bge:
+            logger.error(f"Earnings BG refresh failed: {_bge}")
+        finally:
+            globals()["_earnings_refresh_in_progress"] = False
+
+    if not globals().get("_earnings_refresh_in_progress", False):
+        globals()["_earnings_refresh_in_progress"] = True
         try:
-            from predictions.models import get_trading_state as _gts_e2
-            raw = _gts_e2(_EARNINGS_PERSIST_KEY, "")
-            if raw:
-                stored = _j_ec.loads(raw)
-                return stored.get("data")
+            import threading
+            threading.Thread(target=_bg_earnings_refresh,
+                             daemon=True, name="earnings-refresh").start()
         except Exception:
-            pass
-        raise HTTPException(status_code=500, detail="Failed to fetch earnings")
+            globals()["_earnings_refresh_in_progress"] = False
+
+    # Return stale cached data if available (better than nothing)
+    if _earnings_cache["data"] is not None:
+        return _earnings_cache["data"]
+    try:
+        from predictions.models import get_trading_state as _gts_e2
+        raw = _gts_e2(_EARNINGS_PERSIST_KEY, "")
+        if raw:
+            stored = _j_ec.loads(raw)
+            return stored.get("data")
+    except Exception:
+        pass
+
+    # Cold start: return placeholder so the UI can render skeleton/empty state
+    return {
+        "earnings": [],
+        "week_start": None,
+        "week_end": None,
+        "stocks_checked": 0,
+        "generated_at": None,
+        "cache_status": "warming",
+        "message": "Earnings calendar warming up — refresh in a few seconds",
+    }
 
 
 @app.get("/api/market-news")
