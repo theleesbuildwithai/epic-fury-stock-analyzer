@@ -232,12 +232,16 @@ def prewarm_benchmark_cache():
 
 
 # Portfolio configuration
-# 2026-06-06 F17 fix: previously ORIGINAL_CAPITAL=100k and INITIAL_CAPITAL=109k
-# produced a phantom +9.0% return on a fresh DB with no trades. Aligning both
-# to 109k makes the displayed return reflect actual fund performance from the
-# real starting capital. Cash init = return baseline = same number.
-ORIGINAL_CAPITAL = 109_000.0  # Real starting capital — used for total return calc
-INITIAL_CAPITAL = 109_000.0   # Cash init level — kept equal to ORIGINAL_CAPITAL
+# 2026-06-07 F17 v2 (CORRECTION): ACTUAL starting capital is $100k.
+# Fund went $100k → $132k = +32% return (user confirmed).
+# Earlier F17 v1 incorrectly set both to $109k, producing a wrong
+# displayed return of +21.11% instead of the real +32%. Reverting:
+# both aligned to $100k so:
+#   - Total return reads correctly as +32% from $100k baseline
+#   - Fresh DB init = $100k cash + 0% return (clean baseline)
+#   - No phantom +9% on fresh start either
+ORIGINAL_CAPITAL = 100_000.0  # ACTUAL starting capital — return calc denominator
+INITIAL_CAPITAL = 100_000.0   # Cash init for fresh DB — aligned with ORIGINAL
 MAX_POSITIONS = 999  # No limit — only constrained by cash
 STOP_LOSS_PCT = 0.05  # Default fallback — overridden by per-stock ATR calculation
 DEFAULT_HOLD_DAYS = 30
