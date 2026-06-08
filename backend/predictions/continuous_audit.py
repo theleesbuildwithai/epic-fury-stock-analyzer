@@ -9,6 +9,30 @@ Runs every 5 min during market hours. For each cycle:
   5. Auto-clears halt only after TWO consecutive clean passes
      (prevents flapping when a single noisy reading misleads us)
 
+CONSERVATIVE HALT POLICY (2026-06-07 calibration):
+  Only 3 conditions actually HALT trading. Everything else just logs:
+
+    HALTS:
+      * nav_reconciliation mismatch > $1
+        → "We don't know our own NAV" = real money risk
+      * phantom_trades detected
+        → Data corruption = could trade on lies
+      * cash_floor goes negative
+        → Impossible normal state = something is very wrong
+
+    LOGGED but DOESN'T halt:
+      * capital_aligned (display-only baseline)
+      * snapshot_sanity (already has read-side filter)
+      * vix_path_consistency (autofix attempted; minor display effect)
+      * equity_curve_baseline (display-only, rebases on read)
+      * cash exceeds 5x baseline (could be a legit profit run)
+      * circuit_breaker open (sentinels module already handles gating)
+
+  Philosophy: halt is a heavy hammer that stops trading entirely.
+  Use it only when we genuinely don't trust our own numbers. Display
+  glitches, stale caches, and informational signals belong in the log,
+  not in the halt path.
+
 Halt flag lives in trading_state(audit_halt_active). Trade execution
 checks it before opening any position. Manual clear available via
 the /api/admin/audit-halt-clear endpoint.
@@ -182,14 +206,16 @@ def _mk_result(name: str, ok: bool, severity: str, detail: str,
 
 
 def _check_capital_aligned() -> dict:
-    """INITIAL_CAPITAL must equal ORIGINAL_CAPITAL (the F17 fix)."""
+    """INITIAL_CAPITAL must equal ORIGINAL_CAPITAL (the F17 fix).
+    Severity: MED — misalignment causes DISPLAY-only inflated baseline
+    returns. Trading math itself works correctly. Don't halt for it."""
     try:
         from predictions.paper_trader import INITIAL_CAPITAL, ORIGINAL_CAPITAL
         diff = abs(float(INITIAL_CAPITAL) - float(ORIGINAL_CAPITAL))
         ok = diff < 0.01
         return _mk_result(
             "capital_aligned", ok,
-            SEVERITY_LOW if ok else SEVERITY_HIGH,
+            SEVERITY_LOW if ok else SEVERITY_MED,
             f"INITIAL=${INITIAL_CAPITAL:,.0f} ORIGINAL=${ORIGINAL_CAPITAL:,.0f}",
         )
     except Exception as e:
@@ -265,7 +291,10 @@ def _check_phantom_trades() -> dict:
 
 def _check_snapshot_sanity() -> dict:
     """Last 5 daily snapshots: total_value in [10k, 5x_original]
-    AND |daily_return_pct| < 10%."""
+    AND |daily_return_pct| < 10%.
+    Severity: MED — snapshot table has its own read-side filter that
+    skips bad rows, so trading isn't affected. Just a display + history
+    issue. Don't halt for it."""
     try:
         from predictions.models import get_portfolio_snapshots
         from predictions.paper_trader import ORIGINAL_CAPITAL
@@ -286,7 +315,7 @@ def _check_snapshot_sanity() -> dict:
         ok = len(bad) == 0
         return _mk_result(
             "snapshot_sanity", ok,
-            SEVERITY_LOW if ok else SEVERITY_HIGH,
+            SEVERITY_LOW if ok else SEVERITY_MED,
             f"checked={len(snaps)} flagged={len(bad)} {bad[:3]}",
         )
     except Exception as e:
@@ -359,7 +388,9 @@ def _check_equity_curve_baseline() -> dict:
 
 
 def _check_cash_floor() -> dict:
-    """Cash never goes negative or above 5x ORIGINAL_CAPITAL."""
+    """Cash never goes negative (CRITICAL — impossible normal state).
+    Cash >5x baseline only flagged MED (could be a legit profit run
+    after a great month — not a reason to halt trading)."""
     try:
         from predictions.models import get_cash
         from predictions.paper_trader import ORIGINAL_CAPITAL
@@ -368,8 +399,8 @@ def _check_cash_floor() -> dict:
             return _mk_result("cash_floor", False, SEVERITY_CRIT,
                               f"cash=${cash:,.2f}_negative")
         if cash > ORIGINAL_CAPITAL * 5.0:
-            return _mk_result("cash_floor", False, SEVERITY_HIGH,
-                              f"cash=${cash:,.2f}_exceeds_5x")
+            return _mk_result("cash_floor", False, SEVERITY_MED,
+                              f"cash=${cash:,.2f}_exceeds_5x (likely real profit)")
         return _mk_result("cash_floor", True, SEVERITY_LOW,
                           f"cash=${cash:,.2f}")
     except Exception as e:
@@ -378,15 +409,18 @@ def _check_cash_floor() -> dict:
 
 
 def _check_circuit_breaker() -> dict:
-    """The sentinels circuit breaker must not be open (would mean lots
-    of recent failures). If open, halt new trades regardless."""
+    """Reports the sentinels circuit-breaker state for visibility.
+    Severity: MED — the sentinels module already pauses cash mutations
+    when its breaker is open. Double-halting here would be redundant
+    and overly aggressive. Log the state so it shows up in audit
+    history, but trade execution stays gated by sentinels itself."""
     try:
         from predictions.sentinels import get_circuit_status
         cb = get_circuit_status() or {}
         is_open = bool(cb.get("open"))
         return _mk_result(
             "circuit_breaker", not is_open,
-            SEVERITY_LOW if not is_open else SEVERITY_HIGH,
+            SEVERITY_LOW if not is_open else SEVERITY_MED,
             f"open={is_open} recent_failures={cb.get('recent_failures', 0)}",
         )
     except Exception as e:
