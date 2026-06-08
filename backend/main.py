@@ -2225,6 +2225,47 @@ scheduler.add_job(
 
 
 # ============================================================
+# CONTINUOUS SELF-AUDIT + AUTO-FIX — robot Jackson, every 5 min
+# ============================================================
+# Runs the full trade-math reconciliation + cross-path consistency
+# checks every 5 minutes. Attempts safe autofixes (clear stale VIX
+# cache, etc). If any HIGH/CRITICAL failure remains after autofix,
+# HALTS new trade entries via the audit_halt_active flag in
+# trading_state. Trade execution checks the flag on every cycle.
+# Auto-clears halt after 2 consecutive clean passes (anti-flap).
+#
+# Fully autonomous — no human approval needed for runs, autofixes,
+# or halt activation/clearing.
+def _continuous_audit_job():
+    """5-min audit cycle. Soft-fails — never crashes the scheduler."""
+    try:
+        from predictions.continuous_audit import run_audit_and_autofix
+        result = run_audit_and_autofix()
+        if not result.get("ok"):
+            ch = result.get("critical_or_high_failures", 0)
+            mf = result.get("medium_failures", 0)
+            ha = result.get("halt_action") or "unchanged"
+            logger.warning(
+                f"CONTINUOUS AUDIT: failed (crit/high={ch}, med={mf}, halt={ha})"
+            )
+    except Exception as e:
+        logger.error(f"CONTINUOUS AUDIT job error (non-fatal): {e}")
+
+
+scheduler.add_job(
+    _continuous_audit_job,
+    "interval",
+    minutes=5,
+    id="continuous_audit",
+    name="Continuous Audit + Auto-Fix (robot Jackson, every 5 min)",
+    max_instances=1,
+    misfire_grace_time=300,
+    coalesce=True,
+    replace_existing=True,
+)
+
+
+# ============================================================
 # AUTO-FIX FEEDBACK LOOP — runs Sunday 2am ET (no trading happening)
 # ============================================================
 # Once a week, replays a 180-day momentum strategy across 100 historical
@@ -5479,6 +5520,43 @@ def _cached_response(key: str, fn, ttl: int = _RESPONSE_CACHE_TTL):
             return fn()
         except Exception as _e:
             return {"ok": False, "reason": str(_e)[:200]}
+
+
+@app.get("/api/audit/status")
+def audit_status(request: Request):
+    """Current state of the continuous-audit system.
+    Returns halt status, last audit snapshot, clean-streak progress."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.continuous_audit import get_audit_status
+        return get_audit_status()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:300]}
+
+
+@app.post("/api/audit/run-now")
+def audit_run_now(request: Request):
+    """Manually trigger the audit immediately (outside the 5-min schedule).
+    Returns the full audit result with all check details + autofix attempts."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.continuous_audit import run_audit_and_autofix
+        return run_audit_and_autofix()
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:300]}
+
+
+@app.post("/api/admin/audit-halt-clear")
+def audit_halt_clear(request: Request):
+    """Manually clear the audit halt flag. Use after investigating
+    a halt cause that's been fixed. The audit will re-validate on its
+    next 5-min cycle and re-halt if the issue persists."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.continuous_audit import clear_audit_halt
+        return clear_audit_halt(reason="manual_admin_endpoint")
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:300]}
 
 
 @app.post("/api/admin/vix-cache-reset")

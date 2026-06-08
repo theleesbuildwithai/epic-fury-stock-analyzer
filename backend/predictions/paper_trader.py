@@ -2935,6 +2935,37 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         "errors": [],
     }
 
+    # ============================================================
+    # CONTINUOUS-AUDIT HALT GATE (2026-06-07)
+    # ============================================================
+    # If the 5-min continuous_audit job found a HIGH/CRITICAL failure
+    # (NAV mismatch, phantom trade, snapshot insanity, etc.) it sets
+    # the audit_halt_active flag in trading_state. We block all NEW
+    # trade entries until the halt clears (which happens automatically
+    # after 2 consecutive clean audits, or manually via the admin
+    # endpoint).
+    #
+    # NOTE: This intentionally only blocks OPENING positions. Position
+    # exits (stop-loss, target, time-decay) still run — we never want
+    # to be stuck in a losing trade because the audit halted, and
+    # exit_checker is a separate code path that handles closes.
+    try:
+        from predictions.continuous_audit import is_audit_halted
+        if is_audit_halted():
+            results["skipped"].append({
+                "symbol": "ALL_ENTRIES",
+                "reason": "audit_halt_active — new entries blocked; see /api/audit/status",
+            })
+            results["audit_halt"] = True
+            logger.error(
+                "TRADE EXECUTION BLOCKED by audit_halt_active — "
+                "see /api/audit/status for details"
+            )
+            return results
+    except Exception as _audit_err:
+        # Audit module unavailable shouldn't block trading
+        logger.debug(f"audit halt check soft-fail: {_audit_err}")
+
     # ----- PICK DEDUPE: remove tickers in BOTH long and short lists -----
     # Prevents the contradictory-signal bug (e.g., RBLX in both long & short).
     # Mutates a NEW dict; original quant_picks unchanged.
