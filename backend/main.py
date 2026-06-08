@@ -2205,6 +2205,24 @@ scheduler.add_job(
     replace_existing=True,
 )
 
+# 2026-06-07: PRE-OPEN picks regen at 8:30 ET (1 hour before market open).
+# Ensures picks cache is fresh BEFORE the bell rings so first trade cycle
+# of the day at 9:30 ET uses signals generated <60 min earlier (vs. the
+# previous 10am rollout that meant the first 30 min of trading used picks
+# generated the previous day after close).
+scheduler.add_job(
+    _picks_rollout,
+    "cron",
+    day_of_week="mon-fri",
+    hour=8,
+    minute=30,
+    id="picks_rollout_preopen",
+    name="Picks Rollout (8:30 ET — 1hr before market open)",
+    max_instances=1,
+    misfire_grace_time=1800,
+    replace_existing=True,
+)
+
 
 # ============================================================
 # AUTO-FIX FEEDBACK LOOP — runs Sunday 2am ET (no trading happening)
@@ -4014,15 +4032,60 @@ def get_banner(request: Request):
         return {"tickers": [], "market_open": False, "as_of": None}
 
 
+_daily_picks_cache = {"data": None, "ts": 0}
+_DAILY_PICKS_TTL = 1800  # 30 min
+_daily_picks_refresh_in_progress = False
+
 @app.get("/api/daily-picks")
 def daily_picks(request: Request):
-    """Get today's top 15 stock picks based on technical analysis."""
+    """Get today's top 15 stock picks based on technical analysis.
+
+    2026-06-07: cold-cache compute was blocking >30s (same pattern as
+    rentech and earnings-calendar endpoints). Now returns cached value
+    instantly and spawns a background refresh if the cache is stale.
+    """
     check_rate_limit(request.client.host)
-    try:
-        return get_daily_picks()
-    except Exception as e:
-        logger.error(f"Daily picks error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate picks")
+    import time as _t_dp, threading
+    now = _t_dp.time()
+
+    # Fast path: serve from warm cache
+    if (_daily_picks_cache["data"] is not None
+            and (now - _daily_picks_cache["ts"]) < _DAILY_PICKS_TTL):
+        return _daily_picks_cache["data"]
+
+    # Spawn background refresh (single in-flight)
+    global _daily_picks_refresh_in_progress
+    if not _daily_picks_refresh_in_progress:
+        _daily_picks_refresh_in_progress = True
+        def _bg_dp_refresh():
+            global _daily_picks_refresh_in_progress
+            try:
+                result = get_daily_picks()
+                _daily_picks_cache["data"] = result
+                _daily_picks_cache["ts"] = _t_dp.time()
+            except Exception as _e:
+                logger.error(f"daily-picks BG refresh failed: {_e}")
+            finally:
+                _daily_picks_refresh_in_progress = False
+        try:
+            threading.Thread(target=_bg_dp_refresh, daemon=True,
+                             name="daily-picks-refresh").start()
+        except Exception:
+            _daily_picks_refresh_in_progress = False
+
+    # Return stale data if we have it
+    if _daily_picks_cache["data"] is not None:
+        d = dict(_daily_picks_cache["data"]) if isinstance(_daily_picks_cache["data"], dict) else _daily_picks_cache["data"]
+        if isinstance(d, dict):
+            d["cache_status"] = "stale_refreshing"
+        return d
+
+    # Cold start: return placeholder
+    return {
+        "picks": [],
+        "cache_status": "warming",
+        "message": "Daily picks warming up — refresh in a few seconds",
+    }
 
 
 _earnings_cache = {"data": None, "ts": 0}
@@ -6365,6 +6428,20 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             except Exception:
                 return None, None
 
+        # 2026-06-07 Fix 5: tag each pick with live_tradeable flag based
+        # on the actual live-safety gates. UI can filter to show only
+        # tradeable picks, or mark research-only ones distinctly.
+        try:
+            from predictions.paper_trader import (
+                _get_min_confidence as _gate_conf,
+                _get_min_composite_score as _gate_score,
+            )
+            _live_min_conf = _gate_conf()
+            _live_min_score = _gate_score()
+        except Exception:
+            _live_min_conf = 55
+            _live_min_score = 1.5
+
         def _format(p, direction: str, rank: int):
             px = float(p.get("price", 0) or 0)
             stop_dist, tgt_dist = _swing_levels(p)
@@ -6378,6 +6455,14 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             else:
                 stop = round(px + stop_dist, 2) if has_stop else None
                 target = round(px - tgt_dist, 2) if has_tgt else None
+            # Live-tradeable check: confidence + score gates from
+            # paper_trader (same gates the execution loop applies).
+            try:
+                _conf = float(p.get("confidence", 0) or 0)
+                _score_abs = abs(float(p.get("composite_score", 0) or 0))
+                _live_ok = (_conf >= _live_min_conf and _score_abs >= _live_min_score)
+            except Exception:
+                _live_ok = False
             return {
                 "rank": rank,
                 "ticker": p.get("ticker") or p.get("symbol"),
@@ -6399,18 +6484,34 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 "reasons": (p.get("reasons") or [])[:5],
                 "recommended_hold": "3-5 days minimum; up to 8-12 weeks if trend holds",
                 "no_day_trading": True,
+                # F5 tag — distinguishes live-tradeable vs research-only
+                "live_tradeable": _live_ok,
+                "tier": "live" if _live_ok else "research",
             }
 
+        formatted_longs = [_format(p, "long", i + 1) for i, p in enumerate(top_longs)]
+        formatted_shorts = [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)]
+        live_longs = sum(1 for p in formatted_longs if p.get("live_tradeable"))
+        live_shorts = sum(1 for p in formatted_shorts if p.get("live_tradeable"))
         return {
             "ok": True,
             "generated_at": data.get("generated_at") or "unknown",
             "cache_age_seconds": round(cache_age, 1) if cache_age is not None else None,
             "regime": (data.get("regime") or {}).get("regime", "unknown"),
             "regime_confidence": (data.get("regime") or {}).get("confidence", 0),
-            "long_picks": [_format(p, "long", i + 1) for i, p in enumerate(top_longs)],
-            "short_picks": [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)],
+            "long_picks": formatted_longs,
+            "short_picks": formatted_shorts,
             "long_count": len(top_longs),
             "short_count": len(top_shorts),
+            "live_tradeable_count": {
+                "longs": live_longs,
+                "shorts": live_shorts,
+                "total": live_longs + live_shorts,
+            },
+            "live_gates": {
+                "min_confidence": _live_min_conf,
+                "min_composite_score": _live_min_score,
+            },
             "universe_size": data.get("universe_size", 0),
             "stocks_with_data": data.get("stocks_with_data", 0),
             "guidance": (

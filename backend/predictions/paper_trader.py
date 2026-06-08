@@ -445,14 +445,13 @@ def _get_min_confidence() -> int:
     AUTO-TUNE 2026-05-16: applies rolling 30-day win-rate-driven shift
     on top of the base threshold.  Clamped to [base-3, base+5]."""
     if _is_live_safety_mode():
-        # 2026-06-05: QUALITY-OVER-QUANTITY upgrade. Bumped base 42 → 60.
-        # User feedback: trades later in day weak, picks degrade,
-        # DOCN -55% single trade harpooned the day.  Floor of 60 means
-        # only A-grade picks fire (vs B-grade noise before).  Expected
-        # trade count drops from 22/day to 5-12/day — fewer but better.
-        # Auto-tune range -3/+5 preserved so floor still flexes 57-65
-        # based on recent win rate.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 60))
+        # 2026-06-07: EXPOSURE CALIBRATION. User wants 60-70% gross on
+        # Monday open. Previous floor 60 was leaving only 2-4 picks
+        # passing the gate → ~36% gross deploy. New floor 55 (auto-tune
+        # range 52-60) lets 6-8 picks through → 54-72% gross at 9% sizing.
+        # Quality is still enforced by composite_score floor + Kelly
+        # sizing + sector concentration cap + correlation block.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 55))
     elif _is_preservation_mode():
         base = 65
     else:
@@ -474,16 +473,17 @@ def _get_min_composite_score() -> float:
     Quality is still enforced by: Kelly sizing, calibration, sector cap,
     direction safety, auto-tune confidence, and the picks engine's own
     sector/factor filters."""
-    # 2026-06-05: QUALITY UPGRADE. Bumped 1.0 → 2.0 across all modes.
-    # Combined with conf floor 60, this ensures only the strongest
-    # multi-factor signals get traded.  Score 2.0 represents ~2 std
-    # deviations on the 22-factor composite — the top ~15% of the
-    # universe.  Fewer trades, higher conviction.
+    # 2026-06-07: EXPOSURE CALIBRATION. Bumped 2.0 → 1.5 in live mode
+    # so the gate matches the new score distribution from the 22-factor
+    # rescale. Score 1.5 still represents ~1.5 std deviations on the
+    # composite (top ~30% of universe). Combined with the lower
+    # confidence floor (55), this allows enough picks to actually hit
+    # the 60-70% gross target the user wants on Monday open.
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 2.0)
+        return _live_safety_float("LIVE_MIN_SCORE", 1.5)
     if _is_preservation_mode():
         return 2.5
-    return 2.0
+    return 1.5
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
