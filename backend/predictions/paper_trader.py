@@ -473,17 +473,18 @@ def _get_min_composite_score() -> float:
     Quality is still enforced by: Kelly sizing, calibration, sector cap,
     direction safety, auto-tune confidence, and the picks engine's own
     sector/factor filters."""
-    # 2026-06-07: EXPOSURE CALIBRATION. Bumped 2.0 → 1.5 in live mode
-    # so the gate matches the new score distribution from the 22-factor
-    # rescale. Score 1.5 still represents ~1.5 std deviations on the
-    # composite (top ~30% of universe). Combined with the lower
-    # confidence floor (55), this allows enough picks to actually hit
-    # the 60-70% gross target the user wants on Monday open.
+    # 2026-06-07 v2: REFINED CALIBRATION. First pass to 1.5 verified
+    # live — only 3 longs + 3 shorts passed → 46% projected gross,
+    # short of the 60-70% target. Second pass to 1.2 admits TROW (1.40),
+    # EXPD (1.60), STT (1.38), FDX (1.33) and reaches the band.
+    # Score 1.2 ≈ ~1.2 std deviations on the rescaled composite —
+    # still top ~35% of universe. Quality enforced by Kelly + confidence
+    # floor + sector cap + correlation block.
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 1.5)
+        return _live_safety_float("LIVE_MIN_SCORE", 1.2)
     if _is_preservation_mode():
         return 2.5
-    return 1.5
+    return 1.2
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
