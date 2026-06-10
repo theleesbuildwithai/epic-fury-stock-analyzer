@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v16-confidence-boost+sideways-threshold-0.8+sector-cap-5+trades-7",
+        "commit_marker": "fix-v16-conf-boost+sideways-0.8+empty-picks-retry+vix-threshold-200",
         "date": "2026-06-11",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4743,11 +4743,21 @@ def quant_picks(force_refresh: bool = False):
         # Wednesday morning. Now stale cache is skipped and a background
         # regen is triggered so picks refresh within 15 min.
         _PICKS_ENDPOINT_TTL = 900  # 15 min — matches quant_engine internal TTL
-        if cache_entry and cache_entry.get("data") and _cache_age_s < _PICKS_ENDPOINT_TTL:
-            result = dict(cache_entry["data"])
+        _cached_data = cache_entry["data"] if cache_entry else None
+        # 2026-06-11 fix: also require non-empty picks before serving cache.
+        # A failed regen (yfinance outage) stores empty long_picks/short_picks
+        # in the cache — serving them as "cached" would block retry for 15 min.
+        _cached_has_picks = bool(
+            _cached_data and (
+                len(_cached_data.get("long_picks") or []) +
+                len(_cached_data.get("short_picks") or []) > 0
+            )
+        )
+        if cache_entry and _cached_has_picks and _cache_age_s < _PICKS_ENDPOINT_TTL:
+            result = dict(_cached_data)
             result["cache_status"] = "cached"
             result["cache_age_seconds"] = round(_cache_age_s, 0)
-            result["_endpoint_version"] = "v11-stale-guard"
+            result["_endpoint_version"] = "v12-empty-picks-retry"
             try:
                 return JSONResponse(content=_safe_serialize(result))
             except Exception as _ser_e:
@@ -4755,10 +4765,10 @@ def quant_picks(force_refresh: bool = False):
                 return JSONResponse(content=_json_q.loads(
                     _json_q.dumps(result, default=str)
                 ))
-        # Cache is stale OR cold — trigger background regen + serve fresh/S3
+        # Cache is stale, cold, or empty picks — trigger background regen + serve fresh/S3
         # 2026-06-10 fix: also trigger when cache_entry is None (cold start).
-        # Previously cold cache never triggered regen — system stayed in LOADING.
-        _needs_regen = (not cache_entry) or (_cache_age_s >= _PICKS_ENDPOINT_TTL)
+        # 2026-06-11 fix: also trigger when picks are empty (failed regen result).
+        _needs_regen = (not cache_entry) or (_cache_age_s >= _PICKS_ENDPOINT_TTL) or (not _cached_has_picks)
         if _needs_regen:
             try:
                 import threading as _thr_q
@@ -6495,7 +6505,12 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         # Only regen if cache is stale.
         cache_entry = _quant_cache.get("quant_picks")
         cache_age = (_t_stb.time() - cache_entry["time"]) if cache_entry else None
-        if force_refresh or cache_age is None or cache_age > 900:  # 15-min TTL matching quant-picks
+        _stb_data = cache_entry["data"] if cache_entry else None
+        _stb_has_picks = bool(_stb_data and (
+            len(_stb_data.get("long_picks") or []) + len(_stb_data.get("short_picks") or []) > 0
+        ))
+        # 2026-06-11: also regen if picks are empty (failed regen blocks retry for 15 min)
+        if force_refresh or cache_age is None or cache_age > 900 or not _stb_has_picks:
             try:
                 import threading
                 if not globals().get("_picks_regen_in_progress", False):

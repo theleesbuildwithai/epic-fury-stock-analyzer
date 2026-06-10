@@ -219,7 +219,12 @@ def _try_fetch_yfinance(ticker: str = "^VIX") -> tuple:
                 # pass NaN because NaN comparisons always return False).
                 if _m.isnan(val) or _m.isinf(val):
                     return None, f"nan_or_inf:{val}"
-                if val > 1000 or val < 0:
+                # 2026-06-11: tightened from 1000→200. Real VIX all-time
+                # high is ~89 (March 2020). Values 200-999 are clearly
+                # DataFrame parsing artifacts (wrong column, scaling error).
+                # This ensures 285.83-type garbage is caught here rather
+                # than passing through to the VIX_ABSOLUTE_MAX bounds check.
+                if val > 200 or val < 0:
                     return None, f"scaled_corrupt:{val:.0f}"
                 return val, None
         except Exception as e:
