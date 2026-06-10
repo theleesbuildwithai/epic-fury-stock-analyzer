@@ -1181,18 +1181,43 @@ def detect_market_regime() -> dict:
                         spy_sma200 = float(np.mean(spy_closes[-200:]))
                         spy_sma50 = float(np.mean(spy_closes[-50:]))
                         if spy_last > 0 and spy_sma200 > 0:
-                            # Scale SPY SMA to S&P price units
                             scale = sp_current / spy_last
                             sp_sma200 = spy_sma200 * scale
                             sp_sma50 = spy_sma50 * scale
-                            sp_used_fallback = False   # we have real SMA data now
+                            sp_used_fallback = False
                             regime_data["details"].append(
                                 f"S&P 500 from truth_engine; SMA via SPY (scaled) — ^GSPC corrupted"
                             )
                 except Exception as _spy_e:
                     logger.warning(f"Regime: SPY SMA fallback failed: {_spy_e}")
+
+            # Fallback 3: stooq (independent of yfinance) — works post-market
+            # and during yfinance outages. Uses spy.us historical data.
+            if sp_current is not None and sp_used_fallback:
+                try:
+                    import pandas_datareader.data as _pdr
+                    import datetime as _dt_stooq
+                    _end = _dt_stooq.date.today()
+                    _start = _end - _dt_stooq.timedelta(days=400)
+                    stooq_df = _pdr.DataReader("spy.us", "stooq", _start, _end)
+                    if stooq_df is not None and len(stooq_df) >= 200:
+                        stooq_closes = stooq_df["Close"].dropna().values.astype(float)
+                        if len(stooq_closes) >= 200:
+                            stooq_last = float(stooq_closes[-1])
+                            stooq_sma200 = float(np.mean(stooq_closes[-200:]))
+                            stooq_sma50 = float(np.mean(stooq_closes[-50:]))
+                            if stooq_last > 0 and stooq_sma200 > 0:
+                                scale = sp_current / stooq_last
+                                sp_sma200 = stooq_sma200 * scale
+                                sp_sma50 = stooq_sma50 * scale
+                                sp_used_fallback = False
+                                regime_data["details"].append(
+                                    f"S&P 500 from truth_engine; SMA via stooq/SPY — yfinance down"
+                                )
+                except Exception as _stooq_e:
+                    logger.warning(f"Regime: stooq SMA fallback failed: {_stooq_e}")
                     regime_data["details"].append(
-                        f"S&P 500 from truth_engine — yfinance corrupted; trend=neutral"
+                        f"S&P 500 from truth_engine — all SMA sources failed; trend=neutral"
                     )
 
             if sp_current is not None and sp_current > 0:
