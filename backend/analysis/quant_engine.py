@@ -4576,7 +4576,25 @@ def generate_quant_picks() -> dict:
                     logger.warning("PICKS DISK CACHE: long_picks/short_picks malformed, ignoring")
                 else:
                     age_hours = (time.time() - float(cached.get("_saved_at", 0))) / 3600.0
-                    if 0 <= age_hours <= 48:
+                    # 2026-06-11 fix: refuse crisis-regime disk cache.
+                    # A CPI-day VIX spike (e.g. 37.5) gets cached to disk
+                    # with 0 picks and SIDEWAYS/CRISIS regime. The next
+                    # morning, live generation fails in premarket → falls
+                    # back to this cache → perpetuates CRISIS → 0 picks
+                    # all morning. Better to return empty (LOADING) and let
+                    # the engine retry live data than to serve stale CRISIS.
+                    _c_vix = float((cached.get("regime") or {}).get("vix_level") or 0)
+                    _c_zone = (cached.get("regime") or {}).get("vix_zone", "")
+                    _c_longs = cached.get("long_picks") or []
+                    _c_shorts = cached.get("short_picks") or []
+                    if (_c_zone == "crisis" or _c_vix > 30) and not _c_longs and not _c_shorts:
+                        logger.warning(
+                            f"PICKS DISK CACHE: refusing crisis/0-pick disk cache "
+                            f"(vix={_c_vix:.1f}, zone={_c_zone}, age={age_hours:.1f}h) "
+                            f"— will retry live generation"
+                        )
+                        # Fall through — don't serve this cache
+                    elif 0 <= age_hours <= 48:
                         cached["_cache_source"] = "disk_stale"
                         cached["_cache_age_hours"] = round(age_hours, 1)
                         logger.warning(

@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v11-vix-stale-crisis+stats-reset+ou-pairs",
+        "commit_marker": "fix-v12-stale-cache-kills+picks-ttl-guard+crisis-skip",
         "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4730,12 +4730,24 @@ def quant_picks(force_refresh: bool = False):
             return _scrub_nan(_json_q.loads(_json_q.dumps(payload, default=str)))
 
     try:
+        import time as _time_q
         from analysis.quant_engine import _quant_cache
         cache_entry = _quant_cache.get("quant_picks")
-        if cache_entry and cache_entry.get("data"):
+        _cache_age_s = (
+            (_time_q.time() - cache_entry["time"])
+            if (cache_entry and "time" in cache_entry) else float("inf")
+        )
+        # 2026-06-11 fix: enforce 15-min TTL on the in-memory cache.
+        # Previously this endpoint returned stale data forever on hot deploys
+        # (container not restarted) — June 10 CRISIS regime persisted all
+        # Wednesday morning. Now stale cache is skipped and a background
+        # regen is triggered so picks refresh within 15 min.
+        _PICKS_ENDPOINT_TTL = 900  # 15 min — matches quant_engine internal TTL
+        if cache_entry and cache_entry.get("data") and _cache_age_s < _PICKS_ENDPOINT_TTL:
             result = dict(cache_entry["data"])
             result["cache_status"] = "cached"
-            result["_endpoint_version"] = "v10-true-confidence"
+            result["cache_age_seconds"] = round(_cache_age_s, 0)
+            result["_endpoint_version"] = "v11-stale-guard"
             try:
                 return JSONResponse(content=_safe_serialize(result))
             except Exception as _ser_e:
@@ -4743,6 +4755,15 @@ def quant_picks(force_refresh: bool = False):
                 return JSONResponse(content=_json_q.loads(
                     _json_q.dumps(result, default=str)
                 ))
+        # Cache is stale or empty — trigger background regen + serve fresh
+        if cache_entry and _cache_age_s >= _PICKS_ENDPOINT_TTL:
+            try:
+                import threading as _thr_q
+                from analysis.quant_engine import generate_quant_picks as _gpq
+                _thr_q.Thread(target=_gpq, daemon=True).start()
+                logger.info("quant-picks: stale cache — background regen triggered")
+            except Exception as _bg_e:
+                logger.debug(f"quant-picks bg regen failed: {_bg_e}")
         try:
             from predictions.models import get_trading_state as _gts
             _raw = _gts("picks_s3_snapshot", "")
@@ -4757,7 +4778,7 @@ def quant_picks(force_refresh: bool = False):
                 _snap["long_picks"] = _decontam_snap(_snap.get("long_picks") or [])
                 _snap["short_picks"] = _decontam_snap(_snap.get("short_picks") or [])
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v10-true-confidence"
+                _snap["_endpoint_version"] = "v11-stale-guard"
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
