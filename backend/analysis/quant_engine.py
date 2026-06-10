@@ -3310,22 +3310,24 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         elif current_regime == "BULL":
             long_threshold_high, long_threshold_low = 2.0, 0.6
             short_threshold_high, short_threshold_low = -3.0, -2.0
-        else:  # SIDEWAYS
-            long_threshold_high, long_threshold_low = 2.5, 1.2
-            short_threshold_high, short_threshold_low = -2.5, -1.2
+        else:  # SIDEWAYS — 2026-06-11: lowered low thresholds 1.2→0.8/-1.2→-0.8
+            # to match BULL sensitivity. SIDEWAYS was too strict, starving the
+            # displayed queue. Quality still enforced by Kelly + confidence gate.
+            long_threshold_high, long_threshold_low = 2.5, 0.8
+            short_threshold_high, short_threshold_low = -2.5, -0.8
 
         if final_score >= long_threshold_high:
             direction = "LONG"
-            confidence = min(95, 60 + int(final_score * 3))
+            confidence = min(95, 65 + int(final_score * 3))   # 2026-06-11: was 60+
         elif final_score >= long_threshold_low:
             direction = "LONG"
-            confidence = min(85, 50 + int(final_score * 5))
+            confidence = min(85, 55 + int(final_score * 5))   # 2026-06-11: was 50+
         elif final_score <= short_threshold_high:
             direction = "SHORT"
-            confidence = min(95, 60 + int(abs(final_score) * 3))
+            confidence = min(95, 65 + int(abs(final_score) * 3))  # 2026-06-11: was 60+
         elif final_score <= short_threshold_low:
             direction = "SHORT"
-            confidence = min(85, 50 + int(abs(final_score) * 5))
+            confidence = min(85, 55 + int(abs(final_score) * 5))  # 2026-06-11: was 50+
         else:
             direction = "NEUTRAL"
             confidence = max(30, 50 - int(abs(final_score) * 5))
@@ -4004,9 +4006,9 @@ def generate_quant_picks() -> dict:
         # the in-progress trade execution disagreed.  Walks down the sorted
         # list, keeping each pick UNLESS its sector is already at MAX, then
         # backfills overflow to guarantee at least MIN_PICKS regardless.
-        MAX_PER_SECTOR_QUEUE = 4   # ≤4 picks per sector in the displayed queue
-        MIN_PICKS_LONG = 5        # never drop below this many long candidates
-        MIN_PICKS_SHORT = 3
+        MAX_PER_SECTOR_QUEUE = 5   # 2026-06-11: was 4 — wider queue per sector
+        MIN_PICKS_LONG = 8        # 2026-06-11: was 5 — show more long candidates
+        MIN_PICKS_SHORT = 5       # 2026-06-11: was 3 — show more short candidates
 
         def _diversify_by_sector(sorted_picks, max_per_sector, min_picks, hard_cap):
             kept = []

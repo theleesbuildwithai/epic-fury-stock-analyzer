@@ -455,12 +455,11 @@ def _get_min_confidence() -> int:
         # range 52-60) lets 6-8 picks through → 54-72% gross at 9% sizing.
         # Quality is still enforced by composite_score floor + Kelly
         # sizing + sector concentration cap + correlation block.
-        # 2026-06-10: lowered 55→50. With 6-loss streak adding +5, effective
-        # threshold was 62, leaving only 1-2 picks qualifying (raw picks
-        # typically 52-62%). At base 50: normal window = 55 (streak+5),
-        # caution = 57 (streak+5 + caution+2) → 4-5 picks qualify → 40-45%
-        # gross deployed per cycle, accumulating to 70-80% over 2-3 cycles.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 50))
+        # 2026-06-11: lowered 50→45. With auto-tune streak shift (+5 on losing
+        # streak), effective gate = 50. New confidence formula outputs 55+ for
+        # most qualifying picks so quality bar is maintained by the formula,
+        # not the gate. More picks qualify → more trades fire.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 45))
     elif _is_preservation_mode():
         base = 65
     else:
@@ -489,11 +488,11 @@ def _get_min_composite_score() -> float:
     # Score 1.2 ≈ ~1.2 std deviations on the rescaled composite —
     # still top ~35% of universe. Quality enforced by Kelly + confidence
     # floor + sector cap + correlation block.
-    # 2026-06-09: lowered 1.2→0.8. Picks engine qualifies at score>=0.6 — gate
-    # at 1.2 was rejecting ~80% of candidates. 0.8 = top ~50% by score while
-    # still enforcing Kelly + confidence floor + sector cap as quality backstops.
+    # 2026-06-11: lowered 0.8→0.6. Picks engine now qualifies at score>=0.8
+    # (SIDEWAYS threshold lowered). Gate at 0.6 admits all valid picks while
+    # Kelly + confidence floor + sector cap remain quality backstops.
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 0.8)
+        return _live_safety_float("LIVE_MIN_SCORE", 0.6)
     if _is_preservation_mode():
         return 2.5
     return 0.8
@@ -505,7 +504,7 @@ MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade 
 # one batch of picks. With ~3 trade cycles per day, this gives a
 # theoretical max of 15 trades/day (vs the 22 yesterday that included
 # DOCN's -55% harpoon). Real expected: 5-12/day.
-MAX_TRADES_PER_CYCLE = 5
+MAX_TRADES_PER_CYCLE = 7  # 2026-06-11: was 5 — allow more trades per cycle
 
 # 2026-06-05: Minimum hours an EQUITY position must be held before
 # any soft exit (profit-lock, time-decay, bear-protection) can fire.

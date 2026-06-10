@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v15-vix-crisis-stale-module-level+case2-stale-guard+stb-ttl-900",
+        "commit_marker": "fix-v16-confidence-boost+sideways-threshold-0.8+sector-cap-5+trades-7",
         "date": "2026-06-11",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
