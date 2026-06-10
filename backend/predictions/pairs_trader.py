@@ -313,13 +313,18 @@ def execute_pairs_from_signals(quant_picks: dict, open_trades: list,
                 exp_ret     = float(exp_ret)
 
                 # ---- Entry gates ----
-                if abs(z) < MIN_ZSCORE_ENTRY:
+                # SIDEWAYS: tighter requirements — spread can keep widening with no trend
+                _eff_min_z    = 2.5 if regime == "SIDEWAYS" else MIN_ZSCORE_ENTRY
+                _eff_min_corr = 0.72 if regime == "SIDEWAYS" else MIN_CORRELATION_ENTRY
+                _eff_exit_z_stop = 3.0 if regime == "SIDEWAYS" else EXIT_Z_STOP
+
+                if abs(z) < _eff_min_z:
                     continue
                 if half_life > MAX_HALFLIFE_ENTRY:
                     continue
                 if conf < MIN_CONFIDENCE_ENTRY:
                     continue
-                if corr < MIN_CORRELATION_ENTRY:
+                if corr < _eff_min_corr:
                     continue
                 if price_a <= 0 or price_b <= 0:
                     logger.warning(f"PAIRS: {pair_id} invalid prices a={price_a} b={price_b}")
@@ -355,8 +360,8 @@ def execute_pairs_from_signals(quant_picks: dict, open_trades: list,
                     continue
 
                 # ---- Stop / target ----
-                long_stop    = round(price_long  * 0.90, 2)   # 10% wide — pairs are hedged
-                short_stop   = round(price_short * 1.10, 2)
+                long_stop    = round(price_long  * 0.95, 2)   # 5% max — matches directional stop cap
+                short_stop   = round(price_short * 1.05, 2)
                 long_target  = round(price_long  * (1 + exp_ret / 100), 2)
                 short_target = round(price_short * (1 - exp_ret / 100), 2)
                 hold_days    = max(5, min(60, int(half_life * 2)))
@@ -372,7 +377,7 @@ def execute_pairs_from_signals(quant_picks: dict, open_trades: list,
                     "entry_z":        round(z, 3),
                     "half_life_days": round(half_life, 1),
                     "exit_z_target":  EXIT_Z_TARGET,
-                    "exit_z_stop":    EXIT_Z_STOP,
+                    "exit_z_stop":    _eff_exit_z_stop,
                     "partner_ticker": short_leg,
                     "signal_type":    "ou_stat_arb",
                 })
@@ -384,7 +389,7 @@ def execute_pairs_from_signals(quant_picks: dict, open_trades: list,
                     "entry_z":        round(z, 3),
                     "half_life_days": round(half_life, 1),
                     "exit_z_target":  EXIT_Z_TARGET,
-                    "exit_z_stop":    EXIT_Z_STOP,
+                    "exit_z_stop":    _eff_exit_z_stop,
                     "partner_ticker": long_leg,
                     "signal_type":    "ou_stat_arb",
                 })

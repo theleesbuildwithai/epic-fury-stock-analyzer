@@ -3652,8 +3652,23 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     all_picks.append(p)
                 logger.info(f"BULL regime: {len(long_candidates)} longs, {min(2, len(short_candidates))} shorts selected")
         else:
-            # SIDEWAYS: balanced
-            for p in long_candidates:
+            # SIDEWAYS: balanced — but longs face chop headwind, raise quality bar
+            # Require meaningful conviction: conf>=60% AND score>=1.5
+            # With VIX elevated (>20): even tighter (conf>=63%, score>=1.8)
+            _vix = float((quant_picks.get("macro") or {}).get("vix") or 20)
+            if _vix > 20:
+                _sw_min_conf, _sw_min_score = 63, 1.8
+            else:
+                _sw_min_conf, _sw_min_score = 60, 1.5
+            _sw_longs = [p for p in long_candidates
+                         if p.get("confidence", 0) >= _sw_min_conf
+                         and p.get("composite_score", 0) >= _sw_min_score]
+            if len(_sw_longs) < len(long_candidates):
+                logger.warning(
+                    f"SIDEWAYS LONG GATE: {len(long_candidates)} candidates → "
+                    f"{len(_sw_longs)} passed (conf>={_sw_min_conf}%, score>={_sw_min_score}, VIX={_vix:.1f})"
+                )
+            for p in _sw_longs:
                 p["_adj_confidence"] = p["confidence"]
                 all_picks.append(p)
             for p in short_candidates:

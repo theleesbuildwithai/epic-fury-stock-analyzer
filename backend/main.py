@@ -4730,7 +4730,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v24b-reset-132k",
+        "commit_marker": "feat-v25-pairs-tighter-sideways-long-quality",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4755,6 +4755,10 @@ def build_version():
             "full_portfolio_reset_100k_stats_epoch_v8",
             "atr_mult_1p5_1p2_0p9_tighter_stops",
             "sideways_long_max_stop_3pct_global_5pct",
+            "pairs_leg_stop_10pct_to_5pct",
+            "pairs_sideways_entry_z2p5_corr0p72",
+            "pairs_sideways_exit_zstop_3p0",
+            "sideways_long_gate_conf60_score1p5_vix20adj",
         ],
     }
 
