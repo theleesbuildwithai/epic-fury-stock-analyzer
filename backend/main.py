@@ -939,8 +939,8 @@ try:
             except Exception as _sev8_ce:
                 logger.warning(f"RESET v8: failed to close {_sev8_t.get('ticker')}: {_sev8_ce}")
         # 2. Reset cash to $100,000
-        _sev8_set_cash(100000.0, caller="stats_epoch_reset_v8",
-                       reason="Full portfolio reset — fresh start with v23 quality gates",
+        _sev8_set_cash(132158.05, caller="stats_epoch_reset_v8",
+                       reason="Full portfolio reset — preserving $132k NAV, fresh start with v23 quality gates",
                        bypass_sentinel=True)
         # 3. Advance stats epoch
         _epoch_iso_v8 = _dt_sev8.utcnow().isoformat()
@@ -948,7 +948,7 @@ try:
         _set_state_sev8("stats_epoch_reset_v8_done", "1")
         logger.warning(
             f"STATS EPOCH RESET v8: closed {_sev8_closed_count} positions, "
-            f"cash reset to $100,000, stats epoch advanced to {_epoch_iso_v8}. "
+            f"cash reset to $132,158.05, stats epoch advanced to {_epoch_iso_v8}. "
             f"Fresh start under v23 quality gates (65% SIDEWAYS conf, 1.5x R:R, tighter stops)."
         )
 except Exception as e:
@@ -4730,7 +4730,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v24-full-reset-tighter-stops",
+        "commit_marker": "feat-v24b-reset-132k",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
