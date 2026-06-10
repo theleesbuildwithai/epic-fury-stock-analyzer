@@ -4608,7 +4608,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-trade-firing-v9-s3-decontam+conf-boost-fix",
+        "commit_marker": "fix-v10-true-confidence+high-beta-filter",
         "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4686,35 +4686,17 @@ def quant_picks(force_refresh: bool = False):
         except Exception:
             return _scrub_nan(_json_q.loads(_json_q.dumps(payload, default=str)))
 
-    def _boost_display_confidence(picks_list):
-        """Multiply displayed confidence by 1.35 (cap 99). Internal logic unaffected."""
-        if not picks_list or not isinstance(picks_list, list):
-            return picks_list
-        for p in picks_list:
-            if isinstance(p, dict):
-                raw = p.get("confidence")
-                if isinstance(raw, (int, float)) and _math_q.isfinite(raw):
-                    p["confidence_raw"] = raw
-                    p["confidence"] = min(99, round(raw * 1.35, 1))
-        return picks_list
-
     try:
         from analysis.quant_engine import _quant_cache
         cache_entry = _quant_cache.get("quant_picks")
         if cache_entry and cache_entry.get("data"):
             result = dict(cache_entry["data"])
-            # CRITICAL: deep-copy each pick dict before mutating so the cache
-            # is never modified. Without this, a second caller (e.g. /api/symbols-to-buy)
-            # reads the already-boosted confidence and boosts again (double boost).
-            result["long_picks"] = _boost_display_confidence([dict(p) for p in (result.get("long_picks") or [])])
-            result["short_picks"] = _boost_display_confidence([dict(p) for p in (result.get("short_picks") or [])])
             result["cache_status"] = "cached"
-            result["_endpoint_version"] = "v7-conf-boost"
+            result["_endpoint_version"] = "v10-true-confidence"
             try:
                 return JSONResponse(content=_safe_serialize(result))
             except Exception as _ser_e:
                 logger.error(f"Cache serialize failed: {_ser_e}")
-                # Last resort: dump with default=str, reload as dict
                 return JSONResponse(content=_json_q.loads(
                     _json_q.dumps(result, default=str)
                 ))
@@ -4723,18 +4705,16 @@ def quant_picks(force_refresh: bool = False):
             _raw = _gts("picks_s3_snapshot", "")
             if _raw:
                 _snap = _json_q.loads(_raw)
-                # Decontaminate before boost (old snapshots may have confidence_raw)
+                # Strip any legacy confidence_raw fields saved by old boosting code
                 def _decontam_snap(pl):
                     for _dp in (pl or []):
                         if isinstance(_dp, dict) and "confidence_raw" in _dp:
                             _dp["confidence"] = _dp.pop("confidence_raw")
                     return pl
-                _snap["long_picks"] = _boost_display_confidence(
-                    [dict(p) for p in _decontam_snap(_snap.get("long_picks") or [])])
-                _snap["short_picks"] = _boost_display_confidence(
-                    [dict(p) for p in _decontam_snap(_snap.get("short_picks") or [])])
+                _snap["long_picks"] = _decontam_snap(_snap.get("long_picks") or [])
+                _snap["short_picks"] = _decontam_snap(_snap.get("short_picks") or [])
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v9-decontam"
+                _snap["_endpoint_version"] = "v10-true-confidence"
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
@@ -6633,19 +6613,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
 
         formatted_longs = [_format(p, "long", i + 1) for i, p in enumerate(top_longs)]
         formatted_shorts = [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)]
-        # 2026-06-09: boost display confidence ×1.35 (cap 99) — internal logic unchanged
-        # Guard: if confidence_raw already set (pick came from boosted cache), use it
-        # as the base so we never double-boost. _format() creates new dicts so the
-        # cache is not mutated here, but quant-picks endpoint fix (dict(p) copy) is
-        # the primary protection.
-        import math as _math_stb
-        for _pl in (formatted_longs + formatted_shorts):
-            if isinstance(_pl, dict):
-                _rc = (_pl["confidence_raw"] if "confidence_raw" in _pl
-                       else _pl.get("confidence"))
-                if isinstance(_rc, (int, float)) and _math_stb.isfinite(_rc):
-                    _pl["confidence_raw"] = _rc
-                    _pl["confidence"] = min(99, round(_rc * 1.35, 1))
+        # 2026-06-10: removed ×1.35 confidence boost — show true model confidence only
         live_longs = sum(1 for p in formatted_longs if p.get("live_tradeable"))
         live_shorts = sum(1 for p in formatted_shorts if p.get("live_tradeable"))
         return {
