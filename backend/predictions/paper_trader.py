@@ -3494,13 +3494,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         if preservation:
             logger.warning(f"CAPITAL PRESERVATION MODE: confidence >= {min_conf}, score >= {min_score}, position size 3%")
 
+        # Score-direction guard: longs must have positive score, shorts negative.
+        # abs() was used historically but allows stale cache entries whose score
+        # has flipped direction (e.g. PPLT score=-1.2 in long queue) to fire.
         long_candidates = [p for p in quant_picks.get("long_picks", [])
                           if p["confidence"] >= min_conf
-                          and abs(p.get("composite_score", 0)) >= min_score
+                          and p.get("composite_score", 0) >= min_score
                           and p["symbol"] not in open_tickers]
         short_candidates = [p for p in quant_picks.get("short_picks", [])
                            if p["confidence"] >= min_conf
-                           and abs(p.get("composite_score", 0)) >= min_score
+                           and p.get("composite_score", 0) <= -min_score
                            and p["symbol"] not in open_tickers]
 
         # ────────────────────────────────────────────────────────────────
