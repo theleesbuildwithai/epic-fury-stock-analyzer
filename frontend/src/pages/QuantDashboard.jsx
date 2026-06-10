@@ -130,14 +130,14 @@ export default function QuantDashboard() {
           Sentinel Quant
         </h1>
         <p className="text-neutral-500 mt-1">
-          22-factor quant engine • Autonomous trading • Self-learning system
+          23-factor quant engine • Autonomous trading • Self-learning system
         </p>
 
         {/* Portfolio Value — inline with header */}
         {portfolio && (
           <div className="mt-3 flex items-end justify-between flex-wrap gap-3">
             <div className="flex gap-4 text-xs text-neutral-500">
-              <span>22 Quant Factors</span>
+              <span>23 Quant Factors</span>
               <span>520+ Stocks Analyzed</span>
               <span>Event-Driven Trading</span>
               <span>Self-Learning Weekly</span>
@@ -952,6 +952,8 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                   <th className="text-right py-2 px-2">Current</th>
                   <th className="text-right py-2 px-2">P&L</th>
                   <th className="text-right py-2 px-2">Value</th>
+                  <th className="text-right py-2 px-2">Stop</th>
+                  <th className="text-right py-2 px-2">Target</th>
                   <th className="text-right py-2 px-2">Days</th>
                   <th className="text-left py-2 px-2">Sector</th>
                 </tr>
@@ -998,6 +1000,12 @@ function PaperPortfolioTab({ portfolio, performance, loading, autoStatus, queued
                     </td>
                     <td className="py-2 px-2 text-right font-mono text-neutral-400">
                       ${(p.position_value || 0).toLocaleString(undefined, {maximumFractionDigits: 0})}
+                    </td>
+                    <td className="py-2 px-2 text-right font-mono text-xs text-rose-300/70">
+                      {p.stop_loss ? `$${Number(p.stop_loss).toFixed(2)}` : '—'}
+                    </td>
+                    <td className="py-2 px-2 text-right font-mono text-xs text-emerald-300/70">
+                      {p.target ? `$${Number(p.target).toFixed(2)}` : '—'}
                     </td>
                     <td className="py-2 px-2 text-right text-neutral-400">
                       {isOption && p.dte != null ? (
@@ -1056,6 +1064,7 @@ function IntelligenceTab({ intelligence, loading, quantPicks }) {
     { key: 'sector_rotation', name: 'Sector Rotation', desc: 'Rotate into hot sectors, avoid cold' },
     { key: 'candlestick', name: 'Candlestick Patterns', desc: 'Hammer, engulfing, doji detection' },
     { key: 'beta', name: 'Stock Beta', desc: 'Low-beta anomaly — defensive stocks outperform risk-adjusted' },
+    { key: 'stochastic', name: 'Stochastic Suite (Factor 23)', desc: 'GJR-GARCH + Rough Vol + MJD Jump-Diffusion + Hawkes + VRP + Path Signature + Variance Ratio + Vol-of-Vol' },
   ]
 
   const weightData = Object.entries(weights).map(([name, weight]) => ({

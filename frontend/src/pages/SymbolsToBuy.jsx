@@ -97,8 +97,11 @@ function PickRow({ p, side, rank, cash }) {
           </div>
         )}
       </div>
-      <div className="col-span-2 text-right text-neutral-500 text-[11px] truncate">
+      <div className="col-span-1 text-right text-neutral-500 text-[11px] truncate">
         {(p.reasons && p.reasons[0]) || '—'}
+      </div>
+      <div className={`col-span-1 text-right text-[10px] font-bold ${p.hold_class === 'position' ? 'text-blue-400' : 'text-neutral-500'}`}>
+        {p.hold_class === 'position' ? 'POSITION' : p.hold_class === 'intraday' ? 'INTRADAY' : 'SWING'}
       </div>
     </Link>
   )
@@ -123,7 +126,7 @@ function PickTable({ picks, side, title, cash }) {
           </p>
         </div>
         <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
-          Hold 3-5 days min
+          {picks[0]?.hold_class === 'position' ? 'Position trade (30-60d)' : 'Swing trade (5-14d)'}
         </span>
       </div>
       <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60 text-[10px] font-bold uppercase tracking-wider text-neutral-500">
@@ -136,7 +139,8 @@ function PickTable({ picks, side, title, cash }) {
         <div className="col-span-1 text-right">Target</div>
         <div className="col-span-1 text-right">R/R</div>
         <div className="col-span-1 text-right">Allocate</div>
-        <div className="col-span-2 text-right">Reason</div>
+        <div className="col-span-1 text-right">Reason</div>
+        <div className="col-span-1 text-right">Hold</div>
       </div>
       <div className="max-h-[700px] overflow-y-auto">
         {picks.map((p, i) => <PickRow key={p.ticker} p={p} side={side} rank={i + 1} cash={cash} />)}
