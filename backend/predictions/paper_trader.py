@@ -455,11 +455,16 @@ def _get_min_confidence() -> int:
         # range 52-60) lets 6-8 picks through → 54-72% gross at 9% sizing.
         # Quality is still enforced by composite_score floor + Kelly
         # sizing + sector concentration cap + correlation block.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 55))
+        # 2026-06-10: lowered 55→50. With 6-loss streak adding +5, effective
+        # threshold was 62, leaving only 1-2 picks qualifying (raw picks
+        # typically 52-62%). At base 50: normal window = 55 (streak+5),
+        # caution = 57 (streak+5 + caution+2) → 4-5 picks qualify → 40-45%
+        # gross deployed per cycle, accumulating to 70-80% over 2-3 cycles.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 50))
     elif _is_preservation_mode():
         base = 65
     else:
-        base = 60
+        base = 58
     # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
     final = max(base - 3, min(base + 5, base + shift))
@@ -1448,13 +1453,18 @@ def _get_streak_calibration():
                     "size_multiplier": 1.0, "confidence_shift": 0,
                     "sector_penalties": _get_sector_streak_penalties(recent)}
     else:  # loss
+        # 2026-06-10: confidence_shift capped at +5 (was +15 and +10).
+        # Previous values raised the effective threshold to 72+ on a 6-loss
+        # streak (base 55 + caution 2 + streak 15 = 72), blocking ALL trades
+        # since raw picks are typically 52-65%. Size reduction (-50%) is kept
+        # for capital protection; threshold penalty reduced to allow recovery.
         if streak >= 5:
             return {"streak_type": "loss", "streak_length": streak,
-                    "size_multiplier": 0.50, "confidence_shift": 15,
+                    "size_multiplier": 0.50, "confidence_shift": 5,
                     "sector_penalties": _get_sector_streak_penalties(recent)}
         elif streak >= 3:
             return {"streak_type": "loss", "streak_length": streak,
-                    "size_multiplier": 0.75, "confidence_shift": 10,
+                    "size_multiplier": 0.75, "confidence_shift": 3,
                     "sector_penalties": _get_sector_streak_penalties(recent)}
         else:
             return {"streak_type": "loss", "streak_length": streak,
