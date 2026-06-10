@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v12-stale-cache-kills+picks-ttl-guard+crisis-skip",
+        "commit_marker": "fix-v13-crisis-disk-cache-refused+bad-picks-blocked",
         "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",

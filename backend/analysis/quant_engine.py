@@ -4585,11 +4585,15 @@ def generate_quant_picks() -> dict:
                     # the engine retry live data than to serve stale CRISIS.
                     _c_vix = float((cached.get("regime") or {}).get("vix_level") or 0)
                     _c_zone = (cached.get("regime") or {}).get("vix_zone", "")
-                    _c_longs = cached.get("long_picks") or []
-                    _c_shorts = cached.get("short_picks") or []
-                    if (_c_zone == "crisis" or _c_vix > 30) and not _c_longs and not _c_shorts:
+                    # 2026-06-11 fix v2: refuse ANY disk cache with crisis-level
+                    # regime (VIX>30). These picks were generated under abnormal
+                    # conditions and predate current guards (score-direction,
+                    # high-beta filter, confidence threshold). Serving them causes
+                    # longs with negative scores, same ticker in both sides, and
+                    # sub-60% confidence picks to appear in the queue.
+                    if _c_zone == "crisis" or _c_vix > 30:
                         logger.warning(
-                            f"PICKS DISK CACHE: refusing crisis/0-pick disk cache "
+                            f"PICKS DISK CACHE: refusing crisis-regime disk cache "
                             f"(vix={_c_vix:.1f}, zone={_c_zone}, age={age_hours:.1f}h) "
                             f"— will retry live generation"
                         )
