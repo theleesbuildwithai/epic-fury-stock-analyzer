@@ -4651,19 +4651,17 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v18-stb-safe-pick-direction-only+no-score-sign-filter",
-        "date": "2026-06-11",
+        "commit_marker": "feat-v19-elite-stochastic-factor23+data-shield",
+        "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
             "bulletproof_stub_full_fields",
             "cash_correction_v7",
             "stats_epoch_reset_v6",
-            "min_confidence_60",
-            "min_composite_score_2.0",
-            "MAX_TRADES_PER_CYCLE_5",
-            "min_hold_24h_gate",
-            "profit_lock_30pct",
-            "time_decay_70pct",
+            "stb_safe_pick_direction_only",
+            "elite_stochastic_factor23_8models",
+            "data_shield_4layer_yfinance_safety",
+            "pandas_datareader_stooq_fallback",
         ],
     }
 
