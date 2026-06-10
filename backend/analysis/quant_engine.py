@@ -38,6 +38,13 @@ from analysis.rentech import (
     get_mean_reversion_signals, assess_portfolio_risk,
     calculate_drawdown_circuit_breaker, get_alt_data_signals
 )
+try:
+    from analytics.stochastic_models import compute_stochastic_bundle as _stoch_bundle
+    _STOCHASTIC_ENABLED = True
+except Exception as _stoch_import_err:
+    logger.warning(f"Stochastic models import failed (disabling): {_stoch_import_err}")
+    _STOCHASTIC_ENABLED = False
+    def _stoch_bundle(closes, symbol=""): return {"stochastic_score": 0.0}
 
 logger = logging.getLogger(__name__)
 
@@ -2957,6 +2964,28 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             else:
                 beta = 1.0
 
+            # ============================================================
+            # FACTOR 23: ELITE STOCHASTIC ENSEMBLE (2026-06-10)
+            # 8 research-grade models: GJR-GARCH, Rough Vol (Hurst),
+            # Merton Jump-Diffusion, Hawkes Process, VRP, Path Signature,
+            # Variance Ratio, Vol-of-Vol. All use pre-downloaded closes
+            # (zero new API calls). Returns 0.0 on any failure.
+            # ============================================================
+            stochastic_raw = 0.0
+            try:
+                if _STOCHASTIC_ENABLED and len(closes) >= 60:
+                    _sb = _stoch_bundle(closes, symbol)
+                    stochastic_raw = float(_sb.get("stochastic_score", 0.0))
+                    # Store individual signals for factor_breakdown transparency
+                    _gjr = float(_sb.get("gjr_garch", 0.0))
+                    _jmp = float(_sb.get("jump_diff", 0.0))
+                    _hwk = float(_sb.get("hawkes", 0.0))
+                else:
+                    _gjr = _jmp = _hwk = 0.0
+            except Exception:
+                stochastic_raw = 0.0
+                _gjr = _jmp = _hwk = 0.0
+
             raw_factors.append({
                 "symbol": symbol,
                 "price": round(current_price, 2),
@@ -2987,6 +3016,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 "sector_rotation_raw": 0.0,  # computed post-loop
                 "candlestick_raw": candlestick_raw,
                 "beta_raw": beta_raw,
+                "stochastic_raw": stochastic_raw,
                 "beta": round(beta, 3) if isinstance(beta, float) else 1.0,
                 "adx": round(adx_value, 1),
                 "gap_signal": gap_signal,
@@ -3065,6 +3095,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     candlestick_z = _safe_zscore([s["candlestick_raw"] for s in raw_factors])
     # STOCK BETA — low-beta anomaly (Frazzini & Pedersen)
     beta_z = _safe_zscore([s["beta_raw"] for s in raw_factors])
+    # ELITE STOCHASTIC ENSEMBLE — Factor 23 (GJR-GARCH + Rough Vol + Hawkes + VRP + Path Sig + ...)
+    stochastic_z = _safe_zscore([s.get("stochastic_raw", 0.0) for s in raw_factors])
 
     # --- Regime adjustments ---
     # OVERHAUL: Regime affects FACTOR WEIGHTS only, NOT confidence multiplier
@@ -3107,13 +3139,15 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     W_SECTOR_ROTATION = 0.03  # Sector rotation momentum
     W_CANDLESTICK = 0.03      # Candlestick pattern recognition
     W_BETA = 0.03              # Stock beta (low-beta anomaly)
+    # FACTOR 23: Elite Stochastic Ensemble (GJR-GARCH + Rough Vol + Hawkes + VRP + ...)
+    W_STOCHASTIC = 0.06        # 8-model stochastic suite: research-grade vol + jump + path signals
 
     # Scale existing weights down to make room for new factors (22 total now)
     existing_total = sum(weights.values())
     new_factor_total = (W_SMART_MONEY + W_REL_STRENGTH + W_BB_SQUEEZE + W_VWAP +
                         W_HURST + W_AUTOCORR + W_STAT_ARB + W_KURTOSIS + W_VOL_COMPRESSION +
                         W_MTF_ALIGNMENT + W_EARNINGS_DRIFT + W_VPOC + W_ICHIMOKU +
-                        W_SECTOR_ROTATION + W_CANDLESTICK + W_BETA)
+                        W_SECTOR_ROTATION + W_CANDLESTICK + W_BETA + W_STOCHASTIC)
     scale = (1.0 - new_factor_total)  # existing factors share this portion
 
     w_mom = (weights.get("momentum", 0.25) / existing_total) * scale
@@ -3138,6 +3172,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     w_secrot = W_SECTOR_ROTATION
     w_candle = W_CANDLESTICK
     w_beta = W_BETA
+    w_stoch = W_STOCHASTIC
 
     # --- Calculate composite scores ---
     scored = []
@@ -3165,7 +3200,8 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             ichimoku_z[i] * w_ichi +
             sector_rotation_z[i] * w_secrot +
             candlestick_z[i] * w_candle +
-            beta_z[i] * w_beta
+            beta_z[i] * w_beta +
+            stochastic_z[i] * w_stoch
         )
 
         # Apply macro overlay sector adjustment
@@ -3475,6 +3511,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                      "raw": round(stock["beta_raw"], 2),
                      "contribution": round(beta_z[i] * w_beta, 3),
                      "actual_beta": stock.get("beta", 1.0)},
+            "stochastic": {"z": stochastic_z[i], "weight": round(w_stoch, 3),
+                           "raw": round(stock.get("stochastic_raw", 0.0), 3),
+                           "contribution": round(stochastic_z[i] * w_stoch, 3),
+                           "models": "GJR-GARCH+RoughVol+Hawkes+VRP+PathSig+JumpDiff+VarRatio+VolOfVol"},
         }
 
         # Generate human-readable reasons

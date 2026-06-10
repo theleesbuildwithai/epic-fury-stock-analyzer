@@ -9675,6 +9675,55 @@ def pairs_active(request: Request):
     }
 
 
+# ============================================================
+#  ELITE STOCHASTIC MODELS API
+# ============================================================
+
+@app.get("/api/stochastic/{ticker}")
+async def get_stochastic_analysis(ticker: str, request: Request):
+    """
+    Full elite stochastic analysis for a ticker.
+    Runs 8 research-grade models: GJR-GARCH, Rough Vol (Hurst), Merton Jump-Diffusion,
+    Hawkes Process, Variance Risk Premium, Path Signature, Variance Ratio, Vol-of-Vol.
+    Returns per-model signals + weighted composite stochastic_score.
+    """
+    client_ip = request.client.host
+    check_rate_limit(client_ip)
+    ticker = validate_ticker(ticker)
+    try:
+        import yfinance as _yf_stoch
+        from analytics.stochastic_models import analyze_ticker_stochastic
+        _df = _yf_stoch.download(ticker, period="1y", progress=False)
+        if _df is None or len(_df) < 30:
+            return JSONResponse({"ok": False, "error": "Insufficient price data", "ticker": ticker})
+        from analysis.quant_engine import _safe_close as _sc_stoch
+        _closes = _sc_stoch(_df).dropna().values.astype(float)
+        result = analyze_ticker_stochastic(_closes, ticker)
+        result["ok"] = True
+        return JSONResponse(result)
+    except Exception as e:
+        logger.warning(f"/api/stochastic/{ticker} error: {e}")
+        return JSONResponse({"ok": False, "error": str(e), "ticker": ticker}, status_code=500)
+
+
+@app.get("/api/data-shield/status")
+async def get_data_shield_status(request: Request):
+    """
+    Health status of all data sources: yfinance, Stooq fallback, cache stats.
+    Shows which sources are live, which are degraded, and cache freshness.
+    """
+    client_ip = request.client.host
+    check_rate_limit(client_ip)
+    try:
+        from analytics.data_shield import get_shield_status
+        status = get_shield_status()
+        status["ok"] = True
+        return JSONResponse(status)
+    except Exception as e:
+        logger.warning(f"/api/data-shield/status error: {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 # --- Serve Frontend (in production, the built React app is here) ---
 
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
