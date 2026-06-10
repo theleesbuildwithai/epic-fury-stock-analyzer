@@ -3633,7 +3633,10 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _geo_dir = quant_picks.get("macro", {}).get("geo_impact_analysis", {}).get("geo_direction", "neutral")
             ceasefire_active = _geo_dir == "deescalation" or quant_picks.get("macro", {}).get("ceasefire_overlay", False)
 
-            for p in long_candidates:
+            _bull_longs = [p for p in long_candidates if p.get("confidence", 0) >= 60]
+            if len(_bull_longs) < len(long_candidates):
+                logger.warning(f"BULL LONG GATE: {len(long_candidates)} candidates → {len(_bull_longs)} passed (conf>=60%)")
+            for p in _bull_longs:
                 p["_adj_confidence"] = p["confidence"] + 15
                 all_picks.append(p)
 
@@ -3872,18 +3875,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 break  # Stop opening more positions
 
-            # CONFIDENCE GATE: In BEAR only take decent-conviction longs
-            # Defensive sector longs get a lower gate (35%) — they're safe by nature
-            # Other sector longs need higher conviction (55%)
-            if regime == "BEAR" and direction == "long":
-                is_defensive = pick.get("sector") in DEFENSIVE_SECTORS
-                min_conf = 35 if is_defensive else 55
-                if pick["confidence"] < min_conf:
-                    results["skipped"].append({
-                        "symbol": symbol,
-                        "reason": f"Low conviction long in BEAR ({pick['confidence']}%, need {min_conf}%)",
-                    })
-                    continue
+            # CONFIDENCE GATE: All regimes require 60% for longs
+            if direction == "long" and pick["confidence"] < 60:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": f"Low conviction long ({pick['confidence']}%, need 60% in all regimes)",
+                })
+                continue
 
             # MULTI-DAY CONFIRMATION: Low conviction picks need 2 scans
             if not _check_signal_confirmation(symbol, direction, pick.get("confidence", 50)):
