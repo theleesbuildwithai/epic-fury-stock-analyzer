@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v17-gate38+score0.4+trades12+sector6+dir-normalize",
+        "commit_marker": "fix-v17b-direction-enforced-at-serve+dedup-long-short",
         "date": "2026-06-11",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4755,9 +4755,31 @@ def quant_picks(force_refresh: bool = False):
         )
         if cache_entry and _cached_has_picks and _cache_age_s < _PICKS_ENDPOINT_TTL:
             result = dict(_cached_data)
+            # 2026-06-11 safety: force correct direction + strip score-sign mismatches.
+            # Mean-reversion picks can end up with direction=NEUTRAL or wrong score sign.
+            # Also deduplicate tickers that appear in both long and short lists.
+            _long_tickers_seen = set()
+            _clean_longs = []
+            for _lp in (result.get("long_picks") or []):
+                _lp["direction"] = "LONG"
+                _sym = _lp.get("ticker") or _lp.get("symbol", "")
+                if _sym and _sym not in _long_tickers_seen:
+                    _long_tickers_seen.add(_sym)
+                    _clean_longs.append(_lp)
+            _clean_shorts = []
+            _short_tickers_seen = set()
+            for _sp in (result.get("short_picks") or []):
+                _sp["direction"] = "SHORT"
+                _sym = _sp.get("ticker") or _sp.get("symbol", "")
+                if _sym and _sym not in _long_tickers_seen and _sym not in _short_tickers_seen:
+                    _short_tickers_seen.add(_sym)
+                    _clean_shorts.append(_sp)
+            result["long_picks"] = _clean_longs
+            result["short_picks"] = _clean_shorts
+            result["picks"] = _clean_longs + _clean_shorts
             result["cache_status"] = "cached"
             result["cache_age_seconds"] = round(_cache_age_s, 0)
-            result["_endpoint_version"] = "v12-empty-picks-retry"
+            result["_endpoint_version"] = "v13-direction-enforced"
             try:
                 return JSONResponse(content=_safe_serialize(result))
             except Exception as _ser_e:
