@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v17b-direction-enforced-at-serve+dedup-long-short",
+        "commit_marker": "fix-v18-stb-safe-pick-direction-only+no-score-sign-filter",
         "date": "2026-06-11",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -6568,20 +6568,20 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         all_longs = list(data.get("long_picks", []) or [])
         all_shorts = list(data.get("short_picks", []) or [])
 
-        # Direction & score-sign safety (same guard as /api/quant-picks):
-        # a stock with the wrong direction-or-sign combination would
-        # execute the OPPOSITE of the model.  Strip those.  Also require
-        # a real positive price so downstream stop/target math is sane.
+        # Direction safety: trust the engine's direction assignment (already
+        # enforced/normalized by /api/quant-picks). Only require a valid
+        # price > 0 for stop/target math. Score-sign check removed —
+        # mean-reversion picks legitimately have negative scores in long_picks
+        # (they're contrarian setups, not momentum). 2026-06-11.
         def _safe_pick(p, want_long: bool) -> bool:
             try:
                 d = str(p.get("direction", "")).upper()
-                s = float(p.get("composite_score", 0) or 0)
                 px = float(p.get("price", 0) or 0)
             except (TypeError, ValueError):
                 return False
             if px <= 0:
                 return False
-            return (d == "LONG" and s >= 0) if want_long else (d == "SHORT" and s <= 0)
+            return d == "LONG" if want_long else d == "SHORT"
 
         all_longs  = [p for p in all_longs  if _safe_pick(p, True)]
         all_shorts = [p for p in all_shorts if _safe_pick(p, False)]
