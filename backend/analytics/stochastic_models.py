@@ -279,8 +279,9 @@ def jump_diffusion_signal(closes: np.ndarray, symbol: str = "") -> float:
             return 0.0
 
         # Use advanced JD engine when available (MLE + MC)
+        # n_paths=100 for bulk quant scans (10x faster than default 1000)
         if _ADVANCED_JD_ENABLED and _adv_jd is not None:
-            result = _adv_jd(closes, symbol)
+            result = _adv_jd(closes, symbol, n_paths=100)
             return float(np.clip(result.get("composite_jd_signal", 0.0), -3.0, 3.0))
 
         # Fallback: simple non-parametric threshold approach

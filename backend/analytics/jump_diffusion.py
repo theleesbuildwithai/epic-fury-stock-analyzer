@@ -623,7 +623,8 @@ def jd_trading_signals(params: MJDParams, mc_21d: dict,
 # ============================================================
 
 def compute_jump_diffusion(closes: np.ndarray, symbol: str = "",
-                           force_refresh: bool = False) -> dict:
+                           force_refresh: bool = False,
+                           n_paths: int = 1000) -> dict:
     """
     Full jump-diffusion analysis with 3-tier estimation + MC + signals.
 
@@ -631,6 +632,7 @@ def compute_jump_diffusion(closes: np.ndarray, symbol: str = "",
         closes: np.ndarray of close prices (pre-downloaded, no API calls)
         symbol: ticker for cache key
         force_refresh: bypass TTL cache
+        n_paths: Monte Carlo paths (default 1000; use 100 for bulk quant scans)
 
     Returns:
         dict with: params (MJDParams as dict), mc_21d, mc_5d, signals,
@@ -679,8 +681,8 @@ def compute_jump_diffusion(closes: np.ndarray, symbol: str = "",
         current_price = float(closes_arr[-1])
 
         # Monte Carlo under fitted MJD
-        mc_21d = monte_carlo_mjd(params, current_price, horizon_days=21)
-        mc_5d = monte_carlo_mjd(params, current_price, horizon_days=5, n_paths=500)
+        mc_21d = monte_carlo_mjd(params, current_price, horizon_days=21, n_paths=n_paths)
+        mc_5d = monte_carlo_mjd(params, current_price, horizon_days=5, n_paths=max(50, n_paths // 2))
 
         # Recent returns (last 10 days) for mean-reversion detection
         recent_returns = returns[-10:] if len(returns) >= 10 else returns

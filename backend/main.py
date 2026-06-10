@@ -3042,6 +3042,38 @@ except Exception as _sched_err:
 
 
 # ============================================================
+# STARTUP PICKS WARMUP — pre-warms quant cache at t+90s
+# ============================================================
+# Symbols-to-buy and quant-picks show LOADING until the cache is populated.
+# The main scheduler fires every 5 min but doesn't run immediately on deploy.
+# This warmup thread fires 90 seconds after startup to pre-generate picks
+# so the frontend loads fast on the first visit after a deploy.
+# Safe: runs generate_quant_picks() in a daemon thread — never blocks startup,
+# never executes trades (that's the trade monitor's job).
+def _startup_picks_warmup():
+    """Pre-warm the quant picks cache 90s after deploy."""
+    import threading, time as _t_wp
+
+    def _warmup():
+        try:
+            _t_wp.sleep(90)
+            logger.warning("STARTUP WARMUP: Pre-generating quant picks cache...")
+            from analysis.quant_engine import generate_quant_picks
+            generate_quant_picks()
+            logger.warning("STARTUP WARMUP: Quant picks cache ready.")
+        except Exception as _wp_err:
+            logger.warning(f"STARTUP WARMUP: Non-fatal error: {_wp_err}")
+
+    t = threading.Thread(target=_warmup, daemon=True, name="startup-picks-warmup")
+    t.start()
+
+try:
+    _startup_picks_warmup()
+except Exception:
+    pass  # Never block startup
+
+
+# ============================================================
 # CRITICAL SCHEDULER WATCHDOG — detects dead scheduler + recovers
 # ============================================================
 # A separate Python thread that runs every 5 min and checks:
@@ -4651,7 +4683,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v19-elite-stochastic-factor23+data-shield",
+        "commit_marker": "feat-v20-fast-load-mc100-startup-warmup90s",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4662,6 +4694,8 @@ def build_version():
             "elite_stochastic_factor23_8models",
             "data_shield_4layer_yfinance_safety",
             "pandas_datareader_stooq_fallback",
+            "mc_n_paths_100_for_bulk_scan",
+            "startup_picks_warmup_90s",
         ],
     }
 
