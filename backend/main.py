@@ -9691,13 +9691,21 @@ async def get_stochastic_analysis(ticker: str, request: Request):
     try:
         import yfinance as _yf_stoch
         from analytics.stochastic_models import analyze_ticker_stochastic
+        from analytics.jump_diffusion import analyze_jump_diffusion_full
         _df = _yf_stoch.download(ticker, period="1y", progress=False)
         if _df is None or len(_df) < 30:
             return JSONResponse({"ok": False, "error": "Insufficient price data", "ticker": ticker})
         from analysis.quant_engine import _safe_close as _sc_stoch
         _closes = _sc_stoch(_df).dropna().values.astype(float)
-        result = analyze_ticker_stochastic(_closes, ticker)
-        result["ok"] = True
+        stoch = analyze_ticker_stochastic(_closes, ticker)
+        jd = analyze_jump_diffusion_full(_closes, ticker)
+        result = {
+            "ok": True,
+            "ticker": ticker,
+            "stochastic_ensemble": stoch,
+            "jump_diffusion": jd,
+            "composite_factor23_score": round(stoch.get("stochastic_score", 0.0), 3),
+        }
         return JSONResponse(result)
     except Exception as e:
         logger.warning(f"/api/stochastic/{ticker} error: {e}")

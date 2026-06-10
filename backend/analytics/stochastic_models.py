@@ -27,6 +27,15 @@ import time
 import logging
 from typing import Optional
 
+# Advanced Merton-Kou Jump-Diffusion Engine (replaces the basic stub below)
+try:
+    from analytics.jump_diffusion import compute_jump_diffusion as _adv_jd
+    _ADVANCED_JD_ENABLED = True
+except Exception as _jd_imp_err:
+    logging.getLogger(__name__).warning(f"Advanced JD import failed: {_jd_imp_err}")
+    _ADVANCED_JD_ENABLED = False
+    _adv_jd = None
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -259,69 +268,58 @@ def _hurst_rs(series: np.ndarray) -> Optional[float]:
 # Low jump frequency → calm market → bullish
 # Jump asymmetry: more negative jumps → bearish; positive jumps → bullish
 
-def jump_diffusion_signal(closes: np.ndarray) -> float:
-    """Merton jump-diffusion jump frequency and asymmetry signal. Returns [-3, +3]."""
+def jump_diffusion_signal(closes: np.ndarray, symbol: str = "") -> float:
+    """
+    Advanced Merton Jump-Diffusion signal using 3-tier MLE → MoM → NonParametric.
+    Includes Monte Carlo price distribution + composite trading signal.
+    Returns [-3, +3]. Returns 0.0 on any failure — never blocks trades.
+    """
     try:
-        if len(closes) < 60:
+        if len(closes) < 40:
             return 0.0
 
+        # Use advanced JD engine when available (MLE + MC)
+        if _ADVANCED_JD_ENABLED and _adv_jd is not None:
+            result = _adv_jd(closes, symbol)
+            return float(np.clip(result.get("composite_jd_signal", 0.0), -3.0, 3.0))
+
+        # Fallback: simple non-parametric threshold approach
         rets = np.diff(np.log(np.maximum(closes[-252:], 1e-10)))
         if len(rets) < 30:
             return 0.0
 
-        # Estimate diffusion vol (without jumps): use median absolute deviation
         mad = float(np.median(np.abs(rets - np.median(rets))))
-        sigma_diffusion = mad * 1.4826  # conversion to std
-
+        sigma_diffusion = mad * 1.4826
         if sigma_diffusion <= 0:
             return 0.0
 
-        # Classify jumps: |return| > 3σ
         threshold = 3.0 * sigma_diffusion
-        jump_mask = np.abs(rets) > threshold
-        jumps = rets[jump_mask]
-
-        # Recent jump frequency (last 21 days = 1 month)
         recent_rets = rets[-21:] if len(rets) >= 21 else rets
-        recent_jumps_mask = np.abs(recent_rets) > threshold
-        recent_jumps = recent_rets[recent_jumps_mask]
+        recent_jumps = recent_rets[np.abs(recent_rets) > threshold]
+        all_jumps = rets[np.abs(rets) > threshold]
 
-        total_days = len(rets)
-        recent_lambda = len(recent_jumps) / 21.0 * 252  # annualized recent jump rate
-        long_term_lambda = len(jumps) / total_days * 252  # annualized long-term rate
+        recent_lambda = len(recent_jumps) / 21.0 * 252
+        long_term_lambda = len(all_jumps) / len(rets) * 252
+        neg_pct = float(np.sum(recent_jumps < 0)) / len(recent_jumps) if len(recent_jumps) > 0 else 0.5
 
-        # Jump asymmetry
-        if len(recent_jumps) > 0:
-            neg_jumps = np.sum(recent_jumps < 0)
-            pos_jumps = np.sum(recent_jumps > 0)
-            total_recent = len(recent_jumps)
-            neg_pct = neg_jumps / total_recent
-        else:
-            neg_pct = 0.5
-
-        # Signal: few recent jumps vs history → calm → bullish
-        lambda_ratio = (recent_lambda / (long_term_lambda + 0.1))
-
+        lambda_ratio = recent_lambda / (long_term_lambda + 0.1)
         if recent_lambda < 2 and lambda_ratio < 0.5:
-            raw = 2.0    # Very quiet recently vs history → buy
+            raw = 2.0
         elif recent_lambda < 5 and lambda_ratio < 1.0:
-            raw = 1.0    # Below average jump activity → mild buy
+            raw = 1.0
         elif recent_lambda > 15 and neg_pct > 0.7:
-            raw = -3.0   # High crash-type jumps → strongly bearish
+            raw = -3.0
         elif recent_lambda > 10 and neg_pct > 0.6:
-            raw = -2.0   # Elevated negative jumps → bearish
+            raw = -2.0
         elif recent_lambda > 8:
-            raw = -1.0   # Elevated jump activity → caution
+            raw = -1.0
         else:
             raw = 0.0
-
-        # Asymmetry modifier: mostly positive jumps = bullish
         if len(recent_jumps) >= 2:
             if neg_pct < 0.3:
-                raw = min(3.0, raw + 1.0)   # Mostly up-jumps → bullish
+                raw = min(3.0, raw + 1.0)
             elif neg_pct > 0.7:
-                raw = max(-3.0, raw - 0.5)  # Mostly down-jumps → extra bearish
-
+                raw = max(-3.0, raw - 0.5)
         return float(np.clip(raw, -3.0, 3.0))
 
     except Exception:
@@ -750,14 +748,14 @@ _BUNDLE_WEIGHTS = {
 assert abs(sum(_BUNDLE_WEIGHTS.values()) - 1.0) < 1e-9, "Bundle weights must sum to 1"
 
 
-def _compute_bundle_raw(closes: np.ndarray) -> dict:
+def _compute_bundle_raw(closes: np.ndarray, symbol: str = "") -> dict:
     """Compute all stochastic signals. Called once per symbol per TTL period."""
     closes = np.asarray(closes, dtype=float)
 
     signals = {
         "gjr_garch":  gjr_garch_signal(closes),
         "rough_vol":  rough_vol_signal(closes),
-        "jump_diff":  jump_diffusion_signal(closes),
+        "jump_diff":  jump_diffusion_signal(closes, symbol),   # advanced MJD engine
         "hawkes":     hawkes_signal(closes),
         "vrp":        vrp_signal(closes),
         "path_sig":   path_signature_signal(closes),
@@ -799,7 +797,13 @@ def compute_stochastic_bundle(closes, symbol: str = "") -> dict:
             return _ZERO
 
         cache_key = symbol or "_noname_"
-        return _cached(cache_key, _compute_bundle_raw, closes_arr)
+        now = time.time()
+        entry = _stoch_cache.get(cache_key)
+        if entry and (now - entry["ts"]) < _STOCH_TTL:
+            return entry["data"]
+        data = _compute_bundle_raw(closes_arr, symbol)
+        _stoch_cache[cache_key] = {"data": data, "ts": now}
+        return data
 
     except Exception as e:
         logger.debug(f"Stochastic bundle failed for {symbol}: {e}")

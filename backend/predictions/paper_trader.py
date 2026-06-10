@@ -3874,6 +3874,41 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             conf_cap = mistake_adj.get("confidence_cap", 95)
             pick["confidence"] = min(pick["confidence"], conf_cap)
 
+            # JUMP-DIFFUSION CRASH RISK OVERLAY (2026-06-10)
+            # Uses advanced Merton JD engine (3-tier MLE→MoM→NonParametric + MC).
+            # Only ADJUSTS confidence — never kills a trade outright.
+            # High crash_prob → reduce long confidence. Recent down-jump → boost contrarian.
+            # All failures silently return 0 → no trade impact on error.
+            try:
+                _pick_closes = pick.get("closes") or []
+                if _pick_closes and len(_pick_closes) >= 40:
+                    from analytics.jump_diffusion import compute_jump_diffusion as _jd_pt
+                    _jd = _jd_pt(list(_pick_closes), symbol)
+                    _jd_composite = float(_jd.get("composite_jd_signal", 0.0))
+                    _crash_prob = float(_jd.get("mc_21d", {}).get("crash_prob_15pct", 0) or 0)
+                    _mean_rev = float(_jd.get("mean_reversion_score", 0.0) or 0)
+
+                    if direction == "long":
+                        # Crash risk penalty on longs
+                        if _crash_prob > 0.12:
+                            _jd_adj = -12
+                        elif _crash_prob > 0.07:
+                            _jd_adj = -6
+                        elif _crash_prob > 0.04:
+                            _jd_adj = -3
+                        else:
+                            _jd_adj = 0
+                        # Mean-reversion boost: post-crash bounce opportunity
+                        if _mean_rev >= 1.5:
+                            _jd_adj = max(_jd_adj, 5)  # boost confidence post-jump
+                        pick["confidence"] = max(15, pick["confidence"] + _jd_adj)
+                    elif direction == "short":
+                        # High crash risk confirms shorts
+                        if _crash_prob > 0.10:
+                            pick["confidence"] = min(95, pick["confidence"] + 5)
+            except Exception:
+                pass  # JD overlay is non-fatal — never blocks a trade
+
             # Check sector concentration — max 4 per sector per direction for diversification
             sector_key = f"{pick.get('sector', 'Unknown')}_{direction}"
             if sector_counts.get(sector_key, 0) >= 8:
