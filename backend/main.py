@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v16-conf-boost+sideways-0.8+empty-picks-retry+vix-threshold-200",
+        "commit_marker": "fix-v17-gate38+score0.4+trades12+sector6+dir-normalize",
         "date": "2026-06-11",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",

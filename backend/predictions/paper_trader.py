@@ -455,11 +455,11 @@ def _get_min_confidence() -> int:
         # range 52-60) lets 6-8 picks through → 54-72% gross at 9% sizing.
         # Quality is still enforced by composite_score floor + Kelly
         # sizing + sector concentration cap + correlation block.
-        # 2026-06-11: lowered 50→45. With auto-tune streak shift (+5 on losing
-        # streak), effective gate = 50. New confidence formula outputs 55+ for
-        # most qualifying picks so quality bar is maintained by the formula,
-        # not the gate. More picks qualify → more trades fire.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 45))
+        # 2026-06-11 v2: lowered 45→38. Effective gate with streak (+5) = 43.
+        # Quality enforced by composite_score floor + direction normalization
+        # + Kelly sizing + sector cap. Confidence bar kept by the formula
+        # (outputs 55%+ for valid picks). Gate just needs to let them through.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 38))
     elif _is_preservation_mode():
         base = 65
     else:
@@ -488,23 +488,23 @@ def _get_min_composite_score() -> float:
     # Score 1.2 ≈ ~1.2 std deviations on the rescaled composite —
     # still top ~35% of universe. Quality enforced by Kelly + confidence
     # floor + sector cap + correlation block.
-    # 2026-06-11: lowered 0.8→0.6. Picks engine now qualifies at score>=0.8
-    # (SIDEWAYS threshold lowered). Gate at 0.6 admits all valid picks while
-    # Kelly + confidence floor + sector cap remain quality backstops.
+    # 2026-06-11 v2: lowered 0.6→0.4. SIDEWAYS threshold is now 0.8 so all
+    # engine picks have score>=0.8. Gate at 0.4 admits everything the engine
+    # qualifies while Kelly + direction safety + sector cap handle quality.
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 0.6)
+        return _live_safety_float("LIVE_MIN_SCORE", 0.4)
     if _is_preservation_mode():
         return 2.5
     return 0.8
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
-MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
+MIN_CONFIDENCE = 35  # Default — overridden by _get_min_confidence() at trade time
 
 # 2026-06-05: Cap entries per cycle so we never over-concentrate on
 # one batch of picks. With ~3 trade cycles per day, this gives a
 # theoretical max of 15 trades/day (vs the 22 yesterday that included
 # DOCN's -55% harpoon). Real expected: 5-12/day.
-MAX_TRADES_PER_CYCLE = 7  # 2026-06-11: was 5 — allow more trades per cycle
+MAX_TRADES_PER_CYCLE = 12  # 2026-06-11 v2: was 7 — fire more trades per cycle
 
 # 2026-06-05: Minimum hours an EQUITY position must be held before
 # any soft exit (profit-lock, time-decay, bear-protection) can fire.
@@ -3520,8 +3520,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         #   - Stocks with no sector tag (rare) get treated as their own
         #     "Unknown" bucket and capped together.
         # ────────────────────────────────────────────────────────────────
-        MAX_PER_SECTOR = 4    # 40% of 10 picks max in one sector
-        MIN_PICKS = 5         # don't let the cap drop us below 5 trades
+        MAX_PER_SECTOR = 6    # 2026-06-11: was 4 — wider sector diversity allowed
+        MIN_PICKS = 8         # 2026-06-11: was 5 — guarantee more trades per cycle
 
         def _apply_sector_cap(cands):
             """Cap any sector at MAX_PER_SECTOR; never drop below MIN_PICKS.
