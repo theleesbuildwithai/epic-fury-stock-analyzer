@@ -4683,7 +4683,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v20-fast-load-mc100-startup-warmup90s",
+        "commit_marker": "feat-v21-bulletproof-exits-hold-class-aware",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4696,6 +4696,10 @@ def build_version():
             "pandas_datareader_stooq_fallback",
             "mc_n_paths_100_for_bulk_scan",
             "startup_picks_warmup_90s",
+            "short_max_loss_5pct_to_8pct",
+            "profit_lock_hold_class_swing30_position45",
+            "time_decay_position_2pct_swing_0.5pct",
+            "exit_checker_trail_70_60_50_pct",
         ],
     }
 

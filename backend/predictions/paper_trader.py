@@ -3121,10 +3121,14 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # need to dump on small gains anymore — we can let winners run.
             # Also gated by _can_soft_exit so it can't fire same-day (prevents
             # the day-trading behavior that hit DOCN).
-            profit_lock_threshold = 25.0 if _is_preservation_mode() else 30.0
+            _hold_class = trade.get("hold_class", "swing")
+            if _is_preservation_mode():
+                profit_lock_threshold = 35.0 if _hold_class == "position" else 25.0
+            else:
+                profit_lock_threshold = 45.0 if _hold_class == "position" else 30.0
             if not should_close and _can_soft_exit(trade) and pnl_pct >= profit_lock_threshold:
                 should_close = True
-                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — gain secured (threshold: {profit_lock_threshold}%{'  [PRESERVATION MODE]' if profit_lock_threshold == 25 else ''})"
+                close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — gain secured ({_hold_class} threshold: {profit_lock_threshold}%)"
 
             # TIME DECAY EXIT: If trade hasn't moved in our favor after 70%
             # of hold time, cut it.  Raised 50% → 70% so we give positions
@@ -3137,7 +3141,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     # 2026-06-05: 0.4/0.5 → 0.6/0.7 (more patience)
                     decay_frac = 0.6 if _is_preservation_mode() else 0.7
                     half_hold = max(3, int(max_hold * decay_frac))
-                    if days_held >= half_hold and pnl_pct <= 0.5:
+                    _decay_threshold = 2.0 if trade.get("hold_class", "swing") == "position" else 0.5
+                    if days_held >= half_hold and pnl_pct <= _decay_threshold:
                         should_close = True
                         close_reason = (
                             f"TIME DECAY: {days_held}d held ({int(decay_frac*100)}%+ of {max_hold}d), "
@@ -3164,8 +3169,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 except Exception:
                     pass
 
-            # SHORTS MAX LOSS: Never let a short lose more than 5%
-            if not should_close and direction == "short" and pnl_pct < -5:
+            # SHORTS MAX LOSS: Hard cap -8% (ATR stop fires first; this backstop catches
+            # gap-ups and anomalies. -5% was firing before ATR stop on stocks with ATR>3%)
+            if not should_close and direction == "short" and pnl_pct < -8:
                 should_close = True
                 close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap reached"
 
@@ -5847,8 +5853,9 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             except Exception:
                 pass
 
-        # SHORTS MAX LOSS: Never let a short lose more than 5%
-        if not should_close and direction == "short" and pnl_pct < -5:
+        # SHORTS MAX LOSS: Hard cap -8% (ATR stop fires first; this backstop catches
+        # gap-ups and anomalies. -5% was firing before ATR stop on stocks with ATR>3%)
+        if not should_close and direction == "short" and pnl_pct < -8:
             should_close = True
             close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap"
 
@@ -5871,11 +5878,11 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                         peak_pnl = ((entry_price / trough_price) - 1) * 100
 
                     if peak_pnl >= 20:
-                        trail_pct = 0.65
+                        trail_pct = 0.70  # Keep 70% of big gains
                     elif peak_pnl >= 12:
-                        trail_pct = 0.55
+                        trail_pct = 0.60  # Keep 60%
                     else:
-                        trail_pct = 0.45
+                        trail_pct = 0.50  # Keep 50%
                     trail_level = peak_pnl * trail_pct
                     if peak_pnl >= trail_start_pct and pnl_pct < trail_level:
                         should_close = True
@@ -5886,10 +5893,12 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             except Exception:
                 pass
 
-        # AUTONOMOUS TAKE PROFIT — 20%+ is exceptional, lock it
-        if not should_close and pnl_pct >= 20:
+        # AUTONOMOUS TAKE PROFIT — hold_class-aware thresholds (swing 30% / position 45%)
+        _ec_hold_class = trade.get("hold_class", "swing")
+        _ec_profit_lock = 45.0 if _ec_hold_class == "position" else 30.0
+        if not should_close and pnl_pct >= _ec_profit_lock:
             should_close = True
-            close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — exceptional gain secured"
+            close_reason = f"AUTO PROFIT LOCK: up {pnl_pct:+.1f}% — {_ec_hold_class} threshold {_ec_profit_lock}% reached"
 
         # REMOVED: "SELL AT HIGHS" intraday trigger — killed best trades at +3%
 
