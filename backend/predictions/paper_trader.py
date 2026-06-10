@@ -1609,6 +1609,12 @@ def _autonomous_stop_and_target(
             atr_mult_stop *= 1.2  # More room for longs in bull
         else:
             atr_mult_stop *= 0.8  # Tighter on shorts in bull
+    elif regime == "SIDEWAYS":
+        if direction == "long":
+            # In sideways markets, longs chop without trend. Cut losses faster.
+            # 0.75x tighter stop vs standard — exits before noise becomes real loss.
+            atr_mult_stop *= 0.75
+        # shorts unchanged — sideways drift is usually down-biased, shorts have room
 
     # Mean reversion trades are quick — tighter stops
     if is_mean_reversion:
@@ -1616,8 +1622,12 @@ def _autonomous_stop_and_target(
 
     stop_pct = atr_pct * atr_mult_stop
 
-    # Hard clamp: never risk more than 7% or less than 1.5% (was 2-10% — too wide)
-    stop_pct = max(0.015, min(stop_pct, 0.07))
+    # Hard clamp: longs in SIDEWAYS capped at 4% (was 7%) — fast cut
+    # All others: never risk more than 7% or less than 1.5%
+    if regime == "SIDEWAYS" and direction == "long":
+        stop_pct = max(0.012, min(stop_pct, 0.04))
+    else:
+        stop_pct = max(0.015, min(stop_pct, 0.07))
 
     # --- TAKE PROFIT: ASYMMETRIC R:R for profit-factor edge ---
     # Math: even at 35% win rate, 2.7:1 R:R produces +0.75R per trade.
@@ -2630,10 +2640,13 @@ def get_portfolio_state() -> dict:
         "recent_closed": [{
             "ticker": t["ticker"],
             "direction": t["direction"],
+            "days_held": t.get("days_held", 0),
+            "realized_pct": round(t.get("pnl_pct", 0) or 0, 2),
             "pnl_pct": round(t.get("pnl_pct", 0) or 0, 2),
             "pnl_dollars": round(t.get("pnl_dollars", 0) or 0, 2),
             "entry_price": round(t["entry_price"], 2),
             "exit_price": round(t.get("exit_price") or 0, 2),
+            "close_reason": (t.get("close_reason") or "unknown")[:100],
         } for t in closed_trades[:10]],
         "stats": {
             "total_trades": len(closed_trades),
@@ -3667,6 +3680,39 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     f"short_picks_in={len(quant_picks.get('short_picks', []))}"
                 ),
             })
+
+        # MINIMUM R:R FILTER — skip picks where expected gain < 1.5x expected loss.
+        # Without this, the system enters setups with R:R=0.8 (stops tight, targets far)
+        # which produce avg_win < avg_loss and destroy the profit factor.
+        # Only filter if the pick includes stop/target data (quant engine provides both).
+        _pre_rr_count = len(all_picks)
+        _rr_filtered = []
+        for _rp in all_picks:
+            _rr = _rp.get("reward_risk_ratio") or _rp.get("reward_risk") or 0
+            _stop = _rp.get("stop_loss")
+            _target = _rp.get("target_price")
+            _price = _rp.get("price") or _rp.get("entry_price") or 0
+            # Compute R:R from price/stop/target if not already provided
+            if not _rr and _stop and _target and _price:
+                try:
+                    if _rp.get("direction", "").upper() in ("LONG", "long"):
+                        _gain = _target - _price
+                        _risk = _price - _stop
+                    else:
+                        _gain = _price - _target
+                        _risk = _stop - _price
+                    _rr = round(_gain / _risk, 2) if _risk > 0 else 0
+                    _rp["reward_risk_ratio"] = _rr
+                except Exception:
+                    _rr = 0
+            # Keep pick if R:R >= 1.5 OR no stop/target data (can't compute)
+            if _rr >= 1.5 or not _stop or not _target:
+                _rr_filtered.append(_rp)
+            else:
+                logger.info(f"R:R FILTER: skipped {_rp.get('symbol','?')} {_rp.get('direction','?')} R:R={_rr:.2f} < 1.5")
+        all_picks = _rr_filtered
+        if len(all_picks) < _pre_rr_count:
+            logger.info(f"R:R FILTER: dropped {_pre_rr_count - len(all_picks)} picks (R:R < 1.5x), {len(all_picks)} remain")
 
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)

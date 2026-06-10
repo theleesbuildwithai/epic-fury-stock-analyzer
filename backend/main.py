@@ -4683,7 +4683,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v22-quant-picks-stale-serve-30min",
+        "commit_marker": "feat-v23-sharpe-alpha-winrate-uplift",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4701,6 +4701,10 @@ def build_version():
             "time_decay_position_2pct_swing_0.5pct",
             "exit_checker_trail_70_60_50_pct",
             "quant_picks_stale_serve_30min_dedup_regen",
+            "sideways_long_conf_gate_65pct",
+            "rr_filter_1p5x_min_at_entry",
+            "sideways_long_stop_0p75x_atr_4pct_max",
+            "close_reason_days_held_in_recent_closed",
         ],
     }
 
