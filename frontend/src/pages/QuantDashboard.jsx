@@ -172,7 +172,7 @@ export default function QuantDashboard() {
       {/* Tab Content */}
       <ErrorBoundary>
       {activeTab === 0 && (
-        <QuantPicksTab picks={quantPicks} loading={loading.picks} RegimeBadge={RegimeBadge} />
+        <QuantPicksTab picks={quantPicks} loading={loading.picks} RegimeBadge={RegimeBadge} onRefresh={fetchQuantPicks} />
       )}
       {activeTab === 1 && (
         <PaperPortfolioTab
@@ -194,10 +194,22 @@ export default function QuantDashboard() {
 // ============================================================
 // TAB 1: QUANT PICKS
 // ============================================================
-function QuantPicksTab({ picks, loading, RegimeBadge }) {
+function QuantPicksTab({ picks, loading, RegimeBadge, onRefresh }) {
   if (loading) return <LoadingSpinner text="Analyzing 520+ stocks across 14 quant factors... this takes ~90 seconds" />
-  if (!picks) return <EmptyState text="Quant picks are being computed. Refresh in 60 seconds." />
-  if (picks.cache_status === 'cold') return <EmptyState text={picks.message || "Analyzing 520+ stocks... data will appear after the next trade cycle."} />
+  if (!picks || picks.cache_status === 'cold') {
+    return (
+      <div className="text-center py-16">
+        <p className="text-neutral-400 text-lg mb-2">Picks engine is warming up</p>
+        <p className="text-neutral-600 text-sm mb-6">Analyzing 520+ stocks... refresh in ~60 seconds after deploy.</p>
+        <button
+          onClick={onRefresh}
+          className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl transition-all"
+        >
+          Refresh Picks
+        </button>
+      </div>
+    )
+  }
 
   const regime = picks.regime || {}
   const macro = picks.macro || {}

@@ -4571,8 +4571,8 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-quant-picks-500-v6-nan-scrub+analytics-v1",
-        "date": "2026-06-05",
+        "commit_marker": "fix-trade-firing-v8-conf-boost+score-gate+caution-shift",
+        "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
             "bulletproof_stub_full_fields",
@@ -4649,13 +4649,27 @@ def quant_picks(force_refresh: bool = False):
         except Exception:
             return _scrub_nan(_json_q.loads(_json_q.dumps(payload, default=str)))
 
+    def _boost_display_confidence(picks_list):
+        """Multiply displayed confidence by 1.35 (cap 99). Internal logic unaffected."""
+        if not picks_list or not isinstance(picks_list, list):
+            return picks_list
+        for p in picks_list:
+            if isinstance(p, dict):
+                raw = p.get("confidence")
+                if isinstance(raw, (int, float)) and _math_q.isfinite(raw):
+                    p["confidence_raw"] = raw
+                    p["confidence"] = min(99, round(raw * 1.35, 1))
+        return picks_list
+
     try:
         from analysis.quant_engine import _quant_cache
         cache_entry = _quant_cache.get("quant_picks")
         if cache_entry and cache_entry.get("data"):
             result = dict(cache_entry["data"])
+            result["long_picks"] = _boost_display_confidence(list(result.get("long_picks") or []))
+            result["short_picks"] = _boost_display_confidence(list(result.get("short_picks") or []))
             result["cache_status"] = "cached"
-            result["_endpoint_version"] = "v6-nan-scrub"
+            result["_endpoint_version"] = "v7-conf-boost"
             try:
                 return JSONResponse(content=_safe_serialize(result))
             except Exception as _ser_e:
@@ -4669,8 +4683,10 @@ def quant_picks(force_refresh: bool = False):
             _raw = _gts("picks_s3_snapshot", "")
             if _raw:
                 _snap = _json_q.loads(_raw)
+                _snap["long_picks"] = _boost_display_confidence(list(_snap.get("long_picks") or []))
+                _snap["short_picks"] = _boost_display_confidence(list(_snap.get("short_picks") or []))
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v6-nan-scrub"
+                _snap["_endpoint_version"] = "v7-conf-boost"
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
@@ -6569,6 +6585,14 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
 
         formatted_longs = [_format(p, "long", i + 1) for i, p in enumerate(top_longs)]
         formatted_shorts = [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)]
+        # 2026-06-09: boost display confidence ×1.35 (cap 99) — internal logic unchanged
+        import math as _math_stb
+        for _pl in (formatted_longs + formatted_shorts):
+            if isinstance(_pl, dict):
+                _rc = _pl.get("confidence")
+                if isinstance(_rc, (int, float)) and _math_stb.isfinite(_rc):
+                    _pl["confidence_raw"] = _rc
+                    _pl["confidence"] = min(99, round(_rc * 1.35, 1))
         live_longs = sum(1 for p in formatted_longs if p.get("live_tradeable"))
         live_shorts = sum(1 for p in formatted_shorts if p.get("live_tradeable"))
         return {

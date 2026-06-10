@@ -484,11 +484,14 @@ def _get_min_composite_score() -> float:
     # Score 1.2 ≈ ~1.2 std deviations on the rescaled composite —
     # still top ~35% of universe. Quality enforced by Kelly + confidence
     # floor + sector cap + correlation block.
+    # 2026-06-09: lowered 1.2→0.8. Picks engine qualifies at score>=0.6 — gate
+    # at 1.2 was rejecting ~80% of candidates. 0.8 = top ~50% by score while
+    # still enforcing Kelly + confidence floor + sector cap as quality backstops.
     if _is_live_safety_mode():
-        return _live_safety_float("LIVE_MIN_SCORE", 1.2)
+        return _live_safety_float("LIVE_MIN_SCORE", 0.8)
     if _is_preservation_mode():
         return 2.5
-    return 1.2
+    return 0.8
 
 POSITION_SIZE_PCT = 0.06  # Default — overridden by _get_position_size_pct() at trade time
 MIN_CONFIDENCE = 40  # Default — overridden by _get_min_confidence() at trade time
@@ -1380,7 +1383,8 @@ def _is_good_entry_time(force_market_open: bool = False, force_anytime: bool = F
             return {"can_trade": False, "window": "avoid", "size_modifier": 0.0, "confidence_shift": 0}
         elif t < caution_end:
             # 9:45-10:30 — caution zone, reduce size
-            return {"can_trade": True, "window": "caution", "size_modifier": 0.7, "confidence_shift": 5}
+            # 2026-06-09: lowered shift +5→+2 so caution window doesn't block good picks
+            return {"can_trade": True, "window": "caution", "size_modifier": 0.7, "confidence_shift": 2}
         elif t >= power_start:
             # 3:00-4:00 PM — power hour, best institutional flow
             return {"can_trade": True, "window": "power_hour", "size_modifier": 1.1, "confidence_shift": -5}
@@ -3562,10 +3566,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # check.  Symmetric with long-side filter at line 2972 which already
         # uses abs(p.get("composite_score", 0)).
         pre_gate = len(short_candidates)
+        # 2026-06-09: lowered |score|>=2.0→0.8 to match the rescaled composite distribution
         short_candidates = [p for p in short_candidates
-                           if abs(p.get("composite_score", 0)) >= 2.0 and p["confidence"] >= 45]
+                           if abs(p.get("composite_score", 0)) >= 0.8 and p["confidence"] >= 45]
         if pre_gate > len(short_candidates):
-            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need |score|>=2, conf>=45%)")
+            logger.info(f"SHORT QUALITY GATE: {pre_gate - len(short_candidates)} shorts filtered (need |score|>=0.8, conf>=45%)")
 
         # Defensive sectors — safe for long positions even in bear markets
         # These are stable, dividend-paying, recession-resistant sectors
