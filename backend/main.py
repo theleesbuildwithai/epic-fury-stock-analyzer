@@ -4730,7 +4730,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v26-long-conf-60pct-all-regimes",
+        "commit_marker": "feat-v27-regime-spy-sma-fallback",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",

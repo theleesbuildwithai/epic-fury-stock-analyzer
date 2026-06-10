@@ -1156,25 +1156,49 @@ def detect_market_regime() -> dict:
                     sp_current = None
             sp_used_fallback = False
             if sp_current is None:
-                # Fallback to truth_engine (multi-source: ^GSPC, SPY, ^SPX with bounds)
+                # Fallback 1: truth_engine (multi-source price only)
                 try:
                     from predictions.truth_engine import get_sp500_truth
                     truth = get_sp500_truth(force_refresh=True)
                     if truth.get("ok") and truth.get("price"):
                         sp_current = float(truth["price"])
-                        # Mark fallback so we DON'T pretend to know the SMA-trend
                         sp_used_fallback = True
-                        sp_sma200 = sp_current   # placeholder for display only
+                        sp_sma200 = sp_current   # placeholder — will be overwritten below
                         sp_sma50 = sp_current
-                        regime_data["details"].append(
-                            f"S&P 500 from truth_engine ({truth.get('source')}) — yfinance corrupted; trend=neutral"
-                        )
                 except Exception as _te:
                     logger.warning(f"Regime: truth_engine fallback failed: {_te}")
+
+            # Fallback 2: Use SPY history for 200-SMA when ^GSPC is corrupted.
+            # SPY tracks S&P 1:1 in percentage terms — its SMA relationship is
+            # equivalent. Rescale SPY SMA to the S&P price so the comparison is valid.
+            if sp_current is not None and sp_used_fallback:
+                try:
+                    _throttle()
+                    spy_df = yf.download("SPY", period="1y", progress=False)
+                    if spy_df is not None and len(spy_df) >= 200:
+                        spy_closes = _safe_close(spy_df).values.astype(float)
+                        spy_last = float(spy_closes[-1])
+                        spy_sma200 = float(np.mean(spy_closes[-200:]))
+                        spy_sma50 = float(np.mean(spy_closes[-50:]))
+                        if spy_last > 0 and spy_sma200 > 0:
+                            # Scale SPY SMA to S&P price units
+                            scale = sp_current / spy_last
+                            sp_sma200 = spy_sma200 * scale
+                            sp_sma50 = spy_sma50 * scale
+                            sp_used_fallback = False   # we have real SMA data now
+                            regime_data["details"].append(
+                                f"S&P 500 from truth_engine; SMA via SPY (scaled) — ^GSPC corrupted"
+                            )
+                except Exception as _spy_e:
+                    logger.warning(f"Regime: SPY SMA fallback failed: {_spy_e}")
+                    regime_data["details"].append(
+                        f"S&P 500 from truth_engine — yfinance corrupted; trend=neutral"
+                    )
+
             if sp_current is not None and sp_current > 0:
                 regime_data["sp500_price"] = round(sp_current, 2)
                 if sp_used_fallback:
-                    # No real SMA → trend stays "unknown"; do NOT emit bearish signal
+                    # Both ^GSPC and SPY failed — truly no SMA data
                     regime_data["sp500_trend"] = "unknown"
                     regime_data["sp500_pct_above_200sma"] = 0
                 else:
