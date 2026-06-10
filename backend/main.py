@@ -1919,6 +1919,26 @@ def _exit_checker():
     except Exception as e:
         logger.error(f"EXIT CHECKER ERROR: {e}")
 
+    # OU / Stat Arb pairs exit — spread reversion, stop, time, orphan
+    # Runs after regular exits. Non-fatal: any failure is logged and skipped.
+    try:
+        from predictions.pairs_trader import check_pairs_exits as _check_pairs
+        from predictions.models import get_open_trades as _got_pairs
+        _pairs_closed = _check_pairs(_got_pairs())
+        if _pairs_closed:
+            auto_trade_stats["total_trades_closed"] += len(_pairs_closed) * 2
+            logger.warning(
+                f"PAIRS EXIT CHECKER: {len(_pairs_closed)} pair(s) closed — "
+                f"{[p['pair'] for p in _pairs_closed]}"
+            )
+            try:
+                from predictions.db_persistence import backup_db_to_s3
+                backup_db_to_s3()
+            except Exception:
+                pass
+    except Exception as _pairs_exit_err:
+        logger.warning(f"PAIRS EXIT CHECKER: non-fatal error — {_pairs_exit_err}")
+
 scheduler.add_job(
     _exit_checker,
     "interval",
@@ -9532,6 +9552,43 @@ def rentech_dashboard(request: Request):
             "top_longs": [], "top_shorts": [],
             "cache_status": "error", "error": str(e)[:200],
         }
+
+
+@app.get("/api/pairs-active")
+def pairs_active(request: Request):
+    """
+    Show all currently open OU/stat-arb pair positions with live z-score and P&L.
+    Also shows queued signals from the picks engine (not yet opened).
+    Safe: returns empty lists on any failure.
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import get_open_trades as _got
+        from predictions.pairs_trader import get_open_pairs_summary as _gps
+        _open = _got()
+        open_pairs = _gps(_open)
+    except Exception as _e:
+        logger.warning(f"/api/pairs-active open summary error: {_e}")
+        open_pairs = []
+
+    try:
+        picks = _get_cached_picks() or {}
+        queued_signals = picks.get("pairs_trades", [])
+    except Exception:
+        queued_signals = []
+
+    return {
+        "ok": True,
+        "open_pairs": open_pairs,
+        "open_count": len(open_pairs),
+        "queued_signals": queued_signals[:10],
+        "queued_count": len(queued_signals),
+        "generated_at": __import__("datetime").datetime.utcnow().isoformat(),
+        "note": (
+            "open_pairs = currently executing OU pair positions. "
+            "queued_signals = pending opportunities from picks engine."
+        ),
+    }
 
 
 # --- Serve Frontend (in production, the built React app is here) ---

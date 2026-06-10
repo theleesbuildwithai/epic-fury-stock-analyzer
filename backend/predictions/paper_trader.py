@@ -4581,6 +4581,33 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
     except Exception as e:
         logger.error(f"IBKR mirror setup error: {e}")
 
+    # ============================================================
+    # OU / STAT ARB PAIRS LAYER — market-neutral alpha
+    # Runs AFTER all directional trades so it never competes with
+    # or blocks regular long/short execution. Fully isolated: any
+    # error here returns results unchanged (non-fatal).
+    # ============================================================
+    try:
+        from predictions.pairs_trader import execute_pairs_from_signals as _exec_pairs
+        _fresh_cash = get_cash()
+        _fresh_open = get_open_trades()
+        _nav = _fresh_cash + sum(
+            float(t.get("entry_price", 0) or 0) * float(t.get("shares", 0) or 0)
+            for t in _fresh_open
+        )
+        _pairs_opened = _exec_pairs(
+            quant_picks=quant_picks,
+            open_trades=_fresh_open,
+            cash=_fresh_cash,
+            regime=regime,
+            nav=_nav,
+        )
+        if _pairs_opened:
+            results["pairs_opened"] = _pairs_opened
+            logger.warning(f"PAIRS LAYER: {len(_pairs_opened)} new pair(s) opened")
+    except Exception as _pairs_err:
+        logger.warning(f"PAIRS LAYER: non-fatal error — {_pairs_err}")
+
     return results
 
 
