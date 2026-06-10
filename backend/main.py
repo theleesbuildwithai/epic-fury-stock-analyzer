@@ -4689,8 +4689,11 @@ def quant_picks(force_refresh: bool = False):
         cache_entry = _quant_cache.get("quant_picks")
         if cache_entry and cache_entry.get("data"):
             result = dict(cache_entry["data"])
-            result["long_picks"] = _boost_display_confidence(list(result.get("long_picks") or []))
-            result["short_picks"] = _boost_display_confidence(list(result.get("short_picks") or []))
+            # CRITICAL: deep-copy each pick dict before mutating so the cache
+            # is never modified. Without this, a second caller (e.g. /api/symbols-to-buy)
+            # reads the already-boosted confidence and boosts again (double boost).
+            result["long_picks"] = _boost_display_confidence([dict(p) for p in (result.get("long_picks") or [])])
+            result["short_picks"] = _boost_display_confidence([dict(p) for p in (result.get("short_picks") or [])])
             result["cache_status"] = "cached"
             result["_endpoint_version"] = "v7-conf-boost"
             try:
@@ -6609,10 +6612,15 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         formatted_longs = [_format(p, "long", i + 1) for i, p in enumerate(top_longs)]
         formatted_shorts = [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)]
         # 2026-06-09: boost display confidence ×1.35 (cap 99) — internal logic unchanged
+        # Guard: if confidence_raw already set (pick came from boosted cache), use it
+        # as the base so we never double-boost. _format() creates new dicts so the
+        # cache is not mutated here, but quant-picks endpoint fix (dict(p) copy) is
+        # the primary protection.
         import math as _math_stb
         for _pl in (formatted_longs + formatted_shorts):
             if isinstance(_pl, dict):
-                _rc = _pl.get("confidence")
+                _rc = (_pl["confidence_raw"] if "confidence_raw" in _pl
+                       else _pl.get("confidence"))
                 if isinstance(_rc, (int, float)) and _math_stb.isfinite(_rc):
                     _pl["confidence_raw"] = _rc
                     _pl["confidence"] = min(99, round(_rc * 1.35, 1))
