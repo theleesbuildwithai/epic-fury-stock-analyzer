@@ -4385,6 +4385,17 @@ def generate_quant_picks() -> dict:
         except Exception as e:
             logger.warning(f"RenTech analysis failed (non-fatal): {e}")
 
+        # 2026-06-11: Normalize direction field on all final picks.
+        # Mean-reversion and other special-path additions can end up in
+        # top_longs/top_shorts with direction=NEUTRAL. symbols-to-buy and
+        # paper_trader both filter on direction=="LONG"/"SHORT", so any pick
+        # with wrong direction is silently dropped. Force it here so the
+        # displayed list and execution path always agree.
+        for _p in top_longs:
+            _p["direction"] = "LONG"
+        for _p in top_shorts:
+            _p["direction"] = "SHORT"
+
         elapsed = round(time.time() - start_time, 1)
 
         # ============================================================
