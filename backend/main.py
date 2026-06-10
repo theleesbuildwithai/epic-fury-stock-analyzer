@@ -885,6 +885,29 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v6 error (non-fatal): {e}")
 
 
+# --- STATS EPOCH RESET V7 (2026-06-11) ---
+# Fresh stats slate for Wednesday June 11 trading session.
+# Clears visual win-rate / P&L counters so dashboard reflects only
+# trades executed under the new OU pairs + high-beta-filter + true-confidence
+# build. Underlying trade history preserved in DB.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev7, set_trading_state as _set_state_sev7,
+    )
+    _sev7_done = _get_state_sev7("stats_epoch_reset_v7_done", "0")
+    if _sev7_done != "1":
+        from datetime import datetime as _dt_sev7
+        _epoch_iso_v7 = _dt_sev7.utcnow().isoformat()
+        _set_state_sev7("stats_epoch", _epoch_iso_v7)
+        _set_state_sev7("stats_epoch_reset_v7_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v7: visual stats reset to 0; collecting "
+            f"from {_epoch_iso_v7}.  OU pairs + true-confidence build active."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v7 error (non-fatal): {e}")
+
+
 # --- PORTFOLIO SNAPSHOTS RESET v1 (2026-06-05) ---
 # Analytics endpoint /api/factor-analytics revealed bogus VaR / Sharpe /
 # drawdown values because the portfolio_snapshots table contains every
@@ -4628,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v10-true-confidence+high-beta-filter",
+        "commit_marker": "fix-v11-vix-stale-crisis+stats-reset+ou-pairs",
         "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",

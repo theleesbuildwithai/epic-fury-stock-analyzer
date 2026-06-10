@@ -91,6 +91,18 @@ def get_vix_safe() -> dict:
     # === Case 1: No reading at all ===
     if raw is None:
         if age_hours < LAST_GOOD_TRUST_HOURS and last_good > 0:
+            # 2026-06-11 fix: if cached VIX is CRISIS-level (>35) AND has been
+            # sitting there > CRISIS_STALE_HOURS without live confirmation,
+            # distrust it. A real VIX crisis doesn't persist for hours without
+            # yfinance/Stooq confirming it — stale crisis cache almost always
+            # means the crisis resolved overnight (e.g. CPI spike on June 10
+            # blocking all June 11 trades). Fall back to neutral instead.
+            if last_good > 35 and age_hours > CRISIS_STALE_HOURS:
+                return _result(HARDCODED_NEUTRAL, "hardcoded_neutral", "LOW",
+                               raw_attempted=None,
+                               rejected_reason=f"stale_crisis_no_live_data "
+                                              f"(cached={last_good:.1f}, "
+                                              f"age={age_hours:.1f}h)")
             return _result(last_good, "cached_last_good", "MEDIUM",
                            raw_attempted=None,
                            rejected_reason=f"no_data ({fetch_error})")
