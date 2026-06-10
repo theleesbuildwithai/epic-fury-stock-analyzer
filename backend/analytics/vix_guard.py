@@ -127,7 +127,10 @@ def get_vix_safe() -> dict:
     # Real VIX crises don't stay above 35 for days on end without being
     # reflected in yfinance — a stale crisis cache is almost certainly
     # a prior spike that has since recovered.
-    CRISIS_STALE_HOURS = 4.0   # cache in crisis zone + older than this → distrust it
+    CRISIS_STALE_HOURS = 1.0   # cache in crisis zone + older than 1h → distrust it
+    # 2026-06-09: lowered from 4h. Each cycle refreshes the timestamp when
+    # it accepts a reading, so a 4h threshold was never actually triggering —
+    # the cache was perpetually "fresh" with a stale crisis value.
     if last_good > 0 and age_hours < LAST_GOOD_TRUST_HOURS:
         abs_move = abs(raw - last_good)
         pct_move = (abs_move / last_good) * 100.0

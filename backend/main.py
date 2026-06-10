@@ -2959,6 +2959,29 @@ scheduler.add_job(
 
 
 try:
+    # 2026-06-09: STARTUP VIX CACHE CLEAR — if the persisted last_known_good
+    # is a crisis value (>35), nuke it so the first live fetch starts fresh.
+    # Prevents stale crisis VIX from poisoning regime detection after deploy.
+    try:
+        from predictions.models import get_trading_state as _gts_vix, set_trading_state as _sts_vix
+        _cached_vix_str = _gts_vix("vix_guard_last_known_good", "")
+        if _cached_vix_str:
+            _cached_vix = float(_cached_vix_str)
+            if _cached_vix > 35:
+                _sts_vix("vix_guard_last_known_good", "")
+                _sts_vix("vix_guard_last_known_good_ts", "")
+                _sts_vix("vix_last_good", "")
+                _sts_vix("vix_last_good_ts", "")
+                logger.warning(
+                    f"STARTUP VIX CACHE CLEAR: evicted stale crisis VIX "
+                    f"{_cached_vix:.1f} from DB — next fetch will use live data"
+                )
+    except Exception as _vix_clear_err:
+        logger.debug(f"Startup VIX cache clear skipped: {_vix_clear_err}")
+except Exception:
+    pass
+
+try:
     scheduler.start()
     auto_trade_stats["started_at"] = dt.now().isoformat()
     auto_trade_stats["status"] = "running"
@@ -8335,6 +8358,29 @@ def admin_scrub_phantom_trades_v2(request: Request):
     except Exception as e:
         logger.error(f"manual scrub error: {e}")
         return {"ok": False, "reason": str(e)[:300]}
+
+
+@app.post("/api/admin/reset-vix-cache")
+def admin_reset_vix_cache(request: Request):
+    """Clear stale VIX crisis cache from DB so vix_guard re-fetches live on next call."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.models import set_trading_state, get_trading_state
+        old_vix = get_trading_state("vix_guard_last_known_good", "unknown")
+        old_ts = get_trading_state("vix_guard_last_known_good_ts", "unknown")
+        # Clear both keys so _load_last_good returns (20.0, 0) → no cached value
+        set_trading_state("vix_guard_last_known_good", "")
+        set_trading_state("vix_guard_last_known_good_ts", "")
+        # Also clear legacy key used by _validate_vix
+        set_trading_state("vix_last_good", "")
+        set_trading_state("vix_last_good_ts", "")
+        # Force fresh VIX from live sources immediately
+        from analytics.vix_guard import get_vix_safe
+        fresh = get_vix_safe()
+        return {"ok": True, "cleared_old_vix": old_vix, "cleared_ts": old_ts,
+                "fresh_vix": fresh}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
 
 
 @app.post("/api/admin/force-picks-regen-sync")
