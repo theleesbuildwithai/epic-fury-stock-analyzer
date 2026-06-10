@@ -3290,6 +3290,20 @@ def _prewarm_picks_bg():
                                 f"({', '.join(_sanitized)}). Picks still served; "
                                 f"next live regen will produce fresh regime."
                             )
+                        # 2026-06-09: Decontaminate S3 snapshot.
+                        # Old code saved already-boosted confidence values
+                        # (confidence=83.7, confidence_raw=62). Strip the boost
+                        # so the display layer applies it cleanly on serve.
+                        def _decontaminate_picks(picks_list):
+                            for _dp in (picks_list or []):
+                                if isinstance(_dp, dict) and "confidence_raw" in _dp:
+                                    _dp["confidence"] = _dp.pop("confidence_raw")
+                            return picks_list
+                        _s3_picks["long_picks"] = _decontaminate_picks(
+                            _s3_picks.get("long_picks") or [])
+                        _s3_picks["short_picks"] = _decontaminate_picks(
+                            _s3_picks.get("short_picks") or [])
+
                         from analysis.quant_engine import _quant_cache
                         _quant_cache["quant_picks"] = {
                             "data": _s3_picks,
@@ -4594,7 +4608,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-trade-firing-v8-conf-boost+score-gate+caution-shift",
+        "commit_marker": "fix-trade-firing-v9-s3-decontam+conf-boost-fix",
         "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4709,10 +4723,18 @@ def quant_picks(force_refresh: bool = False):
             _raw = _gts("picks_s3_snapshot", "")
             if _raw:
                 _snap = _json_q.loads(_raw)
-                _snap["long_picks"] = _boost_display_confidence(list(_snap.get("long_picks") or []))
-                _snap["short_picks"] = _boost_display_confidence(list(_snap.get("short_picks") or []))
+                # Decontaminate before boost (old snapshots may have confidence_raw)
+                def _decontam_snap(pl):
+                    for _dp in (pl or []):
+                        if isinstance(_dp, dict) and "confidence_raw" in _dp:
+                            _dp["confidence"] = _dp.pop("confidence_raw")
+                    return pl
+                _snap["long_picks"] = _boost_display_confidence(
+                    [dict(p) for p in _decontam_snap(_snap.get("long_picks") or [])])
+                _snap["short_picks"] = _boost_display_confidence(
+                    [dict(p) for p in _decontam_snap(_snap.get("short_picks") or [])])
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v7-conf-boost"
+                _snap["_endpoint_version"] = "v9-decontam"
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
