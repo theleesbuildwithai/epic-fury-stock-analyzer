@@ -4651,7 +4651,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v13-crisis-disk-cache-refused+bad-picks-blocked",
+        "commit_marker": "fix-v14-scan-timeout-120s+cold-cache-regen+tier-timeouts",
         "date": "2026-06-09",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4755,13 +4755,16 @@ def quant_picks(force_refresh: bool = False):
                 return JSONResponse(content=_json_q.loads(
                     _json_q.dumps(result, default=str)
                 ))
-        # Cache is stale or empty — trigger background regen + serve fresh
-        if cache_entry and _cache_age_s >= _PICKS_ENDPOINT_TTL:
+        # Cache is stale OR cold — trigger background regen + serve fresh/S3
+        # 2026-06-10 fix: also trigger when cache_entry is None (cold start).
+        # Previously cold cache never triggered regen — system stayed in LOADING.
+        _needs_regen = (not cache_entry) or (_cache_age_s >= _PICKS_ENDPOINT_TTL)
+        if _needs_regen:
             try:
                 import threading as _thr_q
                 from analysis.quant_engine import generate_quant_picks as _gpq
                 _thr_q.Thread(target=_gpq, daemon=True).start()
-                logger.info("quant-picks: stale cache — background regen triggered")
+                logger.info("quant-picks: cold/stale — background regen triggered")
             except Exception as _bg_e:
                 logger.debug(f"quant-picks bg regen failed: {_bg_e}")
         try:

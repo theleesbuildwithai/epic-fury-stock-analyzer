@@ -3736,11 +3736,12 @@ def generate_quant_picks() -> dict:
         import time as _time_scan
 
         # HARD TIME BUDGET — the scan MUST complete in time for the next
-        # trade cycle to fire on schedule. 1500s = 25 minutes is plenty for
-        # bulk tiers but lets us early-exit if yfinance is hammering us in
-        # the individual-fetch tiers. The cache fallback fires regardless,
-        # so even an early-exit scan still has coverage from prior runs.
-        _scan_deadline = _time_scan.time() + 1500
+        # trade cycle to fire on schedule.
+        # 2026-06-10 fix: reduced from 1500s to 120s. On high-volatility days
+        # (CPI, FOMC) yfinance batch downloads can hang indefinitely, causing
+        # the entire picks engine to stall for 25 min. 120s total is enough
+        # for a clean fetch and lets us fall back to cache quickly on bad days.
+        _scan_deadline = _time_scan.time() + 120
         def _over_budget():
             return _time_scan.time() > _scan_deadline
 
@@ -3770,9 +3771,10 @@ def generate_quant_picks() -> dict:
 
         # --- TIER 1: bulk batches of ~73 ---
         for batch in batches:
+            if _over_budget(): break
             _throttle()
             try:
-                df = yf.download(batch, period="1y", progress=False, group_by="ticker")
+                df = yf.download(batch, period="1y", progress=False, group_by="ticker", timeout=20)
                 _extract_batch(df, batch)
             except Exception as e:
                 logger.warning(f"Tier 1 batch download failed: {e}")
@@ -3788,7 +3790,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+50]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 2 chunk failed: {e}")
@@ -3802,7 +3804,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+20]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 3 chunk failed: {e}")
@@ -3816,7 +3818,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+10]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 4 chunk failed: {e}")
@@ -3830,7 +3832,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+5]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker")
+                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 5 chunk failed: {e}")
