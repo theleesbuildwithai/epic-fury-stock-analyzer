@@ -1592,11 +1592,11 @@ def _autonomous_stop_and_target(
     # High conviction: 2.5x ATR (more room)
     # Low conviction: 1.5x ATR (tighter, less risk)
     if confidence >= 80 and abs(composite_score) >= 5:
-        atr_mult_stop = 2.0  # High conviction = reasonable room (was 2.5 — too wide)
+        atr_mult_stop = 1.5  # High conviction (was 2.0 — tighter, protect capital)
     elif confidence >= 60:
-        atr_mult_stop = 1.5  # Standard (was 2.0 — tightened to cut losses faster)
+        atr_mult_stop = 1.2  # Standard (was 1.5 — faster loss cuts)
     else:
-        atr_mult_stop = 1.2  # Low conviction = tight stop (was 1.5 — less risk)
+        atr_mult_stop = 0.9  # Low conviction = very tight (was 1.2 — minimal exposure)
 
     # Regime adjustment
     if regime == "BEAR":
@@ -1622,12 +1622,12 @@ def _autonomous_stop_and_target(
 
     stop_pct = atr_pct * atr_mult_stop
 
-    # Hard clamp: longs in SIDEWAYS capped at 4% (was 7%) — fast cut
-    # All others: never risk more than 7% or less than 1.5%
+    # Hard clamp: SIDEWAYS longs capped at 3% (was 4%), global max 5% (was 7%)
+    # Floor also tightened: 1.0% min (was 1.5%) so tight ATR stocks get tight stops
     if regime == "SIDEWAYS" and direction == "long":
-        stop_pct = max(0.012, min(stop_pct, 0.04))
+        stop_pct = max(0.010, min(stop_pct, 0.03))
     else:
-        stop_pct = max(0.015, min(stop_pct, 0.07))
+        stop_pct = max(0.012, min(stop_pct, 0.05))
 
     # --- TAKE PROFIT: ASYMMETRIC R:R for profit-factor edge ---
     # Math: even at 35% win rate, 2.7:1 R:R produces +0.75R per trade.

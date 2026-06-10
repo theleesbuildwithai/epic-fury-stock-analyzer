@@ -908,6 +908,53 @@ except Exception as e:
     logger.warning(f"Stats epoch reset v7 error (non-fatal): {e}")
 
 
+# --- STATS EPOCH RESET V8 + FULL PORTFOLIO RESET (2026-06-10) ---
+# User requested full clean slate after discovering low-confidence-gate
+# issue. All previous trades were entered at confidence ≥38% (too loose).
+# v23 raises the SIDEWAYS long gate to ≥65% and adds R:R ≥1.5x filter.
+# This reset:
+#   1. Closes all open positions at entry price (paper book wipe)
+#   2. Resets cash to $100,000 (fresh start)
+#   3. Advances stats epoch so win-rate/P&L counters restart from zero
+# Historical trades preserved in DB for the learning system.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_sev8, set_trading_state as _set_state_sev8,
+    )
+    _sev8_done = _get_state_sev8("stats_epoch_reset_v8_done", "0")
+    if _sev8_done != "1":
+        from predictions.models import (
+            get_open_trades as _sev8_get_open,
+            close_paper_trade as _sev8_close,
+            set_cash as _sev8_set_cash,
+        )
+        from datetime import datetime as _dt_sev8
+        # 1. Close all open positions at entry price (clean wipe)
+        _sev8_open = _sev8_get_open()
+        _sev8_closed_count = 0
+        for _sev8_t in _sev8_open:
+            try:
+                _sev8_close(_sev8_t["id"], _sev8_t.get("entry_price", 0))
+                _sev8_closed_count += 1
+            except Exception as _sev8_ce:
+                logger.warning(f"RESET v8: failed to close {_sev8_t.get('ticker')}: {_sev8_ce}")
+        # 2. Reset cash to $100,000
+        _sev8_set_cash(100000.0, caller="stats_epoch_reset_v8",
+                       reason="Full portfolio reset — fresh start with v23 quality gates",
+                       bypass_sentinel=True)
+        # 3. Advance stats epoch
+        _epoch_iso_v8 = _dt_sev8.utcnow().isoformat()
+        _set_state_sev8("stats_epoch", _epoch_iso_v8)
+        _set_state_sev8("stats_epoch_reset_v8_done", "1")
+        logger.warning(
+            f"STATS EPOCH RESET v8: closed {_sev8_closed_count} positions, "
+            f"cash reset to $100,000, stats epoch advanced to {_epoch_iso_v8}. "
+            f"Fresh start under v23 quality gates (65% SIDEWAYS conf, 1.5x R:R, tighter stops)."
+        )
+except Exception as e:
+    logger.warning(f"Stats epoch reset v8 error (non-fatal): {e}")
+
+
 # --- PORTFOLIO SNAPSHOTS RESET v1 (2026-06-05) ---
 # Analytics endpoint /api/factor-analytics revealed bogus VaR / Sharpe /
 # drawdown values because the portfolio_snapshots table contains every
@@ -4683,7 +4730,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v23-sharpe-alpha-winrate-uplift",
+        "commit_marker": "feat-v24-full-reset-tighter-stops",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4705,6 +4752,9 @@ def build_version():
             "rr_filter_1p5x_min_at_entry",
             "sideways_long_stop_0p75x_atr_4pct_max",
             "close_reason_days_held_in_recent_closed",
+            "full_portfolio_reset_100k_stats_epoch_v8",
+            "atr_mult_1p5_1p2_0p9_tighter_stops",
+            "sideways_long_max_stop_3pct_global_5pct",
         ],
     }
 
