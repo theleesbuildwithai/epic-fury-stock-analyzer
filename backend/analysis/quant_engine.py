@@ -3953,6 +3953,41 @@ def generate_quant_picks() -> dict:
                        and float(s.get("composite_score", 0) or 0) <= 0]
         neutral = [s for s in all_scored if s.get("direction") == "NEUTRAL"]
 
+        # HIGH-BETA LONG FILTER — 2026-06-10
+        # In SIDEWAYS or BEAR regimes, strip longs with beta > 2.0.
+        # High-beta names (semiconductors, speculative tech) have
+        # asymmetric downside in non-BULL regimes. MRVL dropped 10%
+        # in one day with beta=2.277 while regime was SIDEWAYS.
+        # In BULL: allowed (market tailwind justifies the risk).
+        # Override: if confidence >= 78, keep it (ultra-high-conviction only).
+        _regime_label = ""
+        try:
+            _regime_label = (regime.get("regime") or "") if isinstance(regime, dict) else str(regime)
+        except Exception:
+            pass
+        if _regime_label not in ("BULL",):
+            _filtered_longs = []
+            for _s in long_picks:
+                _actual_beta = 1.0
+                try:
+                    _actual_beta = float(
+                        (_s.get("factors") or {}).get("beta", {}).get("actual_beta", 1.0) or 1.0
+                    )
+                except Exception:
+                    pass
+                if _actual_beta > 2.0:
+                    _conf = float(_s.get("confidence", 0) or 0)
+                    if _conf >= 78:
+                        _filtered_longs.append(_s)
+                    else:
+                        logger.info(
+                            f"HIGH-BETA FILTER: removed {_s.get('ticker')} long "
+                            f"(beta={_actual_beta:.2f}, conf={_conf:.0f}) in {_regime_label} regime"
+                        )
+                else:
+                    _filtered_longs.append(_s)
+            long_picks = _filtered_longs
+
         # Sort: longs by highest score, shorts by lowest score
         long_picks.sort(key=lambda x: x["composite_score"], reverse=True)
         short_picks.sort(key=lambda x: x["composite_score"])
