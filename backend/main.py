@@ -4683,7 +4683,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v21-bulletproof-exits-hold-class-aware",
+        "commit_marker": "feat-v22-quant-picks-stale-serve-30min",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
@@ -4700,6 +4700,7 @@ def build_version():
             "profit_lock_hold_class_swing30_position45",
             "time_decay_position_2pct_swing_0.5pct",
             "exit_checker_trail_70_60_50_pct",
+            "quant_picks_stale_serve_30min_dedup_regen",
         ],
     }
 
@@ -4823,18 +4824,65 @@ def quant_picks(force_refresh: bool = False):
                 return JSONResponse(content=_json_q.loads(
                     _json_q.dumps(result, default=str)
                 ))
-        # Cache is stale, cold, or empty picks — trigger background regen + serve fresh/S3
+        # Cache is stale, cold, or empty picks — trigger background regen + serve best available
         # 2026-06-10 fix: also trigger when cache_entry is None (cold start).
         # 2026-06-11 fix: also trigger when picks are empty (failed regen result).
+        # 2026-06-12 fix: serve stale in-memory cache (up to 30 min) instead of returning
+        #   LOADING — background regen will refresh; showing old picks is always better than
+        #   a blank screen. Only fall through to LOADING if cache is truly empty/cold.
         _needs_regen = (not cache_entry) or (_cache_age_s >= _PICKS_ENDPOINT_TTL) or (not _cached_has_picks)
         if _needs_regen:
+            # dedup guard — don't spawn a second regen if one is already running
+            _regen_running = globals().get("_qp_regen_in_progress", False)
+            if not _regen_running:
+                try:
+                    import threading as _thr_q
+                    from analysis.quant_engine import generate_quant_picks as _gpq
+                    globals()["_qp_regen_in_progress"] = True
+                    def _qp_regen():
+                        try:
+                            _gpq()
+                        finally:
+                            globals()["_qp_regen_in_progress"] = False
+                    _thr_q.Thread(target=_qp_regen, daemon=True, name="qp-regen").start()
+                    logger.info("quant-picks: cold/stale — background regen triggered")
+                except Exception as _bg_e:
+                    globals()["_qp_regen_in_progress"] = False
+                    logger.debug(f"quant-picks bg regen failed: {_bg_e}")
+
+        # Serve stale in-memory cache if it has picks and is < 30 min old
+        _STALE_SERVE_TTL = 1800  # 30 min — show old picks while regen runs in background
+        if _cached_has_picks and _cache_age_s < _STALE_SERVE_TTL:
+            result = dict(_cached_data)
+            _long_tickers_seen = set()
+            _clean_longs = []
+            for _lp in (result.get("long_picks") or []):
+                _lp["direction"] = "LONG"
+                _sym = _lp.get("ticker") or _lp.get("symbol", "")
+                if _sym and _sym not in _long_tickers_seen:
+                    _long_tickers_seen.add(_sym)
+                    _clean_longs.append(_lp)
+            _clean_shorts = []
+            _short_tickers_seen = set()
+            for _sp in (result.get("short_picks") or []):
+                _sp["direction"] = "SHORT"
+                _sym = _sp.get("ticker") or _sp.get("symbol", "")
+                if _sym and _sym not in _long_tickers_seen and _sym not in _short_tickers_seen:
+                    _short_tickers_seen.add(_sym)
+                    _clean_shorts.append(_sp)
+            result["long_picks"] = _clean_longs
+            result["short_picks"] = _clean_shorts
+            result["picks"] = _clean_longs + _clean_shorts
+            result["cache_status"] = "stale"
+            result["cache_age_seconds"] = round(_cache_age_s, 0)
+            result["_endpoint_version"] = "v14-stale-serve"
+            logger.info(f"quant-picks: serving stale cache ({round(_cache_age_s/60,1)}min old) while regen runs")
             try:
-                import threading as _thr_q
-                from analysis.quant_engine import generate_quant_picks as _gpq
-                _thr_q.Thread(target=_gpq, daemon=True).start()
-                logger.info("quant-picks: cold/stale — background regen triggered")
-            except Exception as _bg_e:
-                logger.debug(f"quant-picks bg regen failed: {_bg_e}")
+                return JSONResponse(content=_safe_serialize(result))
+            except Exception as _ser_e:
+                logger.error(f"Stale cache serialize failed: {_ser_e}")
+
+        # Last resort: try S3 snapshot
         try:
             from predictions.models import get_trading_state as _gts
             _raw = _gts("picks_s3_snapshot", "")
@@ -4849,7 +4897,7 @@ def quant_picks(force_refresh: bool = False):
                 _snap["long_picks"] = _decontam_snap(_snap.get("long_picks") or [])
                 _snap["short_picks"] = _decontam_snap(_snap.get("short_picks") or [])
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v11-stale-guard"
+                _snap["_endpoint_version"] = "v14-stale-serve"
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
@@ -4858,7 +4906,7 @@ def quant_picks(force_refresh: bool = False):
             "long_picks": [],
             "short_picks": [],
             "cache_status": "cold",
-            "_endpoint_version": "v6-nan-scrub",
+            "_endpoint_version": "v14-stale-serve",
         })
     except Exception as e:
         import traceback as _tb
