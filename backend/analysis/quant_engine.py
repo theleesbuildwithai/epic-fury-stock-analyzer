@@ -3787,6 +3787,7 @@ def generate_quant_picks() -> dict:
         m = _missing()
         if m:
             for i in range(0, len(m), 50):
+                if _over_budget(): break
                 chunk = m[i:i+50]
                 _throttle()
                 try:
@@ -3801,6 +3802,7 @@ def generate_quant_picks() -> dict:
         m = _missing()
         if m:
             for i in range(0, len(m), 20):
+                if _over_budget(): break
                 chunk = m[i:i+20]
                 _throttle()
                 try:
@@ -3815,6 +3817,7 @@ def generate_quant_picks() -> dict:
         m = _missing()
         if m:
             for i in range(0, len(m), 10):
+                if _over_budget(): break
                 chunk = m[i:i+10]
                 _throttle()
                 try:
@@ -3829,6 +3832,7 @@ def generate_quant_picks() -> dict:
         m = _missing()
         if m:
             for i in range(0, len(m), 5):
+                if _over_budget(): break
                 chunk = m[i:i+5]
                 _throttle()
                 try:

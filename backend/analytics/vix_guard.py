@@ -37,6 +37,7 @@ LAST_GOOD_VIX_TS_KEY = "vix_guard_last_known_good_ts"
 # === Cache freshness ===
 LAST_GOOD_TRUST_HOURS = 12.0  # Trust cached last-good for 12h
 HARDCODED_NEUTRAL = 20.0       # If all else fails, neutral assumption
+CRISIS_STALE_HOURS = 1.0       # Cached crisis (>35) older than this → distrust
 
 
 def get_vix_safe() -> dict:
@@ -114,6 +115,17 @@ def get_vix_safe() -> dict:
     # === Case 2: Absolute bounds check ===
     if raw < VIX_ABSOLUTE_MIN or raw > VIX_ABSOLUTE_MAX:
         if age_hours < LAST_GOOD_TRUST_HOURS and last_good > 0:
+            # 2026-06-10 fix: same stale-crisis logic as Case 1.
+            # When yfinance returns garbage (e.g. 585.29 or 82.14 scaled error)
+            # AND the DB cache has a crisis-level value (>35) from a prior spike,
+            # don't propagate the crisis value. Fall to neutral instead.
+            # This was the root cause of VIX=82 blocking all trades on CPI day.
+            if last_good > 35 and age_hours > CRISIS_STALE_HOURS:
+                return _result(HARDCODED_NEUTRAL, "hardcoded_neutral", "LOW",
+                               raw_attempted=raw,
+                               rejected_reason=f"out_of_bounds+stale_crisis_cache "
+                                              f"(raw={raw:.1f}, cached={last_good:.1f}, "
+                                              f"age={age_hours:.1f}h)")
             return _result(last_good, "cached_last_good", "MEDIUM",
                            raw_attempted=raw,
                            rejected_reason=f"out_of_bounds [{VIX_ABSOLUTE_MIN},"
@@ -139,10 +151,7 @@ def get_vix_safe() -> dict:
     # Real VIX crises don't stay above 35 for days on end without being
     # reflected in yfinance — a stale crisis cache is almost certainly
     # a prior spike that has since recovered.
-    CRISIS_STALE_HOURS = 1.0   # cache in crisis zone + older than 1h → distrust it
-    # 2026-06-09: lowered from 4h. Each cycle refreshes the timestamp when
-    # it accepts a reading, so a 4h threshold was never actually triggering —
-    # the cache was perpetually "fresh" with a stale crisis value.
+    # CRISIS_STALE_HOURS = 1.0 defined at module level (used in Cases 1 & 2 above)
     if last_good > 0 and age_hours < LAST_GOOD_TRUST_HOURS:
         abs_move = abs(raw - last_good)
         pct_move = (abs_move / last_good) * 100.0
@@ -195,7 +204,7 @@ def _try_fetch_yfinance(ticker: str = "^VIX") -> tuple:
     import math as _m
     try:
         import yfinance as yf
-        df = yf.download(ticker, period="2d", progress=False)
+        df = yf.download(ticker, period="2d", progress=False, timeout=10)
         if df is None or df.empty:
             return None, "empty_response"
         try:

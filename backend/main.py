@@ -4651,8 +4651,8 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "fix-v14-scan-timeout-120s+cold-cache-regen+tier-timeouts",
-        "date": "2026-06-09",
+        "commit_marker": "fix-v15-vix-crisis-stale-module-level+case2-stale-guard+stb-ttl-900",
+        "date": "2026-06-11",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
             "bulletproof_stub_full_fields",
@@ -6495,7 +6495,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         # Only regen if cache is stale.
         cache_entry = _quant_cache.get("quant_picks")
         cache_age = (_t_stb.time() - cache_entry["time"]) if cache_entry else None
-        if force_refresh or cache_age is None or cache_age > 3600:
+        if force_refresh or cache_age is None or cache_age > 900:  # 15-min TTL matching quant-picks
             try:
                 import threading
                 if not globals().get("_picks_regen_in_progress", False):
