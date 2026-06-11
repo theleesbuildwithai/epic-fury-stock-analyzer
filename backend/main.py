@@ -4830,9 +4830,14 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v32-score-loop-diagnostics-volume-fix-v2",
-        "date": "2026-06-10",
+        "commit_marker": "feat-v33-yfinance120-multiindex-nan-fix",
+        "date": "2026-06-11",
         "fixes_in_build": [
+            "yfinance120_extract_batch_field_ticker_multiindex",
+            "yfinance120_tier6_tier7_normalize_flat_columns",
+            "trailing_nan_close_stripper_score_loop",
+            "post_fetch_normalization_pass_all_price_data",
+            "skip_ratio_median_counter_increments",
             "quant_picks_500_fallback_with_S3",
             "bulletproof_stub_full_fields",
             "cash_correction_v7",

@@ -2333,6 +2333,15 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 continue
 
             closes = _safe_close(df).values.astype(float)
+
+            # Strip trailing NaN close prices — yfinance 1.x may include a partial
+            # current-day row (pre-market / after-market) with NaN close. Without
+            # this, ALL stocks fail the bad-price check below until market opens.
+            while len(closes) > 0 and (np.isnan(closes[-1]) or closes[-1] <= 0):
+                closes = closes[:-1]
+            if len(closes) < 60:
+                _skip_short_df += 1
+                continue
             # Robust volume extraction — handles MultiIndex, flat Series, and edge cases
             try:
                 vol_col = df["Volume"]
@@ -2367,12 +2376,14 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                 if prior > 0 and not np.isnan(prior):
                     ratio = current_price / prior
                     if ratio > 1.5 or ratio < 0.67:
+                        _skip_ratio += 1
                         continue
             if len(closes) >= 6:
                 recent_median = float(np.median(closes[-6:-1]))
                 if recent_median > 0 and not np.isnan(recent_median):
                     median_ratio = current_price / recent_median
                     if median_ratio > 1.5 or median_ratio < 0.5:
+                        _skip_median += 1
                         continue
 
             # --- Factor 1: MOMENTUM (12-1 month return) ---
@@ -3911,7 +3922,13 @@ def generate_quant_picks() -> dict:
 
         def _extract_batch(df, syms):
             """Add successful per-ticker frames from a yf bulk download
-            result into price_data. Returns count newly added."""
+            result into price_data. Returns count newly added.
+
+            Handles both yfinance column formats:
+              Old (<1.0): MultiIndex (ticker, field) — level 0 = ticker
+              New (>=1.0): MultiIndex (field, ticker) — level 0 = field
+            Also handles flat columns (single-ticker downloads).
+            """
             n_added = 0
             if df is None or df.empty:
                 return n_added
@@ -3920,14 +3937,34 @@ def generate_quant_picks() -> dict:
                     continue
                 try:
                     if isinstance(df.columns, pd.MultiIndex):
-                        if sym in df.columns.get_level_values(0):
+                        lvl0 = df.columns.get_level_values(0)
+                        lvl1 = df.columns.get_level_values(1)
+                        if sym in lvl0:
+                            # Old yfinance: (ticker, field) — df[sym] = flat OHLCV
                             sym_df = df[sym].dropna(how="all")
-                            if len(sym_df) >= 60:
-                                price_data[sym] = sym_df
-                                n_added += 1
+                        elif sym in lvl1:
+                            # New yfinance 1.x: (field, ticker) — use xs to extract
+                            sym_df = df.xs(sym, axis=1, level=1).dropna(how="all")
+                        else:
+                            continue
+                        # Strip trailing rows with NaN close (partial-day yfinance artifact)
+                        if "Close" in sym_df.columns:
+                            while len(sym_df) > 0 and pd.isna(sym_df["Close"].iloc[-1]):
+                                sym_df = sym_df.iloc[:-1]
+                        if len(sym_df) >= 60:
+                            price_data[sym] = sym_df
+                            n_added += 1
                     elif len(syms) == 1:
-                        if df is not None and len(df) >= 60:
-                            price_data[sym] = df
+                        sym_df = df.dropna(how="all")
+                        # Strip trailing NaN close rows
+                        if "Close" in sym_df.columns:
+                            while len(sym_df) > 0 and pd.isna(sym_df["Close"].iloc[-1]):
+                                sym_df = sym_df.iloc[:-1]
+                        elif isinstance(sym_df.columns, pd.MultiIndex) and "Close" in sym_df.columns.get_level_values(0):
+                            while len(sym_df) > 0 and pd.isna(sym_df["Close"].iloc[-1, 0]):
+                                sym_df = sym_df.iloc[:-1]
+                        if len(sym_df) >= 60:
+                            price_data[sym] = sym_df
                             n_added += 1
                 except Exception:
                     continue
@@ -4024,7 +4061,22 @@ def generate_quant_picks() -> dict:
                 try:
                     df = yf.download(t, period="1y", progress=False)
                     if df is not None and len(df) >= 60:
-                        price_data[t] = df.dropna(how="all")
+                        # Normalize MultiIndex columns for single-ticker yfinance 1.x downloads
+                        if isinstance(df.columns, pd.MultiIndex):
+                            if t in df.columns.get_level_values(1):
+                                df = df.xs(t, axis=1, level=1)
+                            elif t in df.columns.get_level_values(0):
+                                df = df[t]
+                            else:
+                                # Collapse field names: take first column per field
+                                df.columns = df.columns.get_level_values(0)
+                        sym_df = df.dropna(how="all")
+                        # Strip trailing NaN close rows (partial-day artifact)
+                        if "Close" in sym_df.columns:
+                            while len(sym_df) > 0 and pd.isna(sym_df["Close"].iloc[-1]):
+                                sym_df = sym_df.iloc[:-1]
+                        if len(sym_df) >= 60:
+                            price_data[t] = sym_df
                 except Exception:
                     _time_scan.sleep(0.05)
                     continue
@@ -4049,7 +4101,19 @@ def generate_quant_picks() -> dict:
                     tk = yf.Ticker(t)
                     df = tk.history(period="1y", auto_adjust=True)
                     if df is not None and len(df) >= 60:
-                        price_data[t] = df.dropna(how="all")
+                        # history() returns flat columns but normalize just in case
+                        if isinstance(df.columns, pd.MultiIndex):
+                            if t in df.columns.get_level_values(1):
+                                df = df.xs(t, axis=1, level=1)
+                            elif t in df.columns.get_level_values(0):
+                                df = df[t]
+                        sym_df = df.dropna(how="all")
+                        # Strip trailing NaN close rows
+                        if "Close" in sym_df.columns:
+                            while len(sym_df) > 0 and pd.isna(sym_df["Close"].iloc[-1]):
+                                sym_df = sym_df.iloc[:-1]
+                        if len(sym_df) >= 60:
+                            price_data[t] = sym_df
                 except Exception:
                     _time_scan.sleep(0.05)
                     continue
@@ -4090,6 +4154,41 @@ def generate_quant_picks() -> dict:
                 _PRICE_DATA_LASTGOOD[t] = {"df": df, "ts": now_ts}
         except Exception:
             pass
+
+        # ============================================================
+        # POST-FETCH NORMALIZATION: flatten any remaining MultiIndex DataFrames
+        # ============================================================
+        # Batch tiers now extract flat sym_df via xs(). Tier 6/7 normalize
+        # inline. But _PRICE_DATA_LASTGOOD may hold old MultiIndex frames from
+        # a previous scan that pre-dates this fix. Normalize everything now so
+        # calculate_multi_factor_scores always gets flat (field-named) columns.
+        _norm_removed = 0
+        for _sym in list(price_data.keys()):
+            _df = price_data[_sym]
+            if _df is None or not isinstance(getattr(_df, "columns", None), pd.MultiIndex):
+                continue
+            try:
+                _lvl1 = _df.columns.get_level_values(1)
+                _lvl0 = _df.columns.get_level_values(0)
+                if _sym in _lvl1:
+                    price_data[_sym] = _df.xs(_sym, axis=1, level=1)
+                elif _sym in _lvl0:
+                    price_data[_sym] = _df[_sym]
+                else:
+                    # Collapse to field names (deduplicate via first-occurrence)
+                    seen = {}
+                    cols = []
+                    for c in _lvl0:
+                        if c not in seen:
+                            seen[c] = True
+                            cols.append(c)
+                    price_data[_sym] = _df.iloc[:, [list(_lvl0).index(c) for c in cols]]
+                    price_data[_sym].columns = cols
+            except Exception:
+                del price_data[_sym]
+                _norm_removed += 1
+        if _norm_removed:
+            logger.warning(f"POST-FETCH NORM: removed {_norm_removed} unfixable MultiIndex frames")
 
         final_coverage = len(price_data) * 100 // max(1, len(QUANT_UNIVERSE))
         logger.info(f"UNIVERSE SCAN FINAL: {len(price_data)}/{len(QUANT_UNIVERSE)} ({final_coverage}%) after 7-tier retry + cache fallback")
