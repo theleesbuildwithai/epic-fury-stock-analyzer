@@ -4044,20 +4044,32 @@ def generate_quant_picks() -> dict:
             t5 = len(price_data)
             logger.info(f"UNIVERSE SCAN tier5: {t5}/{len(QUANT_UNIVERSE)}")
 
-        # --- TIER 6: individual yf.download with backoff ---
-        # No cap — but bounded by overall scan deadline. In practice the
-        # earlier 5 batch tiers leave <80 tickers for this tier even on a
-        # bad day, so it completes in 30-90s. If yfinance is fully down
-        # and EVERY ticker missed the batch tiers, _over_budget() trips
-        # the early exit and the cache fallback takes over.
+        # === BUDGET EXTENSION: if batch tiers basically failed ===
+        # Evidence: /api/analyze/AAPL returns 64 bars — yfinance single-ticker
+        # downloads work from App Runner, but bulk batch downloads do not.
+        # The 120s batch budget is consumed by throttle delays (3s × batches)
+        # before individual tiers 6/7 can run. Extend the deadline here so
+        # individual fallbacks have time to fill the full universe.
+        # 352 tickers × 1s sleep = 352s — well within the 900s extension.
+        if len(price_data) < 30:
+            _scan_deadline = _time_scan.time() + 900
+            logger.warning(
+                f"UNIVERSE SCAN: only {len(price_data)} stocks from batch tiers "
+                f"— extending deadline 900 s for individual fallbacks (tiers 6/7/stooq)"
+            )
+
+        # --- TIER 6: individual yf.download with 1 s inter-call sleep ---
+        # Uses 1s sleep instead of _throttle() (3s) so 352 tickers fit in the
+        # extended 900s budget. Each call returns ~64 bars from App Runner —
+        # identical to what /api/analyze uses and known to work.
         m = _missing()
         if m:
             logger.info(f"UNIVERSE SCAN tier6: retrying {len(m)} individually via yf.download")
             for t in m:
                 if _over_budget():
-                    logger.warning(f"UNIVERSE SCAN tier6 hit time budget — falling through to cache")
+                    logger.warning(f"UNIVERSE SCAN tier6 hit time budget — falling through to tier7")
                     break
-                _throttle()
+                _time_scan.sleep(1.0)
                 try:
                     df = yf.download(t, period="1y", progress=False)
                     if df is not None and len(df) >= 60:
@@ -4084,19 +4096,18 @@ def generate_quant_picks() -> dict:
             logger.info(f"UNIVERSE SCAN tier6: {t6}/{len(QUANT_UNIVERSE)}")
 
         # --- TIER 7: ALTERNATIVE API — yf.Ticker(t).history() ---
-        # Different code path inside yfinance hits a different Yahoo
-        # endpoint, and sometimes succeeds when download() consistently
-        # fails (typically for tickers with unusual symbols, ADRs, or
-        # recently-listed names). Last network-based attempt before the
-        # cache fallback.
+        # Different code path inside yfinance — sometimes succeeds when
+        # download() fails. Also uses 1s sleep (not _throttle()) to fit in budget.
+        # Outer gate removed: no longer skipped when budget is exceeded on entry,
+        # since the extension above guarantees 900s for individual fallbacks.
         m = _missing()
-        if m and not _over_budget():
+        if m:
             logger.info(f"UNIVERSE SCAN tier7: alternative API retry for {len(m)} tickers")
             for t in m:
                 if _over_budget():
-                    logger.warning(f"UNIVERSE SCAN tier7 hit time budget — falling through to cache")
+                    logger.warning(f"UNIVERSE SCAN tier7 hit time budget — falling through to stooq")
                     break
-                _throttle()
+                _time_scan.sleep(1.0)
                 try:
                     tk = yf.Ticker(t)
                     df = tk.history(period="1y", auto_adjust=True)
@@ -4132,12 +4143,6 @@ def generate_quant_picks() -> dict:
         # so stooq + Finnhub have time to fill the full 350-stock universe.
         m = _missing()
         if m:
-            if len(price_data) < 30 and len(m) > 50:
-                _scan_deadline = _time_scan.time() + 600
-                logger.warning(
-                    f"UNIVERSE SCAN: yfinance returned only {len(price_data)} stocks "
-                    f"({len(m)} missing) — extending budget 600 s for stooq/finnhub"
-                )
             logger.warning(f"UNIVERSE SCAN tier8 STOOQ: fetching {len(m)} tickers via stooq.com CSV")
             try:
                 import requests as _stooq_req

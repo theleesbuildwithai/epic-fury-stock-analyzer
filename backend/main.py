@@ -4867,9 +4867,12 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v38-stooq-direct-requests-10s-timeout-no-hang",
+        "commit_marker": "feat-v39-extend-budget-before-tier6-1s-sleep-individual-yf",
         "date": "2026-06-11",
         "fixes_in_build": [
+            "budget_extended_900s_before_tier6_when_batch_fails",
+            "tier6_tier7_use_1s_sleep_not_3s_throttle_fits_budget",
+            "tier7_outer_budget_gate_removed_always_runs",
             "stooq_direct_requests_10s_timeout_replaces_pandas_datareader",
             "tier8_stooq_fallback_when_yfinance_blocked",
             "tier9_finnhub_candles_fallback_secondary",
