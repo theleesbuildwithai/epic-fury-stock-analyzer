@@ -2324,6 +2324,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     _skip_bad_price = 0
     _skip_ratio = 0
     _skip_median = 0
+    _skip_exception = 0
 
     for symbol, df in price_data.items():
         try:
@@ -3140,20 +3141,27 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
         except Exception as e:
             # Upgrade first 5 failures to WARNING so they appear in prod logs
-            if len(raw_factors) + _skip_bad_price + _skip_ratio + _skip_median + _skip_short_df < 5:
+            _skip_exception += 1
+            if _skip_exception <= 5:
                 logger.warning("Factor calc FAILED for %s: %s — %s", symbol, type(e).__name__, e)
-            else:
-                logger.debug(f"Factor calc failed for {symbol}: {e}")
             continue
 
     # DIAGNOSTIC: why stocks were skipped
+    _score_loop_stats = {
+        "raw_factors": len(raw_factors),
+        "skip_short_df": _skip_short_df,
+        "skip_bad_price": _skip_bad_price,
+        "skip_ratio_guard": _skip_ratio,
+        "skip_median_guard": _skip_median,
+        "skip_exception": _skip_exception,
+    }
     logger.warning(
-        "SCORE LOOP DONE: raw_factors=%d | skipped: short_df=%d bad_price=%d ratio=%d median=%d exceptions=(see above)",
-        len(raw_factors), _skip_short_df, _skip_bad_price, _skip_ratio, _skip_median
+        "SCORE LOOP DONE: raw_factors=%d | skipped: short_df=%d bad_price=%d ratio=%d median=%d exception=%d",
+        len(raw_factors), _skip_short_df, _skip_bad_price, _skip_ratio, _skip_median, _skip_exception
     )
 
     if not raw_factors:
-        return []
+        return [], _score_loop_stats
 
     # --- SECTOR ROTATION COMPUTATION (post-loop) ---
     # Calculate average 20-day momentum per sector, then rank sectors
@@ -3709,7 +3717,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
     # Sort by composite score descending
     scored.sort(key=lambda x: x["composite_score"], reverse=True)
-    return scored
+    return scored, _score_loop_stats
 
 
 # ============================================================
@@ -4100,7 +4108,7 @@ def generate_quant_picks() -> dict:
             }
 
         # Step 4: Calculate multi-factor scores
-        all_scored = calculate_multi_factor_scores(price_data, regime, macro)
+        all_scored, _diag_stats = calculate_multi_factor_scores(price_data, regime, macro)
 
         # Step 5: Separate into LONG, SHORT, NEUTRAL
         # DEFENSIVE: require BOTH direction match AND score sign agreement.
@@ -4680,6 +4688,7 @@ def generate_quant_picks() -> dict:
             "total_analyzed": len(all_scored),
             "universe_size": len(QUANT_UNIVERSE),
             "stocks_with_data": len(price_data),
+            "score_loop_stats": _diag_stats,
             "factor_weights": _raw_weights,
             "factor_weights_decorrelated": _decorrelated,  # AUDIT #5
             # RENTECH DATA
