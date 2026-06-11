@@ -292,7 +292,7 @@ def get_cross_asset_signals() -> dict:
     try:
         _throttle()
         tickers = ["UUP", "BTC-USD", "CPER", "TLT"]
-        df = yf.download(tickers, period="1mo", progress=False, group_by="ticker")
+        df = yf.download(tickers, period="1mo", progress=False)
 
         if df is None or df.empty:
             return result
@@ -1366,7 +1366,7 @@ def detect_market_regime() -> dict:
                 "ISRG", "REGN", "VRTX", "ANET", "CDNS", "SNPS",
             ]
             breadth_df = yf.download(
-                breadth_sample, period="3mo", progress=False, group_by="ticker"
+                breadth_sample, period="3mo", progress=False
             )
 
             if breadth_df is not None and not breadth_df.empty:
@@ -1538,7 +1538,7 @@ def get_macro_overlay() -> dict:
         _throttle()
         try:
             macro_symbols = ["^TNX", "CL=F", "GC=F", "^VIX"]
-            df = yf.download(macro_symbols, period="1mo", progress=False, group_by="ticker")
+            df = yf.download(macro_symbols, period="1mo", progress=False)
         except Exception as e:
             logger.warning(f"Macro overlay download failed: {e}")
             return macro
@@ -1709,7 +1709,7 @@ def get_macro_overlay() -> dict:
         # This predicted every recession since 1970 with 12-18 month lead
         try:
             _throttle()
-            tnx_2y_df = yf.download(["^TNX", "^IRX"], period="1mo", progress=False, group_by="ticker")
+            tnx_2y_df = yf.download(["^TNX", "^IRX"], period="1mo", progress=False)
             if tnx_2y_df is not None and not tnx_2y_df.empty:
                 try:
                     tnx_close = tnx_2y_df[("^TNX", "Close")].dropna().values.astype(float)
@@ -1740,7 +1740,7 @@ def get_macro_overlay() -> dict:
         # This is what the smart money watches — it predicted the 2020 crash
         try:
             _throttle()
-            vix_term_df = yf.download(["^VIX", "^VIX3M"], period="5d", progress=False, group_by="ticker")
+            vix_term_df = yf.download(["^VIX", "^VIX3M"], period="5d", progress=False)
             if vix_term_df is not None and not vix_term_df.empty:
                 try:
                     vix_spot = float(vix_term_df[("^VIX", "Close")].dropna().iloc[-1])
@@ -2000,7 +2000,7 @@ def scan_overnight_intelligence() -> dict:
     # These trade nearly 24/7 including Sunday evening — perfect for weekend shifts
     try:
         _throttle()
-        futures_df = yf.download(["ES=F", "NQ=F"], period="5d", progress=False, group_by="ticker")
+        futures_df = yf.download(["ES=F", "NQ=F"], period="5d", progress=False)
         if futures_df is not None and not futures_df.empty:
             for sym, label in [("ES=F", "sp500_futures"), ("NQ=F", "nasdaq_futures")]:
                 try:
@@ -2042,7 +2042,7 @@ def scan_overnight_intelligence() -> dict:
     # Shows what happened while the US was asleep
     try:
         _throttle()
-        global_df = yf.download(["EZU", "EWJ", "FXI"], period="5d", progress=False, group_by="ticker")
+        global_df = yf.download(["EZU", "EWJ", "FXI"], period="5d", progress=False)
         if global_df is not None and not global_df.empty:
             for sym, region in [("EZU", "europe"), ("EWJ", "japan"), ("FXI", "china")]:
                 try:
@@ -2105,7 +2105,7 @@ def scan_overnight_intelligence() -> dict:
     # --- 4. Safe Haven Check (Gold + Treasuries overnight) ---
     try:
         _throttle()
-        haven_df = yf.download(["GC=F", "TLT"], period="5d", progress=False, group_by="ticker")
+        haven_df = yf.download(["GC=F", "TLT"], period="5d", progress=False)
         if haven_df is not None and not haven_df.empty:
             for sym, label in [("GC=F", "gold_overnight"), ("TLT", "bonds_overnight")]:
                 try:
@@ -3975,7 +3975,7 @@ def generate_quant_picks() -> dict:
             if _over_budget(): break
             _throttle()
             try:
-                df = yf.download(batch, period="1y", progress=False, group_by="ticker", timeout=20)
+                df = yf.download(batch, period="1y", progress=False)
                 _extract_batch(df, batch)
             except Exception as e:
                 logger.warning(f"Tier 1 batch download failed: {e}")
@@ -3992,7 +3992,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+50]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
+                    df = yf.download(chunk, period="1y", progress=False)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 2 chunk failed: {e}")
@@ -4007,7 +4007,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+20]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
+                    df = yf.download(chunk, period="1y", progress=False)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 3 chunk failed: {e}")
@@ -4022,7 +4022,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+10]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
+                    df = yf.download(chunk, period="1y", progress=False)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 4 chunk failed: {e}")
@@ -4037,7 +4037,7 @@ def generate_quant_picks() -> dict:
                 chunk = m[i:i+5]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False, group_by="ticker", timeout=20)
+                    df = yf.download(chunk, period="1y", progress=False)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 5 chunk failed: {e}")

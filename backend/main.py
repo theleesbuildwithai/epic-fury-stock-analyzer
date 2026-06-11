@@ -4835,7 +4835,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v34-prewarm-time0-fix-actual-scan",
+        "commit_marker": "feat-v35-remove-deprecated-yf-params-group_by-timeout",
         "date": "2026-06-11",
         "fixes_in_build": [
             "prewarm_s3_restore_time0_so_regen_actually_runs",
