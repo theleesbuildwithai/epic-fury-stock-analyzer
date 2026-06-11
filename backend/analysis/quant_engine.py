@@ -4120,16 +4120,16 @@ def generate_quant_picks() -> dict:
             t7 = len(price_data)
             logger.info(f"UNIVERSE SCAN tier7: {t7}/{len(QUANT_UNIVERSE)}")
 
-        # --- TIER 8: STOOQ fallback (pandas_datareader) ---
+        # --- TIER 8: STOOQ fallback (direct requests, 10 s timeout per ticker) ---
         # Fires when yfinance tiers returned very few stocks — typically because
         # Yahoo Finance is rate-blocking the App Runner IP range. stooq.com is a
         # completely separate data provider; it is unaffected by Yahoo's blocks.
-        # pandas_datareader is already in requirements.txt — no new dependency.
+        #
+        # CRITICAL: uses requests directly with timeout=10. pandas_datareader has
+        # no timeout — a single hanging request blocks the scan thread forever.
         #
         # If yfinance returned < 30 stocks we extend the scan deadline by 600 s
         # so stooq + Finnhub have time to fill the full 350-stock universe.
-        # The closure _over_budget() reads _scan_deadline each call, so the
-        # reassignment is visible immediately to all callers.
         m = _missing()
         if m:
             if len(price_data) < 30 and len(m) > 50:
@@ -4138,37 +4138,45 @@ def generate_quant_picks() -> dict:
                     f"UNIVERSE SCAN: yfinance returned only {len(price_data)} stocks "
                     f"({len(m)} missing) — extending budget 600 s for stooq/finnhub"
                 )
-            logger.warning(f"UNIVERSE SCAN tier8 STOOQ: fetching {len(m)} tickers from stooq.com")
+            logger.warning(f"UNIVERSE SCAN tier8 STOOQ: fetching {len(m)} tickers via stooq.com CSV")
             try:
-                import pandas_datareader.data as _pdr_web
+                import requests as _stooq_req
+                import io as _stooq_io
                 from datetime import datetime as _stooq_dt, timedelta as _stooq_td
-                _stooq_start = (_stooq_dt.now() - _stooq_td(days=400)).strftime("%Y-%m-%d")
-                _stooq_end = _stooq_dt.now().strftime("%Y-%m-%d")
+                _stooq_d1 = (_stooq_dt.now() - _stooq_td(days=400)).strftime("%Y%m%d")
+                _stooq_d2 = _stooq_dt.now().strftime("%Y%m%d")
+                _stooq_hdrs = {"User-Agent": "Mozilla/5.0 (compatible; sentinel-quant/1.0)"}
                 _stooq_added = 0
                 for _t in list(m):
                     if _over_budget():
                         logger.warning("UNIVERSE SCAN tier8 STOOQ hit budget — falling to tier9")
                         break
                     try:
-                        _sdf = _pdr_web.DataReader(_t, "stooq", _stooq_start, _stooq_end)
-                        if _sdf is not None and not _sdf.empty and len(_sdf) >= 60:
-                            _sdf = _sdf.sort_index(ascending=True)
-                            if "Close" in _sdf.columns:
-                                while len(_sdf) > 0 and pd.isna(_sdf["Close"].iloc[-1]):
-                                    _sdf = _sdf.iloc[:-1]
-                            if len(_sdf) >= 60:
-                                price_data[_t] = _sdf
-                                _stooq_added += 1
+                        # stooq CSV endpoint — returns Date,Open,High,Low,Close,Volume (descending)
+                        _url = (
+                            f"https://stooq.com/q/d/l/"
+                            f"?s={_t.lower()}&d1={_stooq_d1}&d2={_stooq_d2}&i=d"
+                        )
+                        _resp = _stooq_req.get(_url, timeout=10, headers=_stooq_hdrs)
+                        if _resp.status_code != 200 or len(_resp.text) < 50:
+                            continue
+                        _sdf = pd.read_csv(_stooq_io.StringIO(_resp.text))
+                        if _sdf is None or _sdf.empty or "Close" not in _sdf.columns:
+                            continue
+                        _sdf["Date"] = pd.to_datetime(_sdf["Date"])
+                        _sdf = _sdf.set_index("Date").sort_index(ascending=True)
+                        while len(_sdf) > 0 and pd.isna(_sdf["Close"].iloc[-1]):
+                            _sdf = _sdf.iloc[:-1]
+                        if len(_sdf) >= 60:
+                            price_data[_t] = _sdf
+                            _stooq_added += 1
                     except Exception:
                         pass
-                    _time_scan.sleep(0.05)
                 t8 = len(price_data)
                 logger.warning(
                     f"UNIVERSE SCAN tier8 STOOQ: added {_stooq_added} tickers "
                     f"→ {t8}/{len(QUANT_UNIVERSE)} total"
                 )
-            except ImportError:
-                logger.warning("pandas_datareader not available — stooq fallback skipped")
             except Exception as _stooq_err:
                 logger.warning(f"UNIVERSE SCAN tier8 STOOQ error: {_stooq_err}")
 

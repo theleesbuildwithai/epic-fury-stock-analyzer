@@ -4867,9 +4867,10 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v37-stooq-finnhub-fallback-never-cold",
+        "commit_marker": "feat-v38-stooq-direct-requests-10s-timeout-no-hang",
         "date": "2026-06-11",
         "fixes_in_build": [
+            "stooq_direct_requests_10s_timeout_replaces_pandas_datareader",
             "tier8_stooq_fallback_when_yfinance_blocked",
             "tier9_finnhub_candles_fallback_secondary",
             "adaptive_600s_budget_extension_on_yf_failure",
