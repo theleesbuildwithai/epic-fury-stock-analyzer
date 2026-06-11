@@ -2320,17 +2320,33 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
     # Collect raw factor values for all stocks
     raw_factors = []
+    _skip_short_df = 0
+    _skip_bad_price = 0
+    _skip_ratio = 0
+    _skip_median = 0
 
     for symbol, df in price_data.items():
         try:
             if df is None or len(df) < 60:
+                _skip_short_df += 1
                 continue
 
             closes = _safe_close(df).values.astype(float)
-            volumes = df["Volume"].iloc[:, 0].values.astype(float) if hasattr(df["Volume"], "columns") else df["Volume"].values.astype(float)
+            # Robust volume extraction — handles MultiIndex, flat Series, and edge cases
+            try:
+                vol_col = df["Volume"]
+                if hasattr(vol_col, "columns"):
+                    volumes = vol_col.iloc[:, 0].values.astype(float)
+                elif hasattr(vol_col, "values"):
+                    volumes = np.array(vol_col.values, dtype=float).flatten()
+                else:
+                    volumes = np.ones(len(closes))
+            except Exception:
+                volumes = np.ones(len(closes))
             current_price = float(closes[-1])
 
             if current_price <= 0 or np.isnan(current_price) or np.isinf(current_price):
+                _skip_bad_price += 1
                 continue
 
             # PRICE SANITY GUARD: if the latest close moved >50% up or >33%
@@ -3123,8 +3139,18 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             })
 
         except Exception as e:
-            logger.debug(f"Factor calc failed for {symbol}: {e}")
+            # Upgrade first 5 failures to WARNING so they appear in prod logs
+            if len(raw_factors) + _skip_bad_price + _skip_ratio + _skip_median + _skip_short_df < 5:
+                logger.warning("Factor calc FAILED for %s: %s — %s", symbol, type(e).__name__, e)
+            else:
+                logger.debug(f"Factor calc failed for {symbol}: {e}")
             continue
+
+    # DIAGNOSTIC: why stocks were skipped
+    logger.warning(
+        "SCORE LOOP DONE: raw_factors=%d | skipped: short_df=%d bad_price=%d ratio=%d median=%d exceptions=(see above)",
+        len(raw_factors), _skip_short_df, _skip_bad_price, _skip_ratio, _skip_median
+    )
 
     if not raw_factors:
         return []
