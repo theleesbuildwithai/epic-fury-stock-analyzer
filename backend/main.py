@@ -3120,6 +3120,60 @@ except Exception:
     pass  # Never block startup
 
 
+def _startup_stop_corrector():
+    """Fix open trades whose stop exceeds 5% from entry."""
+    import threading, time as _t_sc
+
+    def _correct():
+        try:
+            _t_sc.sleep(15)
+            from predictions.models import get_open_trades, update_trade_stop
+            trades = get_open_trades()
+            corrected = 0
+            for tr in trades:
+                try:
+                    entry = float(tr.get("entry_price") or 0)
+                    stop = float(tr.get("stop_loss_price") or 0)
+                    direction = tr.get("direction", "long")
+                    if not entry or not stop:
+                        continue
+                    if direction == "long":
+                        dist_pct = (entry - stop) / entry
+                        if dist_pct > 0.05:
+                            new_stop = round(entry * (1 - 0.035), 2)
+                            update_trade_stop(tr["id"], new_stop)
+                            corrected += 1
+                            logger.warning(
+                                "STOP CORRECTOR: %s long stop %.2f->%.2f (was %.1f%% from entry)",
+                                tr.get("ticker"), stop, new_stop, dist_pct * 100
+                            )
+                    else:
+                        dist_pct = (stop - entry) / entry
+                        if dist_pct > 0.05:
+                            new_stop = round(entry * 1.05, 2)
+                            update_trade_stop(tr["id"], new_stop)
+                            corrected += 1
+                            logger.warning(
+                                "STOP CORRECTOR: %s short stop %.2f->%.2f (was %.1f%% from entry)",
+                                tr.get("ticker"), stop, new_stop, dist_pct * 100
+                            )
+                except Exception:
+                    pass
+            if corrected:
+                logger.warning("STOP CORRECTOR: Fixed %d wide stops at startup.", corrected)
+        except Exception as _sc_err:
+            logger.warning("STOP CORRECTOR: Non-fatal error: %s", _sc_err)
+
+    _t = threading.Thread(target=_correct, daemon=True, name="startup-stop-corrector")
+    _t.start()
+
+
+try:
+    _startup_stop_corrector()
+except Exception:
+    pass
+
+
 # ============================================================
 # CRITICAL SCHEDULER WATCHDOG — detects dead scheduler + recovers
 # ============================================================
@@ -4730,7 +4784,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v29-regime-sma-cache-72h-fallback",
+        "commit_marker": "feat-v30-stop-5pct-absolute-cap",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",

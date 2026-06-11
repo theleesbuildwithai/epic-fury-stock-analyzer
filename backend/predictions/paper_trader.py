@@ -1629,6 +1629,11 @@ def _autonomous_stop_and_target(
     else:
         stop_pct = max(0.012, min(stop_pct, 0.05))
 
+    # ABSOLUTE SAFETY NET: no stop can exceed 5% distance from entry regardless
+    # of any upstream calculation. Defense-in-depth to prevent 10%+ stops slipping
+    # through via any unexpected code path (corrupted ATR data, wrong regime, etc.)
+    stop_pct = min(stop_pct, 0.05)
+
     # --- TAKE PROFIT: ASYMMETRIC R:R for profit-factor edge ---
     # Math: even at 35% win rate, 2.7:1 R:R produces +0.75R per trade.
     # Profit factor = (win_rate * avg_win) / (loss_rate * avg_loss)
