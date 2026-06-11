@@ -6870,8 +6870,8 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 kept.extend(overflow[: want - len(kept)])
             return kept
 
-        top_longs  = _cap_by_sector(all_longs,  max_per_sec=4, want=30)
-        top_shorts = _cap_by_sector(all_shorts, max_per_sec=4, want=20)
+        top_longs  = _cap_by_sector(all_longs,  max_per_sec=5, want=40)
+        top_shorts = _cap_by_sector(all_shorts, max_per_sec=5, want=25)
 
         # SWING-HOLD STOPS/TARGETS: wider than the intraday execution
         # path because manual holds are days-to-months.  Stop = 5-12%

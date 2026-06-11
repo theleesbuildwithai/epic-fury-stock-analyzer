@@ -4168,9 +4168,9 @@ def generate_quant_picks() -> dict:
         # the in-progress trade execution disagreed.  Walks down the sorted
         # list, keeping each pick UNLESS its sector is already at MAX, then
         # backfills overflow to guarantee at least MIN_PICKS regardless.
-        MAX_PER_SECTOR_QUEUE = 5   # 2026-06-11: was 4 — wider queue per sector
-        MIN_PICKS_LONG = 8        # 2026-06-11: was 5 — show more long candidates
-        MIN_PICKS_SHORT = 5       # 2026-06-11: was 3 — show more short candidates
+        MAX_PER_SECTOR_QUEUE = 6   # 2026-06-11: was 5 — wider queue per sector
+        MIN_PICKS_LONG = 12       # 2026-06-11: was 8 — guarantee 12+ longs in queue
+        MIN_PICKS_SHORT = 8       # 2026-06-11: was 5 — guarantee 8+ shorts in queue
 
         def _diversify_by_sector(sorted_picks, max_per_sector, min_picks, hard_cap):
             kept = []
@@ -4190,10 +4190,10 @@ def generate_quant_picks() -> dict:
             return kept
 
         top_longs = _diversify_by_sector(
-            long_picks, MAX_PER_SECTOR_QUEUE, MIN_PICKS_LONG, hard_cap=30,
+            long_picks, MAX_PER_SECTOR_QUEUE, MIN_PICKS_LONG, hard_cap=40,
         )
         top_shorts = _diversify_by_sector(
-            short_picks, MAX_PER_SECTOR_QUEUE, MIN_PICKS_SHORT, hard_cap=20,
+            short_picks, MAX_PER_SECTOR_QUEUE, MIN_PICKS_SHORT, hard_cap=25,
         )
 
         # AUDIT FIX #1 — long/short pre-pick reconciliation
