@@ -3481,9 +3481,14 @@ def _prewarm_picks_bg():
                             _s3_picks.get("short_picks") or [])
 
                         from analysis.quant_engine import _quant_cache
+                        # 2026-06-11 fix: store with time=0 (immediately stale).
+                        # The endpoint serves S3 data via its own S3-fallback path
+                        # while generate_quant_picks() at line below runs a REAL
+                        # scan. Previously time=now made _get_cached return the S3
+                        # data without ever calling fetch() — "PRE-WARM" was a no-op.
                         _quant_cache["quant_picks"] = {
                             "data": _s3_picks,
-                            "time": _t.time(),
+                            "time": 0,
                         }
                         logger.warning(
                             f"PICKS S3 RESTORE: {s3_restore.get('long_count')} longs + "
@@ -4830,9 +4835,10 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v33-yfinance120-multiindex-nan-fix",
+        "commit_marker": "feat-v34-prewarm-time0-fix-actual-scan",
         "date": "2026-06-11",
         "fixes_in_build": [
+            "prewarm_s3_restore_time0_so_regen_actually_runs",
             "yfinance120_extract_batch_field_ticker_multiindex",
             "yfinance120_tier6_tier7_normalize_flat_columns",
             "trailing_nan_close_stripper_score_loop",
