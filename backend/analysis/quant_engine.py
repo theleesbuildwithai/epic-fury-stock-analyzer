@@ -4941,6 +4941,29 @@ def generate_quant_picks() -> dict:
         except Exception as _e:
             logger.debug(f"S3 picks backup failed (non-fatal): {_e}")
 
+        # DB BACKUP — third layer. Unlike disk (lost on container restart)
+        # and S3 (no bucket configured), the trading_state DB persists across
+        # ALL deploys. Writes a compact snapshot so startup can serve real
+        # picks immediately even if yfinance is rate-limited post-restart.
+        # 2026-06-11: This is the permanent fix for cold-start 0-picks.
+        try:
+            from predictions.models import set_trading_state as _sts_pb
+            import json as _json_pb
+            _pb_payload = {
+                k: v for k, v in result.items()
+                if k not in ("_price_data",)
+            }
+            _pb_payload["_db_saved_at"] = time.time()
+            _pb_payload["_long_count"] = len(result.get("long_picks") or [])
+            _pb_payload["_short_count"] = len(result.get("short_picks") or [])
+            _sts_pb("quant_picks_db_backup", _json_pb.dumps(_pb_payload, default=str))
+            logger.warning(
+                f"Picks DB backup saved: {_pb_payload['_long_count']}L "
+                f"{_pb_payload['_short_count']}S"
+            )
+        except Exception as _e:
+            logger.debug(f"DB picks backup failed (non-fatal): {_e}")
+
     return result
 
 

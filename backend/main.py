@@ -3499,9 +3499,41 @@ def _prewarm_picks_bg():
                 except Exception as _e:
                     logger.debug(f"S3 restore skipped (non-fatal): {_e}")
 
-                # Always run a fresh background regen to replace the cache
-                # with new data (S3 might be hours stale). This populates
-                # both the in-memory cache AND saves a fresh S3 backup.
+                # DB BACKUP RESTORE — if S3 failed (no bucket), try the DB.
+                # Unlike disk cache (lost on restart) or S3 (no bucket),
+                # the trading_state DB persists across all container restarts.
+                # This is the permanent cold-start fix: after ONE good scan,
+                # the DB backup ensures we always have picks on boot.
+                # 2026-06-11: added as third fallback tier.
+                _db_loaded = False
+                try:
+                    from predictions.models import get_trading_state as _gts_db
+                    import json as _json_db, time as _t_db
+                    _raw_db = _gts_db("quant_picks_db_backup", "")
+                    if _raw_db:
+                        _db_picks = _json_db.loads(_raw_db)
+                        _db_saved = float(_db_picks.get("_db_saved_at") or 0)
+                        _db_age_h = (_t_db.time() - _db_saved) / 3600
+                        _db_long = len(_db_picks.get("long_picks") or [])
+                        _db_short = len(_db_picks.get("short_picks") or [])
+                        if _db_age_h <= 48 and (_db_long + _db_short) > 0:
+                            from analysis.quant_engine import _quant_cache as _qc_db
+                            # time=0 so the regen below runs a real scan
+                            _qc_db["quant_picks"] = {"data": _db_picks, "time": 0}
+                            _db_loaded = True
+                            logger.warning(
+                                f"PICKS DB RESTORE: {_db_long}L + {_db_short}S "
+                                f"({_db_age_h:.1f}h old) — regen will refresh"
+                            )
+                        else:
+                            logger.debug(
+                                f"DB backup skipped: age={_db_age_h:.1f}h, "
+                                f"picks={_db_long + _db_short}"
+                            )
+                except Exception as _e:
+                    logger.debug(f"DB restore skipped (non-fatal): {_e}")
+
+                # Always run a fresh regen to replace cache with live data.
                 logger.warning("PICKS PRE-WARM starting (background)")
                 from analysis.quant_engine import generate_quant_picks
                 picks = generate_quant_picks()
@@ -4835,7 +4867,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v35-remove-deprecated-yf-params-group_by-timeout",
+        "commit_marker": "feat-v36-db-picks-backup-cold-start-fix",
         "date": "2026-06-11",
         "fixes_in_build": [
             "prewarm_s3_restore_time0_so_regen_actually_runs",
