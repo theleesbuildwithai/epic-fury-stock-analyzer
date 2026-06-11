@@ -151,6 +151,58 @@ def get_prices_batch(tickers: list) -> dict:
     return out
 
 
+def get_candles_df(ticker: str, days: int = 400):
+    """Fetch daily OHLCV candles as a pandas DataFrame for use in the quant scan.
+
+    Calls Finnhub /stock/candle (resolution=D) and returns a flat DataFrame
+    with columns Open,High,Low,Close,Volume sorted ascending by date.
+    Returns None on any failure — caller must treat None as "no data".
+
+    Counts against the 55/min budget. Free tier covers all US stocks.
+    """
+    import pandas as _fh_pd
+    if not is_enabled() or not ticker:
+        return None
+    try:
+        import time as _fh_t
+        now_ts = int(_fh_t.time())
+        from_ts = now_ts - days * 86400
+        if not _under_budget():
+            return None
+        url = (
+            f"{FINNHUB_BASE}/stock/candle"
+            f"?symbol={urllib.parse.quote(ticker)}"
+            f"&resolution=D"
+            f"&from={from_ts}&to={now_ts}"
+            f"&token={FINNHUB_KEY}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "sentinel-quant/1.0"})
+        _record_call()
+        with urllib.request.urlopen(req, timeout=FINNHUB_TIMEOUT) as resp:
+            body = resp.read()
+        data = json.loads(body)
+        if data.get("s") != "ok":
+            return None
+        t_arr = data.get("t", [])
+        if len(t_arr) < 60:
+            return None
+        df = _fh_pd.DataFrame(
+            {
+                "Open":   [float(x) for x in data.get("o", [])],
+                "High":   [float(x) for x in data.get("h", [])],
+                "Low":    [float(x) for x in data.get("l", [])],
+                "Close":  [float(x) for x in data.get("c", [])],
+                "Volume": [float(x) for x in data.get("v", [])],
+            },
+            index=_fh_pd.to_datetime(t_arr, unit="s", utc=True).tz_convert(None),
+        )
+        df.index.name = "Date"
+        return df.sort_index(ascending=True)
+    except Exception as e:
+        logger.debug(f"finnhub get_candles_df({ticker}) failed: {e}")
+        return None
+
+
 def get_status() -> dict:
     """Health snapshot for the admin endpoint."""
     try:

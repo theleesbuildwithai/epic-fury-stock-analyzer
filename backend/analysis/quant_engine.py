@@ -4120,6 +4120,98 @@ def generate_quant_picks() -> dict:
             t7 = len(price_data)
             logger.info(f"UNIVERSE SCAN tier7: {t7}/{len(QUANT_UNIVERSE)}")
 
+        # --- TIER 8: STOOQ fallback (pandas_datareader) ---
+        # Fires when yfinance tiers returned very few stocks — typically because
+        # Yahoo Finance is rate-blocking the App Runner IP range. stooq.com is a
+        # completely separate data provider; it is unaffected by Yahoo's blocks.
+        # pandas_datareader is already in requirements.txt — no new dependency.
+        #
+        # If yfinance returned < 30 stocks we extend the scan deadline by 600 s
+        # so stooq + Finnhub have time to fill the full 350-stock universe.
+        # The closure _over_budget() reads _scan_deadline each call, so the
+        # reassignment is visible immediately to all callers.
+        m = _missing()
+        if m:
+            if len(price_data) < 30 and len(m) > 50:
+                _scan_deadline = _time_scan.time() + 600
+                logger.warning(
+                    f"UNIVERSE SCAN: yfinance returned only {len(price_data)} stocks "
+                    f"({len(m)} missing) — extending budget 600 s for stooq/finnhub"
+                )
+            logger.warning(f"UNIVERSE SCAN tier8 STOOQ: fetching {len(m)} tickers from stooq.com")
+            try:
+                import pandas_datareader.data as _pdr_web
+                from datetime import datetime as _stooq_dt, timedelta as _stooq_td
+                _stooq_start = (_stooq_dt.now() - _stooq_td(days=400)).strftime("%Y-%m-%d")
+                _stooq_end = _stooq_dt.now().strftime("%Y-%m-%d")
+                _stooq_added = 0
+                for _t in list(m):
+                    if _over_budget():
+                        logger.warning("UNIVERSE SCAN tier8 STOOQ hit budget — falling to tier9")
+                        break
+                    try:
+                        _sdf = _pdr_web.DataReader(_t, "stooq", _stooq_start, _stooq_end)
+                        if _sdf is not None and not _sdf.empty and len(_sdf) >= 60:
+                            _sdf = _sdf.sort_index(ascending=True)
+                            if "Close" in _sdf.columns:
+                                while len(_sdf) > 0 and pd.isna(_sdf["Close"].iloc[-1]):
+                                    _sdf = _sdf.iloc[:-1]
+                            if len(_sdf) >= 60:
+                                price_data[_t] = _sdf
+                                _stooq_added += 1
+                    except Exception:
+                        pass
+                    _time_scan.sleep(0.05)
+                t8 = len(price_data)
+                logger.warning(
+                    f"UNIVERSE SCAN tier8 STOOQ: added {_stooq_added} tickers "
+                    f"→ {t8}/{len(QUANT_UNIVERSE)} total"
+                )
+            except ImportError:
+                logger.warning("pandas_datareader not available — stooq fallback skipped")
+            except Exception as _stooq_err:
+                logger.warning(f"UNIVERSE SCAN tier8 STOOQ error: {_stooq_err}")
+
+        # --- TIER 9: FINNHUB candles fallback ---
+        # Last-resort live fetch for tickers stooq also missed.
+        # Requires FINNHUB_API_KEY env var. Free tier: 60 calls/min (we cap at 55).
+        # At that rate, 352 stocks takes ≈6 min — well within the extended 600 s budget.
+        # This tier is a complete no-op when the key is not configured.
+        m = _missing()
+        if m and not _over_budget():
+            try:
+                from predictions.finnhub_adapter import (
+                    is_enabled as _fh_ok,
+                    get_candles_df as _fh_candles,
+                )
+                if _fh_ok():
+                    logger.warning(
+                        f"UNIVERSE SCAN tier9 FINNHUB: fetching candles for {len(m)} tickers"
+                    )
+                    _fh_added = 0
+                    for _t in list(m):
+                        if _over_budget():
+                            logger.warning("UNIVERSE SCAN tier9 FINNHUB hit budget")
+                            break
+                        try:
+                            _fdf = _fh_candles(_t, days=400)
+                            if _fdf is not None and not _fdf.empty and len(_fdf) >= 60:
+                                if "Close" in _fdf.columns:
+                                    while len(_fdf) > 0 and pd.isna(_fdf["Close"].iloc[-1]):
+                                        _fdf = _fdf.iloc[:-1]
+                                if len(_fdf) >= 60:
+                                    price_data[_t] = _fdf
+                                    _fh_added += 1
+                        except Exception:
+                            pass
+                    t9 = len(price_data)
+                    logger.warning(
+                        f"UNIVERSE SCAN tier9 FINNHUB: added {_fh_added} tickers "
+                        f"→ {t9}/{len(QUANT_UNIVERSE)} total"
+                    )
+            except Exception:
+                pass  # Finnhub tier — never crash the scan
+
         # --- CACHE FALLBACK: last-good per-ticker frame ---
         # For tickers that STILL failed all SEVEN fetch tiers, use the last
         # successful price frame from a prior scan. This guarantees coverage

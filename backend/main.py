@@ -4867,9 +4867,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v36-db-picks-backup-cold-start-fix",
+        "commit_marker": "feat-v37-stooq-finnhub-fallback-never-cold",
         "date": "2026-06-11",
         "fixes_in_build": [
+            "tier8_stooq_fallback_when_yfinance_blocked",
+            "tier9_finnhub_candles_fallback_secondary",
+            "adaptive_600s_budget_extension_on_yf_failure",
+            "finnhub_get_candles_df_daily_ohlcv",
             "prewarm_s3_restore_time0_so_regen_actually_runs",
             "yfinance120_extract_batch_field_ticker_multiindex",
             "yfinance120_tier6_tier7_normalize_flat_columns",
