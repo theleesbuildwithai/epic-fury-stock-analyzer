@@ -1223,14 +1223,53 @@ def detect_market_regime() -> dict:
             if sp_current is not None and sp_current > 0:
                 regime_data["sp500_price"] = round(sp_current, 2)
                 if sp_used_fallback:
-                    # Both ^GSPC and SPY failed — truly no SMA data
-                    regime_data["sp500_trend"] = "unknown"
-                    regime_data["sp500_pct_above_200sma"] = 0
+                    # Live SMA failed — try cached last-good SMA values (mirrors VIX guard pattern)
+                    try:
+                        from predictions.models import get_trading_state as _gts_sma, set_trading_state as _sts_sma
+                        _cached_sma200 = _gts_sma("sp500_sma200_last_good", "")
+                        _cached_sma50 = _gts_sma("sp500_sma50_last_good", "")
+                        _cached_sma_ts = float(_gts_sma("sp500_sma_last_good_ts", "0") or 0)
+                        _sma_cache_age_h = (now_ts - _cached_sma_ts) / 3600
+                        if _cached_sma200 and _sma_cache_age_h < 72:
+                            # Use cached SMA — valid up to 72h (200-SMA barely moves day-to-day)
+                            sp_sma200 = float(_cached_sma200)
+                            sp_sma50 = float(_cached_sma50) if _cached_sma50 else sp_sma200
+                            sp_pct_above_200 = ((sp_current / sp_sma200) - 1) * 100
+                            regime_data["sp500_sma200"] = round(sp_sma200, 2)
+                            regime_data["sp500_sma50"] = round(sp_sma50, 2)
+                            regime_data["sp500_pct_above_200sma"] = round(sp_pct_above_200, 2)
+                            if sp_current > sp_sma200:
+                                regime_data["sp500_trend"] = "bullish"
+                                regime_data["details"].append(
+                                    "S&P 500 above cached 200-SMA by {:.1f}% (SMA {:.0f}h old — live source down)".format(
+                                        sp_pct_above_200, _sma_cache_age_h)
+                                )
+                            else:
+                                regime_data["sp500_trend"] = "bearish"
+                                regime_data["details"].append(
+                                    "S&P 500 below cached 200-SMA by {:.1f}% (SMA {:.0f}h old — live source down)".format(
+                                        abs(sp_pct_above_200), _sma_cache_age_h)
+                                )
+                        else:
+                            regime_data["sp500_trend"] = "unknown"
+                            regime_data["sp500_pct_above_200sma"] = 0
+                    except Exception as _sma_cache_e:
+                        logger.warning("Regime: SMA cache read failed: %s", _sma_cache_e)
+                        regime_data["sp500_trend"] = "unknown"
+                        regime_data["sp500_pct_above_200sma"] = 0
                 else:
                     sp_pct_above_200 = ((sp_current / sp_sma200) - 1) * 100 if sp_sma200 > 0 else 0
                     regime_data["sp500_sma200"] = round(sp_sma200, 2)
                     regime_data["sp500_sma50"] = round(sp_sma50, 2)
                     regime_data["sp500_pct_above_200sma"] = round(sp_pct_above_200, 2)
+                    # Persist for future fallback (mirrors VIX guard pattern)
+                    try:
+                        from predictions.models import set_trading_state as _sts_sma
+                        _sts_sma("sp500_sma200_last_good", str(round(sp_sma200, 4)))
+                        _sts_sma("sp500_sma50_last_good", str(round(sp_sma50, 4)))
+                        _sts_sma("sp500_sma_last_good_ts", str(round(now_ts, 0)))
+                    except Exception:
+                        pass
                     if sp_current > sp_sma200:
                         regime_data["sp500_trend"] = "bullish"
                         if sp_current > sp_sma50 > sp_sma200:
@@ -1239,12 +1278,12 @@ def detect_market_regime() -> dict:
                             )
                         else:
                             regime_data["details"].append(
-                                f"S&P 500 above 200-SMA by {sp_pct_above_200:.1f}%"
+                                "S&P 500 above 200-SMA by {:.1f}%".format(sp_pct_above_200)
                             )
                     else:
                         regime_data["sp500_trend"] = "bearish"
                         regime_data["details"].append(
-                            f"S&P 500 below 200-SMA by {abs(sp_pct_above_200):.1f}% — risk-off"
+                            "S&P 500 below 200-SMA by {:.1f}% — risk-off".format(abs(sp_pct_above_200))
                         )
         except Exception as e:
             logger.warning(f"Regime: S&P 500 data failed: {e}")
