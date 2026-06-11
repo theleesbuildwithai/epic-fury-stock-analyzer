@@ -716,8 +716,8 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None, regime=N
             target = 0.50
             _regime_min, _regime_max = 0.40, 0.60
         elif _regime_str in ("SIDEWAYS", "NEUTRAL"):
-            target = 0.65
-            _regime_min, _regime_max = 0.60, 0.75
+            target = 0.72  # Raised from 0.65 — target 70-80% gross exposure
+            _regime_min, _regime_max = 0.65, 0.80
         else:
             target = DYNAMIC_EXPOSURE_BASE
             _regime_min, _regime_max = DYNAMIC_EXPOSURE_MIN, DYNAMIC_EXPOSURE_MAX
@@ -3660,21 +3660,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     all_picks.append(p)
                 logger.info(f"BULL regime: {len(long_candidates)} longs, {min(2, len(short_candidates))} shorts selected")
         else:
-            # SIDEWAYS: balanced — but longs face chop headwind, raise quality bar
-            # Require meaningful conviction: conf>=60% AND score>=1.5
-            # With VIX elevated (>20): even tighter (conf>=63%, score>=1.8)
+            # SIDEWAYS: balanced — longs get a quality bar but NOT zero-picks.
+            # Gate: conf>=55% AND score>=1.2 (reduced from 60%/1.5 and 63%/1.8)
+            # Rationale: SIDEWAYS doesn't mean no good setups — 63% gate was
+            # producing ZERO longs and starving the portfolio of capital deployment.
+            # 55% with score>=1.2 filters noise while keeping the top decile of longs.
             _vix = float((quant_picks.get("macro") or {}).get("vix") or 20)
-            if _vix > 20:
-                _sw_min_conf, _sw_min_score = 63, 1.8
-            else:
-                _sw_min_conf, _sw_min_score = 60, 1.5
+            _sw_min_conf = 55
+            _sw_min_score = 1.2
             _sw_longs = [p for p in long_candidates
                          if p.get("confidence", 0) >= _sw_min_conf
                          and p.get("composite_score", 0) >= _sw_min_score]
+            # MINIMUM PICKS GUARANTEE: if gate is still too tight, progressively
+            # relax to ensure at least 3 longs pass — never leave the portfolio
+            # with zero options. Quality floor: conf>=45%, score>=0.8.
+            if len(_sw_longs) < 3 and len(long_candidates) > 0:
+                _sw_longs = [p for p in long_candidates
+                             if p.get("confidence", 0) >= 45
+                             and p.get("composite_score", 0) >= 0.8]
+                logger.warning(
+                    "SIDEWAYS LONG GATE: primary gate produced %d longs — "
+                    "relaxed to conf>=45%% score>=0.8 → %d longs",
+                    0, len(_sw_longs)
+                )
             if len(_sw_longs) < len(long_candidates):
                 logger.warning(
-                    f"SIDEWAYS LONG GATE: {len(long_candidates)} candidates → "
-                    f"{len(_sw_longs)} passed (conf>={_sw_min_conf}%, score>={_sw_min_score}, VIX={_vix:.1f})"
+                    "SIDEWAYS LONG GATE: %d candidates → %d passed "
+                    "(conf>=%d%%, score>=%.1f, VIX=%.1f)",
+                    len(long_candidates), len(_sw_longs),
+                    _sw_min_conf, _sw_min_score, _vix
                 )
             for p in _sw_longs:
                 p["_adj_confidence"] = p["confidence"]

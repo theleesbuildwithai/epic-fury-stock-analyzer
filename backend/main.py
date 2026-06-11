@@ -3626,6 +3626,52 @@ scheduler.add_job(
 )
 
 
+# --- MARKET OPEN FORCED SCAN: 9:35 AM ET Mon-Fri ---
+# Ensures fresh quant picks are ready at market open every day.
+# The 90s startup warmup covers deploys, but not daily stale-cache situations.
+# This guarantees a fresh scan 5 min after open regardless of deploy time.
+def _market_open_scan():
+    """Force a fresh quant-picks regeneration at 9:35 AM ET market open."""
+    try:
+        logger.warning("MARKET OPEN SCAN: Forcing fresh quant picks regen at 9:35 AM ET...")
+        from analysis.quant_engine import generate_quant_picks
+        generate_quant_picks()
+        logger.warning("MARKET OPEN SCAN: Fresh picks ready.")
+    except Exception as _mos_e:
+        logger.error("MARKET OPEN SCAN: Error: %s", _mos_e)
+
+scheduler.add_job(
+    _market_open_scan,
+    "cron",
+    day_of_week="mon-fri",
+    hour=9,
+    minute=35,
+    timezone="US/Eastern",
+    id="market_open_scan",
+    name="Market Open Forced Scan (9:35 AM ET)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=1800,
+    replace_existing=True,
+)
+
+# --- 10:05 AM FOLLOW-UP SCAN: catches any 9:35 failures ---
+scheduler.add_job(
+    _market_open_scan,
+    "cron",
+    day_of_week="mon-fri",
+    hour=10,
+    minute=5,
+    timezone="US/Eastern",
+    id="market_open_scan_followup",
+    name="Market Open Follow-Up Scan (10:05 AM ET)",
+    max_instances=1,
+    coalesce=True,
+    misfire_grace_time=1800,
+    replace_existing=True,
+)
+
+
 # --- RESET DAY: Close all positions, restore to yesterday's value ---
 # This runs ONCE on this deploy to undo today's damage and restart fresh.
 def _reset_day():
@@ -4784,7 +4830,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v30-stop-5pct-absolute-cap",
+        "commit_marker": "feat-v31-market-open-scan-picks-exposure",
         "date": "2026-06-10",
         "fixes_in_build": [
             "quant_picks_500_fallback_with_S3",
