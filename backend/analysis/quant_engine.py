@@ -1142,7 +1142,14 @@ def detect_market_regime() -> dict:
         # --- Signal 1: S&P 500 vs 200-SMA ---
         try:
             _throttle()
-            sp_df = yf.download("^GSPC", period="1y", progress=False)
+            import threading as _reg_thr
+            _reg_r1 = [None]
+            _reg_t1 = _reg_thr.Thread(
+                target=lambda r=_reg_r1: r.__setitem__(
+                    0, yf.download("^GSPC", period="1y", progress=False)
+                ), daemon=True)
+            _reg_t1.start(); _reg_t1.join(timeout=10)
+            sp_df = _reg_r1[0]
             sp_current = None
             if sp_df is not None and len(sp_df) >= 200:
                 sp_closes = _safe_close(sp_df).values.astype(float)
@@ -1180,7 +1187,13 @@ def detect_market_regime() -> dict:
             if sp_current is not None and sp_used_fallback:
                 try:
                     _throttle()
-                    spy_df = yf.download("SPY", period="1y", progress=False)
+                    _reg_r2 = [None]
+                    _reg_t2 = _reg_thr.Thread(
+                        target=lambda r=_reg_r2: r.__setitem__(
+                            0, yf.download("SPY", period="1y", progress=False)
+                        ), daemon=True)
+                    _reg_t2.start(); _reg_t2.join(timeout=10)
+                    spy_df = _reg_r2[0]
                     if spy_df is not None and len(spy_df) >= 200:
                         spy_closes = _safe_close(spy_df).values.astype(float)
                         spy_last = float(spy_closes[-1])
@@ -1371,9 +1384,14 @@ def detect_market_regime() -> dict:
                 "SQ", "COIN", "SHOP", "MELI", "TJX", "ROST", "DHR",
                 "ISRG", "REGN", "VRTX", "ANET", "CDNS", "SNPS",
             ]
-            breadth_df = yf.download(
-                breadth_sample, period="3mo", progress=False
-            )
+            import threading as _reg_thr3
+            _reg_r3 = [None]
+            _reg_t3 = _reg_thr3.Thread(
+                target=lambda r=_reg_r3: r.__setitem__(
+                    0, yf.download(breadth_sample, period="3mo", progress=False)
+                ), daemon=True)
+            _reg_t3.start(); _reg_t3.join(timeout=10)
+            breadth_df = _reg_r3[0]
 
             if breadth_df is not None and not breadth_df.empty:
                 above_50sma = 0

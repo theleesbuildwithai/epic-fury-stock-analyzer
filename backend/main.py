@@ -4931,9 +4931,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v47-system-intelligence-nan-scrub-global-exception-handler",
+        "commit_marker": "feat-v48-detect-market-regime-3x-thread-timeouts-live-prices-unblocked",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "detect_market_regime_gspc_thread_timeout_10s_no_hang",
+            "detect_market_regime_spy_fallback_thread_timeout_10s",
+            "detect_market_regime_breadth_50stocks_thread_timeout_10s",
+            "live_prices_now_fast_regime_cache_warm_after_10s_max",
             "system_intelligence_nan_scrub_jsonresponse_fixes_500",
             "global_exception_handler_structured_json_on_any_500",
             "global_nan_handler_catches_json_serialization_failures",
