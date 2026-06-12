@@ -4999,7 +4999,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v50-daily-summary-watchlist-thread-timeouts-zero-unguarded-polling",
+        "commit_marker": "feat-v51-syntax-fix-scan-running-intel-error-exposed",
         "date": "2026-06-12",
         "fixes_in_build": [
             "daily_summary_initial_yf_download_10s_thread_timeout",
@@ -9571,8 +9571,10 @@ def system_intelligence(request: Request):
         result = generate_intelligence_report()
         return JSONResponse(content=scrub_nan(result))
     except Exception as e:
-        logger.error(f"Intelligence report error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate intelligence report")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error("Intelligence report error: %s", e)
+        raise HTTPException(status_code=500, detail=f"Error: {type(e).__name__}: {e}")
 
 
 @app.get("/api/chart-data/{ticker}")
