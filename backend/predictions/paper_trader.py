@@ -1539,7 +1539,11 @@ def _calculate_stock_atr(symbol: str, period: int = 14) -> float:
     """
     try:
         _throttle()
-        df = yf.download(symbol, period="2mo", progress=False)
+        import threading as _atr_thr
+        _atr_r = [None]
+        _atr_t = _atr_thr.Thread(target=lambda r=_atr_r, s=symbol: r.__setitem__(0, yf.download(s, period="2mo", progress=False)), daemon=True)
+        _atr_t.start(); _atr_t.join(timeout=10)
+        df = _atr_r[0]
         if df is None or len(df) < period + 1:
             return 0.025  # Default 2.5% if no data
 
@@ -2205,7 +2209,11 @@ def _check_correlation(new_symbol: str, open_tickers: set, price_data: dict = No
     try:
         check_symbols = list(open_tickers) + [new_symbol]
         _throttle()
-        df = yf.download(check_symbols, period="3mo", progress=False, group_by="ticker")
+        import threading as _cc_thr
+        _cc_r = [None]
+        _cc_t = _cc_thr.Thread(target=lambda r=_cc_r, s=check_symbols: r.__setitem__(0, yf.download(s, period="3mo", progress=False, group_by="ticker")), daemon=True)
+        _cc_t.start(); _cc_t.join(timeout=10)
+        df = _cc_r[0]
         if df is None or df.empty:
             return result
 
@@ -3116,7 +3124,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if not should_close and pnl_pct > trail_start_pct:
                 try:
                     _throttle()
-                    hist_df = yf.download(ticker, period="1mo", progress=False)
+                    import threading as _ets_thr
+                    _ets_r = [None]
+                    _ets_t = _ets_thr.Thread(target=lambda r=_ets_r, tk=ticker: r.__setitem__(0, yf.download(tk, period="1mo", progress=False)), daemon=True)
+                    _ets_t.start(); _ets_t.join(timeout=10)
+                    hist_df = _ets_r[0]
                     if hist_df is not None and len(hist_df) >= 3:
                         hist_closes = _safe_col(hist_df, "Close").values.astype(float)
 
@@ -4556,8 +4568,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 _inception = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
             _throttle()
-            # Download from inception to today (not just last month!)
-            sp_df = yf.download("^GSPC", start=_inception, progress=False)
+            import threading as _sp_thr
+            _sp_r = [None]
+            _sp_t = _sp_thr.Thread(target=lambda r=_sp_r, inc=_inception: r.__setitem__(0, yf.download("^GSPC", start=inc, progress=False)), daemon=True)
+            _sp_t.start(); _sp_t.join(timeout=10)
+            sp_df = _sp_r[0]
             if sp_df is not None and len(sp_df) >= 2:
                 sp_closes = _safe_col(sp_df, "Close").values.astype(float)
                 sp500_daily = ((sp_closes[-1] / sp_closes[-2]) - 1) * 100
@@ -5967,7 +5982,11 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         if not should_close and pnl_pct > trail_start_pct:
             try:
                 _throttle()
-                hist_df = yf.download(ticker, period="1mo", progress=False)
+                import threading as _exit_thr
+                _exit_r = [None]
+                _exit_t = _exit_thr.Thread(target=lambda r=_exit_r, tk=ticker: r.__setitem__(0, yf.download(tk, period="1mo", progress=False)), daemon=True)
+                _exit_t.start(); _exit_t.join(timeout=10)
+                hist_df = _exit_r[0]
                 if hist_df is not None and len(hist_df) >= 3:
                     hist_closes = _safe_col(hist_df, "Close").values.astype(float)
                     if direction == "long":

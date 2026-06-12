@@ -578,6 +578,8 @@ def auto_adjust_weights() -> dict:
 
     # Normalize to sum = 1.0
     total = sum(new_weights.values())
+    if total <= 0:
+        total = 1.0  # safety: prevent division by zero if all weights zeroed out
     new_weights = {k: round(v / total, 4) for k, v in new_weights.items()}
 
     # Save updated GLOBAL weights (these are what picks consume)

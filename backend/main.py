@@ -3945,10 +3945,13 @@ def trigger_trade_cycle():
 @app.get("/api/intelligence-report")
 def get_intelligence_report():
     """Get the self-learning system's intelligence report — what it learned, strengths, weaknesses."""
+    from fastapi.responses import JSONResponse
     try:
+        from analytics.nan_helpers import scrub_nan
         report = generate_intelligence_report()
-        return report
+        return JSONResponse(content=scrub_nan(report))
     except Exception as e:
+        logger.error("Intelligence report error: %s", e)
         return {"error": str(e), "message": "Not enough trade data yet for intelligence report"}
 
 
@@ -5003,7 +5006,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v55-trading-loop-thread-timeouts-intel-per-section-safety-search-guard",
+        "commit_marker": "feat-v56-intelligence-report-scrub-nan-audit-complete",
         "date": "2026-06-12",
         "fixes_in_build": [
             "daily_summary_initial_yf_download_10s_thread_timeout",
