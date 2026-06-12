@@ -114,9 +114,11 @@ def _compute_factor_stats(trades: list) -> dict:
 
         for factor_name in FACTOR_NAMES:
             factor_data = factors.get(factor_name, {})
+            if not isinstance(factor_data, dict):
+                factor_data = {}
             try:
                 contribution = float(factor_data.get("contribution", 0) or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, AttributeError):
                 contribution = 0.0
             abs_contrib = abs(contribution)
             # Only credit this factor for this trade if it was a material
