@@ -4079,8 +4079,12 @@ def search_stocks(request: Request, q: str = ""):
     check_rate_limit(request.client.host)
     if len(q) > 50:
         raise HTTPException(status_code=400, detail="Query too long")
-    results = search_tickers(q)
-    return {"results": results}
+    try:
+        results = search_tickers(q)
+        return {"results": results}
+    except Exception as e:
+        logger.error("Search error for q=%r: %s", q, e)
+        return {"results": []}
 
 
 # Per-ticker DAY-LONG cache for analyze endpoint.
@@ -4999,7 +5003,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v54-factors-isinstance-dict-guard-intel-fixed",
+        "commit_marker": "feat-v55-trading-loop-thread-timeouts-intel-per-section-safety-search-guard",
         "date": "2026-06-12",
         "fixes_in_build": [
             "daily_summary_initial_yf_download_10s_thread_timeout",

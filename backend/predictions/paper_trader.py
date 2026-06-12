@@ -1727,7 +1727,11 @@ def _get_vix_scale() -> float:
     """Get position size multiplier based on current VIX level."""
     try:
         _throttle()
-        vix_df = yf.download("^VIX", period="5d", progress=False)
+        import threading as _vs_thr
+        _vs_r = [None]
+        _vs_t = _vs_thr.Thread(target=lambda r=_vs_r: r.__setitem__(0, yf.download("^VIX", period="5d", progress=False)), daemon=True)
+        _vs_t.start(); _vs_t.join(timeout=10)
+        vix_df = _vs_r[0]
         if vix_df is not None and not vix_df.empty:
             vix = float(_safe_col(vix_df, "Close").dropna().iloc[-1])
             if vix < 15:
@@ -2131,7 +2135,11 @@ def _get_dynamic_winlock(regime: str = "SIDEWAYS") -> dict:
     """
     try:
         _throttle()
-        vix_df = yf.download("^VIX", period="5d", progress=False)
+        import threading as _dwl_thr
+        _dwl_r = [None]
+        _dwl_t = _dwl_thr.Thread(target=lambda r=_dwl_r: r.__setitem__(0, yf.download("^VIX", period="5d", progress=False)), daemon=True)
+        _dwl_t.start(); _dwl_t.join(timeout=10)
+        vix_df = _dwl_r[0]
         vix = float(_safe_col(vix_df, "Close").dropna().iloc[-1]) if vix_df is not None and not vix_df.empty else 20
     except Exception:
         vix = 20
@@ -2853,7 +2861,14 @@ def _get_current_prices(symbols: list) -> dict:
     if yahoo_symbols:
         _throttle()
         try:
-            df = yf.download(yahoo_symbols, period="5d", progress=False, group_by="ticker")
+            import threading as _gcp_thr
+            _gcp_r = [None]
+            _gcp_t = _gcp_thr.Thread(
+                target=lambda r=_gcp_r, s=yahoo_symbols: r.__setitem__(
+                    0, yf.download(s, period="5d", progress=False, group_by="ticker")
+                ), daemon=True)
+            _gcp_t.start(); _gcp_t.join(timeout=10)
+            df = _gcp_r[0]
             if df is not None and not df.empty:
                 for sym in yahoo_symbols:
                     try:

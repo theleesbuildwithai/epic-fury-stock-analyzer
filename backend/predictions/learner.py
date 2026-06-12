@@ -874,24 +874,48 @@ def generate_intelligence_report() -> dict:
     }
 
     # Factor analysis
-    factor_analysis = analyze_factor_performance()
-    report["factor_performance"] = factor_analysis.get("factors", {})
+    factor_analysis = {}
+    try:
+        factor_analysis = analyze_factor_performance()
+        report["factor_performance"] = factor_analysis.get("factors", {})
+    except Exception as _e:
+        logger.warning("Intelligence: factor analysis failed (non-fatal): %s", _e)
+        report["factor_performance"] = {}
 
     # Sector analysis
-    sector_analysis = analyze_sector_performance()
-    report["sector_performance"] = sector_analysis
+    sector_analysis = {}
+    try:
+        sector_analysis = analyze_sector_performance()
+        report["sector_performance"] = sector_analysis
+    except Exception as _e:
+        logger.warning("Intelligence: sector analysis failed (non-fatal): %s", _e)
+        report["sector_performance"] = {}
 
     # Regime analysis
-    regime_analysis = analyze_regime_performance()
-    report["regime_performance"] = regime_analysis
+    regime_analysis = {}
+    try:
+        regime_analysis = analyze_regime_performance()
+        report["regime_performance"] = regime_analysis
+    except Exception as _e:
+        logger.warning("Intelligence: regime analysis failed (non-fatal): %s", _e)
+        report["regime_performance"] = {}
 
     # Current weights
-    weights = get_signal_weights()
-    report["current_weights"] = weights
+    try:
+        weights = get_signal_weights()
+        report["current_weights"] = weights
+    except Exception as _e:
+        logger.warning("Intelligence: weights failed (non-fatal): %s", _e)
+        report["current_weights"] = {}
 
     # Closed trades count
-    closed = get_closed_trades(limit=500)
-    report["total_closed"] = len(closed)
+    closed = []
+    try:
+        closed = get_closed_trades(limit=500)
+        report["total_closed"] = len(closed)
+    except Exception as _e:
+        logger.warning("Intelligence: closed trades failed (non-fatal): %s", _e)
+        report["total_closed"] = 0
 
     # --- Generate insights (human-readable) ---
     insights = []
@@ -899,64 +923,65 @@ def generate_intelligence_report() -> dict:
     weaknesses = []
 
     # Factor insights
-    factors = factor_analysis.get("factors", {})
-    if factors:
-        best_factor = max(factors, key=lambda k: factors[k].get("sharpe", 0))
-        worst_factor = min(factors, key=lambda k: factors[k].get("sharpe", 0))
-
-        if factors[best_factor].get("sharpe", 0) > 1:
-            strengths.append(
-                f"{best_factor.replace('_', ' ').title()} factor performing well "
-                f"(Sharpe: {factors[best_factor]['sharpe']}, "
-                f"Win Rate: {factors[best_factor]['win_rate']}%)"
-            )
-
-        if factors[worst_factor].get("sharpe", 0) < 0:
-            weaknesses.append(
-                f"{worst_factor.replace('_', ' ').title()} factor underperforming "
-                f"(Sharpe: {factors[worst_factor]['sharpe']})"
-            )
+    try:
+        factors = factor_analysis.get("factors", {}) if isinstance(factor_analysis, dict) else {}
+        if factors:
+            best_factor = max(factors, key=lambda k: factors[k].get("sharpe", 0) if isinstance(factors[k], dict) else 0)
+            worst_factor = min(factors, key=lambda k: factors[k].get("sharpe", 0) if isinstance(factors[k], dict) else 0)
+            if isinstance(factors[best_factor], dict) and factors[best_factor].get("sharpe", 0) > 1:
+                strengths.append(
+                    f"{best_factor.replace('_', ' ').title()} factor performing well "
+                    f"(Sharpe: {factors[best_factor]['sharpe']}, "
+                    f"Win Rate: {factors[best_factor]['win_rate']}%)"
+                )
+            if isinstance(factors[worst_factor], dict) and factors[worst_factor].get("sharpe", 0) < 0:
+                weaknesses.append(
+                    f"{worst_factor.replace('_', ' ').title()} factor underperforming "
+                    f"(Sharpe: {factors[worst_factor]['sharpe']})"
+                )
+    except Exception as _e:
+        logger.warning("Intelligence: factor insights failed (non-fatal): %s", _e)
 
     # Sector insights
-    sectors = sector_analysis.get("sectors", {})
-    if sectors:
-        best_sector = sector_analysis.get("best_sector")
-        worst_sector = sector_analysis.get("worst_sector")
-        if best_sector and sectors.get(best_sector, {}).get("win_rate", 0) > 60:
-            strengths.append(
-                f"Strong at trading {best_sector} "
-                f"({sectors[best_sector]['win_rate']}% win rate)"
-            )
-        if worst_sector and sectors.get(worst_sector, {}).get("win_rate", 0) < 40:
-            weaknesses.append(
-                f"Struggling with {worst_sector} "
-                f"({sectors[worst_sector]['win_rate']}% win rate)"
-            )
+    try:
+        sectors = sector_analysis.get("sectors", {}) if isinstance(sector_analysis, dict) else {}
+        if sectors:
+            best_sector = sector_analysis.get("best_sector")
+            worst_sector = sector_analysis.get("worst_sector")
+            if best_sector and isinstance(sectors.get(best_sector), dict) and sectors[best_sector].get("win_rate", 0) > 60:
+                strengths.append(f"Strong at trading {best_sector} ({sectors[best_sector]['win_rate']}% win rate)")
+            if worst_sector and isinstance(sectors.get(worst_sector), dict) and sectors[worst_sector].get("win_rate", 0) < 40:
+                weaknesses.append(f"Struggling with {worst_sector} ({sectors[worst_sector]['win_rate']}% win rate)")
+    except Exception as _e:
+        logger.warning("Intelligence: sector insights failed (non-fatal): %s", _e)
 
     # Mistake analysis — learn from losses
-    mistake_analysis = analyze_mistakes()
-    report["mistake_analysis"] = mistake_analysis
-    for lesson in mistake_analysis.get("lessons", []):
-        weaknesses.append(lesson)
-    if mistake_analysis.get("win_loss_ratio", 0) > 1.5:
-        strengths.append(
-            f"Good risk/reward: wins avg {mistake_analysis['avg_win_pct']}% vs "
-            f"losses avg {mistake_analysis['avg_loss_pct']}%"
-        )
+    try:
+        mistake_analysis = analyze_mistakes()
+        report["mistake_analysis"] = mistake_analysis
+        for lesson in mistake_analysis.get("lessons", []):
+            weaknesses.append(lesson)
+        if mistake_analysis.get("win_loss_ratio", 0) > 1.5:
+            strengths.append(
+                f"Good risk/reward: wins avg {mistake_analysis['avg_win_pct']}% vs "
+                f"losses avg {mistake_analysis['avg_loss_pct']}%"
+            )
+    except Exception as _e:
+        logger.warning("Intelligence: mistake analysis failed (non-fatal): %s", _e)
+        report["mistake_analysis"] = {}
 
     # Regime insights
-    regimes = regime_analysis.get("regimes", {})
-    for regime_name, stats in regimes.items():
-        if stats["win_rate"] > 65:
-            strengths.append(
-                f"Good performance in {regime_name} markets "
-                f"({stats['win_rate']}% win rate)"
-            )
-        elif stats["win_rate"] < 40:
-            weaknesses.append(
-                f"Poor performance in {regime_name} markets "
-                f"({stats['win_rate']}% win rate)"
-            )
+    try:
+        regimes = regime_analysis.get("regimes", {}) if isinstance(regime_analysis, dict) else {}
+        for regime_name, stats in regimes.items():
+            if not isinstance(stats, dict):
+                continue
+            if stats.get("win_rate", 0) > 65:
+                strengths.append(f"Good performance in {regime_name} markets ({stats['win_rate']}% win rate)")
+            elif stats.get("win_rate", 0) < 40:
+                weaknesses.append(f"Poor performance in {regime_name} markets ({stats['win_rate']}% win rate)")
+    except Exception as _e:
+        logger.warning("Intelligence: regime insights failed (non-fatal): %s", _e)
 
     # Overall assessment
     if len(closed) < 20:
