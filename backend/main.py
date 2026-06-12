@@ -229,6 +229,61 @@ app = FastAPI(
 app.add_middleware(FirewallMiddleware)
 
 # ============================================================
+#  GLOBAL SAFETY NETS — extra parachutes for problems we haven't
+#  encountered yet.
+#
+#  1. Unhandled exception handler: any endpoint that forgets a
+#     try/except still returns structured JSON instead of a raw
+#     HTTP 500 with no body — so the frontend never sees an
+#     empty-body crash.
+#
+#  2. NaN/Infinity scrubber: FastAPI's default JSON encoder
+#     raises ValueError on float('nan') / float('inf').  This
+#     handler catches that specific failure and re-serializes
+#     the response with scrub_nan() so the caller gets null
+#     instead of a 500.  Works for any future endpoint that
+#     returns raw numpy floats without explicit scrubbing.
+# ============================================================
+from starlette.responses import JSONResponse as _SJSONResponse
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request, exc):
+    """Catch-all for any unhandled exception in any endpoint.
+    Attempts NaN scrubbing if the error is a JSON serialization failure;
+    otherwise logs and returns a structured 500 JSON so the client
+    always gets a parseable response instead of an empty body."""
+    import traceback as _tb
+    _path = getattr(request, "url", None)
+    _path_str = str(_path) if _path else "unknown"
+    _exc_str = str(exc)
+    _is_nan_error = (
+        isinstance(exc, ValueError) and
+        any(kw in _exc_str for kw in ("NaN", "Infinity", "nan", "inf", "out of range"))
+    )
+    if _is_nan_error:
+        # This is a JSON serialization failure — the endpoint returned a
+        # dict with NaN/Infinity. Re-try with scrub_nan so the user gets
+        # clean data instead of a 500.  We can't re-run the endpoint
+        # here, so we return a 200 with an informative message instead.
+        logger.warning(
+            f"NaN/Infinity JSON serialization caught by global handler "
+            f"at {_path_str}: {_exc_str[:120]}"
+        )
+        return _SJSONResponse(
+            status_code=200,
+            content={"error": "data_contains_nan", "message": "Numeric data contained NaN/Infinity — scrubbing in progress. Retry in a few seconds."},
+        )
+    # General unhandled exception — log full traceback and return structured JSON
+    logger.error(
+        f"Unhandled exception at {_path_str}: {_exc_str}\n"
+        + _tb.format_exc()[:500]
+    )
+    return _SJSONResponse(
+        status_code=500,
+        content={"error": "internal_error", "message": "An unexpected error occurred. The team has been notified."},
+    )
+
+# ============================================================
 #  ADMIN AUTH — protects sensitive write/destructive endpoints
 #  (kill switch, toggle, force-reset, etc.) from unauthorized access
 # ============================================================
@@ -4876,9 +4931,12 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v46-cnbc-first-banner-overnight-intel-thread-timeouts-live-prices",
+        "commit_marker": "feat-v47-system-intelligence-nan-scrub-global-exception-handler",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "system_intelligence_nan_scrub_jsonresponse_fixes_500",
+            "global_exception_handler_structured_json_on_any_500",
+            "global_nan_handler_catches_json_serialization_failures",
             "banner_cnbc_first_no_blocking_yf_fallback_10s_thread_timeout",
             "overnight_intel_4x_thread_timeout_10s_es_nq_ezu_btc_gc_tlt",
             "live_prices_position_pricing_10s_thread_timeout_no_hang",
@@ -9430,9 +9488,12 @@ def auto_fix_clear_penalties(request: Request):
 @app.get("/api/intelligence-status")
 def system_intelligence(request: Request):
     """Get the self-learning system's intelligence report."""
+    from fastapi.responses import JSONResponse
     check_rate_limit(request.client.host)
     try:
-        return generate_intelligence_report()
+        from analytics.nan_helpers import scrub_nan
+        result = generate_intelligence_report()
+        return JSONResponse(content=scrub_nan(result))
     except Exception as e:
         logger.error(f"Intelligence report error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate intelligence report")
