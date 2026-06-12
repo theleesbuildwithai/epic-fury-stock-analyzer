@@ -1093,9 +1093,16 @@ def get_daily_summary(watchlist_tickers=None):
         symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
         movers_by_symbol = {}
 
-        # 1) PRIMARY: Yahoo Finance batch
+        # 1) PRIMARY: Yahoo Finance batch — 10s thread timeout (App Runner IPs often blocked)
         try:
-            df = yf.download(SUMMARY_STOCKS, period="5d", progress=False, group_by="ticker")
+            import threading as _ds_thr
+            _ds_r = [None]
+            _ds_t = _ds_thr.Thread(
+                target=lambda r=_ds_r: r.__setitem__(
+                    0, yf.download(SUMMARY_STOCKS, period="5d", progress=False, group_by="ticker")
+                ), daemon=True)
+            _ds_t.start(); _ds_t.join(timeout=10)
+            df = _ds_r[0]
         except Exception:
             df = None
 
@@ -1239,7 +1246,16 @@ def _get_watchlist_summary(tickers):
     results = []
     _throttle()
     try:
-        df = yf.download(tickers, period="1mo", progress=False, group_by="ticker")
+        import threading as _wl_thr
+        _wl_r = [None]
+        _wl_t = _wl_thr.Thread(
+            target=lambda r=_wl_r: r.__setitem__(
+                0, yf.download(tickers, period="1mo", progress=False, group_by="ticker")
+            ), daemon=True)
+        _wl_t.start(); _wl_t.join(timeout=10)
+        df = _wl_r[0]
+        if df is None:
+            return []
     except Exception:
         return []
 

@@ -4999,9 +4999,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v49-fresh-start-v9-132k-32pct-stats-reset-backtest-thread-timeout",
+        "commit_marker": "feat-v50-daily-summary-watchlist-thread-timeouts-zero-unguarded-polling",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "daily_summary_initial_yf_download_10s_thread_timeout",
+            "watchlist_summary_yf_download_10s_thread_timeout",
             "fresh_start_v9_cash_132k_32pct_return_stats_epoch_snapshots_reset",
             "backtest_paper_trader_30s_thread_timeout_no_infinite_hang",
             "detect_market_regime_gspc_thread_timeout_10s_no_hang",
