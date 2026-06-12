@@ -1091,43 +1091,78 @@ def get_daily_summary(watchlist_tickers=None):
     """
     def fetch():
         _throttle()
+        symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
+        movers_by_symbol = {}
+
+        # 1) PRIMARY: Yahoo Finance batch
         try:
             df = yf.download(SUMMARY_STOCKS, period="5d", progress=False, group_by="ticker")
         except Exception:
-            return {"error": "Could not fetch market data", "gainers": [], "losers": [], "watchlist_summary": []}
+            df = None
 
-        if df is None or df.empty:
+        if df is not None and not df.empty:
+            for symbol in SUMMARY_STOCKS:
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        if symbol not in df.columns.get_level_values(0):
+                            continue
+                        close_series = df[(symbol, "Close")].dropna()
+                    else:
+                        if len(SUMMARY_STOCKS) == 1 and "Close" in df.columns:
+                            close_series = df["Close"].dropna()
+                        else:
+                            continue
+
+                    if close_series is None or len(close_series) < 2:
+                        continue
+
+                    current = float(close_series.iloc[-1])
+                    prev = float(close_series.iloc[-2])
+                    change = current - prev
+                    change_pct = (change / prev) * 100
+
+                    movers_by_symbol[symbol] = {
+                        "symbol": symbol,
+                        "name": symbol_to_name.get(symbol, symbol),
+                        "price": round(current, 2),
+                        "change": round(change, 2),
+                        "change_pct": round(change_pct, 2),
+                    }
+                except Exception:
+                    continue
+
+        # 2) CNBC FALLBACK: for any stocks yfinance didn't return
+        missing = [s for s in SUMMARY_STOCKS if s not in movers_by_symbol]
+        if missing:
+            try:
+                cnbc_request = [YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s) for s in missing]
+                cnbc_to_yahoo = {YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s): s for s in missing}
+                cnbc_data = cnbc_quote_batch(cnbc_request)
+                for cnbc_sym, val in (cnbc_data or {}).items():
+                    try:
+                        yahoo_sym = cnbc_to_yahoo.get(cnbc_sym, cnbc_sym)
+                        price = float(val.get("price") or 0)
+                        change_pct = float(val.get("change_pct") or 0)
+                        if price <= 0:
+                            continue
+                        prev_price = price / (1.0 + change_pct / 100.0) if change_pct != -100 else price
+                        change_dollars = round(price - prev_price, 2)
+                        movers_by_symbol[yahoo_sym] = {
+                            "symbol": yahoo_sym,
+                            "name": symbol_to_name.get(yahoo_sym, yahoo_sym),
+                            "price": round(price, 2),
+                            "change": change_dollars,
+                            "change_pct": round(change_pct, 2),
+                        }
+                    except Exception:
+                        continue
+            except Exception:
+                pass  # CNBC fallback failure is non-fatal
+
+        if not movers_by_symbol:
             return {"error": "No data available", "gainers": [], "losers": [], "watchlist_summary": []}
 
-        symbol_to_name = {s[0]: s[1] for s in BANNER_SYMBOLS}
-        movers = []
-
-        for symbol in SUMMARY_STOCKS:
-            try:
-                if isinstance(df.columns, pd.MultiIndex):
-                    if symbol not in df.columns.get_level_values(0):
-                        continue
-                    close_series = df[(symbol, "Close")].dropna()
-                else:
-                    continue
-
-                if close_series is None or len(close_series) < 2:
-                    continue
-
-                current = float(close_series.iloc[-1])
-                prev = float(close_series.iloc[-2])
-                change = current - prev
-                change_pct = (change / prev) * 100
-
-                movers.append({
-                    "symbol": symbol,
-                    "name": symbol_to_name.get(symbol, symbol),
-                    "price": round(current, 2),
-                    "change": round(change, 2),
-                    "change_pct": round(change_pct, 2),
-                })
-            except Exception:
-                continue
+        movers = list(movers_by_symbol.values())
 
         # Sort for gainers and losers
         movers.sort(key=lambda x: x["change_pct"], reverse=True)

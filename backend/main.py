@@ -4867,9 +4867,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v44-stale-comment-fixes-510-universe-tier7-log-finnhub",
+        "commit_marker": "feat-v45-daily-summary-cnbc-fallback-full-stock-coverage",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "daily_summary_cnbc_fallback_fills_missing_yf_stocks",
+            "daily_summary_flat_df_handling_when_single_ticker_returned",
             "stale_comment_fixes_510_universe_tier7_log_now_says_finnhub",
             "global_scan_lock_one_scan_at_a_time_full_finnhub_budget",
             "s3_emergency_restore_when_live_scan_0picks_and_disk_empty",
