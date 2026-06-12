@@ -2006,7 +2006,14 @@ def scan_overnight_intelligence() -> dict:
     # These trade nearly 24/7 including Sunday evening — perfect for weekend shifts
     try:
         _throttle()
-        futures_df = yf.download(["ES=F", "NQ=F"], period="5d", progress=False)
+        import threading as _oi_thr
+        _oi_r1 = [None]
+        _t1 = _oi_thr.Thread(
+            target=lambda r=_oi_r1: r.__setitem__(
+                0, yf.download(["ES=F", "NQ=F"], period="5d", progress=False)
+            ), daemon=True)
+        _t1.start(); _t1.join(timeout=10)
+        futures_df = _oi_r1[0]
         if futures_df is not None and not futures_df.empty:
             for sym, label in [("ES=F", "sp500_futures"), ("NQ=F", "nasdaq_futures")]:
                 try:
@@ -2048,7 +2055,13 @@ def scan_overnight_intelligence() -> dict:
     # Shows what happened while the US was asleep
     try:
         _throttle()
-        global_df = yf.download(["EZU", "EWJ", "FXI"], period="5d", progress=False)
+        _oi_r2 = [None]
+        _t2 = _oi_thr.Thread(
+            target=lambda r=_oi_r2: r.__setitem__(
+                0, yf.download(["EZU", "EWJ", "FXI"], period="5d", progress=False)
+            ), daemon=True)
+        _t2.start(); _t2.join(timeout=10)
+        global_df = _oi_r2[0]
         if global_df is not None and not global_df.empty:
             for sym, region in [("EZU", "europe"), ("EWJ", "japan"), ("FXI", "china")]:
                 try:
@@ -2081,7 +2094,13 @@ def scan_overnight_intelligence() -> dict:
     # If BTC crashes over the weekend, Monday will likely be rough
     try:
         _throttle()
-        btc_df = yf.download("BTC-USD", period="5d", progress=False)
+        _oi_r3 = [None]
+        _t3 = _oi_thr.Thread(
+            target=lambda r=_oi_r3: r.__setitem__(
+                0, yf.download("BTC-USD", period="5d", progress=False)
+            ), daemon=True)
+        _t3.start(); _t3.join(timeout=10)
+        btc_df = _oi_r3[0]
         if btc_df is not None and len(btc_df) >= 2:
             btc_closes = _safe_close(btc_df).values.astype(float)
             btc_current = float(btc_closes[-1])
@@ -2111,7 +2130,13 @@ def scan_overnight_intelligence() -> dict:
     # --- 4. Safe Haven Check (Gold + Treasuries overnight) ---
     try:
         _throttle()
-        haven_df = yf.download(["GC=F", "TLT"], period="5d", progress=False)
+        _oi_r4 = [None]
+        _t4 = _oi_thr.Thread(
+            target=lambda r=_oi_r4: r.__setitem__(
+                0, yf.download(["GC=F", "TLT"], period="5d", progress=False)
+            ), daemon=True)
+        _t4.start(); _t4.join(timeout=10)
+        haven_df = _oi_r4[0]
         if haven_df is not None and not haven_df.empty:
             for sym, label in [("GC=F", "gold_overnight"), ("TLT", "bonds_overnight")]:
                 try:

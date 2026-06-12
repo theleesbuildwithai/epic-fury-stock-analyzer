@@ -256,90 +256,89 @@ def get_banner_data():
         results_by_symbol = {}  # symbol -> entry dict
         as_of_date = None
 
-        # 1) PRIMARY: Yahoo Finance batches of 10
-        # (Yahoo gives us prev close + current — best data for change calc.)
-        batch_size = 10
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i:i + batch_size]
-            _throttle()
-            try:
-                df = yf.download(batch, period="5d", progress=False, group_by="ticker")
-            except Exception:
-                continue
-
-            if df is None or df.empty:
-                continue
-
-            for symbol in batch:
+        # 1) PRIMARY: CNBC — fast, always available, covers all banner symbols.
+        # App Runner IPs are blocked by yfinance batch; CNBC never blocks.
+        # CNBC gives price + change_pct directly; we derive change_dollars.
+        cnbc_request = [YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s) for s in symbols]
+        cnbc_to_yahoo = {YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s): s for s in symbols}
+        try:
+            cnbc_data = cnbc_quote_batch(cnbc_request)
+            cnbc_data = {cnbc_to_yahoo.get(k, k): v for k, v in (cnbc_data or {}).items()}
+            for sym, val in cnbc_data.items():
                 try:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        if symbol in df.columns.get_level_values(0):
-                            close_series = df[(symbol, "Close")].dropna()
-                        else:
-                            continue
-                    else:
-                        if "Close" in df.columns:
-                            close_series = df["Close"].dropna()
-                        else:
-                            continue
-
-                    if close_series is None or len(close_series) < 2:
+                    price = float(val.get("price") or 0)
+                    change_pct = float(val.get("change_pct") or 0)
+                    if price <= 0:
                         continue
-
-                    current = float(close_series.iloc[-1])
-                    prev = float(close_series.iloc[-2])
-                    change = current - prev
-                    change_pct = (change / prev) * 100
-
-                    if as_of_date is None:
-                        try:
-                            as_of_date = str(close_series.index[-1].date())
-                        except Exception:
-                            pass
-
-                    results_by_symbol[symbol] = {
-                        "symbol": symbol,
-                        "name": symbol_to_name[symbol],
-                        "price": round(current, 2),
-                        "change": round(change, 2),
-                        "change_pct": round(change_pct, 2),
-                        "_source": "yahoo",
-                    }
-                except Exception:
-                    continue
-
-        # 2) SAFETY NET: For any symbol Yahoo dropped, try CNBC.
-        # Uses YAHOO_TO_CNBC_SYMBOL_MAP for indices/commodities/share-classes.
-        missing = [s for s in symbols if s not in results_by_symbol]
-        if missing:
-            cnbc_request = [YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s) for s in missing]
-            cnbc_to_yahoo = {YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s): s for s in missing}
-            try:
-                cnbc_data = cnbc_quote_batch(cnbc_request)
-                # Map CNBC-format keys back to Yahoo-format symbols
-                cnbc_data = {cnbc_to_yahoo.get(k, k): v for k, v in cnbc_data.items()}
-                for sym, val in cnbc_data.items():
-                    # CNBC gives us price + change_pct directly. Compute "change"
-                    # in dollars from those: change = price - (price / (1 + pct/100)).
-                    try:
-                        price = val["price"]
-                        change_pct = val["change_pct"]
-                        prev_price = price / (1.0 + (change_pct / 100.0)) if (1.0 + change_pct / 100.0) != 0 else price
-                        change_dollars = price - prev_price
-                    except Exception:
-                        price = val.get("price", 0)
-                        change_pct = val.get("change_pct", 0)
-                        change_dollars = 0
+                    prev_price = price / (1.0 + change_pct / 100.0) if change_pct != -100 else price
+                    change_dollars = round(price - prev_price, 2)
                     results_by_symbol[sym] = {
                         "symbol": sym,
                         "name": symbol_to_name.get(sym, sym),
                         "price": round(price, 2),
-                        "change": round(change_dollars, 2),
+                        "change": change_dollars,
                         "change_pct": round(change_pct, 2),
                         "_source": "cnbc",
                     }
-            except Exception:
-                pass  # CNBC fallback failure is non-fatal — just leave gaps
+                except Exception:
+                    continue
+        except Exception:
+            pass  # CNBC failure falls through to yfinance below
+
+        # 2) FALLBACK: Yahoo Finance with 10s thread timeout per batch.
+        # Only runs for symbols CNBC missed. Thread timeout prevents blocking
+        # the web server when App Runner IPs are rate-limited by yfinance.
+        missing = [s for s in symbols if s not in results_by_symbol]
+        if missing:
+            import threading as _bn_thr
+            batch_size = 10
+            for i in range(0, len(missing), batch_size):
+                batch = missing[i:i + batch_size]
+                _throttle()
+                _yf_result = [None]
+                _t = _bn_thr.Thread(
+                    target=lambda r=_yf_result, b=batch: r.__setitem__(
+                        0, yf.download(b, period="5d", progress=False, group_by="ticker")
+                    ),
+                    daemon=True,
+                )
+                _t.start()
+                _t.join(timeout=10)
+                df = _yf_result[0]
+                if df is None or df.empty:
+                    continue
+                for symbol in batch:
+                    try:
+                        if isinstance(df.columns, pd.MultiIndex):
+                            if symbol not in df.columns.get_level_values(0):
+                                continue
+                            close_series = df[(symbol, "Close")].dropna()
+                        else:
+                            if "Close" in df.columns:
+                                close_series = df["Close"].dropna()
+                            else:
+                                continue
+                        if close_series is None or len(close_series) < 2:
+                            continue
+                        current = float(close_series.iloc[-1])
+                        prev = float(close_series.iloc[-2])
+                        change = current - prev
+                        change_pct = (change / prev) * 100
+                        if as_of_date is None:
+                            try:
+                                as_of_date = str(close_series.index[-1].date())
+                            except Exception:
+                                pass
+                        results_by_symbol[symbol] = {
+                            "symbol": symbol,
+                            "name": symbol_to_name[symbol],
+                            "price": round(current, 2),
+                            "change": round(change, 2),
+                            "change_pct": round(change_pct, 2),
+                            "_source": "yahoo",
+                        }
+                    except Exception:
+                        continue
 
         # Build final list in canonical order, drop the internal _source field
         # from output but keep it in a separate "sources" summary for debugging.

@@ -3864,7 +3864,16 @@ def live_prices(request: Request):
             tickers = list(set(t["ticker"] for t in open_trades))
             try:
                 _throttle()
-                data = yf.download(tickers, period="1d", progress=False)
+                import threading as _lp_thr
+                _lp_result = [None]
+                _lp_t = _lp_thr.Thread(
+                    target=lambda r=_lp_result, tk=tickers: r.__setitem__(
+                        0, yf.download(tk, period="1d", progress=False)
+                    ), daemon=True)
+                _lp_t.start(); _lp_t.join(timeout=10)
+                data = _lp_result[0]
+                if data is None:
+                    raise RuntimeError("live-prices yfinance timed out")
                 for t in open_trades:
                     entry_px = float(t.get("entry_price") or 0)
                     try:
@@ -4867,9 +4876,12 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v45-daily-summary-cnbc-fallback-full-stock-coverage",
+        "commit_marker": "feat-v46-cnbc-first-banner-overnight-intel-thread-timeouts-live-prices",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "banner_cnbc_first_no_blocking_yf_fallback_10s_thread_timeout",
+            "overnight_intel_4x_thread_timeout_10s_es_nq_ezu_btc_gc_tlt",
+            "live_prices_position_pricing_10s_thread_timeout_no_hang",
             "daily_summary_cnbc_fallback_fills_missing_yf_stocks",
             "daily_summary_flat_df_handling_when_single_ticker_returned",
             "stale_comment_fixes_510_universe_tier7_log_now_says_finnhub",
