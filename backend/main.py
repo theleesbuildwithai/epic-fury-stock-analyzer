@@ -4867,9 +4867,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v43-global-scan-lock-one-scan-at-a-time-full-finnhub-budget",
+        "commit_marker": "feat-v44-stale-comment-fixes-510-universe-tier7-log-finnhub",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "stale_comment_fixes_510_universe_tier7_log_now_says_finnhub",
+            "global_scan_lock_one_scan_at_a_time_full_finnhub_budget",
             "s3_emergency_restore_when_live_scan_0picks_and_disk_empty",
             "disk_cache_fallback_backfills_quant_cache_so_stb_serves_it",
             "tier6_tier7_budget_reduced_90s_not_900s_finnhub_starts_sooner",

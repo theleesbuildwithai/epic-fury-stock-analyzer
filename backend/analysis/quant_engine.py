@@ -4139,7 +4139,7 @@ def _generate_quant_picks_impl() -> dict:
             logger.info(f"UNIVERSE SCAN tier7: alternative API retry for {len(m)} tickers")
             for t in m:
                 if _over_budget():
-                    logger.warning(f"UNIVERSE SCAN tier7 hit time budget — falling through to stooq")
+                    logger.warning(f"UNIVERSE SCAN tier7 hit time budget — falling through to Finnhub tier8")
                     break
                 _time_scan.sleep(1.0)
                 try:
@@ -4178,7 +4178,7 @@ def _generate_quant_picks_impl() -> dict:
         # Stooq.com returns a JS bot-challenge page (not CSV data) from App Runner
         # IPs — completely unusable. Finnhub is confirmed working (SPY live price
         # verified). Free tier: 60 calls/min (we cap at 55 inside the adapter).
-        # At 1.1 s/call, 352 stocks takes ≈6.5 min — fits in the extended 900 s budget.
+        # At 1.1 s/call, 510 stocks takes ≈9.4 min — fits in the extended 900 s budget.
         # Each get_candles_df() call has its own 12 s timeout — cannot hang.
         # This tier is a complete no-op when FINNHUB_API_KEY is not configured.
         m = _missing()
