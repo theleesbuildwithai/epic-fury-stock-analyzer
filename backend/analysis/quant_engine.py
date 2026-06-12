@@ -57,6 +57,12 @@ _QUANT_CACHE_TTL = 300  # 5 minutes
 _last_quant_call = [0.0]
 _QUANT_DELAY = 3.0  # seconds between Yahoo Finance calls
 
+# Global scan lock — prevents concurrent scans splitting the Finnhub API budget.
+# Only ONE scan runs at a time; all other callers get the current cached result.
+import threading as _scan_thr
+_SCAN_LOCK = _scan_thr.Lock()
+_SCAN_RUNNING = False
+
 # Fundamentals cache — 24-hour TTL for yfinance .info data
 _fundamentals_cache = {}
 _FUNDAMENTALS_CACHE_TTL = 86400  # 24 hours
@@ -3815,6 +3821,25 @@ def generate_quant_picks() -> dict:
     Returns:
         dict with regime, macro, long_picks, short_picks, neutral, metadata
     """
+    global _SCAN_RUNNING
+    # Prevent concurrent scans — multiple callers (prewarm, STB regen, quant-picks regen)
+    # each launching a scan splits the Finnhub rate-limit budget (55/min) among N scans,
+    # making each take N× longer. Only one scan runs at a time; all other callers
+    # return whatever is currently in cache (stale or empty is fine — caller handles it).
+    with _SCAN_LOCK:
+        if _SCAN_RUNNING:
+            cached = _quant_cache.get("quant_picks")
+            return (cached or {}).get("data") or {}
+        _SCAN_RUNNING = True
+    try:
+        return _generate_quant_picks_impl()
+    finally:
+        global _SCAN_RUNNING
+        _SCAN_RUNNING = False
+
+
+def _generate_quant_picks_impl() -> dict:
+    """Internal implementation — only called by generate_quant_picks() after lock acquired."""
     def fetch():
         start_time = time.time()
 

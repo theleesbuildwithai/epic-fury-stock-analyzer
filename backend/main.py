@@ -4867,7 +4867,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v42-s3-emergency-restore-90s-yf-budget-disk-cache-backfill",
+        "commit_marker": "feat-v43-global-scan-lock-one-scan-at-a-time-full-finnhub-budget",
         "date": "2026-06-12",
         "fixes_in_build": [
             "s3_emergency_restore_when_live_scan_0picks_and_disk_empty",
