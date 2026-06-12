@@ -4867,9 +4867,12 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v41-finnhub-fresh-900s-budget-tier8-not-exhausted-by-tier6",
+        "commit_marker": "feat-v42-s3-emergency-restore-90s-yf-budget-disk-cache-backfill",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "s3_emergency_restore_when_live_scan_0picks_and_disk_empty",
+            "disk_cache_fallback_backfills_quant_cache_so_stb_serves_it",
+            "tier6_tier7_budget_reduced_90s_not_900s_finnhub_starts_sooner",
             "finnhub_tier8_resets_scan_deadline_to_900s_fresh_budget",
             "tier6_yf_download_10s_threading_timeout_no_hang",
             "tier7_yf_ticker_history_10s_threading_timeout_no_hang",

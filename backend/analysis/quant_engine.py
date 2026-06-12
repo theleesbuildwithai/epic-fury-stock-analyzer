@@ -4052,10 +4052,11 @@ def generate_quant_picks() -> dict:
         # individual fallbacks have time to fill the full universe.
         # 352 tickers × 1s sleep = 352s — well within the 900s extension.
         if len(price_data) < 30:
-            _scan_deadline = _time_scan.time() + 900
+            _scan_deadline = _time_scan.time() + 90
             logger.warning(
                 f"UNIVERSE SCAN: only {len(price_data)} stocks from batch tiers "
-                f"— extending deadline 900 s for individual fallbacks (tiers 6/7/stooq)"
+                f"— extending deadline 90 s for individual yfinance tiers (6/7), "
+                f"then Finnhub tier8 gets fresh 900 s"
             )
 
         # --- TIER 6: individual yf.download with 1 s inter-call sleep ---
@@ -4960,6 +4961,11 @@ def generate_quant_picks() -> dict:
                     elif 0 <= age_hours <= 48:
                         cached["_cache_source"] = "disk_stale"
                         cached["_cache_age_hours"] = round(age_hours, 1)
+                        # Backfill in-memory cache so STB and paper portfolio see the
+                        # disk data immediately — without this the _quant_cache still
+                        # holds the 0-pick result from the failed live scan.
+                        # time = now-899 → near-stale so next scan can refresh.
+                        _quant_cache["quant_picks"] = {"data": cached, "time": time.time() - 899}
                         logger.warning(
                             f"PICKS DISK CACHE: live generation failed — "
                             f"serving stale picks from {age_hours:.1f}h ago "
@@ -4978,6 +4984,29 @@ def generate_quant_picks() -> dict:
         except Exception as _e:
             # Catch-all. Never let cache load break the trading engine.
             logger.warning(f"Picks disk cache unexpected error on load: {_e}")
+
+        # S3 EMERGENCY RESTORE — last resort when live scan returned 0 picks
+        # AND disk cache is empty, stale, or absent (common on cold container
+        # start where yfinance is blocked and Finnhub hasn't completed yet).
+        # Protects the S3 backup from being overwritten by a 0-pick scan result.
+        # Updates _quant_cache so STB and paper portfolio serve real picks.
+        if _picks_are_empty(result):
+            try:
+                from predictions.enhancements import restore_picks_from_s3
+                _s3_em = restore_picks_from_s3(max_age_hours=24)
+                if _s3_em.get("ok") and not _picks_are_empty(_s3_em.get("picks") or {}):
+                    result = _s3_em["picks"]
+                    result["_cache_source"] = "s3_emergency"
+                    # near-stale so next completed scan replaces with fresh live data
+                    _quant_cache["quant_picks"] = {"data": result, "time": time.time() - 899}
+                    logger.warning(
+                        f"PICKS S3 EMERGENCY RESTORE: serving "
+                        f"{len(result.get('long_picks', []))}L + "
+                        f"{len(result.get('short_picks', []))}S from S3 backup "
+                        f"(live scan produced 0 picks, disk cache empty)"
+                    )
+            except Exception as _s3em_e:
+                logger.debug(f"Picks S3 emergency restore skipped: {_s3em_e}")
     else:
         # Live picks succeeded — save snapshot for the next outage.
         # ATOMIC WRITE: write to .tmp first, then rename. Prevents serving a
