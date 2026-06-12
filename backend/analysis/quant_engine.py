@@ -4165,8 +4165,13 @@ def generate_quant_picks() -> dict:
                     get_candles_df as _fh_candles,
                 )
                 if _fh_ok():
+                    # Reset deadline — Finnhub gets its own fresh 900 s budget
+                    # regardless of how long tiers 6/7 burned (yfinance is blocked
+                    # on App Runner IPs so those tiers exhaust the scan clock).
+                    _scan_deadline = _time_scan.time() + 900
                     logger.warning(
                         f"UNIVERSE SCAN tier8 FINNHUB: fetching candles for {len(m)} tickers"
+                        f" (fresh 900s budget)"
                     )
                     _fh_added = 0
                     for _t in list(m):

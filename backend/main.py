@@ -4867,9 +4867,10 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v40-threading-timeout-tier6-tier7-finnhub-tier8-no-stooq",
-        "date": "2026-06-11",
+        "commit_marker": "feat-v41-finnhub-fresh-900s-budget-tier8-not-exhausted-by-tier6",
+        "date": "2026-06-12",
         "fixes_in_build": [
+            "finnhub_tier8_resets_scan_deadline_to_900s_fresh_budget",
             "tier6_yf_download_10s_threading_timeout_no_hang",
             "tier7_yf_ticker_history_10s_threading_timeout_no_hang",
             "tier8_finnhub_candles_replaces_stooq_bot_protection_confirmed_broken",
