@@ -4867,15 +4867,17 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v39-extend-budget-before-tier6-1s-sleep-individual-yf",
+        "commit_marker": "feat-v40-threading-timeout-tier6-tier7-finnhub-tier8-no-stooq",
         "date": "2026-06-11",
         "fixes_in_build": [
+            "tier6_yf_download_10s_threading_timeout_no_hang",
+            "tier7_yf_ticker_history_10s_threading_timeout_no_hang",
+            "tier8_finnhub_candles_replaces_stooq_bot_protection_confirmed_broken",
+            "stooq_removed_returns_js_challenge_from_app_runner",
+            "finnhub_1p1s_sleep_55_per_min_rate_limit",
             "budget_extended_900s_before_tier6_when_batch_fails",
             "tier6_tier7_use_1s_sleep_not_3s_throttle_fits_budget",
             "tier7_outer_budget_gate_removed_always_runs",
-            "stooq_direct_requests_10s_timeout_replaces_pandas_datareader",
-            "tier8_stooq_fallback_when_yfinance_blocked",
-            "tier9_finnhub_candles_fallback_secondary",
             "adaptive_600s_budget_extension_on_yf_failure",
             "finnhub_get_candles_df_daily_ohlcv",
             "prewarm_s3_restore_time0_so_regen_actually_runs",

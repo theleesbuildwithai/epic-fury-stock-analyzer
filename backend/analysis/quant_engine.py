@@ -4071,7 +4071,17 @@ def generate_quant_picks() -> dict:
                     break
                 _time_scan.sleep(1.0)
                 try:
-                    df = yf.download(t, period="1y", progress=False)
+                    import threading as _t6_thr_mod
+                    _t6_r = [None]
+                    _t6_thr = _t6_thr_mod.Thread(
+                        target=lambda r=_t6_r, _sym=t: r.__setitem__(
+                            0, yf.download(_sym, period="1y", progress=False)
+                        ),
+                        daemon=True,
+                    )
+                    _t6_thr.start()
+                    _t6_thr.join(timeout=10)
+                    df = _t6_r[0]
                     if df is not None and len(df) >= 60:
                         # Normalize MultiIndex columns for single-ticker yfinance 1.x downloads
                         if isinstance(df.columns, pd.MultiIndex):
@@ -4109,8 +4119,17 @@ def generate_quant_picks() -> dict:
                     break
                 _time_scan.sleep(1.0)
                 try:
-                    tk = yf.Ticker(t)
-                    df = tk.history(period="1y", auto_adjust=True)
+                    import threading as _t7_thr_mod
+                    _t7_r = [None]
+                    _t7_thr = _t7_thr_mod.Thread(
+                        target=lambda r=_t7_r, _sym=t: r.__setitem__(
+                            0, yf.Ticker(_sym).history(period="1y", auto_adjust=True)
+                        ),
+                        daemon=True,
+                    )
+                    _t7_thr.start()
+                    _t7_thr.join(timeout=10)
+                    df = _t7_r[0]
                     if df is not None and len(df) >= 60:
                         # history() returns flat columns but normalize just in case
                         if isinstance(df.columns, pd.MultiIndex):
@@ -4131,67 +4150,15 @@ def generate_quant_picks() -> dict:
             t7 = len(price_data)
             logger.info(f"UNIVERSE SCAN tier7: {t7}/{len(QUANT_UNIVERSE)}")
 
-        # --- TIER 8: STOOQ fallback (direct requests, 10 s timeout per ticker) ---
-        # Fires when yfinance tiers returned very few stocks — typically because
-        # Yahoo Finance is rate-blocking the App Runner IP range. stooq.com is a
-        # completely separate data provider; it is unaffected by Yahoo's blocks.
-        #
-        # CRITICAL: uses requests directly with timeout=10. pandas_datareader has
-        # no timeout — a single hanging request blocks the scan thread forever.
-        #
-        # If yfinance returned < 30 stocks we extend the scan deadline by 600 s
-        # so stooq + Finnhub have time to fill the full 350-stock universe.
+        # --- TIER 8: FINNHUB candles fallback ---
+        # Stooq.com returns a JS bot-challenge page (not CSV data) from App Runner
+        # IPs — completely unusable. Finnhub is confirmed working (SPY live price
+        # verified). Free tier: 60 calls/min (we cap at 55 inside the adapter).
+        # At 1.1 s/call, 352 stocks takes ≈6.5 min — fits in the extended 900 s budget.
+        # Each get_candles_df() call has its own 12 s timeout — cannot hang.
+        # This tier is a complete no-op when FINNHUB_API_KEY is not configured.
         m = _missing()
         if m:
-            logger.warning(f"UNIVERSE SCAN tier8 STOOQ: fetching {len(m)} tickers via stooq.com CSV")
-            try:
-                import requests as _stooq_req
-                import io as _stooq_io
-                from datetime import datetime as _stooq_dt, timedelta as _stooq_td
-                _stooq_d1 = (_stooq_dt.now() - _stooq_td(days=400)).strftime("%Y%m%d")
-                _stooq_d2 = _stooq_dt.now().strftime("%Y%m%d")
-                _stooq_hdrs = {"User-Agent": "Mozilla/5.0 (compatible; sentinel-quant/1.0)"}
-                _stooq_added = 0
-                for _t in list(m):
-                    if _over_budget():
-                        logger.warning("UNIVERSE SCAN tier8 STOOQ hit budget — falling to tier9")
-                        break
-                    try:
-                        # stooq CSV endpoint — returns Date,Open,High,Low,Close,Volume (descending)
-                        _url = (
-                            f"https://stooq.com/q/d/l/"
-                            f"?s={_t.lower()}&d1={_stooq_d1}&d2={_stooq_d2}&i=d"
-                        )
-                        _resp = _stooq_req.get(_url, timeout=10, headers=_stooq_hdrs)
-                        if _resp.status_code != 200 or len(_resp.text) < 50:
-                            continue
-                        _sdf = pd.read_csv(_stooq_io.StringIO(_resp.text))
-                        if _sdf is None or _sdf.empty or "Close" not in _sdf.columns:
-                            continue
-                        _sdf["Date"] = pd.to_datetime(_sdf["Date"])
-                        _sdf = _sdf.set_index("Date").sort_index(ascending=True)
-                        while len(_sdf) > 0 and pd.isna(_sdf["Close"].iloc[-1]):
-                            _sdf = _sdf.iloc[:-1]
-                        if len(_sdf) >= 60:
-                            price_data[_t] = _sdf
-                            _stooq_added += 1
-                    except Exception:
-                        pass
-                t8 = len(price_data)
-                logger.warning(
-                    f"UNIVERSE SCAN tier8 STOOQ: added {_stooq_added} tickers "
-                    f"→ {t8}/{len(QUANT_UNIVERSE)} total"
-                )
-            except Exception as _stooq_err:
-                logger.warning(f"UNIVERSE SCAN tier8 STOOQ error: {_stooq_err}")
-
-        # --- TIER 9: FINNHUB candles fallback ---
-        # Last-resort live fetch for tickers stooq also missed.
-        # Requires FINNHUB_API_KEY env var. Free tier: 60 calls/min (we cap at 55).
-        # At that rate, 352 stocks takes ≈6 min — well within the extended 600 s budget.
-        # This tier is a complete no-op when the key is not configured.
-        m = _missing()
-        if m and not _over_budget():
             try:
                 from predictions.finnhub_adapter import (
                     is_enabled as _fh_ok,
@@ -4199,13 +4166,14 @@ def generate_quant_picks() -> dict:
                 )
                 if _fh_ok():
                     logger.warning(
-                        f"UNIVERSE SCAN tier9 FINNHUB: fetching candles for {len(m)} tickers"
+                        f"UNIVERSE SCAN tier8 FINNHUB: fetching candles for {len(m)} tickers"
                     )
                     _fh_added = 0
                     for _t in list(m):
                         if _over_budget():
-                            logger.warning("UNIVERSE SCAN tier9 FINNHUB hit budget")
+                            logger.warning("UNIVERSE SCAN tier8 FINNHUB hit budget")
                             break
+                        _time_scan.sleep(1.1)  # ~55/min — stay under Finnhub free-tier cap
                         try:
                             _fdf = _fh_candles(_t, days=400)
                             if _fdf is not None and not _fdf.empty and len(_fdf) >= 60:
@@ -4217,10 +4185,10 @@ def generate_quant_picks() -> dict:
                                     _fh_added += 1
                         except Exception:
                             pass
-                    t9 = len(price_data)
+                    t8 = len(price_data)
                     logger.warning(
-                        f"UNIVERSE SCAN tier9 FINNHUB: added {_fh_added} tickers "
-                        f"→ {t9}/{len(QUANT_UNIVERSE)} total"
+                        f"UNIVERSE SCAN tier8 FINNHUB: added {_fh_added} tickers "
+                        f"→ {t8}/{len(QUANT_UNIVERSE)} total"
                     )
             except Exception:
                 pass  # Finnhub tier — never crash the scan
