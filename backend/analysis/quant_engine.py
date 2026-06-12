@@ -3877,7 +3877,6 @@ def generate_quant_picks() -> dict:
     try:
         return _generate_quant_picks_impl()
     finally:
-        global _SCAN_RUNNING
         _SCAN_RUNNING = False
 
 
