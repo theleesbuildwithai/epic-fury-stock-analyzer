@@ -4048,9 +4048,8 @@ def generate_quant_picks() -> dict:
         # Evidence: /api/analyze/AAPL returns 64 bars — yfinance single-ticker
         # downloads work from App Runner, but bulk batch downloads do not.
         # The 120s batch budget is consumed by throttle delays (3s × batches)
-        # before individual tiers 6/7 can run. Extend the deadline here so
-        # individual fallbacks have time to fill the full universe.
-        # 352 tickers × 1s sleep = 352s — well within the 900s extension.
+        # before individual tiers 6/7 can run. Give yfinance individual tiers
+        # 90s to grab whatever they can, then Finnhub tier8 resets to 900s fresh.
         if len(price_data) < 30:
             _scan_deadline = _time_scan.time() + 90
             logger.warning(
@@ -4060,9 +4059,8 @@ def generate_quant_picks() -> dict:
             )
 
         # --- TIER 6: individual yf.download with 1 s inter-call sleep ---
-        # Uses 1s sleep instead of _throttle() (3s) so 352 tickers fit in the
-        # extended 900s budget. Each call returns ~64 bars from App Runner —
-        # identical to what /api/analyze uses and known to work.
+        # Gets 90s to fetch whatever yfinance can serve individually before
+        # budget fires and Finnhub tier8 takes over the rest of the universe.
         m = _missing()
         if m:
             logger.info(f"UNIVERSE SCAN tier6: retrying {len(m)} individually via yf.download")
