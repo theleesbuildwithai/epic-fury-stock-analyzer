@@ -1078,6 +1078,74 @@ except Exception as e:
     logger.warning(f"Portfolio snapshots reset v1 error (non-fatal): {e}")
 
 
+# --- FULL FRESH START v9 (2026-06-12): deploy-day reset ---
+# User: "reset to 132k and 32% return, fresh start with new system."
+# This block runs ONCE on first boot after deploy and:
+#   1. Closes all open positions at entry price (clean slate — 0 trades)
+#   2. Sets cash to exactly $132,000 (32% return vs $100k ORIGINAL_CAPITAL)
+#   3. Advances stats_epoch so Sharpe/win-rate/P&L counters restart from 0
+#   4. Wipes portfolio_snapshots and writes one clean baseline row
+#      (total=$132k, cum_ret=32%, sp500_cum=0, daily_ret=0)
+# Historical closed_trades are preserved for the learning system.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v9, set_trading_state as _set_state_v9,
+    )
+    _v9_done = _get_state_v9("fresh_start_v9_done", "0")
+    if _v9_done != "1":
+        from predictions.models import (
+            get_open_trades as _v9_get_open,
+            close_paper_trade as _v9_close,
+            set_cash as _v9_set_cash,
+            get_db as _v9_get_db,
+            save_portfolio_snapshot as _v9_snap,
+        )
+        from datetime import datetime as _dt_v9
+        # 1. Close all open positions at entry price
+        _v9_open = _v9_get_open() or []
+        _v9_closed_count = 0
+        for _v9_t in _v9_open:
+            try:
+                _v9_close(_v9_t["id"], _v9_t.get("entry_price", 0))
+                _v9_closed_count += 1
+            except Exception as _v9_ce:
+                logger.warning(f"RESET v9: failed to close {_v9_t.get('ticker')}: {_v9_ce}")
+        # 2. Set cash to $132,000 (32% return vs $100k initial)
+        _V9_CASH = 132_000.00
+        _v9_set_cash(_V9_CASH, caller="fresh_start_v9",
+                     reason="Deploy-day fresh start — $132k NAV, 32% return, clean stats",
+                     bypass_sentinel=True)
+        # 3. Advance stats epoch — Sharpe/win-rate/P&L restart from zero
+        _v9_epoch = _dt_v9.utcnow().isoformat()
+        _set_state_v9("stats_epoch", _v9_epoch)
+        # 4. Wipe portfolio_snapshots, write one clean baseline
+        _v9_conn = _v9_get_db()
+        try:
+            _v9_row_count = _v9_conn.execute(
+                "SELECT COUNT(*) AS c FROM portfolio_snapshots"
+            ).fetchone()["c"]
+        except Exception:
+            _v9_row_count = "unknown"
+        _v9_conn.execute("DELETE FROM portfolio_snapshots")
+        _v9_conn.commit()
+        # Write baseline: NAV=$132k, cash=$132k, positions=0, cum_ret=32%
+        _v9_snap(_V9_CASH, _V9_CASH, 0.0,
+                 0.0,  # daily_ret
+                 32.0,  # cum_ret (fund: $132k / $100k - 1 = 32%)
+                 0.0,  # sp500_daily
+                 0.0,  # sp500_cum (reset — not relevant to fund's fresh start)
+                 0)    # num open positions
+        _set_state_v9("fresh_start_v9_done", "1")
+        logger.warning(
+            f"FRESH START v9: closed {_v9_closed_count} positions, "
+            f"cash=${_V9_CASH:,.2f}, stats_epoch={_v9_epoch}, "
+            f"cleared {_v9_row_count} snapshot rows. "
+            f"Portfolio shows 32% cumulative return from $100k inception."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v9 error (non-fatal): {e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must
@@ -4931,9 +4999,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v48-detect-market-regime-3x-thread-timeouts-live-prices-unblocked",
+        "commit_marker": "feat-v49-fresh-start-v9-132k-32pct-stats-reset-backtest-thread-timeout",
         "date": "2026-06-12",
         "fixes_in_build": [
+            "fresh_start_v9_cash_132k_32pct_return_stats_epoch_snapshots_reset",
+            "backtest_paper_trader_30s_thread_timeout_no_infinite_hang",
             "detect_market_regime_gspc_thread_timeout_10s_no_hang",
             "detect_market_regime_spy_fallback_thread_timeout_10s",
             "detect_market_regime_breadth_50stocks_thread_timeout_10s",

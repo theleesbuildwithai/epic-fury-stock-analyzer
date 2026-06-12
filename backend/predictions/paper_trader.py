@@ -4770,13 +4770,20 @@ def run_backtest(days_back: int = 180, num_trades_target: int = 500) -> dict:
         "MRK", "COST", "CVX", "MA", "ABBV",
     ]
 
-    # Batch download historical data
+    # Batch download historical data — 30s thread timeout prevents hang from App Runner IPs
     _throttle()
     try:
+        import threading as _bt_thr
         period = "2y" if days_back > 365 else "1y"
-        df = yf.download(
-            backtest_symbols, period=period, progress=False, group_by="ticker"
-        )
+        _bt_result = [None]
+        _bt_t = _bt_thr.Thread(
+            target=lambda r=_bt_result, s=backtest_symbols, p=period: r.__setitem__(
+                0, yf.download(s, period=p, progress=False, group_by="ticker")
+            ), daemon=True)
+        _bt_t.start(); _bt_t.join(timeout=30)
+        df = _bt_result[0]
+        if df is None:
+            return {"error": "Download timed out — yfinance blocked from server IPs. Try again later.", "trades": []}
     except Exception as e:
         return {"error": f"Download failed: {e}", "trades": []}
 
