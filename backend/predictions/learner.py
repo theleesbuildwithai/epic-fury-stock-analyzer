@@ -109,7 +109,7 @@ def _compute_factor_stats(trades: list) -> dict:
             factors = json.loads(trade.get("factors_used", "{}") or "{}")
         except Exception:
             factors = {}
-        if not factors:
+        if not isinstance(factors, dict) or not factors:
             continue
 
         for factor_name in FACTOR_NAMES:
