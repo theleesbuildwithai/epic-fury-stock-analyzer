@@ -4151,10 +4151,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if combo_key in mistake_adj.get("blocked_combos", []):
                 # Don't fully block — just heavily penalize confidence
                 pick["confidence"] = max(15, pick["confidence"] - 15)
-                if pick["confidence"] < MIN_CONFIDENCE:
+                _combo_gate = _long_min_conf if direction == "long" else _short_min_conf
+                if pick["confidence"] < _combo_gate:
                     results["skipped"].append({
                         "symbol": symbol,
-                        "reason": f"Learned mistake: {direction} in {regime} regime has high loss rate",
+                        "reason": f"Learned mistake: {direction} in {regime} regime has high loss rate — below regime gate {_combo_gate}",
                     })
                     continue
 
