@@ -5006,7 +5006,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v56-intelligence-report-scrub-nan-audit-complete",
+        "commit_marker": "feat-v57-confidence-boost-stacking-floor-overconfidence-fix",
         "date": "2026-06-12",
         "fixes_in_build": [
             "daily_summary_initial_yf_download_10s_thread_timeout",

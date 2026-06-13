@@ -3536,19 +3536,20 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
         if final_score >= long_threshold_high:
             direction = "LONG"
-            confidence = min(95, 65 + int(final_score * 3))   # 2026-06-11: was 60+
+            confidence = min(95, 75 + int(final_score * 4))   # 2026-06-12: raised base; score=2.5→85%
         elif final_score >= long_threshold_low:
             direction = "LONG"
-            confidence = min(85, 55 + int(final_score * 5))   # 2026-06-11: was 50+
+            confidence = min(88, 65 + int(final_score * 5))   # 2026-06-12: raised base; score=1.5→72%
         elif final_score <= short_threshold_high:
             direction = "SHORT"
-            confidence = min(95, 65 + int(abs(final_score) * 3))  # 2026-06-11: was 60+
+            confidence = min(95, 75 + int(abs(final_score) * 4))
         elif final_score <= short_threshold_low:
             direction = "SHORT"
-            confidence = min(85, 55 + int(abs(final_score) * 5))  # 2026-06-11: was 50+
+            confidence = min(88, 65 + int(abs(final_score) * 5))
         else:
             direction = "NEUTRAL"
             confidence = max(30, 50 - int(abs(final_score) * 5))
+        _base_confidence = confidence  # track pre-penalty baseline for stacking floor
 
         # MOMENTUM CRASH FILTER: penalize stocks where momentum is unwinding (gently)
         if stock.get("momentum_crash") and direction == "LONG":
@@ -3638,6 +3639,12 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
                     pass  # Will be added to reasons below
         except Exception:
             ensemble = None
+
+        # STACKING FLOOR: compound multiplier penalties (momentum_crash, gap, ADX, trend,
+        # ensemble) can stack to collapse a strong pick from 85% → 45%.  Cap total
+        # multiplier damage at 18 points so high-conviction picks stay above the trade gate.
+        if direction != "NEUTRAL":
+            confidence = max(_base_confidence - 18, confidence)
 
         # Build factor breakdown for transparency
         factor_breakdown = {
@@ -5322,19 +5329,19 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         if score >= 4:
             signal = "STRONG BUY"
             direction = "LONG"
-            confidence = min(90, 60 + score * 4)
+            confidence = min(92, 68 + score * 4)   # 2026-06-12: raised; score=4→84%, score=5→88%
         elif score >= 2:
             signal = "BUY"
             direction = "LONG"
-            confidence = min(75, 50 + score * 4)
+            confidence = min(84, 58 + score * 4)   # 2026-06-12: raised; score=2→66%, score=3→70%
         elif score <= -4:
             signal = "STRONG SELL"
             direction = "SHORT"
-            confidence = min(90, 60 + abs(score) * 4)
+            confidence = min(92, 68 + abs(score) * 4)
         elif score <= -2:
             signal = "SELL"
             direction = "SHORT"
-            confidence = min(75, 50 + abs(score) * 4)
+            confidence = min(84, 58 + abs(score) * 4)
         else:
             signal = "HOLD"
             direction = "NEUTRAL"

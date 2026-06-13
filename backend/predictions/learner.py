@@ -736,14 +736,20 @@ def analyze_mistakes() -> dict:
     mistake_patterns["bad_regime_direction_combos"] = bad_combos
 
     # --- Pattern 3: Overconfidence analysis ---
-    high_conf_losses = [t for t in losers if (t.get("signal_score", 0) or 0) > 5]
-    if high_conf_losses and len(high_conf_losses) >= 3:
-        overconf_rate = len(high_conf_losses) / len(losers) * 100
-        lessons.append(
-            f"OVERCONFIDENCE DETECTED: {len(high_conf_losses)} high-confidence trades lost "
-            f"({overconf_rate:.0f}% of all losses) — reduce confidence threshold"
-        )
-        mistake_patterns["overconfidence_issue"] = True
+    # Use actual confidence % (not signal_score which is composite z-score, not confidence).
+    # Flag only if genuinely high-confidence (>75%) trades lose at a high rate.
+    high_conf_losses = [t for t in losers if (t.get("confidence", 0) or 0) > 75]
+    high_conf_total = [t for t in closed if (t.get("confidence", 0) or 0) > 75]
+    if high_conf_losses and len(high_conf_losses) >= 5 and len(high_conf_total) >= 10:
+        overconf_rate = len(high_conf_losses) / len(high_conf_total) * 100
+        if overconf_rate > 65:  # only flag if >65% of high-confidence trades lose
+            lessons.append(
+                f"OVERCONFIDENCE DETECTED: {len(high_conf_losses)}/{len(high_conf_total)} "
+                f"high-confidence (>75%) trades lost ({overconf_rate:.0f}% loss rate)"
+            )
+            mistake_patterns["overconfidence_issue"] = True
+        else:
+            mistake_patterns["overconfidence_issue"] = False
     else:
         mistake_patterns["overconfidence_issue"] = False
 
@@ -850,9 +856,9 @@ def get_mistake_adjustments() -> dict:
     for combo in patterns.get("bad_regime_direction_combos", []):
         adjustments["blocked_combos"].append(combo)
 
-    # Cap confidence if overconfident
+    # Cap confidence if overconfident — only cap if truly verified (>65% loss rate on high-conf trades)
     if patterns.get("overconfidence_issue"):
-        adjustments["confidence_cap"] = 80
+        adjustments["confidence_cap"] = 88  # was 80; allow high-conviction trades room to express
 
     # Tighten stops if holding too long
     if patterns.get("holding_too_long"):
