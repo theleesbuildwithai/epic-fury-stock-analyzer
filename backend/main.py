@@ -5409,7 +5409,11 @@ def _disabled_quant_picks_v3(request: Request, force_refresh: bool = False):
         # Always return current cache (even if stale) so the API responds fast
         if cache_entry:
             result = cache_entry["data"]
-            result["cache_age_seconds"] = round(cache_age) if cache_age else 0
+            # Cap at 24h: time=0 (cold-start restore) produces ~1.78B sec which is nonsensical.
+            # None signals frontend to show "Refreshing..." instead of a huge number.
+            _age_display = cache_age if (cache_age and cache_age < 86400) else None
+            result["cache_age_seconds"] = round(_age_display) if _age_display else None
+            result["cache_is_restoring"] = (cache_entry is not None and cache_entry.get("time", 1) == 0)
             result["regen_triggered"] = needs_refresh
             # ALWAYS populate sp500_return_pct from truth_engine — the Quant HF
             # page reads this field. If truth says +17% but our local calc says

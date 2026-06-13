@@ -296,8 +296,8 @@ export default function SymbolsToBuy() {
               Universe: <span className="text-white font-bold">{data.universe_size}</span> tickers
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Cache age: <span className="text-white font-bold">
-                {data.cache_age_seconds != null ? Math.round(data.cache_age_seconds / 60) + ' min' : '—'}
+              Cache age: <span className={data.cache_is_restoring ? "text-yellow-400 font-bold" : "text-white font-bold"}>
+                {data.cache_is_restoring ? 'Refreshing…' : data.cache_age_seconds != null ? Math.round(data.cache_age_seconds / 60) + ' min' : '—'}
               </span>
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
