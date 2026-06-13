@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v65-trading-quality-overhaul-conf-gates-trail-hold-rr",
+        "commit_marker": "feat-v65b-regime-gates-post-penalty-sector-cap-all-paths-verified",
         "date": "2026-06-13",
         "fixes_in_build": [
             "multi_source_adapter_stockanalysis_quote_batch_concurrent_threads",

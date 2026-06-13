@@ -3747,7 +3747,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         #   - Stocks with no sector tag (rare) get treated as their own
         #     "Unknown" bucket and capped together.
         # ────────────────────────────────────────────────────────────────
-        MAX_PER_SECTOR = 6    # 2026-06-11: was 4 — wider sector diversity allowed
+        MAX_PER_SECTOR = 3    # 2026-06-13 v65: was 6 — with MAX_TRADES_PER_CYCLE=6, keep sector diversity enforced
         MIN_PICKS = 8         # 2026-06-11: was 5 — guarantee more trades per cycle
 
         def _apply_sector_cap(cands):
@@ -4138,10 +4138,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 # Cap penalty at -20 (was -10) — stronger signal for repeat losers
                 capped_penalty = max(-20, sector_penalty) if sector_penalty < 0 else min(10, sector_penalty)
                 pick["confidence"] = max(15, pick["confidence"] + capped_penalty)
-                if pick["confidence"] < MIN_CONFIDENCE:
+                _post_gate = _long_min_conf if direction == "long" else _short_min_conf
+                if pick["confidence"] < _post_gate:
                     results["skipped"].append({
                         "symbol": symbol,
-                        "reason": f"Learned mistake: {direction} {pick_sector} has high loss rate (penalty {capped_penalty})",
+                        "reason": f"Learned mistake: {direction} {pick_sector} has high loss rate (penalty {capped_penalty}) — below regime gate {_post_gate}",
                     })
                     continue
 
@@ -4299,7 +4300,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 elif direction == "long" and sector_signal < -0.3:
                     # Headlines say sector is bearish — penalize long
                     pick["confidence"] = max(15, pick["confidence"] - 20)
-                    if pick["confidence"] < MIN_CONFIDENCE:
+                    _dd_gate = _long_min_conf if (pick.get("direction","LONG").upper()=="LONG") else _short_min_conf
+                    if pick["confidence"] < _dd_gate:
                         results["skipped"].append({
                             "symbol": symbol,
                             "reason": f"GEO BLOCK: Long {pick_sector} penalized — headlines bearish (signal={sector_signal:+.2f})",
