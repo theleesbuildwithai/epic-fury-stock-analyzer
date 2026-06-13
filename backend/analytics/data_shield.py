@@ -5,13 +5,15 @@ Bulletproof yfinance wrapper with multi-layer fallbacks.
 Every function here is designed to NEVER crash the caller:
   - Exponential backoff retry (3 attempts, 1s → 2s → 4s)
   - Stooq fallback when yfinance fails or returns garbage
+  - Multi-source fallback (stockanalysis, finviz, AV, Tiingo, FMP)
   - In-memory TTL cache (no redundant API calls)
   - Corruption detection (price sanity bounds)
   - Persistent DB cache (trading_state) for critical data
 
 Design principle: trade latency for reliability.
 If yfinance is down, Stooq takes over transparently.
-If both are down, return last cached value with staleness flag.
+If Stooq is also down, multi_source_adapter tries 5 more sources.
+If all live sources fail, return last cached value with staleness flag.
 
 Usage:
     from analytics.data_shield import safe_download, safe_ticker_info
@@ -206,6 +208,7 @@ def safe_download(ticker: str, period: str = "6mo", ttl: Optional[float] = None,
       1. In-memory TTL cache (instant)
       2. yfinance with 3-attempt retry + backoff
       3. Stooq fallback
+      3b. Multi-source fallback (Tiingo/AV/FMP historical, if keys configured)
       4. Stale cache acceptance (2h window during outages)
 
     Returns:
@@ -235,6 +238,17 @@ def safe_download(ticker: str, period: str = "6mo", ttl: Optional[float] = None,
         if df_stooq is not None and len(df_stooq) >= require_rows:
             _cache_set(cache_key, df_stooq, "stooq")
             return df_stooq
+
+        # Layer 3b: Multi-source historical fallback (Tiingo/AV/FMP — key-gated)
+        try:
+            from analytics.multi_source_adapter import get_historical_any_source
+            df_ms = get_historical_any_source(ticker, period)
+            if df_ms is not None and len(df_ms) >= require_rows:
+                logger.info(f"DataShield: multi-source historical succeeded for {ticker}")
+                _cache_set(cache_key, df_ms, "multi_source")
+                return df_ms
+        except Exception as _ms_e:
+            logger.debug(f"DataShield: multi-source historical error for {ticker}: {_ms_e}")
 
         # Layer 4: Accept stale cache
         stale = _cache_get_stale(cache_key)
@@ -307,6 +321,12 @@ def safe_ticker_info(ticker: str) -> dict:
     """
     Fetch ticker fundamental info with caching.
     Returns empty dict on any failure. Never raises.
+
+    Layers:
+      1. In-memory cache
+      2. yfinance (2-attempt retry, 5s timeout each)
+      2b. multi_source_adapter (stockanalysis → finviz → fmp)
+      3. Stale cache (72h window)
     """
     import yfinance as yf
 
@@ -331,6 +351,17 @@ def safe_ticker_info(ticker: str) -> dict:
             logger.debug(f"DataShield ticker info {ticker} attempt {attempt + 1}: {e}")
             if attempt == 0:
                 time.sleep(1.5)
+
+    # Layer 2b: multi-source fundamentals fallback
+    try:
+        from analytics.multi_source_adapter import get_fundamentals_any_source
+        ms_info = get_fundamentals_any_source(ticker)
+        if ms_info:
+            logger.info(f"DataShield: multi-source fundamentals for {ticker} via {ms_info.get('_source','?')}")
+            _cache_set(cache_key, ms_info, ms_info.get("_source", "multi_source"))
+            return ms_info
+    except Exception as _ms_e:
+        logger.debug(f"DataShield: multi-source fundamentals error for {ticker}: {_ms_e}")
 
     # Return stale if available
     stale = _cache_get_stale(cache_key, _TTL_INFO * 3)
@@ -396,7 +427,19 @@ def get_shield_status() -> dict:
         "status": "HEALTHY" if stooq_ok else "DOWN",
     }
 
+    # Multi-source status (stockanalysis, finviz, AV, Tiingo, FMP)
+    try:
+        from analytics.multi_source_adapter import get_multi_source_status
+        status["sources"]["multi_source"] = get_multi_source_status()
+    except Exception as _ms_e:
+        status["sources"]["multi_source"] = {"error": str(_ms_e)[:120]}
+
     # Overall assessment
+    ms = status["sources"].get("multi_source", {})
+    ms_any_ok = any(
+        v.get("ok") for v in ms.values() if isinstance(v, dict)
+    ) if isinstance(ms, dict) else False
+
     if yf_ok:
         status["overall"] = "HEALTHY"
         status["primary_source"] = "yfinance"
@@ -404,6 +447,10 @@ def get_shield_status() -> dict:
         status["overall"] = "DEGRADED"
         status["primary_source"] = "stooq_fallback"
         status["warning"] = "yfinance down — Stooq fallback active"
+    elif ms_any_ok:
+        status["overall"] = "DEGRADED"
+        status["primary_source"] = "multi_source_fallback"
+        status["warning"] = "yfinance+Stooq down — multi-source safety nets active"
     else:
         status["overall"] = "CRITICAL"
         status["primary_source"] = "cache_only"

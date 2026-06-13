@@ -4058,8 +4058,26 @@ def live_prices(request: Request):
                     except Exception:
                         positions_value += t["entry_price"] * t["shares"]
             except Exception:
+                # yfinance batch failed — try multi-source (stockanalysis → finviz) for each ticker
+                _ms_prices = {}
+                try:
+                    from analytics.multi_source_adapter import multi_source_quote_batch
+                    _ms_batch = multi_source_quote_batch(tickers)
+                    for sym, q in _ms_batch.items():
+                        if isinstance(q, dict) and q.get("price") and float(q["price"]) > 0:
+                            _ms_prices[sym] = float(q["price"])
+                except Exception:
+                    pass
                 for t in open_trades:
-                    positions_value += t["entry_price"] * t["shares"]
+                    tick = t["ticker"]
+                    if tick in _ms_prices:
+                        pv = _ms_prices[tick] * t["shares"]
+                        if t.get("direction") == "short":
+                            pv = abs(t["shares"] * _ms_prices[tick])
+                        positions_value += pv
+                        position_prices[tick] = round(_ms_prices[tick], 2)
+                    else:
+                        positions_value += t["entry_price"] * t["shares"]
 
         total_value = cash + positions_value
         total_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
@@ -5025,9 +5043,22 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v60-comprehensive-safety-nets-data-shield-macro-rate-limits-triggers",
-        "date": "2026-06-12",
+        "commit_marker": "feat-v62-multisource-wired-everywhere-banner-sector-cnbc-portfolio-stb-analyze-live",
+        "date": "2026-06-13",
         "fixes_in_build": [
+            "multi_source_adapter_stockanalysis_quote_batch_concurrent_threads",
+            "multi_source_adapter_finviz_quote_batch_concurrent_threads",
+            "multi_source_adapter_multi_source_quote_batch_combined",
+            "paper_trader_get_current_prices_tier4_stockanalysis_tier5_finviz",
+            "extras_get_banner_data_step3_stockanalysis_step4_finviz",
+            "extras_get_sector_heatmap_step3_stockanalysis_step4_finviz",
+            "extras_cnbc_get_prices_fallback_stockanalysis_then_finviz",
+            "quant_engine_analyze_watchlist_stock_tier2_multisource_tier3_datashield",
+            "main_live_prices_exception_path_multi_source_position_pricing",
+            "data_shield_layer_3b_historical_multi_source_after_stooq",
+            "data_shield_layer_2b_fundamentals_multi_source_after_yfinance",
+            "market_data_tier_2p7_multi_source_historical_before_stale_cache",
+            "market_data_get_stock_info_attempt_3_multi_source_fundamentals",
             "daily_summary_initial_yf_download_10s_thread_timeout",
             "watchlist_summary_yf_download_10s_thread_timeout",
             "fresh_start_v9_cash_132k_32pct_return_stats_epoch_snapshots_reset",

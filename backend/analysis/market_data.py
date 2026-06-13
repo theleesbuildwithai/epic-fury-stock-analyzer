@@ -95,10 +95,38 @@ def get_stock_info(ticker: str) -> dict:
                     "regularMarketDayLow": round(float(last["Low"]), 2),
                     "regularMarketVolume": int(last["Volume"]),
                 }
-            else:
-                # Nothing worked — return an empty shell so the caller
-                # doesn't crash.
-                info = {"shortName": ticker.upper()}
+
+        # Attempt 3: multi-source fallback (stockanalysis → finviz → fmp)
+        if info is None:
+            try:
+                from analytics.multi_source_adapter import get_fundamentals_any_source
+                ms = get_fundamentals_any_source(ticker)
+                if ms and ms.get("currentPrice"):
+                    info = {
+                        "shortName": ms.get("shortName", ticker.upper()),
+                        "regularMarketPrice": float(ms["currentPrice"]),
+                        "previousClose": ms.get("previousClose") or 0,
+                        "regularMarketOpen": 0,
+                        "regularMarketDayHigh": ms.get("fiftyTwoWeekHigh") or 0,
+                        "regularMarketDayLow": ms.get("fiftyTwoWeekLow") or 0,
+                        "regularMarketVolume": int(ms.get("volume") or 0),
+                        "marketCap": ms.get("marketCap") or 0,
+                        "trailingPE": ms.get("trailingPE") or 0,
+                        "beta": ms.get("beta") or 0,
+                        "sector": ms.get("sector") or "N/A",
+                        "industry": ms.get("industry") or "N/A",
+                        "fiftyTwoWeekHigh": ms.get("fiftyTwoWeekHigh") or 0,
+                        "fiftyTwoWeekLow": ms.get("fiftyTwoWeekLow") or 0,
+                        "averageVolume": int(ms.get("avgVolume") or 0),
+                        "dividendYield": ms.get("dividendYield") or 0,
+                    }
+            except Exception:
+                pass
+
+        if info is None:
+            # Nothing worked — return an empty shell so the caller
+            # doesn't crash.
+            info = {"shortName": ticker.upper()}
 
         return {
             "ticker": ticker.upper(),
@@ -289,6 +317,17 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
                         break
             except Exception:
                 continue
+
+    # Tier 2.7: multi-source historical (Tiingo/AlphaVantage/FMP — key-gated)
+    if not data:
+        try:
+            from analytics.multi_source_adapter import get_historical_any_source
+            import pandas as _ms_pd
+            df_ms = get_historical_any_source(ticker, period)
+            if df_ms is not None and not df_ms.empty:
+                data = _df_to_records(df_ms)
+        except Exception:
+            pass
 
     # Tier 3: serve last-known good data for ANY period of this ticker.
     # No 404 when yfinance is temporarily down.  Returns a COPY so a

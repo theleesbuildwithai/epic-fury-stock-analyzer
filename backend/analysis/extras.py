@@ -160,6 +160,7 @@ def cnbc_get_prices(yahoo_symbols):
       - Filters out None, NaN, zero, and negative prices (junk data guard)
       - Filters out unrealistic prices (>$1M per share, likely parse error)
       - Each symbol's parse is independent — one bad symbol can't poison the rest
+      - Falls back to stockanalysis.com → finviz.com for any CNBC misses
 
     Returns dict {yahoo_symbol: float_price}. Missing/failed symbols are
     simply absent from the dict — caller decides how to handle gaps.
@@ -176,30 +177,54 @@ def cnbc_get_prices(yahoo_symbols):
     out = {}
     try:
         cnbc_data = cnbc_quote_batch(cnbc_request)
-        if not isinstance(cnbc_data, dict):
-            return {}
-        for cnbc_sym, val in cnbc_data.items():
-            try:
-                if not isinstance(val, dict):
+        if isinstance(cnbc_data, dict):
+            for cnbc_sym, val in cnbc_data.items():
+                try:
+                    if not isinstance(val, dict):
+                        continue
+                    yahoo_sym = cnbc_to_yahoo.get(cnbc_sym, cnbc_sym)
+                    raw_price = val.get("price")
+                    if raw_price is None:
+                        continue
+                    price = float(raw_price)
+                    if price != price:  # NaN
+                        continue
+                    if price <= 0 or price > 1_000_000:
+                        continue
+                    out[yahoo_sym] = price
+                except (TypeError, ValueError):
                     continue
-                yahoo_sym = cnbc_to_yahoo.get(cnbc_sym, cnbc_sym)
-                raw_price = val.get("price")
-                if raw_price is None:
-                    continue
-                price = float(raw_price)
-                # Sanity bounds: reject NaN, inf, zero/negative, and absurdly large
-                # values that would indicate a parse error rather than a real price.
-                if price != price:  # NaN check (NaN != NaN)
-                    continue
-                if price <= 0 or price > 1_000_000:
-                    continue
-                out[yahoo_sym] = price
-            except (TypeError, ValueError):
-                # Skip individual bad entries — keep collecting good ones
-                continue
     except Exception:
-        # Network failure, JSON error, anything — return what we have so far
         pass
+
+    # stockanalysis.com for any symbols CNBC missed
+    cnbc_missed = [s for s in yahoo_symbols if s not in out]
+    if cnbc_missed:
+        try:
+            from analytics.multi_source_adapter import stockanalysis_quote_batch
+            sa_data = stockanalysis_quote_batch(cnbc_missed)
+            for sym, val in sa_data.items():
+                if sym not in out and isinstance(val, dict) and val.get("price"):
+                    price = float(val["price"])
+                    if 0 < price < 1_000_000:
+                        out[sym] = price
+        except Exception:
+            pass
+
+    # finviz.com for any still-missing symbols
+    still_missed = [s for s in yahoo_symbols if s not in out]
+    if still_missed:
+        try:
+            from analytics.multi_source_adapter import finviz_quote_batch
+            fv_data = finviz_quote_batch(still_missed)
+            for sym, val in fv_data.items():
+                if sym not in out and isinstance(val, dict) and val.get("price"):
+                    price = float(val["price"])
+                    if 0 < price < 1_000_000:
+                        out[sym] = price
+        except Exception:
+            pass
+
     return out
 
 
@@ -340,10 +365,54 @@ def get_banner_data():
                     except Exception:
                         continue
 
+        # 3) stockanalysis.com for any still-missing banner tickers
+        still_missing = [s for s in symbols if s not in results_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import stockanalysis_quote_batch
+                sa_data = stockanalysis_quote_batch(still_missing)
+                for sym, val in sa_data.items():
+                    if sym not in results_by_symbol and val.get("price") and float(val["price"]) > 0:
+                        price = float(val["price"])
+                        change_pct = float(val.get("change_pct") or 0)
+                        prev = price / (1.0 + change_pct / 100.0) if change_pct != -100 else price
+                        results_by_symbol[sym] = {
+                            "symbol": sym,
+                            "name": symbol_to_name.get(sym, sym),
+                            "price": round(price, 2),
+                            "change": round(price - prev, 2),
+                            "change_pct": round(change_pct, 2),
+                            "_source": "stockanalysis",
+                        }
+            except Exception:
+                pass
+
+        # 4) finviz.com for any remaining gaps
+        still_missing = [s for s in symbols if s not in results_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import finviz_quote_batch
+                fv_data = finviz_quote_batch(still_missing)
+                for sym, val in fv_data.items():
+                    if sym not in results_by_symbol and val.get("price") and float(val["price"]) > 0:
+                        price = float(val["price"])
+                        change_pct = float(val.get("change_pct") or 0)
+                        prev = price / (1.0 + change_pct / 100.0) if change_pct != -100 else price
+                        results_by_symbol[sym] = {
+                            "symbol": sym,
+                            "name": symbol_to_name.get(sym, sym),
+                            "price": round(price, 2),
+                            "change": round(price - prev, 2),
+                            "change_pct": round(change_pct, 2),
+                            "_source": "finviz",
+                        }
+            except Exception:
+                pass
+
         # Build final list in canonical order, drop the internal _source field
         # from output but keep it in a separate "sources" summary for debugging.
         results = []
-        sources_used = {"yahoo": 0, "cnbc": 0}
+        sources_used = {"yahoo": 0, "cnbc": 0, "stockanalysis": 0, "finviz": 0}
         for sym, name in BANNER_SYMBOLS:
             if sym in results_by_symbol:
                 entry = dict(results_by_symbol[sym])
@@ -646,7 +715,35 @@ def get_sector_heatmap():
                 for sym, val in yf_data.items():
                     sectors_by_symbol[sym] = {**val, "_source": "yfinance"}
 
-        # 3) For any STILL missing, use last-known-good cache
+        # 3) stockanalysis.com for any sector ETFs still missing
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import stockanalysis_quote_batch
+                sa_data = stockanalysis_quote_batch(still_missing)
+                if sa_data:
+                    sources_used.append(f"stockanalysis({len(sa_data)})")
+                    for sym, val in sa_data.items():
+                        if sym not in sectors_by_symbol and val.get("price") and float(val["price"]) > 0:
+                            sectors_by_symbol[sym] = {**val, "_source": "stockanalysis"}
+            except Exception:
+                pass
+
+        # 4) finviz.com for any still-missing sector ETFs
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import finviz_quote_batch
+                fv_data = finviz_quote_batch(still_missing)
+                if fv_data:
+                    sources_used.append(f"finviz({len(fv_data)})")
+                    for sym, val in fv_data.items():
+                        if sym not in sectors_by_symbol and val.get("price") and float(val["price"]) > 0:
+                            sectors_by_symbol[sym] = {**val, "_source": "finviz"}
+            except Exception:
+                pass
+
+        # 5) For any STILL missing, use last-known-good cache
         still_missing = [s for s in symbols if s not in sectors_by_symbol]
         if still_missing:
             for sym in still_missing:
@@ -659,12 +756,12 @@ def get_sector_heatmap():
                         "_stale_at": cached.get("fetched_at"),
                     }
 
-        # 4) Update last-known-good cache for everything we got fresh
+        # 6) Update last-known-good cache for everything we got fresh
         try:
             now_iso = datetime.now().isoformat()
             for sym, val in sectors_by_symbol.items():
                 src = val.get("_source", "")
-                if src in ("cnbc", "yfinance"):
+                if src in ("cnbc", "yfinance", "stockanalysis", "finviz"):
                     _sector_last_good[sym] = {
                         "price": val["price"],
                         "change_pct": val["change_pct"],

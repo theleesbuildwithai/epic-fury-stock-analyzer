@@ -5227,6 +5227,7 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         macro = get_macro_overlay()
 
         # Download stock data only (SPY not needed for single-stock analysis)
+        # Tier 1: yfinance (10s thread timeout)
         _throttle()
         import threading as _aws_thr
         _aws_r = [None]
@@ -5236,7 +5237,24 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             ), daemon=True)
         _aws_t.start(); _aws_t.join(timeout=10)
         stock_df = _aws_r[0]
+
+        # Tier 2: multi-source historical (Tiingo/AV/FMP) if yfinance failed
         if stock_df is None or stock_df.empty:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                stock_df = get_historical_any_source(symbol, "1y")
+            except Exception:
+                pass
+
+        # Tier 3: data_shield safe_download (yfinance retry + Stooq)
+        if stock_df is None or (hasattr(stock_df, 'empty') and stock_df.empty):
+            try:
+                from analytics.data_shield import safe_download
+                stock_df = safe_download(symbol, period="1y")
+            except Exception:
+                pass
+
+        if stock_df is None or (hasattr(stock_df, 'empty') and stock_df.empty):
             result["error"] = "No price data available"
             return result
 

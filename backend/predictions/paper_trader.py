@@ -2945,7 +2945,6 @@ def _get_current_prices(symbols: list) -> dict:
                 from analysis.extras import stooq_quote_batch
                 stooq_prices = stooq_quote_batch(still_missing)
                 if stooq_prices:
-                    # stooq returns {sym: {price, change_pct}} — extract price only
                     for sym, q in stooq_prices.items():
                         if isinstance(q, dict) and q.get("price") is not None:
                             prices[sym] = float(q["price"])
@@ -2955,6 +2954,51 @@ def _get_current_prices(symbols: list) -> dict:
                     )
             except Exception as e:
                 logger.debug(f"Stooq price fallback failed (non-fatal): {e}")
+    except Exception:
+        pass
+
+    # TIER 4: stockanalysis.com — scrape-based, no rate limits, no API key.
+    # Runs concurrently (parallel threads) so latency scales with depth not count.
+    try:
+        t4_missing = [s for s in symbols if s not in prices]
+        if t4_missing:
+            try:
+                from analytics.multi_source_adapter import stockanalysis_quote_batch
+                sa_prices = stockanalysis_quote_batch(t4_missing)
+                filled = 0
+                for sym, q in sa_prices.items():
+                    if isinstance(q, dict) and q.get("price") and float(q["price"]) > 0:
+                        prices[sym] = float(q["price"])
+                        filled += 1
+                if filled:
+                    logger.warning(
+                        f"STOCKANALYSIS PRICE FALLBACK (T4): filled {filled}/{len(t4_missing)} "
+                        f"symbols all prior tiers missed"
+                    )
+            except Exception as e:
+                logger.debug(f"StockAnalysis price fallback failed (non-fatal): {e}")
+    except Exception:
+        pass
+
+    # TIER 5: finviz.com — secondary scrape source, different infrastructure.
+    try:
+        t5_missing = [s for s in symbols if s not in prices]
+        if t5_missing:
+            try:
+                from analytics.multi_source_adapter import finviz_quote_batch
+                fv_prices = finviz_quote_batch(t5_missing)
+                filled = 0
+                for sym, q in fv_prices.items():
+                    if isinstance(q, dict) and q.get("price") and float(q["price"]) > 0:
+                        prices[sym] = float(q["price"])
+                        filled += 1
+                if filled:
+                    logger.warning(
+                        f"FINVIZ PRICE FALLBACK (T5): filled {filled}/{len(t5_missing)} "
+                        f"symbols all prior tiers missed"
+                    )
+            except Exception as e:
+                logger.debug(f"Finviz price fallback failed (non-fatal): {e}")
     except Exception:
         pass
 
