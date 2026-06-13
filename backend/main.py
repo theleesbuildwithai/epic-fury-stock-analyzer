@@ -5006,7 +5006,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v58-confidence-70-95-range-tighter-stacking-floor",
+        "commit_marker": "feat-v59-thread-timeouts-all-yf-calls-quant-engine-complete",
         "date": "2026-06-12",
         "fixes_in_build": [
             "daily_summary_initial_yf_download_10s_thread_timeout",

@@ -93,7 +93,13 @@ def _prefetch_fundamentals(symbols: list) -> dict:
     for sym in uncached[:50]:  # Cap at 50 to avoid excessive API calls
         try:
             _throttle()
-            info = yf.Ticker(sym).info or {}
+            import threading as _pf_thr
+            _pf_r = [{}]
+            _pf_t = _pf_thr.Thread(
+                target=lambda r=_pf_r, _s=sym: r.__setitem__(0, yf.Ticker(_s).info or {}),
+                daemon=True)
+            _pf_t.start(); _pf_t.join(timeout=5)
+            info = _pf_r[0]
             pe = info.get("trailingPE")
             fwd_pe = info.get("forwardPE")
             pb = info.get("priceToBook")
@@ -298,7 +304,14 @@ def get_cross_asset_signals() -> dict:
     try:
         _throttle()
         tickers = ["UUP", "BTC-USD", "CPER", "TLT"]
-        df = yf.download(tickers, period="1mo", progress=False)
+        import threading as _cas_thr
+        _cas_r = [None]
+        _cas_t = _cas_thr.Thread(
+            target=lambda r=_cas_r: r.__setitem__(
+                0, yf.download(tickers, period="1mo", progress=False)
+            ), daemon=True)
+        _cas_t.start(); _cas_t.join(timeout=10)
+        df = _cas_r[0]
 
         if df is None or df.empty:
             return result
@@ -987,10 +1000,16 @@ def _get_sector_with_fallback(symbol: str) -> str:
         if cached and cached != "Unknown":
             return cached
 
-    # Tier 3: live yfinance fetch (slow — minimise spam by throttling)
+    # Tier 3: live yfinance fetch — 5s thread timeout to prevent worker hang
     try:
         _throttle()
-        info = yf.Ticker(sym).info or {}
+        import threading as _sf_thr
+        _sf_r = [{}]
+        _sf_t = _sf_thr.Thread(
+            target=lambda r=_sf_r, _s=sym: r.__setitem__(0, yf.Ticker(_s).info or {}),
+            daemon=True)
+        _sf_t.start(); _sf_t.join(timeout=5)
+        info = _sf_r[0]
         s = info.get("sector") or info.get("category") or ""
         s = str(s).strip()
         if s and s != "Unknown":
@@ -1558,11 +1577,18 @@ def get_macro_overlay() -> dict:
             "timestamp": datetime.now().isoformat(),
         }
 
-        # Batch download all macro indicators at once (1 API call)
+        # Batch download all macro indicators at once (1 API call) — 10s thread timeout
         _throttle()
         try:
             macro_symbols = ["^TNX", "CL=F", "GC=F", "^VIX"]
-            df = yf.download(macro_symbols, period="1mo", progress=False)
+            import threading as _mo_thr
+            _mo_r = [None]
+            _mo_t = _mo_thr.Thread(
+                target=lambda r=_mo_r: r.__setitem__(
+                    0, yf.download(macro_symbols, period="1mo", progress=False)
+                ), daemon=True)
+            _mo_t.start(); _mo_t.join(timeout=10)
+            df = _mo_r[0]
         except Exception as e:
             logger.warning(f"Macro overlay download failed: {e}")
             return macro
@@ -1733,7 +1759,11 @@ def get_macro_overlay() -> dict:
         # This predicted every recession since 1970 with 12-18 month lead
         try:
             _throttle()
-            tnx_2y_df = yf.download(["^TNX", "^IRX"], period="1mo", progress=False)
+            import threading as _yc_thr; _yc_r = [None]
+            _yc_t = _yc_thr.Thread(target=lambda r=_yc_r: r.__setitem__(
+                0, yf.download(["^TNX", "^IRX"], period="1mo", progress=False)), daemon=True)
+            _yc_t.start(); _yc_t.join(timeout=10)
+            tnx_2y_df = _yc_r[0]
             if tnx_2y_df is not None and not tnx_2y_df.empty:
                 try:
                     tnx_close = tnx_2y_df[("^TNX", "Close")].dropna().values.astype(float)
@@ -1764,7 +1794,11 @@ def get_macro_overlay() -> dict:
         # This is what the smart money watches — it predicted the 2020 crash
         try:
             _throttle()
-            vix_term_df = yf.download(["^VIX", "^VIX3M"], period="5d", progress=False)
+            import threading as _vt_thr; _vt_r = [None]
+            _vt_t = _vt_thr.Thread(target=lambda r=_vt_r: r.__setitem__(
+                0, yf.download(["^VIX", "^VIX3M"], period="5d", progress=False)), daemon=True)
+            _vt_t.start(); _vt_t.join(timeout=10)
+            vix_term_df = _vt_r[0]
             if vix_term_df is not None and not vix_term_df.empty:
                 try:
                     vix_spot = float(vix_term_df[("^VIX", "Close")].dropna().iloc[-1])
@@ -1801,7 +1835,11 @@ def get_macro_overlay() -> dict:
         # Strong dollar hurts multinationals, helps domestic companies
         try:
             _throttle()
-            uup_df = yf.download("UUP", period="1mo", progress=False)
+            import threading as _uup_thr; _uup_r = [None]
+            _uup_t = _uup_thr.Thread(target=lambda r=_uup_r: r.__setitem__(
+                0, yf.download("UUP", period="1mo", progress=False)), daemon=True)
+            _uup_t.start(); _uup_t.join(timeout=10)
+            uup_df = _uup_r[0]
             if uup_df is not None and len(uup_df) >= 20:
                 uup_closes = _safe_close(uup_df).values.astype(float)
                 uup_sma20 = float(np.mean(uup_closes[-20:]))
@@ -2357,11 +2395,18 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
     all_symbols = list(price_data.keys())
     fundamentals_data = _prefetch_fundamentals(all_symbols)
 
-    # Download SPY data once for beta calculation (reuse regime's SPY data if possible)
+    # Download SPY data once for beta calculation — 10s thread timeout
     spy_closes = None
     try:
         _throttle()
-        spy_df = yf.download("^GSPC", period="6mo", progress=False)
+        import threading as _spy_thr
+        _spy_r = [None]
+        _spy_t = _spy_thr.Thread(
+            target=lambda r=_spy_r: r.__setitem__(
+                0, yf.download("^GSPC", period="6mo", progress=False)
+            ), daemon=True)
+        _spy_t.start(); _spy_t.join(timeout=10)
+        spy_df = _spy_r[0]
         if spy_df is not None and len(spy_df) >= 60:
             spy_closes = _safe_close(spy_df).values.astype(float)
     except Exception:
@@ -4564,7 +4609,13 @@ def _generate_quant_picks_impl() -> dict:
                         continue
 
                     _throttle()
-                    info = yf.Ticker(sym).info or {}
+                    import threading as _fe_thr
+                    _fe_r = [{}]
+                    _fe_t = _fe_thr.Thread(
+                        target=lambda r=_fe_r, _s=sym: r.__setitem__(0, yf.Ticker(_s).info or {}),
+                        daemon=True)
+                    _fe_t.start(); _fe_t.join(timeout=5)
+                    info = _fe_r[0]
 
                     pe = info.get("trailingPE")
                     fwd_pe = info.get("forwardPE")
@@ -5177,7 +5228,14 @@ def analyze_watchlist_stock(symbol: str) -> dict:
 
         # Download stock data only (SPY not needed for single-stock analysis)
         _throttle()
-        stock_df = yf.download(symbol, period="1y", progress=False)
+        import threading as _aws_thr
+        _aws_r = [None]
+        _aws_t = _aws_thr.Thread(
+            target=lambda r=_aws_r, s=symbol: r.__setitem__(
+                0, yf.download(s, period="1y", progress=False)
+            ), daemon=True)
+        _aws_t.start(); _aws_t.join(timeout=10)
+        stock_df = _aws_r[0]
         if stock_df is None or stock_df.empty:
             result["error"] = "No price data available"
             return result
