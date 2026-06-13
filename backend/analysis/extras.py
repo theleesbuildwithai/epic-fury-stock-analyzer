@@ -225,6 +225,68 @@ def cnbc_get_prices(yahoo_symbols):
         except Exception:
             pass
 
+    # Yahoo Finance direct API for any still-missing (bypasses yfinance library)
+    still_missed = [s for s in yahoo_symbols if s not in out]
+    if still_missed:
+        try:
+            from analytics.multi_source_adapter import yahoo_direct_quote_batch
+            yh_data = yahoo_direct_quote_batch(still_missed)
+            for sym, val in yh_data.items():
+                if sym not in out and isinstance(val, dict) and val.get("price"):
+                    price = float(val["price"])
+                    if 0 < price < 1_000_000:
+                        out[sym] = price
+        except Exception:
+            pass
+
+    # Twelve Data batch for any still-missing (key-gated, 800/day)
+    still_missed = [s for s in yahoo_symbols if s not in out]
+    if still_missed:
+        try:
+            from analytics.multi_source_adapter import twelvedata_quote_batch
+            td_data = twelvedata_quote_batch(still_missed)
+            for sym, val in td_data.items():
+                if sym not in out and isinstance(val, dict) and val.get("price"):
+                    price = float(val["price"])
+                    if 0 < price < 1_000_000:
+                        out[sym] = price
+        except Exception:
+            pass
+
+    # Polygon batch for any still-missing (key-gated, delayed)
+    still_missed = [s for s in yahoo_symbols if s not in out]
+    if still_missed:
+        try:
+            from analytics.multi_source_adapter import polygon_quote_batch
+            pg_data = polygon_quote_batch(still_missed)
+            for sym, val in pg_data.items():
+                if sym not in out and isinstance(val, dict) and val.get("price"):
+                    price = float(val["price"])
+                    if 0 < price < 1_000_000:
+                        out[sym] = price
+        except Exception:
+            pass
+
+    # Persistent price cache for any still-missing
+    still_missed = [s for s in yahoo_symbols if s not in out]
+    if still_missed:
+        try:
+            from analytics.price_cache import get_cached_price
+            for sym in still_missed:
+                cached = get_cached_price(sym)
+                if cached and cached.get("price") and 0 < float(cached["price"]) < 1_000_000:
+                    out[sym] = float(cached["price"])
+        except Exception:
+            pass
+
+    # Save successful prices to persistent cache
+    if out:
+        try:
+            from analytics.price_cache import update_price_cache
+            update_price_cache(out, source="cnbc_get_prices")
+        except Exception:
+            pass
+
     return out
 
 
@@ -409,10 +471,94 @@ def get_banner_data():
             except Exception:
                 pass
 
+        # 5) Yahoo Finance direct API (bypasses yfinance library — independent code path)
+        still_missing = [s for s in symbols if s not in results_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import yahoo_direct_quote_batch
+                yh_data = yahoo_direct_quote_batch(still_missing)
+                for sym, val in yh_data.items():
+                    if sym not in results_by_symbol and val.get("price") and float(val["price"]) > 0:
+                        price = float(val["price"])
+                        change_pct = float(val.get("change_pct") or 0)
+                        prev = price / (1.0 + change_pct / 100.0) if change_pct != -100 else price
+                        results_by_symbol[sym] = {
+                            "symbol": sym,
+                            "name": symbol_to_name.get(sym, sym),
+                            "price": round(price, 2),
+                            "change": round(price - prev, 2),
+                            "change_pct": round(change_pct, 2),
+                            "_source": "yahoo_direct",
+                        }
+            except Exception:
+                pass
+
+        # 6) Twelve Data batch (key-gated, 800/day — one HTTP call for all missing)
+        still_missing = [s for s in symbols if s not in results_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import twelvedata_quote_batch
+                td_data = twelvedata_quote_batch(still_missing)
+                for sym, val in td_data.items():
+                    if sym not in results_by_symbol and val.get("price") and float(val["price"]) > 0:
+                        price = float(val["price"])
+                        results_by_symbol[sym] = {
+                            "symbol": sym,
+                            "name": symbol_to_name.get(sym, sym),
+                            "price": round(price, 2),
+                            "change": 0.0,
+                            "change_pct": 0.0,
+                            "_source": "twelvedata",
+                        }
+            except Exception:
+                pass
+
+        # 7) Polygon batch snapshot (key-gated, delayed)
+        still_missing = [s for s in symbols if s not in results_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import polygon_quote_batch
+                pg_data = polygon_quote_batch(still_missing)
+                for sym, val in pg_data.items():
+                    if sym not in results_by_symbol and val.get("price") and float(val["price"]) > 0:
+                        price = float(val["price"])
+                        change_pct = float(val.get("change_pct") or 0)
+                        prev = price / (1.0 + change_pct / 100.0) if change_pct != -100 else price
+                        results_by_symbol[sym] = {
+                            "symbol": sym,
+                            "name": symbol_to_name.get(sym, sym),
+                            "price": round(price, 2),
+                            "change": round(price - prev, 2),
+                            "change_pct": round(change_pct, 2),
+                            "_source": "polygon",
+                        }
+            except Exception:
+                pass
+
+        # 8) Persistent price cache — absolute last resort for banner tickers
+        still_missing = [s for s in symbols if s not in results_by_symbol]
+        if still_missing:
+            try:
+                from analytics.price_cache import get_cached_price
+                for sym in still_missing:
+                    cached = get_cached_price(sym)
+                    if cached and cached.get("price") and float(cached["price"]) > 0:
+                        results_by_symbol[sym] = {
+                            "symbol": sym,
+                            "name": symbol_to_name.get(sym, sym),
+                            "price": round(float(cached["price"]), 2),
+                            "change": 0.0,
+                            "change_pct": 0.0,
+                            "_source": "price_cache",
+                        }
+            except Exception:
+                pass
+
         # Build final list in canonical order, drop the internal _source field
         # from output but keep it in a separate "sources" summary for debugging.
         results = []
-        sources_used = {"yahoo": 0, "cnbc": 0, "stockanalysis": 0, "finviz": 0}
+        sources_used = {"yahoo": 0, "cnbc": 0, "stockanalysis": 0, "finviz": 0,
+                        "yahoo_direct": 0, "twelvedata": 0, "polygon": 0, "price_cache": 0}
         for sym, name in BANNER_SYMBOLS:
             if sym in results_by_symbol:
                 entry = dict(results_by_symbol[sym])
@@ -743,6 +889,48 @@ def get_sector_heatmap():
             except Exception:
                 pass
 
+        # 4b) Yahoo Finance direct API (bypasses yfinance library — independent code path)
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import yahoo_direct_quote_batch
+                yh_data = yahoo_direct_quote_batch(still_missing)
+                if yh_data:
+                    sources_used.append(f"yahoo_direct({len(yh_data)})")
+                    for sym, val in yh_data.items():
+                        if sym not in sectors_by_symbol and val.get("price") and float(val["price"]) > 0:
+                            sectors_by_symbol[sym] = {**val, "_source": "yahoo_direct"}
+            except Exception:
+                pass
+
+        # 4c) Twelve Data batch (key-gated, 800/day)
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import twelvedata_quote_batch
+                td_data = twelvedata_quote_batch(still_missing)
+                if td_data:
+                    sources_used.append(f"twelvedata({len(td_data)})")
+                    for sym, val in td_data.items():
+                        if sym not in sectors_by_symbol and val.get("price") and float(val["price"]) > 0:
+                            sectors_by_symbol[sym] = {**val, "_source": "twelvedata"}
+            except Exception:
+                pass
+
+        # 4d) Polygon batch snapshot (key-gated, delayed)
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            try:
+                from analytics.multi_source_adapter import polygon_quote_batch
+                pg_data = polygon_quote_batch(still_missing)
+                if pg_data:
+                    sources_used.append(f"polygon({len(pg_data)})")
+                    for sym, val in pg_data.items():
+                        if sym not in sectors_by_symbol and val.get("price") and float(val["price"]) > 0:
+                            sectors_by_symbol[sym] = {**val, "_source": "polygon"}
+            except Exception:
+                pass
+
         # 5) For any STILL missing, use last-known-good cache
         still_missing = [s for s in symbols if s not in sectors_by_symbol]
         if still_missing:
@@ -756,12 +944,29 @@ def get_sector_heatmap():
                         "_stale_at": cached.get("fetched_at"),
                     }
 
+        # 4e) Persistent price cache as final resort (survives deploys and full outages)
+        still_missing = [s for s in symbols if s not in sectors_by_symbol]
+        if still_missing:
+            try:
+                from analytics.price_cache import get_cached_price
+                for sym in still_missing:
+                    cached = get_cached_price(sym)
+                    if cached and cached.get("price") and float(cached["price"]) > 0:
+                        sectors_by_symbol[sym] = {
+                            "price": float(cached["price"]),
+                            "change_pct": 0.0,
+                            "_source": "price_cache",
+                        }
+            except Exception:
+                pass
+
         # 6) Update last-known-good cache for everything we got fresh
         try:
             now_iso = datetime.now().isoformat()
             for sym, val in sectors_by_symbol.items():
                 src = val.get("_source", "")
-                if src in ("cnbc", "yfinance", "stockanalysis", "finviz"):
+                if src in ("cnbc", "yfinance", "stockanalysis", "finviz",
+                           "yahoo_direct", "twelvedata", "polygon"):
                     _sector_last_good[sym] = {
                         "price": val["price"],
                         "change_pct": val["change_pct"],

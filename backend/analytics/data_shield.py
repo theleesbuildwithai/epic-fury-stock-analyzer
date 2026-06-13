@@ -352,7 +352,7 @@ def safe_ticker_info(ticker: str) -> dict:
             if attempt == 0:
                 time.sleep(1.5)
 
-    # Layer 2b: multi-source fundamentals fallback
+    # Layer 2b: multi-source fundamentals fallback (yahoo_direct → stockanalysis → finviz → twelvedata → polygon → fmp)
     try:
         from analytics.multi_source_adapter import get_fundamentals_any_source
         ms_info = get_fundamentals_any_source(ticker)
@@ -362,6 +362,27 @@ def safe_ticker_info(ticker: str) -> dict:
             return ms_info
     except Exception as _ms_e:
         logger.debug(f"DataShield: multi-source fundamentals error for {ticker}: {_ms_e}")
+
+    # Layer 2c: Yahoo Finance direct API (no library, independent code path)
+    try:
+        from analytics.multi_source_adapter import yahoo_direct_quote
+        yh = yahoo_direct_quote(ticker)
+        if yh and yh.get("price") and float(yh["price"]) > 0:
+            yh_info = {"regularMarketPrice": float(yh["price"]), "shortName": ticker.upper()}
+            _cache_set(cache_key, yh_info, "yahoo_direct")
+            return yh_info
+    except Exception as _yh_e:
+        logger.debug(f"DataShield: yahoo_direct info error for {ticker}: {_yh_e}")
+
+    # Layer 2d: Persistent price cache — survives full outages and deploys
+    try:
+        from analytics.price_cache import get_cached_price
+        cached = get_cached_price(ticker)
+        if cached and cached.get("price") and float(cached["price"]) > 0:
+            cached_info = {"regularMarketPrice": float(cached["price"]), "shortName": ticker.upper()}
+            return cached_info
+    except Exception:
+        pass
 
     # Return stale if available
     stale = _cache_get_stale(cache_key, _TTL_INFO * 3)

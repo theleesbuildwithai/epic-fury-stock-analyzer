@@ -535,16 +535,376 @@ def get_fmp_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFram
 
 
 # ============================================================
+#  YAHOO FINANCE V8/V7 DIRECT  (no API key — bypasses yfinance library)
+#  The yfinance library can fail due to version issues, curl_cffi errors,
+#  or Python environment problems. Hitting Yahoo's raw JSON API with urllib
+#  is a completely independent code path — if yfinance breaks, this still works.
+# ============================================================
+
+def _fetch_yahoo_v8_quote(ticker: str) -> Optional[dict]:
+    """Hit Yahoo Finance v8 chart API directly, bypassing the yfinance library.
+    Tries query1 then query2. No crumb required for chart range queries."""
+    for host in ("query1", "query2"):
+        try:
+            url = (
+                f"https://{host}.finance.yahoo.com/v8/finance/chart/"
+                f"{urllib.parse.quote(ticker.upper())}"
+                "?interval=1d&range=5d&includePrePost=false"
+            )
+            headers = {**_JSON_HEADERS, "Referer": "https://finance.yahoo.com/"}
+            raw = _http_get(url, headers=headers, timeout=10)
+            if not raw:
+                continue
+            data = json.loads(raw)
+            result = (data.get("chart") or {}).get("result") or []
+            if not result:
+                continue
+            meta = result[0].get("meta") or {}
+            price = meta.get("regularMarketPrice")
+            if price is None:
+                price = meta.get("chartPreviousClose")
+            if not price or float(price) <= 0:
+                continue
+            price = float(price)
+            prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or 0)
+            change_pct = round(((price - prev) / prev) * 100, 2) if prev > 0 else 0.0
+            return {
+                "price": round(price, 2),
+                "change_pct": change_pct,
+                "prev_close": round(prev, 2),
+            }
+        except Exception as e:
+            logger.debug(f"Yahoo v8 direct ({host}) failed for {ticker}: {e}")
+    return None
+
+
+def yahoo_direct_quote(ticker: str) -> Optional[dict]:
+    """Yahoo Finance v8 direct API (no yfinance library). Returns {price, change_pct} or None."""
+    return _run_with_timeout(lambda: _fetch_yahoo_v8_quote(ticker), timeout=12)
+
+
+def _fetch_yahoo_v7_batch(symbols: list) -> dict:
+    """Yahoo Finance v7 quote API for batch. One HTTP call for all symbols.
+    Returns {symbol: {price, change_pct}} dict. No crumb needed for basic fields."""
+    try:
+        sym_str = ",".join(s.upper() for s in symbols[:100])
+        for host in ("query1", "query2"):
+            url = (
+                f"https://{host}.finance.yahoo.com/v7/finance/quote"
+                f"?symbols={urllib.parse.quote(sym_str)}"
+                "&fields=regularMarketPrice,regularMarketPreviousClose,regularMarketChangePercent"
+                "&formatted=false"
+            )
+            headers = {**_JSON_HEADERS, "Referer": "https://finance.yahoo.com/"}
+            raw = _http_get(url, headers=headers, timeout=12)
+            if not raw:
+                continue
+            data = json.loads(raw)
+            result = (data.get("quoteResponse") or {}).get("result") or []
+            if not result:
+                continue
+            out = {}
+            for q in result:
+                sym = (q.get("symbol") or "").upper()
+                price = float(q.get("regularMarketPrice") or 0)
+                if sym and price > 0:
+                    prev = float(q.get("regularMarketPreviousClose") or 0)
+                    chg = float(q.get("regularMarketChangePercent") or 0)
+                    out[sym] = {"price": round(price, 2), "change_pct": round(chg, 2)}
+            if out:
+                logger.info(f"Yahoo v7 batch ({host}): {len(out)}/{len(symbols)} resolved")
+                return out
+    except Exception as e:
+        logger.debug(f"Yahoo v7 batch failed: {e}")
+    return {}
+
+
+def yahoo_direct_quote_batch(symbols: list, max_workers: int = 10, timeout: int = 20) -> dict:
+    """
+    Batch Yahoo direct quotes. Tries v7 batch (one HTTP call) first, then fills
+    gaps with concurrent threaded v8 chart calls for anything v7 missed.
+    Never raises. Returns {symbol: {price, change_pct}}.
+    """
+    if not symbols:
+        return {}
+    out = {}
+
+    # v7 batch — most efficient (one HTTP call for all symbols)
+    try:
+        v7_result = _run_with_timeout(lambda: _fetch_yahoo_v7_batch(symbols), timeout=15)
+        if v7_result:
+            out.update(v7_result)
+    except Exception:
+        pass
+
+    # v8 threaded fallback for anything v7 missed
+    still_missing = [s for s in symbols if s.upper() not in out]
+    if still_missing:
+        capped = [s.upper() for s in still_missing[:60]]
+        results = [None] * len(capped)
+
+        def _fetch_v8(idx, ticker):
+            try:
+                results[idx] = _fetch_yahoo_v8_quote(ticker)
+            except Exception:
+                pass
+
+        threads = []
+        for i, sym in enumerate(capped):
+            t = threading.Thread(target=_fetch_v8, args=(i, sym), daemon=True)
+            threads.append(t)
+            t.start()
+            if (i + 1) % max_workers == 0:
+                time.sleep(0.05)
+        for t in threads:
+            t.join(timeout=timeout)
+        for i, sym in enumerate(capped):
+            r = results[i]
+            if r and r.get("price") and float(r["price"]) > 0:
+                out[sym] = r
+
+    if out:
+        logger.info(f"Yahoo direct batch: {len(out)}/{len(symbols)} symbols resolved")
+    return out
+
+
+# ============================================================
+#  TWELVE DATA  (free key: TWELVE_DATA_KEY env var, 800 credits/day)
+#  Batch-capable: one call for up to 120 symbols (highly efficient).
+# ============================================================
+
+_TWELVE_DATA_KEY = lambda: os.environ.get("TWELVE_DATA_KEY", "").strip()
+
+
+def _fetch_twelvedata_batch(symbols: list) -> dict:
+    """Batch price fetch from Twelve Data. One API call for all symbols (max 120)."""
+    key = _TWELVE_DATA_KEY()
+    if not key or not symbols:
+        return {}
+    try:
+        sym_str = ",".join(s.upper() for s in symbols[:120])
+        url = (
+            f"https://api.twelvedata.com/price"
+            f"?symbol={urllib.parse.quote(sym_str)}&apikey={key}"
+        )
+        data = _http_get_json(url)
+        if not data:
+            return {}
+        out = {}
+        if len(symbols) == 1:
+            sym = symbols[0].upper()
+            if data.get("status") != "error":
+                price = float(data.get("price") or 0)
+                if price > 0:
+                    out[sym] = {"price": round(price, 2), "change_pct": 0.0}
+        else:
+            for sym_key, val in data.items():
+                if isinstance(val, dict) and val.get("price"):
+                    try:
+                        price = float(val["price"])
+                        if price > 0:
+                            out[sym_key.upper()] = {"price": round(price, 2), "change_pct": 0.0}
+                    except (TypeError, ValueError):
+                        pass
+        if out:
+            logger.info(f"Twelve Data batch: {len(out)}/{len(symbols)} symbols resolved")
+        return out
+    except Exception as e:
+        logger.debug(f"Twelve Data batch failed: {e}")
+    return {}
+
+
+def twelvedata_quote_batch(symbols: list) -> dict:
+    """Batch quotes from Twelve Data. Key-gated (800/day). Never raises."""
+    if not _TWELVE_DATA_KEY():
+        return {}
+    return _run_with_timeout(lambda: _fetch_twelvedata_batch(symbols), timeout=15)
+
+
+def _fetch_twelvedata_quote(ticker: str) -> Optional[dict]:
+    """Single quote from Twelve Data."""
+    result = _fetch_twelvedata_batch([ticker])
+    return result.get(ticker.upper())
+
+
+def _fetch_twelvedata_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+    """Historical OHLCV from Twelve Data (consumes ~30 credits per call)."""
+    key = _TWELVE_DATA_KEY()
+    if not key:
+        return None
+    try:
+        days = _PERIOD_DAYS.get(period, 182)
+        outputsize = min(days, 5000)
+        url = (
+            f"https://api.twelvedata.com/time_series"
+            f"?symbol={urllib.parse.quote(ticker.upper())}"
+            f"&interval=1day&outputsize={outputsize}&apikey={key}"
+        )
+        data = _http_get_json(url)
+        if not data or data.get("status") == "error":
+            return None
+        values = data.get("values", [])
+        if len(values) < 5:
+            return None
+        records = []
+        for row in values:
+            try:
+                records.append({
+                    "Date": pd.to_datetime(row["datetime"]),
+                    "Open": float(row.get("open") or 0),
+                    "High": float(row.get("high") or 0),
+                    "Low": float(row.get("low") or 0),
+                    "Close": float(row.get("close") or 0),
+                    "Volume": int(float(row.get("volume") or 0)),
+                })
+            except (KeyError, ValueError, TypeError):
+                continue
+        if len(records) < 5:
+            return None
+        df = pd.DataFrame(records).set_index("Date").sort_index()
+        logger.info(f"Twelve Data historical: {ticker} ({len(df)} rows)")
+        return df
+    except Exception as e:
+        logger.debug(f"Twelve Data historical failed for {ticker}: {e}")
+    return None
+
+
+def get_twelvedata_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+    """Historical data from Twelve Data. Returns None if key not set or call fails."""
+    if not _TWELVE_DATA_KEY():
+        return None
+    return _run_with_timeout(lambda: _fetch_twelvedata_historical(ticker, period), timeout=16)
+
+
+# ============================================================
+#  POLYGON.IO  (free key: POLYGON_KEY env var — delayed data, no daily cap)
+#  Batch snapshot: one call for up to 50 tickers.
+# ============================================================
+
+_POLYGON_KEY = lambda: os.environ.get("POLYGON_KEY", "").strip()
+
+
+def _fetch_polygon_batch(symbols: list) -> dict:
+    """Batch snapshot from Polygon.io. Returns {symbol: {price, change_pct}}."""
+    key = _POLYGON_KEY()
+    if not key or not symbols:
+        return {}
+    try:
+        tickers_str = ",".join(s.upper() for s in symbols[:50])
+        url = (
+            "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            f"?tickers={urllib.parse.quote(tickers_str)}&apiKey={key}"
+        )
+        data = _http_get_json(url)
+        if not data or not data.get("tickers"):
+            return {}
+        out = {}
+        for item in data["tickers"]:
+            sym = (item.get("ticker") or "").upper()
+            if not sym:
+                continue
+            day = item.get("day") or {}
+            price = float(day.get("c") or 0)
+            if price <= 0:
+                last = item.get("lastTrade") or {}
+                price = float(last.get("p") or 0)
+            if price <= 0:
+                continue
+            prev_day = item.get("prevDay") or {}
+            prev_close = float(prev_day.get("c") or 0)
+            change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close > 0 else 0.0
+            out[sym] = {"price": round(price, 2), "change_pct": change_pct}
+        if out:
+            logger.info(f"Polygon batch: {len(out)}/{len(symbols)} symbols resolved")
+        return out
+    except Exception as e:
+        logger.debug(f"Polygon batch failed: {e}")
+    return {}
+
+
+def polygon_quote_batch(symbols: list) -> dict:
+    """Batch snapshots from Polygon.io. Key-gated (delayed data). Never raises."""
+    if not _POLYGON_KEY():
+        return {}
+    return _run_with_timeout(lambda: _fetch_polygon_batch(symbols), timeout=15)
+
+
+def _fetch_polygon_quote(ticker: str) -> Optional[dict]:
+    """Single quote from Polygon.io."""
+    result = _fetch_polygon_batch([ticker])
+    return result.get(ticker.upper())
+
+
+def _fetch_polygon_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+    """Historical OHLCV from Polygon.io aggs endpoint (adjusted, delayed)."""
+    key = _POLYGON_KEY()
+    if not key:
+        return None
+    try:
+        days = _PERIOD_DAYS.get(period, 182)
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        url = (
+            f"https://api.polygon.io/v2/aggs/ticker/{urllib.parse.quote(ticker.upper())}/range/1/day"
+            f"/{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+            f"?adjusted=true&sort=asc&limit=5000&apiKey={key}"
+        )
+        data = _http_get_json(url)
+        if not data or data.get("status") == "ERROR" or not data.get("results"):
+            return None
+        results = data["results"]
+        if len(results) < 5:
+            return None
+        records = []
+        for bar in results:
+            try:
+                records.append({
+                    "Date": pd.to_datetime(bar["t"], unit="ms"),
+                    "Open": float(bar.get("o") or 0),
+                    "High": float(bar.get("h") or 0),
+                    "Low": float(bar.get("l") or 0),
+                    "Close": float(bar.get("c") or 0),
+                    "Volume": int(bar.get("v") or 0),
+                })
+            except (KeyError, ValueError, TypeError):
+                continue
+        if len(records) < 5:
+            return None
+        df = pd.DataFrame(records).set_index("Date").sort_index()
+        logger.info(f"Polygon historical: {ticker} ({len(df)} rows)")
+        return df
+    except Exception as e:
+        logger.debug(f"Polygon historical failed for {ticker}: {e}")
+    return None
+
+
+def get_polygon_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+    """Historical data from Polygon.io. Returns None if key not set or call fails."""
+    if not _POLYGON_KEY():
+        return None
+    return _run_with_timeout(lambda: _fetch_polygon_historical(ticker, period), timeout=16)
+
+
+# ============================================================
 #  COMBINED RESOLVERS — used by data_shield + market_data
 # ============================================================
 
 def get_price_any_source(ticker: str) -> Optional[float]:
     """
-    Try every no-key free source for a current price.
-    Returns first valid price or None.
+    Try every source for a current price. Returns first valid price or None.
 
-    Chain: stockanalysis.com → finviz.com → fmp (if key)
+    Chain: Yahoo direct → stockanalysis → finviz → Twelve Data → Polygon → FMP → price cache
     """
+    # 0. Yahoo Finance v8/v7 direct (no key — independent of yfinance library)
+    try:
+        result = yahoo_direct_quote(ticker)
+        if result and result.get("price") and float(result["price"]) > 0:
+            price = float(result["price"])
+            logger.info(f"MultiSource price for {ticker}: yahoo_direct={price}")
+            return price
+    except Exception:
+        pass
+
     # 1. stockanalysis (no key)
     try:
         price = get_stockanalysis_price(ticker)
@@ -563,12 +923,46 @@ def get_price_any_source(ticker: str) -> Optional[float]:
     except Exception:
         pass
 
-    # 3. FMP (optional key)
+    # 3. Twelve Data (optional key, 800/day)
+    try:
+        if _TWELVE_DATA_KEY():
+            result = _run_with_timeout(lambda: _fetch_twelvedata_quote(ticker), timeout=12)
+            if result and result.get("price") and float(result["price"]) > 0:
+                price = float(result["price"])
+                logger.info(f"MultiSource price for {ticker}: twelvedata={price}")
+                return price
+    except Exception:
+        pass
+
+    # 4. Polygon (optional key, delayed data)
+    try:
+        if _POLYGON_KEY():
+            result = _run_with_timeout(lambda: _fetch_polygon_quote(ticker), timeout=12)
+            if result and result.get("price") and float(result["price"]) > 0:
+                price = float(result["price"])
+                logger.info(f"MultiSource price for {ticker}: polygon={price}")
+                return price
+    except Exception:
+        pass
+
+    # 5. FMP (optional key, 250/day)
     try:
         fmp = get_fmp_quote(ticker)
         if fmp and fmp.get("currentPrice") and float(fmp["currentPrice"]) > 0:
-            logger.info(f"MultiSource price for {ticker}: fmp={fmp['currentPrice']}")
-            return float(fmp["currentPrice"])
+            price = float(fmp["currentPrice"])
+            logger.info(f"MultiSource price for {ticker}: fmp={price}")
+            return price
+    except Exception:
+        pass
+
+    # 6. Persistent price cache — last resort, survives full outages and deploys
+    try:
+        from analytics.price_cache import get_cached_price
+        cached = get_cached_price(ticker)
+        if cached and cached.get("price") and float(cached["price"]) > 0:
+            age = time.time() - cached.get("ts", 0)
+            logger.warning(f"MultiSource price for {ticker}: price_cache (stale {age:.0f}s old)")
+            return float(cached["price"])
     except Exception:
         pass
 
@@ -577,10 +971,10 @@ def get_price_any_source(ticker: str) -> Optional[float]:
 
 def get_fundamentals_any_source(ticker: str) -> Optional[dict]:
     """
-    Try every free source for fundamentals (price + metadata).
+    Try every source for fundamentals (price + metadata).
     Returns first successful dict with currentPrice > 0, or None.
 
-    Chain: stockanalysis → finviz → fmp (if key)
+    Chain: stockanalysis → finviz → fmp → Twelve Data (price only) → Polygon (price only) → price cache
     """
     # 1. stockanalysis (no key) — richest metadata
     try:
@@ -598,11 +992,62 @@ def get_fundamentals_any_source(ticker: str) -> Optional[dict]:
     except Exception:
         pass
 
-    # 3. FMP (optional key)
+    # 3. FMP (optional key, 250/day)
     try:
         info = get_fmp_quote(ticker)
         if info and info.get("currentPrice") and float(info["currentPrice"]) > 0:
             return info
+    except Exception:
+        pass
+
+    # 4. Twelve Data price — minimal dict so callers still get a valid price
+    try:
+        if _TWELVE_DATA_KEY():
+            result = _run_with_timeout(lambda: _fetch_twelvedata_quote(ticker), timeout=12)
+            if result and result.get("price") and float(result["price"]) > 0:
+                return {
+                    "currentPrice": float(result["price"]),
+                    "shortName": ticker.upper(),
+                    "_source": "twelvedata",
+                }
+    except Exception:
+        pass
+
+    # 5. Polygon price (optional key, delayed)
+    try:
+        if _POLYGON_KEY():
+            result = _run_with_timeout(lambda: _fetch_polygon_quote(ticker), timeout=12)
+            if result and result.get("price") and float(result["price"]) > 0:
+                return {
+                    "currentPrice": float(result["price"]),
+                    "shortName": ticker.upper(),
+                    "_source": "polygon",
+                }
+    except Exception:
+        pass
+
+    # 6. Yahoo direct (no key) — price only
+    try:
+        result = yahoo_direct_quote(ticker)
+        if result and result.get("price") and float(result["price"]) > 0:
+            return {
+                "currentPrice": float(result["price"]),
+                "shortName": ticker.upper(),
+                "_source": "yahoo_direct",
+            }
+    except Exception:
+        pass
+
+    # 7. Persistent price cache — absolute last resort
+    try:
+        from analytics.price_cache import get_cached_price
+        cached = get_cached_price(ticker)
+        if cached and cached.get("price") and float(cached["price"]) > 0:
+            return {
+                "currentPrice": float(cached["price"]),
+                "shortName": ticker.upper(),
+                "_source": f"price_cache({cached.get('source','?')})",
+            }
     except Exception:
         pass
 
@@ -614,8 +1059,8 @@ def get_historical_any_source(ticker: str, period: str = "6mo") -> Optional[pd.D
     Try every source for historical OHLCV data.
     Returns first DataFrame with >= 5 rows, or None.
 
-    Chain: tiingo (500/day) → alpha_vantage (25/day) → fmp (250/day)
-    All require optional env-var API keys. Returns None if none configured.
+    Chain: tiingo → alpha_vantage → fmp → twelve_data → polygon
+    All except Twelve Data and Polygon require optional env-var API keys.
     """
     # 1. Tiingo (500/day — most generous free tier)
     try:
@@ -640,6 +1085,24 @@ def get_historical_any_source(ticker: str, period: str = "6mo") -> Optional[pd.D
         df = get_fmp_historical(ticker, period)
         if df is not None and len(df) >= 5:
             logger.info(f"MultiSource historical for {ticker}: fmp ({len(df)} rows)")
+            return df
+    except Exception:
+        pass
+
+    # 4. Twelve Data historical (key-gated, ~30 credits per call)
+    try:
+        df = get_twelvedata_historical(ticker, period)
+        if df is not None and len(df) >= 5:
+            logger.info(f"MultiSource historical for {ticker}: twelvedata ({len(df)} rows)")
+            return df
+    except Exception:
+        pass
+
+    # 5. Polygon historical (key-gated, delayed data, no daily cap)
+    try:
+        df = get_polygon_historical(ticker, period)
+        if df is not None and len(df) >= 5:
+            logger.info(f"MultiSource historical for {ticker}: polygon ({len(df)} rows)")
             return df
     except Exception:
         pass
@@ -831,7 +1294,16 @@ def finviz_quote_batch(symbols: list, max_workers: int = 6, timeout: int = 20) -
 
 def multi_source_quote_batch(symbols: list) -> dict:
     """
-    Combined batch quote: stockanalysis.com first, finviz for any still-missing.
+    Combined batch quote across all sources. 9-layer safety net.
+
+    Layers (in order):
+      1. Yahoo direct v7 batch (one HTTP call for all) → v8 threaded fallback
+      2. stockanalysis.com concurrent threads (no key)
+      3. finviz.com concurrent threads (no key)
+      4. Twelve Data batch (one HTTP call, key-gated, 800/day)
+      5. Polygon batch snapshot (one HTTP call, key-gated, delayed)
+      6. FMP individual quotes (key-gated, 250/day)
+      7. Persistent price cache (last resort — survives full outages)
 
     Returns: {symbol: {"price": float, "change_pct": float}}
     Drop-in replacement for cnbc_quote_batch / stooq_quote_batch.
@@ -839,20 +1311,91 @@ def multi_source_quote_batch(symbols: list) -> dict:
     """
     if not symbols:
         return {}
+    syms_upper = [s.upper() for s in symbols]
     out = {}
-    try:
-        sa_data = stockanalysis_quote_batch(symbols)
-        out.update(sa_data)
-    except Exception as e:
-        logger.debug(f"multi_source_quote_batch stockanalysis failed: {e}")
 
-    still_missing = [s for s in symbols if s.upper() not in out]
+    # 1. Yahoo Finance direct (v7 batch → threaded v8 fallback)
+    try:
+        yh_data = yahoo_direct_quote_batch(syms_upper)
+        out.update(yh_data)
+    except Exception as e:
+        logger.debug(f"multi_source_quote_batch yahoo_direct failed: {e}")
+
+    # 2. stockanalysis.com for any still-missing
+    still_missing = [s for s in syms_upper if s not in out]
+    if still_missing:
+        try:
+            sa_data = stockanalysis_quote_batch(still_missing)
+            out.update(sa_data)
+        except Exception as e:
+            logger.debug(f"multi_source_quote_batch stockanalysis failed: {e}")
+
+    # 3. finviz.com for any still-missing
+    still_missing = [s for s in syms_upper if s not in out]
     if still_missing:
         try:
             fv_data = finviz_quote_batch(still_missing)
             out.update(fv_data)
         except Exception as e:
             logger.debug(f"multi_source_quote_batch finviz failed: {e}")
+
+    # 4. Twelve Data batch (one call, key-gated)
+    still_missing = [s for s in syms_upper if s not in out]
+    if still_missing and _TWELVE_DATA_KEY():
+        try:
+            td_data = twelvedata_quote_batch(still_missing)
+            out.update(td_data)
+        except Exception as e:
+            logger.debug(f"multi_source_quote_batch twelvedata failed: {e}")
+
+    # 5. Polygon batch snapshot (one call, key-gated, delayed data)
+    still_missing = [s for s in syms_upper if s not in out]
+    if still_missing and _POLYGON_KEY():
+        try:
+            pg_data = polygon_quote_batch(still_missing)
+            out.update(pg_data)
+        except Exception as e:
+            logger.debug(f"multi_source_quote_batch polygon failed: {e}")
+
+    # 6. FMP individual quotes (key-gated, 250/day)
+    still_missing = [s for s in syms_upper if s not in out]
+    if still_missing and _FMP_KEY():
+        for sym in still_missing[:20]:
+            try:
+                fmp = _run_with_timeout(lambda t=sym: _fetch_fmp_quote(t), timeout=10)
+                if fmp and fmp.get("currentPrice") and float(fmp["currentPrice"]) > 0:
+                    out[sym] = {"price": round(float(fmp["currentPrice"]), 2), "change_pct": 0.0}
+            except Exception:
+                pass
+
+    # 7. Persistent price cache — absolute last resort for any still-missing
+    still_missing = [s for s in syms_upper if s not in out]
+    if still_missing:
+        try:
+            from analytics.price_cache import get_cached_price
+            for sym in still_missing:
+                cached = get_cached_price(sym)
+                if cached and cached.get("price") and float(cached["price"]) > 0:
+                    out[sym] = {
+                        "price": float(cached["price"]),
+                        "change_pct": 0.0,
+                        "_stale": True,
+                    }
+        except Exception:
+            pass
+
+    # Persist all fresh (non-stale) results to price cache for future outages
+    if out:
+        try:
+            from analytics.price_cache import update_price_cache
+            fresh = {
+                sym: val["price"] for sym, val in out.items()
+                if not val.get("_stale") and val.get("price")
+            }
+            if fresh:
+                update_price_cache(fresh, source="multi_source")
+        except Exception:
+            pass
 
     return out
 
@@ -867,6 +1410,18 @@ def get_multi_source_status() -> dict:
     Tests price fetch for SPY as a canary. Returns status dict.
     """
     out = {}
+
+    # Yahoo Finance direct v8 (no key — bypasses yfinance library)
+    t0 = time.time()
+    yh_result = _run_with_timeout(lambda: _fetch_yahoo_v8_quote("SPY"), timeout=12)
+    yh_ok = bool(yh_result and yh_result.get("price") and float(yh_result["price"]) > 0)
+    out["yahoo_direct"] = {
+        "ok": yh_ok,
+        "latency_s": round(time.time() - t0, 2),
+        "status": "HEALTHY" if yh_ok else "DOWN",
+        "key_required": False,
+        "note": "Direct Yahoo v8/v7 API, independent of yfinance library",
+    }
 
     # stockanalysis — test with SPY
     t0 = time.time()
@@ -888,7 +1443,25 @@ def get_multi_source_status() -> dict:
         "key_required": False,
     }
 
-    # Alpha Vantage — just check key presence (don't burn daily quota on health check)
+    # Twelve Data — just check key presence (don't burn daily quota on health check)
+    out["twelvedata"] = {
+        "ok": bool(_TWELVE_DATA_KEY()),
+        "status": "CONFIGURED" if _TWELVE_DATA_KEY() else "NO_KEY",
+        "key_required": True,
+        "free_quota": "800 credits/day",
+        "note": "Batch-capable: 1 call for up to 120 symbols",
+    }
+
+    # Polygon.io
+    out["polygon"] = {
+        "ok": bool(_POLYGON_KEY()),
+        "status": "CONFIGURED" if _POLYGON_KEY() else "NO_KEY",
+        "key_required": True,
+        "free_quota": "unlimited (delayed data)",
+        "note": "Batch snapshot: 1 call for up to 50 symbols",
+    }
+
+    # Alpha Vantage
     out["alphavantage"] = {
         "ok": bool(_AV_KEY()),
         "status": "CONFIGURED" if _AV_KEY() else "NO_KEY",
@@ -911,5 +1484,18 @@ def get_multi_source_status() -> dict:
         "key_required": True,
         "free_quota": "250/day",
     }
+
+    # Persistent price cache
+    try:
+        from analytics.price_cache import get_cache_status
+        cache_status = get_cache_status()
+        out["price_cache"] = {
+            "ok": cache_status.get("total_tickers", 0) > 0,
+            "status": "ACTIVE" if cache_status.get("total_tickers", 0) > 0 else "EMPTY",
+            "key_required": False,
+            **cache_status,
+        }
+    except Exception:
+        out["price_cache"] = {"ok": False, "status": "ERROR"}
 
     return out

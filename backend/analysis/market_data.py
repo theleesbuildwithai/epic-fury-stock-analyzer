@@ -96,7 +96,7 @@ def get_stock_info(ticker: str) -> dict:
                     "regularMarketVolume": int(last["Volume"]),
                 }
 
-        # Attempt 3: multi-source fallback (stockanalysis → finviz → fmp)
+        # Attempt 3: multi-source fallback (yahoo_direct → stockanalysis → finviz → twelvedata → polygon → fmp)
         if info is None:
             try:
                 from analytics.multi_source_adapter import get_fundamentals_any_source
@@ -119,6 +119,19 @@ def get_stock_info(ticker: str) -> dict:
                         "fiftyTwoWeekLow": ms.get("fiftyTwoWeekLow") or 0,
                         "averageVolume": int(ms.get("avgVolume") or 0),
                         "dividendYield": ms.get("dividendYield") or 0,
+                    }
+            except Exception:
+                pass
+
+        # Attempt 4: persistent price cache — last resort, survives full outages and deploys
+        if info is None:
+            try:
+                from analytics.price_cache import get_cached_price
+                cached = get_cached_price(ticker)
+                if cached and cached.get("price") and float(cached["price"]) > 0:
+                    info = {
+                        "shortName": ticker.upper(),
+                        "regularMarketPrice": float(cached["price"]),
                     }
             except Exception:
                 pass

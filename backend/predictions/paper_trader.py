@@ -3002,6 +3002,106 @@ def _get_current_prices(symbols: list) -> dict:
     except Exception:
         pass
 
+    # TIER 6: Yahoo Finance v8/v7 direct — bypasses yfinance library entirely.
+    # Independent code path: if yfinance library breaks, this still works.
+    try:
+        t6_missing = [s for s in symbols if s not in prices]
+        if t6_missing:
+            try:
+                from analytics.multi_source_adapter import yahoo_direct_quote_batch
+                yh_prices = yahoo_direct_quote_batch(t6_missing)
+                filled = 0
+                for sym, q in yh_prices.items():
+                    if isinstance(q, dict) and q.get("price") and float(q["price"]) > 0:
+                        prices[sym] = float(q["price"])
+                        filled += 1
+                if filled:
+                    logger.warning(
+                        f"YAHOO DIRECT PRICE FALLBACK (T6): filled {filled}/{len(t6_missing)} "
+                        f"symbols all prior tiers missed"
+                    )
+            except Exception as e:
+                logger.debug(f"Yahoo direct price fallback failed (non-fatal): {e}")
+    except Exception:
+        pass
+
+    # TIER 7: Twelve Data batch — key-gated (TWELVE_DATA_KEY), 800 credits/day.
+    # One HTTP call for all missing symbols — very efficient.
+    try:
+        t7_missing = [s for s in symbols if s not in prices]
+        if t7_missing:
+            try:
+                from analytics.multi_source_adapter import twelvedata_quote_batch
+                td_prices = twelvedata_quote_batch(t7_missing)
+                filled = 0
+                for sym, q in td_prices.items():
+                    if isinstance(q, dict) and q.get("price") and float(q["price"]) > 0:
+                        prices[sym] = float(q["price"])
+                        filled += 1
+                if filled:
+                    logger.warning(
+                        f"TWELVE DATA PRICE FALLBACK (T7): filled {filled}/{len(t7_missing)} "
+                        f"symbols all prior tiers missed"
+                    )
+            except Exception as e:
+                logger.debug(f"Twelve Data price fallback failed (non-fatal): {e}")
+    except Exception:
+        pass
+
+    # TIER 8: Polygon batch snapshot — key-gated (POLYGON_KEY), delayed data, no daily cap.
+    try:
+        t8_missing = [s for s in symbols if s not in prices]
+        if t8_missing:
+            try:
+                from analytics.multi_source_adapter import polygon_quote_batch
+                pg_prices = polygon_quote_batch(t8_missing)
+                filled = 0
+                for sym, q in pg_prices.items():
+                    if isinstance(q, dict) and q.get("price") and float(q["price"]) > 0:
+                        prices[sym] = float(q["price"])
+                        filled += 1
+                if filled:
+                    logger.warning(
+                        f"POLYGON PRICE FALLBACK (T8): filled {filled}/{len(t8_missing)} "
+                        f"symbols all prior tiers missed"
+                    )
+            except Exception as e:
+                logger.debug(f"Polygon price fallback failed (non-fatal): {e}")
+    except Exception:
+        pass
+
+    # TIER 9: Persistent price cache — absolute last resort.
+    # Survives full internet outages and cold deploys. Returns last-known price
+    # from DB so portfolio valuation never shows $0 for a position.
+    try:
+        t9_missing = [s for s in symbols if s not in prices]
+        if t9_missing:
+            try:
+                from analytics.price_cache import get_cached_price
+                filled = 0
+                for sym in t9_missing:
+                    cached = get_cached_price(sym)
+                    if cached and cached.get("price") and float(cached["price"]) > 0:
+                        prices[sym] = float(cached["price"])
+                        filled += 1
+                if filled:
+                    logger.warning(
+                        f"PRICE CACHE FALLBACK (T9): filled {filled}/{len(t9_missing)} "
+                        f"symbols from persistent cache (stale data)"
+                    )
+            except Exception as e:
+                logger.debug(f"Price cache fallback failed (non-fatal): {e}")
+    except Exception:
+        pass
+
+    # Persist all successfully fetched prices to the cache for future outages
+    try:
+        if prices:
+            from analytics.price_cache import update_price_cache
+            update_price_cache(prices, source="paper_trader")
+    except Exception:
+        pass
+
     return prices
 
 

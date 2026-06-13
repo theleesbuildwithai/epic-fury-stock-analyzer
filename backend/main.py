@@ -4082,6 +4082,14 @@ def live_prices(request: Request):
         total_value = cash + positions_value
         total_return = ((total_value / ORIGINAL_CAPITAL) - 1) * 100
 
+        # Save successfully fetched prices to persistent cache
+        if position_prices:
+            try:
+                from analytics.price_cache import update_price_cache
+                update_price_cache(position_prices, source="live_prices")
+            except Exception:
+                pass
+
         return {
             "sp500": {
                 "price": sp500_price,
@@ -5043,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v62-multisource-wired-everywhere-banner-sector-cnbc-portfolio-stb-analyze-live",
+        "commit_marker": "feat-v63-yahoo-direct-twelvedata-polygon-price-cache-9tier-failure-impossible",
         "date": "2026-06-13",
         "fixes_in_build": [
             "multi_source_adapter_stockanalysis_quote_batch_concurrent_threads",
