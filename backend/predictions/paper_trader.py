@@ -6174,12 +6174,12 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
                         trough_price = float(np.min(hist_closes))
                         peak_pnl = ((entry_price / trough_price) - 1) * 100
 
-                    if peak_pnl >= 20:
-                        trail_pct = 0.70  # Keep 70% of big gains
-                    elif peak_pnl >= 12:
-                        trail_pct = 0.60  # Keep 60%
+                    if peak_pnl >= 15:
+                        trail_pct = 0.75  # Keep 75% of big gains
+                    elif peak_pnl >= 8:
+                        trail_pct = 0.65  # Keep 65%
                     else:
-                        trail_pct = 0.50  # Keep 50%
+                        trail_pct = 0.55  # Keep 55%
                     trail_level = peak_pnl * trail_pct
                     if peak_pnl >= trail_start_pct and pnl_pct < trail_level:
                         should_close = True
