@@ -3536,16 +3536,16 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
         if final_score >= long_threshold_high:
             direction = "LONG"
-            confidence = min(95, 75 + int(final_score * 4))   # 2026-06-12: raised base; score=2.5→85%
+            confidence = min(95, 78 + int(final_score * 4))   # v57b: score=2.5→88%, score=3→90%
         elif final_score >= long_threshold_low:
             direction = "LONG"
-            confidence = min(88, 65 + int(final_score * 5))   # 2026-06-12: raised base; score=1.5→72%
+            confidence = min(90, 67 + int(final_score * 5))   # v57b: score=1.5→74%, score=2→77%
         elif final_score <= short_threshold_high:
             direction = "SHORT"
-            confidence = min(95, 75 + int(abs(final_score) * 4))
+            confidence = min(95, 78 + int(abs(final_score) * 4))
         elif final_score <= short_threshold_low:
             direction = "SHORT"
-            confidence = min(88, 65 + int(abs(final_score) * 5))
+            confidence = min(90, 67 + int(abs(final_score) * 5))
         else:
             direction = "NEUTRAL"
             confidence = max(30, 50 - int(abs(final_score) * 5))
@@ -3641,10 +3641,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             ensemble = None
 
         # STACKING FLOOR: compound multiplier penalties (momentum_crash, gap, ADX, trend,
-        # ensemble) can stack to collapse a strong pick from 85% → 45%.  Cap total
-        # multiplier damage at 18 points so high-conviction picks stay above the trade gate.
+        # ensemble) can stack to collapse a strong pick from 88% → 45%.  Cap total
+        # multiplier damage at 10 points so high-conviction picks stay in the 75-88% range.
         if direction != "NEUTRAL":
-            confidence = max(_base_confidence - 18, confidence)
+            confidence = max(_base_confidence - 10, confidence)
 
         # Build factor breakdown for transparency
         factor_breakdown = {
@@ -5329,19 +5329,19 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         if score >= 4:
             signal = "STRONG BUY"
             direction = "LONG"
-            confidence = min(92, 68 + score * 4)   # 2026-06-12: raised; score=4→84%, score=5→88%
+            confidence = min(94, 72 + score * 5)   # v57b: score=4→92%, score=5→97%→94%
         elif score >= 2:
             signal = "BUY"
             direction = "LONG"
-            confidence = min(84, 58 + score * 4)   # 2026-06-12: raised; score=2→66%, score=3→70%
+            confidence = min(87, 62 + score * 5)   # v57b: score=2→72%, score=3→77%
         elif score <= -4:
             signal = "STRONG SELL"
             direction = "SHORT"
-            confidence = min(92, 68 + abs(score) * 4)
+            confidence = min(94, 72 + abs(score) * 5)
         elif score <= -2:
             signal = "SELL"
             direction = "SHORT"
-            confidence = min(84, 58 + abs(score) * 4)
+            confidence = min(87, 62 + abs(score) * 5)
         else:
             signal = "HOLD"
             direction = "NEUTRAL"
