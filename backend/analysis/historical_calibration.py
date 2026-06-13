@@ -157,6 +157,23 @@ def _fetch_max_history(symbols: list) -> dict:
         if batch_num < len(batches) - 1:
             time.sleep(_BATCH_DELAY)
 
+    # Fallback: per-symbol multi-source for any gaps
+    missing = [s for s in symbols if s not in result]
+    if missing:
+        try:
+            from analytics.multi_source_adapter import get_historical_any_source
+            for sym in missing:
+                try:
+                    df2 = get_historical_any_source(sym, "5y")
+                    if df2 is not None and "Close" in df2.columns:
+                        close_series = df2["Close"].dropna()
+                        if len(close_series) >= 252:
+                            result[sym] = close_series
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     return result
 
 
@@ -448,6 +465,12 @@ def _analyze_volatility_regimes(spy_series: pd.Series) -> dict:
         time.sleep(_BATCH_DELAY)
         vix_df = yf.download("^VIX", period="max", progress=False)
         if vix_df is None or len(vix_df) < 252:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                vix_df = get_historical_any_source("^VIX", "5y")
+            except Exception:
+                vix_df = None
+        if vix_df is None or len(vix_df) < 252:
             return {}
 
         vix_close = vix_df["Close"]
@@ -604,7 +627,26 @@ def _analyze_cross_asset_leads(history: dict, sector_map: dict) -> dict:
         macro_df = yf.download(macro_symbols, period="max", progress=False, group_by="ticker")
 
         if macro_df is None or macro_df.empty:
-            return {}
+            # Fallback: per-symbol multi-source
+            try:
+                import pandas as pd
+                from analytics.multi_source_adapter import get_historical_any_source
+                frames = {}
+                for sym in macro_symbols:
+                    try:
+                        df2 = get_historical_any_source(sym, "5y")
+                        if df2 is not None and "Close" in df2.columns:
+                            frames[sym] = df2["Close"].dropna()
+                    except Exception:
+                        continue
+                if frames:
+                    macro_df = pd.concat(frames, axis=1)
+                    macro_df.columns = pd.MultiIndex.from_tuples(
+                        [(s, "Close") for s in frames.keys()])
+                else:
+                    return {}
+            except Exception:
+                return {}
 
         # Extract macro series
         macro_series = {}

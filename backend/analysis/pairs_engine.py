@@ -276,6 +276,23 @@ def _fetch_universe_prices() -> dict:
             logger.debug(f"Pairs fetch batch failed: {e}")
             continue
 
+    # Fallback: per-symbol multi-source historical for any gaps
+    missing = [s for s in symbols if s not in out]
+    if missing:
+        try:
+            from analytics.multi_source_adapter import get_historical_any_source
+            for sym in missing:
+                try:
+                    df2 = get_historical_any_source(sym, "1y")
+                    if df2 is not None and len(df2) >= MIN_DATA_POINTS:
+                        closes = df2["Close"].dropna().values
+                        if closes is not None and len(closes) >= MIN_DATA_POINTS:
+                            out[sym] = closes
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     return out
 
 
@@ -432,6 +449,20 @@ def check_exit_for_pair(sym_a: str, sym_b: str) -> dict:
         )
         a = _safe_close_series(df, sym_a)
         b = _safe_close_series(df, sym_b)
+        # Fallback per leg if yfinance returned None
+        if a is None or b is None:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                if a is None:
+                    df_a = get_historical_any_source(sym_a, "3mo")
+                    if df_a is not None and len(df_a) >= 30:
+                        a = df_a["Close"].dropna().values
+                if b is None:
+                    df_b = get_historical_any_source(sym_b, "3mo")
+                    if df_b is not None and len(df_b) >= 30:
+                        b = df_b["Close"].dropna().values
+            except Exception:
+                pass
         if a is None or b is None:
             return {"action": "hold", "z_score": 0.0, "ok": False}
 

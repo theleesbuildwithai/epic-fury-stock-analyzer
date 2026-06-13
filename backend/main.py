@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v63-yahoo-direct-twelvedata-polygon-price-cache-9tier-failure-impossible",
+        "commit_marker": "feat-v64-all-sources-wired-every-fetch-path-11-files-patched",
         "date": "2026-06-13",
         "fixes_in_build": [
             "multi_source_adapter_stockanalysis_quote_batch_concurrent_threads",

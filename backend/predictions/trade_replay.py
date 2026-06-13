@@ -60,7 +60,17 @@ def _safe_price_window(ticker: str, start: str, days: int = 30) -> list:
         return [float(c) for c in closes]
     except Exception as e:
         logger.debug(f"_safe_price_window {ticker} soft-fail: {e}")
-        return []
+    # Fallback: multi-source historical adapter
+    try:
+        from analytics.multi_source_adapter import get_historical_any_source
+        _period = f"{int(days) + 5}d" if (days + 5) <= 365 else "1y"
+        df2 = get_historical_any_source(ticker, _period)
+        if df2 is not None and len(df2) >= 1:
+            closes2 = df2["Close"].dropna().values.tolist()
+            return [float(c) for c in closes2]
+    except Exception:
+        pass
+    return []
 
 
 def _simulate_exit(closes: list, entry_price: float, direction: str,

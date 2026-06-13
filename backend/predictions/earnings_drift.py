@@ -144,7 +144,25 @@ def _measure_drift(ticker: str, event_date: str) -> dict:
         return out
     except Exception as e:
         logger.debug(f"_measure_drift {ticker} {event_date} soft-fail: {e}")
-        return {}
+    # Fallback: multi-source historical adapter (~3 months to cover drift windows)
+    try:
+        from analytics.multi_source_adapter import get_historical_any_source
+        df2 = get_historical_any_source(ticker, "3mo")
+        if df2 is not None and len(df2) >= 5:
+            closes2 = df2["Close"].dropna().values.tolist()
+            closes2 = [float(c) for c in closes2]
+            anchor = closes2[0] if closes2 else 0
+            if anchor > 0:
+                out = {}
+                for window in DRIFT_WINDOWS:
+                    if len(closes2) > window:
+                        out[f"drift_{window}d_pct"] = round(
+                            (float(closes2[window]) / anchor - 1) * 100, 2)
+                if out:
+                    return out
+    except Exception:
+        pass
+    return {}
 
 
 def build_ticker_drift_history(ticker: str,

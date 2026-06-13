@@ -71,6 +71,23 @@ def _safe_recent_closes(tickers: list, days: int) -> dict:
                 continue
     except Exception as e:
         logger.debug(f"_safe_recent_closes soft-fail: {e}")
+    # Fallback: per-ticker multi-source historical for any missing tickers
+    missing = [t for t in tickers if t not in out]
+    if missing:
+        try:
+            from analytics.multi_source_adapter import get_historical_any_source
+            _period = f"{int(days)}d" if days <= 365 else "1y"
+            for t in missing:
+                try:
+                    df2 = get_historical_any_source(t, _period)
+                    if df2 is not None and len(df2) >= 30:
+                        s = df2["Close"].dropna().values.tolist()
+                        if len(s) >= 30:
+                            out[t] = [float(x) for x in s]
+                except Exception:
+                    continue
+        except Exception:
+            pass
     return out
 
 

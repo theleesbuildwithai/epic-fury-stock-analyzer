@@ -198,6 +198,30 @@ def _get_pair_prices(ticker_a: str, ticker_b: str) -> dict:
                 pass
     except Exception as e:
         logger.debug(f"_get_pair_prices ({ticker_a}/{ticker_b}): {e}")
+
+    # Fallback T1: multi-source batch for missing tickers
+    missing = [t for t in [ticker_a, ticker_b] if t not in result or result.get(t, 0) <= 0]
+    if missing:
+        try:
+            from analytics.multi_source_adapter import multi_source_quote_batch
+            batch_res = multi_source_quote_batch(missing)
+            for tk in missing:
+                p = (batch_res.get(tk) or {}).get("price")
+                if p and math.isfinite(float(p)) and float(p) > 0:
+                    result[tk] = float(p)
+        except Exception:
+            pass
+    # Fallback T2: persistent price cache for still-missing tickers
+    still_missing = [t for t in [ticker_a, ticker_b] if t not in result or result.get(t, 0) <= 0]
+    if still_missing:
+        try:
+            from analytics.price_cache import get_cached_price
+            for tk in still_missing:
+                cached = get_cached_price(tk)
+                if cached and cached.get("price") and float(cached["price"]) > 0:
+                    result[tk] = float(cached["price"])
+        except Exception:
+            pass
     return result
 
 
@@ -658,7 +682,7 @@ def _get_single_price(ticker: str) -> float:
         import yfinance as yf
         df = yf.download(ticker, period="2d", progress=False, auto_adjust=True)
         if df is None or df.empty:
-            return None
+            raise ValueError("empty")
         close = df["Close"]
         if hasattr(close, "iloc"):
             if hasattr(close, "columns"):
@@ -666,6 +690,22 @@ def _get_single_price(ticker: str) -> float:
             val = float(close.dropna().iloc[-1])
             if math.isfinite(val) and val > 0:
                 return val
+    except Exception:
+        pass
+    # Fallback T1: multi-source adapter (Yahoo direct, Twelve Data, Polygon, FMP, Tiingo)
+    try:
+        from analytics.multi_source_adapter import get_price_any_source
+        p = get_price_any_source(ticker)
+        if p and math.isfinite(p) and p > 0:
+            return p
+    except Exception:
+        pass
+    # Fallback T2: persistent price cache
+    try:
+        from analytics.price_cache import get_cached_price
+        cached = get_cached_price(ticker)
+        if cached and cached.get("price") and float(cached["price"]) > 0:
+            return float(cached["price"])
     except Exception:
         pass
     return None

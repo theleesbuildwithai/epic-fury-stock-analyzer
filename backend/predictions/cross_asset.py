@@ -87,7 +87,33 @@ def _safe_recent_data(ticker: str, days: int = 30) -> dict:
         }
     except Exception as e:
         logger.debug(f"_safe_recent_data {ticker} soft-fail: {e}")
-        return {}
+    # Fallback: multi-source historical adapter
+    try:
+        from analytics.multi_source_adapter import get_historical_any_source
+        _period = f"{int(days)}d" if days <= 365 else "1y"
+        df2 = get_historical_any_source(ticker, _period)
+        if df2 is not None and len(df2) >= 5:
+            closes2 = df2["Close"].dropna().values.tolist()
+            closes2 = [float(c) for c in closes2]
+            if len(closes2) >= 2:
+                latest = float(closes2[-1])
+                prev = float(closes2[-2])
+                pct_1d = (latest / prev - 1) * 100 if prev > 0 else 0
+                pct_5d = ((latest / closes2[-6] - 1) * 100
+                          if len(closes2) >= 6 and closes2[-6] > 0 else 0)
+                pct_20d = ((latest / closes2[0] - 1) * 100
+                           if closes2[0] > 0 else 0)
+                return {
+                    "latest": round(latest, 4),
+                    "prev": round(prev, 4),
+                    "pct_1d": round(pct_1d, 2),
+                    "pct_5d": round(pct_5d, 2),
+                    "pct_20d": round(pct_20d, 2),
+                    "samples": len(closes2),
+                }
+    except Exception:
+        pass
+    return {}
 
 
 def _classify_regime_from_signals(signals: dict) -> dict:

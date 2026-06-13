@@ -405,6 +405,12 @@ def ann_predict_direction(ticker: str, price_data=None) -> Dict:
         else:
             _throttle()
             df = yf.download(ticker, period="2y", progress=False, timeout=15)
+            if df is None or df.empty:
+                try:
+                    from analytics.multi_source_adapter import get_historical_any_source
+                    df = get_historical_any_source(ticker, "2y")
+                except Exception:
+                    df = None
 
         closes = _safe_close_array(df)
         volumes = _safe_volume_array(df)
@@ -851,6 +857,12 @@ def monte_carlo_price_simulation(ticker: str, horizon_days: int = 20,
         else:
             _throttle()
             df = yf.download(ticker, period="1y", progress=False, timeout=15)
+            if df is None or df.empty:
+                try:
+                    from analytics.multi_source_adapter import get_historical_any_source
+                    df = get_historical_any_source(ticker, "1y")
+                except Exception:
+                    df = None
 
         closes = _safe_close_array(df)
         if len(closes) < 60:
@@ -1044,6 +1056,23 @@ def cointegration_test(sym_a: str, sym_b: str, lookback: int = 120) -> Dict:
         _throttle()
         df = yf.download([sym_a, sym_b], period="1y", progress=False,
                          group_by="ticker", timeout=15)
+        # Fallback per leg if yfinance fails
+        try:
+            import pandas as pd
+            if df is None or df.empty:
+                raise ValueError("empty")
+        except Exception:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                df_a = get_historical_any_source(sym_a, "1y")
+                df_b = get_historical_any_source(sym_b, "1y")
+                if df_a is not None and df_b is not None:
+                    import pandas as pd
+                    df = pd.concat({sym_a: df_a["Close"], sym_b: df_b["Close"]}, axis=1)
+                    df.columns = pd.MultiIndex.from_tuples(
+                        [(sym_a, "Close"), (sym_b, "Close")])
+            except Exception:
+                df = None
 
         try:
             a = df[sym_a]["Close"].values.astype(float)
@@ -1346,6 +1375,12 @@ def hmm_regime_detect(ticker: str = "^GSPC", lookback_days: int = 252,
         else:
             _throttle()
             df = yf.download(ticker, period="2y", progress=False, timeout=15)
+            if df is None or df.empty:
+                try:
+                    from analytics.multi_source_adapter import get_historical_any_source
+                    df = get_historical_any_source(ticker, "2y")
+                except Exception:
+                    df = None
 
         closes = _safe_close_array(df)
         if len(closes) < 100:

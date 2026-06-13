@@ -176,6 +176,16 @@ def _fetch_sp500_close_on(date_str: str) -> Optional[float]:
                 pass
     except Exception as e:
         logger.debug(f"_fetch_sp500_close_on({date_str}) failed: {e}")
+    # Fallback: multi-source historical for SPY
+    try:
+        from analytics.multi_source_adapter import get_historical_any_source
+        df_spy = get_historical_any_source("SPY", "1mo")
+        if df_spy is not None and len(df_spy) > 0:
+            val = float(df_spy["Close"].dropna().iloc[0]) * 10.0
+            if 100 < val < 100000:
+                return val
+    except Exception:
+        pass
     return None
 
 

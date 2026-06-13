@@ -177,6 +177,23 @@ def _fetch_all() -> dict:
         except Exception as e:
             logger.debug(f"cross_asset_macro fetch batch failed: {e}")
             continue
+
+    # Fallback: per-symbol multi-source for any gaps
+    missing = [s for s in ALL_TICKERS if s not in out]
+    if missing:
+        try:
+            from analytics.multi_source_adapter import get_historical_any_source
+            for sym in missing:
+                try:
+                    df2 = get_historical_any_source(sym, "3mo")
+                    if df2 is not None and len(df2) >= 5:
+                        arr = df2["Close"].dropna().values
+                        if arr is not None and len(arr) >= 5:
+                            out[sym] = arr
+                except Exception:
+                    continue
+        except Exception:
+            pass
     return out
 
 

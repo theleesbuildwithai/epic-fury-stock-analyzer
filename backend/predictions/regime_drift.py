@@ -89,6 +89,13 @@ def snapshot_regime() -> dict:
         spy = yf.download("SPY", start=start.strftime("%Y-%m-%d"),
                           end=end.strftime("%Y-%m-%d"),
                           progress=False, auto_adjust=True, threads=False)
+        if spy is None or spy.empty or len(spy) < 10:
+            # Fallback: multi-source historical for SPY
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                spy = get_historical_any_source("SPY", "1y")
+            except Exception:
+                spy = None
         vix = yf.download("^VIX", start=(end - timedelta(days=10)).strftime("%Y-%m-%d"),
                           end=end.strftime("%Y-%m-%d"),
                           progress=False, auto_adjust=True, threads=False)
