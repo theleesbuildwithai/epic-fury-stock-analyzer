@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v66-trail-start-synced-cache-age-fix-audit-clean",
+        "commit_marker": "feat-v66b-cache-age-fix-symbols-to-buy-endpoint",
         "date": "2026-06-13",
         "fixes_in_build": [
             "v66_exit_checker_trail_start_2p5x_5pct_matches_main_loop",
@@ -7243,7 +7243,10 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         return {
             "ok": True,
             "generated_at": data.get("generated_at") or "unknown",
-            "cache_age_seconds": round(cache_age, 1) if cache_age is not None else None,
+            # Cap at 86400s: time=0 cold-start restore produces ~1.78B sec (nonsensical).
+            # None signals frontend to show "Refreshing…" instead of a huge number.
+            "cache_age_seconds": (round(cache_age, 1) if (cache_age is not None and cache_age < 86400) else None),
+            "cache_is_restoring": (cache_entry is not None and cache_entry.get("time", 1) == 0),
             "regime": (data.get("regime") or {}).get("regime", "unknown"),
             "regime_confidence": (data.get("regime") or {}).get("confidence", 0),
             "long_picks": formatted_longs,
