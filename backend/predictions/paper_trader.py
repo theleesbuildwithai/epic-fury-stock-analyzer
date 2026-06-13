@@ -455,11 +455,11 @@ def _get_min_confidence() -> int:
         # range 52-60) lets 6-8 picks through → 54-72% gross at 9% sizing.
         # Quality is still enforced by composite_score floor + Kelly
         # sizing + sector concentration cap + correlation block.
-        # 2026-06-11 v2: lowered 45→38. Effective gate with streak (+5) = 43.
-        # Quality enforced by composite_score floor + direction normalization
-        # + Kelly sizing + sector cap. Confidence bar kept by the formula
-        # (outputs 55%+ for valid picks). Gate just needs to let them through.
-        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 38))
+        # 2026-06-13 v64: raised 38→52. At 38, gate is too loose — lets in
+        # low-IC signals that destroy win rate. Picks engine outputs 55%+
+        # for real signals. 52 admits all valid picks, blocks marginal ones.
+        # With autotune +5 (losing streak), effective gate = 57.
+        base = int(_live_safety_float("LIVE_MIN_CONFIDENCE", 52))
     elif _is_preservation_mode():
         base = 65
     else:
@@ -504,7 +504,7 @@ MIN_CONFIDENCE = 35  # Default — overridden by _get_min_confidence() at trade 
 # one batch of picks. With ~3 trade cycles per day, this gives a
 # theoretical max of 15 trades/day (vs the 22 yesterday that included
 # DOCN's -55% harpoon). Real expected: 5-12/day.
-MAX_TRADES_PER_CYCLE = 12  # 2026-06-11 v2: was 7 — fire more trades per cycle
+MAX_TRADES_PER_CYCLE = 6   # 2026-06-13 v64: was 12 — quality over quantity. Fewer trades, higher IC.
 
 # 2026-06-05: Minimum hours an EQUITY position must be held before
 # any soft exit (profit-lock, time-decay, bear-protection) can fire.
@@ -1670,11 +1670,13 @@ def _autonomous_stop_and_target(
         base_hold = 7 if confidence >= 70 else 3
         hold_days = max(2, min(14, base_hold))
     elif regime == "BULL":
-        base_hold = 30 if confidence >= 70 else 14
-        hold_days = max(7, min(60, base_hold))
-    else:
-        base_hold = 14 if confidence >= 70 else 7
-        hold_days = max(5, min(30, base_hold))
+        # 2026-06-13: raised minimums. BULL trends need weeks to deliver.
+        # Low conf 14→21d (was 7 min), high conf 30→45d — let real trends run.
+        base_hold = 45 if confidence >= 70 else 21
+        hold_days = max(14, min(60, base_hold))
+    else:  # SIDEWAYS
+        base_hold = 14 if confidence >= 70 else 10
+        hold_days = max(7, min(30, base_hold))
 
     # --- CALCULATE ACTUAL PRICES ---
     if direction == "long":
@@ -3262,8 +3264,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # A stable stock (ATR 1%) can start trailing at 3%.
             # Trail width = 1x ATR below peak — gives exactly one day of noise room.
             stock_atr = _calculate_stock_atr(ticker)
-            trail_start_pct = stock_atr * 100 * 1.5  # Start trailing at 1.5x daily ATR (was 2x — too late)
-            trail_start_pct = max(2.0, min(trail_start_pct, 8.0))  # Clamp 2-8% (was 3-12% — waited too long)
+            trail_start_pct = stock_atr * 100 * 2.5  # Start trailing at 2.5x daily ATR — real gain, not 1-day noise
+            # Clamp 5-12%: won't trail on a 3% bounce; position trades get room to develop
+            trail_start_pct = max(5.0, min(trail_start_pct, 12.0))
 
             if not should_close and pnl_pct > trail_start_pct:
                 try:
@@ -3286,11 +3289,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
                         # Smart trail: keep more gains, protect profits aggressively
                         if peak_pnl >= 15:
-                            trail_pct = 0.70  # Keep 70% of big gains (was 65%)
+                            trail_pct = 0.75  # Keep 75% of big gains
                         elif peak_pnl >= 8:
-                            trail_pct = 0.60  # Keep 60% (was 55%)
+                            trail_pct = 0.65  # Keep 65%
                         else:
-                            trail_pct = 0.50  # Keep 50% of smaller gains (was 45%)
+                            trail_pct = 0.55  # Keep 55% of smaller gains
 
                         trail_level = peak_pnl * trail_pct
 
@@ -3327,15 +3330,27 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     entry_date = datetime.fromisoformat(trade["entry_date"])
                     days_held = (datetime.now() - entry_date).days
                     max_hold = trade.get("hold_duration_days", DEFAULT_HOLD_DAYS)
-                    # 2026-06-05: 0.4/0.5 → 0.6/0.7 (more patience)
-                    decay_frac = 0.6 if _is_preservation_mode() else 0.7
+                    _hc = trade.get("hold_class", "swing")
+                    # Hold-class-specific time decay:
+                    # position (14-60d): only fire at 85% of hold time, need <5% to cut
+                    #   → protects multi-week setups from premature EOD flushes
+                    # swing (2-14d): fire at 75% of hold time, need <1.5% to cut
+                    # intraday: handled by hard target/stop, no decay needed
+                    if _hc == "position":
+                        decay_frac = 0.85
+                        _decay_threshold = 5.0  # Only cut if truly dead money
+                    elif _hc == "swing":
+                        decay_frac = 0.75 if not _is_preservation_mode() else 0.60
+                        _decay_threshold = 1.5
+                    else:  # intraday
+                        decay_frac = 0.60
+                        _decay_threshold = 0.5
                     half_hold = max(3, int(max_hold * decay_frac))
-                    _decay_threshold = 2.0 if trade.get("hold_class", "swing") == "position" else 0.5
                     if days_held >= half_hold and pnl_pct <= _decay_threshold:
                         should_close = True
                         close_reason = (
-                            f"TIME DECAY: {days_held}d held ({int(decay_frac*100)}%+ of {max_hold}d), "
-                            f"only {pnl_pct:+.1f}% — cutting dead weight"
+                            f"TIME DECAY: {days_held}d held ({int(decay_frac*100)}%+ of {max_hold}d "
+                            f"[{_hc}]), only {pnl_pct:+.1f}% — cutting dead weight"
                         )
                 except Exception:
                     pass
@@ -3688,15 +3703,32 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         if preservation:
             logger.warning(f"CAPITAL PRESERVATION MODE: confidence >= {min_conf}, score >= {min_score}, position size 3%")
 
+        # REGIME-SPECIFIC CONFIDENCE GATES — 2026-06-13 v65
+        # SIDEWAYS: noise-dominated, need highest conviction to avoid chop
+        # BEAR longs: trading against trend = highest bar (longs in bear get stopped)
+        # BEAR shorts: directionally aligned but still need quality signal
+        # BULL: trend support — base gate is sufficient
+        _regime_for_gate = regime  # regime already set above
+        if _regime_for_gate == "SIDEWAYS":
+            _long_min_conf = max(min_conf, 62)   # Sideways chops longs hardest
+            _short_min_conf = max(min_conf, 60)  # Sideways shorts also unreliable
+        elif _regime_for_gate == "BEAR":
+            _long_min_conf = max(min_conf, 70)   # Longs in bear = very high bar
+            _short_min_conf = max(min_conf, 58)  # Shorts aligned with trend
+        else:  # BULL
+            _long_min_conf = max(min_conf, 52)   # Bull longs — trend is your friend
+            _short_min_conf = max(min_conf, 65)  # Shorts against bull trend = high bar
+        logger.info(f"Confidence gates — long:{_long_min_conf} short:{_short_min_conf} (regime:{_regime_for_gate}, base:{min_conf})")
+
         # Score-direction guard: longs must have positive score, shorts negative.
         # abs() was used historically but allows stale cache entries whose score
         # has flipped direction (e.g. PPLT score=-1.2 in long queue) to fire.
         long_candidates = [p for p in quant_picks.get("long_picks", [])
-                          if p["confidence"] >= min_conf
+                          if p["confidence"] >= _long_min_conf
                           and p.get("composite_score", 0) >= min_score
                           and p["symbol"] not in open_tickers]
         short_candidates = [p for p in quant_picks.get("short_picks", [])
-                           if p["confidence"] >= min_conf
+                           if p["confidence"] >= _short_min_conf
                            and p.get("composite_score", 0) <= -min_score
                            and p["symbol"] not in open_tickers]
 
@@ -3914,13 +3946,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 except Exception:
                     _rr = 0
             # Keep pick if R:R >= 1.5 OR no stop/target data (can't compute)
-            if _rr >= 1.5 or not _stop or not _target:
+            if _rr >= 2.0 or not _stop or not _target:
                 _rr_filtered.append(_rp)
             else:
-                logger.info(f"R:R FILTER: skipped {_rp.get('symbol','?')} {_rp.get('direction','?')} R:R={_rr:.2f} < 1.5")
+                logger.info(f"R:R FILTER: skipped {_rp.get('symbol','?')} {_rp.get('direction','?')} R:R={_rr:.2f} < 2.0")
         all_picks = _rr_filtered
         if len(all_picks) < _pre_rr_count:
-            logger.info(f"R:R FILTER: dropped {_pre_rr_count - len(all_picks)} picks (R:R < 1.5x), {len(all_picks)} remain")
+            logger.info(f"R:R FILTER: dropped {_pre_rr_count - len(all_picks)} picks (R:R < 2.0x), {len(all_picks)} remain")
 
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)
