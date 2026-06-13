@@ -236,7 +236,13 @@ def _try_yfinance(ticker: str) -> tuple:
     import math as _m
     try:
         import yfinance as yf
-        df = yf.download(ticker, period="5d", progress=False)
+        import threading as _mg_thr
+        _mg_r = [None]
+        _mg_t = _mg_thr.Thread(
+            target=lambda r=_mg_r, t=ticker: r.__setitem__(0, yf.download(t, period="5d", progress=False)),
+            daemon=True)
+        _mg_t.start(); _mg_t.join(timeout=10)
+        df = _mg_r[0]
         if df is None or df.empty:
             return None, "empty"
         close = df["Close"]

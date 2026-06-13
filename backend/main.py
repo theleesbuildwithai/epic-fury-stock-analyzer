@@ -3915,36 +3915,47 @@ def trigger_learning():
     """Manually trigger the weekend learning cycle — reviews trades, adjusts weights, preps Monday picks."""
     import threading
     def _run():
-        _weekend_learning_cycle()
+        try:
+            _weekend_learning_cycle()
+        except Exception as _e:
+            logger.error("trigger-learning background error: %s", _e)
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "triggered", "message": "Weekend learning cycle started in background"}
 
 @app.post("/api/trigger-premarket")
 def trigger_premarket():
     """Manually trigger pre-market intelligence scan — checks futures, global markets, overnight news."""
-    _premarket_scan()
-    intel = scan_overnight_intelligence()
-    return {
-        "status": "complete",
-        "futures_sentiment": intel.get("futures_sentiment"),
-        "overnight_gap_pct": intel.get("overnight_gap_pct"),
-        "weekend_shift_detected": intel.get("weekend_shift_detected"),
-        "confidence_modifier": intel.get("confidence_modifier"),
-        "signals": intel.get("signals", []),
-    }
+    try:
+        _premarket_scan()
+        intel = scan_overnight_intelligence()
+        return {
+            "status": "complete",
+            "futures_sentiment": intel.get("futures_sentiment"),
+            "overnight_gap_pct": intel.get("overnight_gap_pct"),
+            "weekend_shift_detected": intel.get("weekend_shift_detected"),
+            "confidence_modifier": intel.get("confidence_modifier"),
+            "signals": intel.get("signals", []),
+        }
+    except Exception as e:
+        logger.error("trigger-premarket error: %s", e)
+        return {"status": "error", "message": str(e)[:200]}
 
 @app.post("/api/trigger-trade-cycle")
 def trigger_trade_cycle():
     """Manually trigger a single trade cycle — generates picks and executes trades."""
     import threading
     def _run():
-        _run_auto_trade_cycle()
+        try:
+            _run_auto_trade_cycle()
+        except Exception as _e:
+            logger.error("trigger-trade-cycle background error: %s", _e)
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "triggered", "message": "Trade cycle started in background"}
 
 @app.get("/api/intelligence-report")
-def get_intelligence_report():
+def get_intelligence_report(request: Request):
     """Get the self-learning system's intelligence report — what it learned, strengths, weaknesses."""
+    check_rate_limit(request.client.host)
     from fastapi.responses import JSONResponse
     try:
         from analytics.nan_helpers import scrub_nan
@@ -4725,9 +4736,16 @@ def force_reset(request: Request):
                     # Close options at $0.01 (write off)
                     close_paper_trade(trade["id"], 0.01)
                 else:
-                    # Close equity at current price
+                    # Close equity at current price — 8s thread timeout
                     try:
-                        data = yf.download(ticker, period="1d", progress=False)
+                        import threading as _fc_thr
+                        _fc_r = [None]
+                        _fc_t = _fc_thr.Thread(
+                            target=lambda r=_fc_r, tk=ticker: r.__setitem__(
+                                0, yf.download(tk, period="1d", progress=False)),
+                            daemon=True)
+                        _fc_t.start(); _fc_t.join(timeout=8)
+                        data = _fc_r[0]
                         if data is not None and len(data) > 0:
                             price = float(data["Close"].iloc[-1])
                         else:
@@ -4828,8 +4846,9 @@ def ai_analyst(request: Request, q: str = ""):
 # - attribution: per-factor and per-sector P&L attribution
 # - statarb: pairs cointegration scan, mean-reversion candidates
 @app.get("/api/factor-analytics")
-def factor_analytics_endpoint():
+def factor_analytics_endpoint(request: Request):
     """Hedge-fund-grade analytics. Built Sprint 1, Jun 6-7."""
+    check_rate_limit(request.client.host)
     from fastapi.responses import JSONResponse
     try:
         from analytics.nan_helpers import scrub_nan
@@ -5006,7 +5025,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v59-thread-timeouts-all-yf-calls-quant-engine-complete",
+        "commit_marker": "feat-v60-comprehensive-safety-nets-data-shield-macro-rate-limits-triggers",
         "date": "2026-06-12",
         "fixes_in_build": [
             "daily_summary_initial_yf_download_10s_thread_timeout",
@@ -9710,10 +9729,15 @@ def watchlist_backtest(request: Request, tickers: str = "", period: str = "6mo",
         price_series = {}
 
         def _download_single(sym):
-            """Download a single ticker and return its Close series."""
-            import time as _t
+            """Download a single ticker and return its Close series — 10s thread timeout."""
+            import time as _t, threading as _wb_thr
             _t.sleep(1.0)  # Light throttle (1s) — safe for 5 sequential calls
-            sdf = yf.download(sym, period="2y", progress=False)
+            _wb_r = [None]
+            _wb_t = _wb_thr.Thread(
+                target=lambda r=_wb_r, s=sym: r.__setitem__(0, yf.download(s, period="2y", progress=False)),
+                daemon=True)
+            _wb_t.start(); _wb_t.join(timeout=10)
+            sdf = _wb_r[0]
             if sdf is None or sdf.empty:
                 return None
             # Flatten MultiIndex if present (yfinance wraps single tickers too)

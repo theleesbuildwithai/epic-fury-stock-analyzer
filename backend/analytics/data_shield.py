@@ -166,13 +166,20 @@ def _download_from_stooq(ticker: str, period: str = "6mo") -> Optional[pd.DataFr
 
 def _download_yfinance_with_retry(ticker: str, period: str = "6mo",
                                    max_attempts: int = 3) -> Optional[pd.DataFrame]:
-    """yfinance download with exponential backoff retry."""
+    """yfinance download with exponential backoff retry + 10s thread timeout per attempt."""
     import yfinance as yf
+    import threading as _ds_thr
 
     delay = 1.0
     for attempt in range(max_attempts):
         try:
-            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+            _ds_r = [None]
+            _ds_t = _ds_thr.Thread(
+                target=lambda r=_ds_r, t=ticker, p=period: r.__setitem__(
+                    0, yf.download(t, period=p, progress=False, auto_adjust=True)
+                ), daemon=True)
+            _ds_t.start(); _ds_t.join(timeout=10)
+            df = _ds_r[0]
             if df is not None and not df.empty:
                 return df
             logger.debug(f"DataShield: yfinance empty for {ticker}, attempt {attempt + 1}")
@@ -310,7 +317,13 @@ def safe_ticker_info(ticker: str) -> dict:
 
     for attempt in range(2):
         try:
-            info = yf.Ticker(ticker).info or {}
+            import threading as _dsi_thr
+            _dsi_r = [{}]
+            _dsi_t = _dsi_thr.Thread(
+                target=lambda r=_dsi_r, t=ticker: r.__setitem__(0, yf.Ticker(t).info or {}),
+                daemon=True)
+            _dsi_t.start(); _dsi_t.join(timeout=5)
+            info = _dsi_r[0]
             if info:
                 _cache_set(cache_key, info, "yfinance")
                 return info
@@ -342,13 +355,19 @@ def get_shield_status() -> dict:
         "sources": {},
     }
 
-    # Test yfinance with a quick SPY fetch
+    # Test yfinance with a quick SPY fetch — 8s thread timeout
     yf_ok = False
     yf_latency = None
     try:
         import yfinance as yf
+        import threading as _spy_thr
+        _spy_r = [None]
         t0 = time.time()
-        df = yf.download("SPY", period="5d", progress=False)
+        _spy_t = _spy_thr.Thread(
+            target=lambda r=_spy_r: r.__setitem__(0, yf.download("SPY", period="5d", progress=False)),
+            daemon=True)
+        _spy_t.start(); _spy_t.join(timeout=8)
+        df = _spy_r[0]
         yf_latency = round(time.time() - t0, 2)
         yf_ok = df is not None and len(df) >= 3
     except Exception:
