@@ -3945,7 +3945,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     _rp["reward_risk_ratio"] = _rr
                 except Exception:
                     _rr = 0
-            # Keep pick if R:R >= 1.5 OR no stop/target data (can't compute)
+            # Keep pick if R:R >= 2.0 OR no stop/target data (can't compute)
             if _rr >= 2.0 or not _stop or not _target:
                 _rr_filtered.append(_rp)
             else:
@@ -6154,9 +6154,10 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
             close_reason = f"SHORT MAX LOSS: down {pnl_pct:+.1f}% — hard cap"
 
         # AUTONOMOUS TRAILING PROFIT PROTECTION (ATR-based, per-stock)
+        # 2026-06-13 v66: sync with main loop — was 2x/3-12%, now 2.5x/5-12% for consistency
         stock_atr = _calculate_stock_atr(ticker)
-        trail_start_pct = stock_atr * 100 * 2  # Start trailing at 2x daily ATR
-        trail_start_pct = max(3.0, min(trail_start_pct, 12.0))  # Clamp 3-12%
+        trail_start_pct = stock_atr * 100 * 2.5  # Start trailing at 2.5x daily ATR
+        trail_start_pct = max(5.0, min(trail_start_pct, 12.0))  # Clamp 5-12%
 
         if not should_close and pnl_pct > trail_start_pct:
             try:

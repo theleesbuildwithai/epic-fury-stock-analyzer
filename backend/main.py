@@ -5051,9 +5051,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v65d-all-conf-bypass-paths-closed-22checks-pass-audit-clean",
+        "commit_marker": "feat-v66-trail-start-synced-cache-age-fix-audit-clean",
         "date": "2026-06-13",
         "fixes_in_build": [
+            "v66_exit_checker_trail_start_2p5x_5pct_matches_main_loop",
+            "v66_cache_age_cap_86400s_restoring_state_frontend",
             "multi_source_adapter_stockanalysis_quote_batch_concurrent_threads",
             "multi_source_adapter_finviz_quote_batch_concurrent_threads",
             "multi_source_adapter_multi_source_quote_batch_combined",
