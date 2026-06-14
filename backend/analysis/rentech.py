@@ -972,8 +972,11 @@ def get_alt_data_signals(symbols: list) -> dict:
     for symbol in symbols[:30]:  # Max 30 to avoid API hammering
         try:
             _throttle_rentech()
-            ticker = yf.Ticker(symbol)
-            info = ticker.info or {}
+            import threading as _ad_thr
+            _ad_r = [None]
+            _ad_t = _ad_thr.Thread(target=lambda r=_ad_r, s=symbol: r.__setitem__(0, yf.Ticker(s).info or {}), daemon=True)
+            _ad_t.start(); _ad_t.join(timeout=8)
+            info = _ad_r[0] or {}
 
             signal = {
                 "symbol": symbol,
@@ -1538,8 +1541,11 @@ def get_earnings_shield(price_data: dict) -> dict:
     for symbol in symbols:
         try:
             _throttle_rentech()
-            ticker = yf.Ticker(symbol)
-            cal = ticker.calendar
+            import threading as _es_thr
+            _es_r = [None]
+            _es_t = _es_thr.Thread(target=lambda r=_es_r, s=symbol: r.__setitem__(0, yf.Ticker(s).calendar), daemon=True)
+            _es_t.start(); _es_t.join(timeout=8)
+            cal = _es_r[0]
             if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
                 next_earnings = None
                 if isinstance(cal, dict):
@@ -1844,8 +1850,11 @@ def get_stock_news_sentiment(symbols: list) -> dict:
     for symbol in symbols[:20]:
         try:
             _throttle_rentech()
-            ticker = yf.Ticker(symbol)
-            news = ticker.news
+            import threading as _ns_thr
+            _ns_r = [None]
+            _ns_t = _ns_thr.Thread(target=lambda r=_ns_r, s=symbol: r.__setitem__(0, yf.Ticker(s).news), daemon=True)
+            _ns_t.start(); _ns_t.join(timeout=8)
+            news = _ns_r[0]
             # yfinance 0.2.36+ may return dict with "news" key
             if isinstance(news, dict):
                 news = news.get("news", [])
@@ -1895,12 +1904,19 @@ def detect_unusual_options(symbols: list) -> dict:
     for symbol in symbols[:15]:
         try:
             _throttle_rentech()
-            ticker = yf.Ticker(symbol)
-            expirations = ticker.options
-            if not expirations:
+            import threading as _uo_thr
+            def _fetch_chain(s):
+                t = yf.Ticker(s)
+                exps = t.options
+                if not exps:
+                    return None, None
+                return exps, t.option_chain(exps[0])
+            _uo_r = [None, None]
+            _uo_t = _uo_thr.Thread(target=lambda r=_uo_r, s=symbol: r.__setitem__(slice(None), list(_fetch_chain(s))), daemon=True)
+            _uo_t.start(); _uo_t.join(timeout=10)
+            expirations, chain = _uo_r[0], _uo_r[1]
+            if not expirations or chain is None:
                 continue
-
-            chain = ticker.option_chain(expirations[0])
             call_vol = int(chain.calls["volume"].fillna(0).sum()) if "volume" in chain.calls.columns else 0
             put_vol = int(chain.puts["volume"].fillna(0).sum()) if "volume" in chain.puts.columns else 0
             call_oi = int(chain.calls["openInterest"].fillna(0).sum()) if "openInterest" in chain.calls.columns else 0

@@ -4097,11 +4097,12 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 })
                 break  # Stop opening more positions
 
-            # CONFIDENCE GATE: All regimes require 60% for longs
-            if direction == "long" and pick["confidence"] < 60:
+            # CONFIDENCE GATE: regime-specific floor (BULL=52, SIDEWAYS=62, BEAR=70)
+            _entry_gate = _long_min_conf if direction == "long" else _short_min_conf
+            if pick["confidence"] < _entry_gate:
                 results["skipped"].append({
                     "symbol": symbol,
-                    "reason": f"Low conviction long ({pick['confidence']}%, need 60% in all regimes)",
+                    "reason": f"Low conviction {direction} ({pick['confidence']}%, need {_entry_gate}% in {_regime_for_gate} regime)",
                 })
                 continue
 
