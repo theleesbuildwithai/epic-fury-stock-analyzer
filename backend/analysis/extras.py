@@ -1356,7 +1356,12 @@ def get_earnings_calendar():
 
                 # Fallback: try calendar
                 try:
-                    cal = stock.calendar
+                    _cal_r = [None]
+                    _cal_t = _ed_thr.Thread(
+                        target=lambda r=_cal_r, sym=symbol: r.__setitem__(0, yf.Ticker(sym).calendar),
+                        daemon=True)
+                    _cal_t.start(); _cal_t.join(timeout=8)
+                    cal = _cal_r[0]
                     if cal and isinstance(cal, dict):
                         ed_raw = cal.get("Earnings Date")
                         if ed_raw:
