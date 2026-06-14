@@ -4619,16 +4619,38 @@ def _generate_quant_picks_impl() -> dict:
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
+                    if hist_px <= 0:
+                        return True
+                    corrected = False
+                    # Layer 1: external API cross-validation (when available)
                     _lv = live_prices.get(sym) or 0
                     live_px = float((_lv.get("price", 0) if isinstance(_lv, dict) else _lv) or 0)
-                    if hist_px <= 0 or live_px <= 0:
-                        return True  # can't validate — keep
-                    ratio = hist_px / live_px
-                    if ratio < 0.7 or ratio > 1.43:  # >30% mismatch → bad data
-                        logger.warning(f"PRICE VALIDATION: {sym} hist=${hist_px:.2f} live=${live_px:.2f} ratio={ratio:.2f} — dropping pick")
-                        # Correct the price rather than dropping — live price is fresh
-                        pick["price"] = round(live_px, 2)
-                        pick["reasons"].append(f"Price corrected: hist ${hist_px:.2f} → live ${live_px:.2f}")
+                    if live_px > 0:
+                        ratio = hist_px / live_px
+                        if ratio < 0.7 or ratio > 1.43:
+                            logger.warning(f"PRICE VALIDATION L1: {sym} hist=${hist_px:.2f} live=${live_px:.2f} ratio={ratio:.2f} — correcting")
+                            pick["price"] = round(live_px, 2)
+                            pick["reasons"].append(f"Price corrected (API): ${hist_px:.2f}→${live_px:.2f}")
+                            hist_px = live_px
+                            corrected = True
+                    # Layer 2: internal historical consistency — compare last close
+                    # against 5-day prior average using already-downloaded batch data.
+                    # Catches bad last-row yfinance data even when external API fails.
+                    if not corrected:
+                        try:
+                            sym_df = price_data.get(sym)
+                            if sym_df is not None and not sym_df.empty:
+                                _cl = _safe_close(sym_df).values.astype(float)
+                                if len(_cl) >= 7:
+                                    prior_avg = float(np.nanmean(_cl[-6:-1]))
+                                    if prior_avg > 0:
+                                        ratio2 = hist_px / prior_avg
+                                        if ratio2 < 0.57 or ratio2 > 1.75:
+                                            logger.warning(f"PRICE VALIDATION L2: {sym} last=${hist_px:.2f} 5d_avg=${prior_avg:.2f} ratio={ratio2:.2f} — correcting to 5d avg")
+                                            pick["price"] = round(prior_avg, 2)
+                                            pick["reasons"].append(f"Price corrected (internal): ${hist_px:.2f}→${prior_avg:.2f}")
+                        except Exception as _l2e:
+                            logger.debug(f"Price L2 check failed for {sym}: {_l2e}")
                     return True  # keep all, correct in place
                 top_longs = [p for p in top_longs if _price_ok(p)]
                 top_shorts = [p for p in top_shorts if _price_ok(p)]
