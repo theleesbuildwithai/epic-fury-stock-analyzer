@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 MIN_TRADES_FOR_UPDATE = 10  # Don't adjust weights with fewer trades
 WEIGHT_ADJUSTMENT_RATE = 0.30  # 30% per cycle — faster learning given higher trade volume
-MIN_WEIGHT = 0.05  # No factor can go below 5%
+MIN_WEIGHT = 0.005  # No factor can go below 0.5% (allows bad factors to be nearly disabled)
 MAX_WEIGHT = 0.40  # No factor can go above 40%
 RECENCY_DECAY = 0.95  # Recent trades matter more: each older trade has 5% less influence
 
@@ -936,7 +936,7 @@ def generate_intelligence_report() -> dict:
         if factors:
             best_factor = max(factors, key=lambda k: factors[k].get("sharpe", 0) if isinstance(factors[k], dict) else 0)
             worst_factor = min(factors, key=lambda k: factors[k].get("sharpe", 0) if isinstance(factors[k], dict) else 0)
-            if isinstance(factors[best_factor], dict) and factors[best_factor].get("sharpe", 0) > 1:
+            if isinstance(factors[best_factor], dict) and factors[best_factor].get("sharpe", 0) > 0.3:
                 strengths.append(
                     f"{best_factor.replace('_', ' ').title()} factor performing well "
                     f"(Sharpe: {factors[best_factor]['sharpe']}, "
@@ -999,7 +999,7 @@ def generate_intelligence_report() -> dict:
         insights.append("Building confidence — patterns emerging but sample size still growing")
         report["system_status"] = "learning"
     else:
-        if any(f.get("sharpe", 0) > 1.5 for f in factors.values()):
+        if any(f.get("sharpe", 0) > 0.7 for f in factors.values()):
             insights.append("System has found strong edges — continue current strategy")
             report["system_status"] = "confident"
         else:
