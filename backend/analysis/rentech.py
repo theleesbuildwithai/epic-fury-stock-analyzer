@@ -1610,7 +1610,14 @@ def detect_sector_rotation(price_data: dict) -> dict:
     try:
         _throttle_rentech()
         etf_symbols = list(sector_etfs.values())
-        data = yf.download(etf_symbols, period="2mo", progress=False, group_by="ticker")
+        import threading as _sr_thr
+        _sr_r = [None]
+        _sr_t = _sr_thr.Thread(
+            target=lambda r=_sr_r, s=etf_symbols: r.__setitem__(
+                0, yf.download(s, period="2mo", progress=False, group_by="ticker")
+            ), daemon=True)
+        _sr_t.start(); _sr_t.join(timeout=15)
+        data = _sr_r[0]
 
         for sector, etf in sector_etfs.items():
             try:
@@ -1724,7 +1731,14 @@ def predict_regime_transition(price_data: dict) -> dict:
 
     try:
         _throttle_rentech()
-        vix_data = yf.download("^VIX", period="1mo", progress=False)
+        import threading as _rt_vix_thr
+        _rt_vix_r = [None]
+        _rt_vix_t = _rt_vix_thr.Thread(
+            target=lambda r=_rt_vix_r: r.__setitem__(
+                0, yf.download("^VIX", period="1mo", progress=False)
+            ), daemon=True)
+        _rt_vix_t.start(); _rt_vix_t.join(timeout=10)
+        vix_data = _rt_vix_r[0]
         if vix_data is not None and len(vix_data) >= 5:
             vix_closes = _safe_col(vix_data, "Close").values.astype(float)
             vix_now = vix_closes[-1]
@@ -1764,7 +1778,13 @@ def predict_regime_transition(price_data: dict) -> dict:
 
         # Credit spreads
         _throttle_rentech()
-        credit = yf.download(["HYG", "TLT"], period="1mo", progress=False, group_by="ticker")
+        _rt_cr_r = [None]
+        _rt_cr_t = _rt_vix_thr.Thread(
+            target=lambda r=_rt_cr_r: r.__setitem__(
+                0, yf.download(["HYG", "TLT"], period="1mo", progress=False, group_by="ticker")
+            ), daemon=True)
+        _rt_cr_t.start(); _rt_cr_t.join(timeout=10)
+        credit = _rt_cr_r[0]
         if credit is not None:
             try:
                 hyg = credit["HYG"]["Close"].values.astype(float)
