@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v73-quant-picks-stale-serve-12h-not-30min-no-cold-screen",
+        "commit_marker": "feat-v74-price-crossval-fix-float-dict-bug-silent-failure",
         "date": "2026-06-14",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",

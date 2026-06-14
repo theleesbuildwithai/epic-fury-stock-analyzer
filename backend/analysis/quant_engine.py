@@ -4619,7 +4619,8 @@ def _generate_quant_picks_impl() -> dict:
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
-                    live_px = float(live_prices.get(sym, 0) or 0)
+                    _lv = live_prices.get(sym) or 0
+                    live_px = float((_lv.get("price", 0) if isinstance(_lv, dict) else _lv) or 0)
                     if hist_px <= 0 or live_px <= 0:
                         return True  # can't validate — keep
                     ratio = hist_px / live_px
