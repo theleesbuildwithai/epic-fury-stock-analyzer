@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v71-cache-restoring-fix-extras-calendar-nameerror-quant-engine-inmem-cache",
+        "commit_marker": "feat-v72-force-regen-race-condition-fix-no-time0-reset-while-scan-running",
         "date": "2026-06-14",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",
@@ -9047,16 +9047,31 @@ def admin_force_picks_regen_sync(request: Request):
     Cannot block trades or cycles."""
     check_rate_limit(request.client.host)
     try:
-        # Bust the in-memory cache to FORCE re-fetch
+        # Bust the in-memory cache to FORCE re-fetch — but only if no scan
+        # is currently running.  Resetting time=0 while a prewarm scan is
+        # in-flight creates a race condition: the scan may finish and store
+        # time=now, then this reset sets it back to 0, leaving the STB page
+        # stuck on cache_is_restoring=True forever.
+        from analysis.quant_engine import _quant_cache, _SCAN_RUNNING
         try:
-            from analysis.quant_engine import _quant_cache
-            if "quant_picks" in _quant_cache:
-                _quant_cache["quant_picks"]["time"] = 0  # expire
+            if not _SCAN_RUNNING and "quant_picks" in _quant_cache:
+                _quant_cache["quant_picks"]["time"] = 0  # expire only when idle
         except Exception:
             pass
 
         from analysis.quant_engine import generate_quant_picks
         result = generate_quant_picks()
+
+        # After the call, stamp cache with time=now if picks were returned.
+        # This clears cache_is_restoring=True even when generate_quant_picks()
+        # returned early (scan running) with valid cached data.
+        try:
+            import time as _t_regen
+            _rp = result.get("long_picks") or result.get("short_picks")
+            if _rp:
+                _quant_cache["quant_picks"] = {"data": result, "time": _t_regen.time()}
+        except Exception:
+            pass
 
         longs = result.get("long_picks") or []
         n_with_overlay = sum(1 for p in longs if p.get("_intel_overlay"))
