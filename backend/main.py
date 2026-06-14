@@ -5051,8 +5051,8 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v70-thread-protect-all-14-remaining-files-zero-bare-yf-calls",
-        "date": "2026-06-13",
+        "commit_marker": "feat-v71-cache-restoring-fix-extras-calendar-nameerror-quant-engine-inmem-cache",
+        "date": "2026-06-14",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",
             "v70_market_data_get_stock_info_8s_thread",
