@@ -144,11 +144,17 @@ def _fetch_sp500_close_on(date_str: str) -> Optional[float]:
     Returns None on any failure."""
     try:
         import yfinance as yf
+        import threading as _te_thr
         # Pull a small range around the target date for resilience
         start = date_str
         end = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=10)).strftime("%Y-%m-%d")
-        df = yf.download("^GSPC", start=start, end=end, progress=False,
-                         auto_adjust=False, threads=False)
+        _te_r1 = [None]
+        _te_t1 = _te_thr.Thread(
+            target=lambda r=_te_r1, s=start, e=end: r.__setitem__(
+                0, yf.download("^GSPC", start=s, end=e, progress=False, auto_adjust=False, threads=False)
+            ), daemon=True)
+        _te_t1.start(); _te_t1.join(timeout=10)
+        df = _te_r1[0]
         if df is not None and len(df) > 0:
             close_col = df["Close"]
             # Handle multi-level column from yf occasionally
@@ -165,8 +171,13 @@ def _fetch_sp500_close_on(date_str: str) -> Optional[float]:
                     pass
 
         # Fallback to SPY * ~10 (SPY tracks 1/10 of S&P value)
-        df = yf.download("SPY", start=start, end=end, progress=False,
-                         auto_adjust=False, threads=False)
+        _te_r2 = [None]
+        _te_t2 = _te_thr.Thread(
+            target=lambda r=_te_r2, s=start, e=end: r.__setitem__(
+                0, yf.download("SPY", start=s, end=e, progress=False, auto_adjust=False, threads=False)
+            ), daemon=True)
+        _te_t2.start(); _te_t2.join(timeout=10)
+        df = _te_r2[0]
         if df is not None and len(df) > 0:
             try:
                 val = float(df["Close"].iloc[0]) * 10.0
@@ -604,10 +615,16 @@ def recompute_sp500_history() -> dict:
         start = inception["date"]
         end = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
         df = None
+        import threading as _te_cum_thr
         for symbol, mult in [("^GSPC", 1.0), ("SPY", 10.0), ("^SPX", 1.0)]:
             try:
-                df = yf.download(symbol, start=start, end=end, progress=False,
-                                 auto_adjust=False, threads=False)
+                _te_cum_r = [None]
+                _te_cum_t = _te_cum_thr.Thread(
+                    target=lambda r=_te_cum_r, s=symbol, st=start, en=end: r.__setitem__(
+                        0, yf.download(s, start=st, end=en, progress=False, auto_adjust=False, threads=False)
+                    ), daemon=True)
+                _te_cum_t.start(); _te_cum_t.join(timeout=10)
+                df = _te_cum_r[0]
                 if df is not None and len(df) > 0:
                     df_mult = mult
                     break

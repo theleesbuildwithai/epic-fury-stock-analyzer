@@ -116,16 +116,23 @@ def _fetch_sp500_data(inception_date: str, sharpe_start: str):
     _disk_cache_path = _os_sp.path.join(_os_sp.path.dirname(__file__), ".sp500_disk_cache.json")
 
     try:
+        import threading as _sp_thr
         for attempt in range(3):
             try:
                 _throttle()
-                sp_df = yf.download("^GSPC", start=inception_date, progress=False, timeout=10)
+                _sp_r = [None]
+                _sp_t = _sp_thr.Thread(
+                    target=lambda r=_sp_r, d=inception_date: r.__setitem__(
+                        0, yf.download("^GSPC", start=d, progress=False)
+                    ), daemon=True)
+                _sp_t.start(); _sp_t.join(timeout=10)
+                sp_df = _sp_r[0]
                 if sp_df is not None and len(sp_df) >= 2:
                     sp_closes = _safe_col(sp_df, "Close").values.astype(float).flatten()
                     sp_closes = sp_closes[~np.isnan(sp_closes)]
                     if len(sp_closes) >= 2:
                         break
-                time.sleep(1.0 + attempt)  # Backoff
+                time.sleep(1.0 + attempt)
             except Exception as retry_err:
                 logger.warning(f"S&P inception download attempt {attempt+1} failed: {retry_err}")
                 time.sleep(1.0 + attempt)
@@ -133,7 +140,13 @@ def _fetch_sp500_data(inception_date: str, sharpe_start: str):
         for attempt in range(3):
             try:
                 _throttle()
-                sharpe_df = yf.download("^GSPC", start=sharpe_start, progress=False, timeout=10)
+                _sh_r = [None]
+                _sh_t = _sp_thr.Thread(
+                    target=lambda r=_sh_r, d=sharpe_start: r.__setitem__(
+                        0, yf.download("^GSPC", start=d, progress=False)
+                    ), daemon=True)
+                _sh_t.start(); _sh_t.join(timeout=10)
+                sharpe_df = _sh_r[0]
                 if sharpe_df is not None and len(sharpe_df) >= 30:
                     sharpe_closes = _safe_col(sharpe_df, "Close").values.astype(float).flatten()
                     sharpe_closes = sharpe_closes[~np.isnan(sharpe_closes)]
@@ -4413,15 +4426,29 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     from predictions.sentinels import yf_is_degraded, yf_record_failure
                     if not yf_is_degraded():
                         try:
-                            _t = yf.Ticker(symbol)
-                            _info = _t.fast_info
-                            _prev_close = float(_info.get("previousClose") or 0)
-                            if _prev_close > 0 and price > 0:
-                                _gap_pct = (price - _prev_close) / _prev_close * 100
-                                _gap_in_dir = _gap_pct if direction == "long" else -_gap_pct
-                                if _gap_in_dir > 5.0:
-                                    quality_mult *= 0.85
-                                    quality_notes.append(f"gap_chasing={_gap_in_dir:.1f}%")
+                            import threading as _gap_thr
+                            _gap_r = [None]; _gap_err = [False]
+                            def _fetch_gap_fast_info(r=_gap_r, err=_gap_err, sym=symbol):
+                                try:
+                                    r[0] = yf.Ticker(sym).fast_info
+                                except Exception:
+                                    err[0] = True
+                            _gap_t = _gap_thr.Thread(target=_fetch_gap_fast_info, daemon=True)
+                            _gap_t.start(); _gap_t.join(timeout=8)
+                            if _gap_err[0]:
+                                try:
+                                    yf_record_failure()
+                                except Exception:
+                                    pass
+                            _info = _gap_r[0]
+                            if _info is not None:
+                                _prev_close = float(_info.get("previousClose") or 0)
+                                if _prev_close > 0 and price > 0:
+                                    _gap_pct = (price - _prev_close) / _prev_close * 100
+                                    _gap_in_dir = _gap_pct if direction == "long" else -_gap_pct
+                                    if _gap_in_dir > 5.0:
+                                        quality_mult *= 0.85
+                                        quality_notes.append(f"gap_chasing={_gap_in_dir:.1f}%")
                         except Exception:
                             try:
                                 yf_record_failure()
@@ -6113,8 +6140,13 @@ def check_and_exit_positions(regime: str = "SIDEWAYS") -> dict:
         # EARNINGS SHIELD: Close positions if earnings are imminent (next 1 day)
         if not should_close:
             try:
-                t = yf.Ticker(ticker)
-                cal = t.calendar
+                import threading as _earn_thr
+                _earn_r = [None]
+                _earn_t = _earn_thr.Thread(
+                    target=lambda r=_earn_r, tk=ticker: r.__setitem__(0, yf.Ticker(tk).calendar),
+                    daemon=True)
+                _earn_t.start(); _earn_t.join(timeout=8)
+                cal = _earn_r[0]
                 if cal is not None:
                     next_earn = None
                     if isinstance(cal, dict) and cal.get("Earnings Date"):
