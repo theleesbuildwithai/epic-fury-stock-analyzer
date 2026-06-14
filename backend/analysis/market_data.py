@@ -50,12 +50,14 @@ def _download_recent(ticker: str, period: str = "5d"):
     """
     _throttle()
     try:
-        df = yf.download(
-            ticker,
-            period=period,
-            progress=False,
-        )
-        return df
+        import threading as _dr_thr
+        _dr_r = [None]
+        _dr_t = _dr_thr.Thread(
+            target=lambda r=_dr_r, t=ticker, p=period: r.__setitem__(
+                0, yf.download(t, period=p, progress=False)),
+            daemon=True)
+        _dr_t.start(); _dr_t.join(timeout=10)
+        return _dr_r[0]
     except Exception:
         return None
 
@@ -64,14 +66,19 @@ def get_stock_info(ticker: str) -> dict:
     """Get basic info about a stock (name, price, market cap, etc.)."""
 
     def fetch():
-        stock = yf.Ticker(ticker)
+        import threading as _si_thr
         info = None
 
-        # Attempt 1: try stock.info with retry
+        # Attempt 1: try stock.info with retry (8s thread timeout each)
         for attempt in range(2):
             try:
                 _throttle()
-                raw = stock.info
+                _si_r = [None]
+                _si_t = _si_thr.Thread(
+                    target=lambda r=_si_r, t=ticker: r.__setitem__(0, yf.Ticker(t).info),
+                    daemon=True)
+                _si_t.start(); _si_t.join(timeout=8)
+                raw = _si_r[0]
                 if raw and (raw.get("regularMarketPrice") or raw.get("currentPrice")):
                     info = raw
                     break
@@ -284,10 +291,17 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
 
     # Tier 1: try the requested period with one retry
     data = []
+    import threading as _hist_thr
     for attempt in range(2):
         _throttle()
         try:
-            df = yf.download(ticker, period=period, progress=False)
+            _h1_r = [None]
+            _h1_t = _hist_thr.Thread(
+                target=lambda r=_h1_r, t=ticker, p=period: r.__setitem__(
+                    0, yf.download(t, period=p, progress=False)),
+                daemon=True)
+            _h1_t.start(); _h1_t.join(timeout=12)
+            df = _h1_r[0]
             if df is not None and not df.empty:
                 data = _df_to_records(df)
                 if data:
@@ -305,7 +319,13 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
                 continue
             _throttle()
             try:
-                df = yf.download(ticker, period=fp, progress=False)
+                _h2_r = [None]
+                _h2_t = _hist_thr.Thread(
+                    target=lambda r=_h2_r, t=ticker, p=fp: r.__setitem__(
+                        0, yf.download(t, period=p, progress=False)),
+                    daemon=True)
+                _h2_t.start(); _h2_t.join(timeout=10)
+                df = _h2_r[0]
                 if df is not None and not df.empty:
                     data = _df_to_records(df)
                     if data:
@@ -322,8 +342,13 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
         for fp in (period, "6mo", "3mo", "1mo"):
             _throttle()
             try:
-                tk = yf.Ticker(ticker)
-                df = tk.history(period=fp, auto_adjust=True)
+                _h25_r = [None]
+                _h25_t = _hist_thr.Thread(
+                    target=lambda r=_h25_r, t=ticker, p=fp: r.__setitem__(
+                        0, yf.Ticker(t).history(period=p, auto_adjust=True)),
+                    daemon=True)
+                _h25_t.start(); _h25_t.join(timeout=8)
+                df = _h25_r[0]
                 if df is not None and not df.empty:
                     data = _df_to_records(df)
                     if data:

@@ -121,7 +121,7 @@ def _fetch_max_history(symbols: list) -> dict:
     for batch_num, batch in enumerate(batches):
         try:
             logger.info(f"Historical download batch {batch_num + 1}/{len(batches)}: {len(batch)} symbols")
-            df = yf.download(batch, period="max", progress=False, group_by="ticker", threads=True)
+            import threading as _hc_thr; _hc_r = [None]; _hc_t = _hc_thr.Thread(target=lambda r=_hc_r, b=batch: r.__setitem__(0, yf.download(b, period="max", progress=False, group_by="ticker", threads=True)), daemon=True); _hc_t.start(); _hc_t.join(timeout=120); df = _hc_r[0]
 
             if df is None or df.empty:
                 continue
@@ -463,7 +463,7 @@ def _analyze_volatility_regimes(spy_series: pd.Series) -> dict:
     try:
         # Download VIX history
         time.sleep(_BATCH_DELAY)
-        vix_df = yf.download("^VIX", period="max", progress=False)
+        import threading as _hcv_thr; _hcv_r = [None]; _hcv_t = _hcv_thr.Thread(target=lambda r=_hcv_r: r.__setitem__(0, yf.download("^VIX", period="max", progress=False)), daemon=True); _hcv_t.start(); _hcv_t.join(timeout=60); vix_df = _hcv_r[0]
         if vix_df is None or len(vix_df) < 252:
             try:
                 from analytics.multi_source_adapter import get_historical_any_source
@@ -624,7 +624,7 @@ def _analyze_cross_asset_leads(history: dict, sector_map: dict) -> dict:
         # Download macro indicators
         time.sleep(_BATCH_DELAY)
         macro_symbols = ["GC=F", "CL=F", "^TNX", "UUP"]
-        macro_df = yf.download(macro_symbols, period="max", progress=False, group_by="ticker")
+        import threading as _hcm_thr; _hcm_r = [None]; _hcm_t = _hcm_thr.Thread(target=lambda r=_hcm_r, ms=macro_symbols: r.__setitem__(0, yf.download(ms, period="max", progress=False, group_by="ticker")), daemon=True); _hcm_t.start(); _hcm_t.join(timeout=60); macro_df = _hcm_r[0]
 
         if macro_df is None or macro_df.empty:
             # Fallback: per-symbol multi-source
@@ -838,7 +838,7 @@ def _analyze_vix_term_structure_history() -> dict:
     """
     try:
         time.sleep(_BATCH_DELAY)
-        vix_df = yf.download(["^VIX", "^VIX3M"], period="max", progress=False, group_by="ticker")
+        import threading as _hcvv_thr; _hcvv_r = [None]; _hcvv_t = _hcvv_thr.Thread(target=lambda r=_hcvv_r: r.__setitem__(0, yf.download(["^VIX", "^VIX3M"], period="max", progress=False, group_by="ticker")), daemon=True); _hcvv_t.start(); _hcvv_t.join(timeout=60); vix_df = _hcvv_r[0]
 
         if vix_df is None or vix_df.empty:
             return {}
@@ -859,7 +859,7 @@ def _analyze_vix_term_structure_history() -> dict:
 
         # Download SPY for forward returns
         time.sleep(_BATCH_DELAY)
-        spy_df = yf.download("SPY", period="max", progress=False)
+        import threading as _hcs1_thr; _hcs1_r = [None]; _hcs1_t = _hcs1_thr.Thread(target=lambda r=_hcs1_r: r.__setitem__(0, yf.download("SPY", period="max", progress=False)), daemon=True); _hcs1_t.start(); _hcs1_t.join(timeout=60); spy_df = _hcs1_r[0]
         if spy_df is None:
             return {}
         spy_close = spy_df["Close"]
@@ -954,7 +954,7 @@ def build_calibration(symbols: list, sector_map: dict = None) -> dict:
     if spy_series is None:
         try:
             logger.info("Downloading SPY history separately...")
-            spy_df = yf.download("SPY", period="max", progress=False)
+            import threading as _hcs2_thr; _hcs2_r = [None]; _hcs2_t = _hcs2_thr.Thread(target=lambda r=_hcs2_r: r.__setitem__(0, yf.download("SPY", period="max", progress=False)), daemon=True); _hcs2_t.start(); _hcs2_t.join(timeout=60); spy_df = _hcs2_r[0]
             if spy_df is not None and len(spy_df) >= 252:
                 close_col = spy_df["Close"]
                 if hasattr(close_col, "columns"):

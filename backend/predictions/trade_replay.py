@@ -46,12 +46,19 @@ def _safe_price_window(ticker: str, start: str, days: int = 30) -> list:
     """Pull `days` of closes starting from `start`. Returns [] on fail."""
     try:
         import yfinance as yf
+        import threading as _tr_thr
         from datetime import datetime as _dt, timedelta as _td
         st = _dt.strptime(start[:10], "%Y-%m-%d")
         en = st + _td(days=int(days) + 5)
-        df = yf.download(ticker, start=st.strftime("%Y-%m-%d"),
-                         end=en.strftime("%Y-%m-%d"),
-                         progress=False, auto_adjust=True, threads=False)
+        _tr_r = [None]
+        _tr_t = _tr_thr.Thread(
+            target=lambda r=_tr_r, t=ticker, s=st, e=en: r.__setitem__(
+                0, yf.download(t, start=s.strftime("%Y-%m-%d"),
+                               end=e.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=True, threads=False)),
+            daemon=True)
+        _tr_t.start(); _tr_t.join(timeout=10)
+        df = _tr_r[0]
         if df is None or df.empty:
             return []
         closes = df["Close"].dropna().values.tolist()

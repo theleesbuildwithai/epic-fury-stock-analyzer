@@ -5051,9 +5051,27 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v69-zero-bare-yf-calls-all-paths-thread-protected",
+        "commit_marker": "feat-v70-thread-protect-all-14-remaining-files-zero-bare-yf-calls",
         "date": "2026-06-13",
         "fixes_in_build": [
+            "v70_market_data_download_recent_10s_thread",
+            "v70_market_data_get_stock_info_8s_thread",
+            "v70_market_data_historical_tiers1_2_25_thread_wrappers",
+            "v70_extras_fetch_sectors_yfinance_12s_thread",
+            "v70_extras_pick_recommendations_20s_thread",
+            "v70_extras_earnings_loop_8s_thread_per_symbol",
+            "v70_data_shield_safe_batch_download_15s_thread",
+            "v70_cross_asset_macro_batch_loop_15s_thread",
+            "v70_regime_drift_spy_15s_vix_10s_threads",
+            "v70_pairs_trader_all_3_yf_calls_8_10s_threads",
+            "v70_backtest_safe_yf_download_all_3_tiers_threaded",
+            "v70_correlation_matrix_15s_thread",
+            "v70_earnings_drift_yf_ticker_8s_and_download_10s",
+            "v70_cross_asset_10s_thread",
+            "v70_trade_replay_10s_thread",
+            "v70_rentech_advanced_4_calls_15s_thread_wrappers",
+            "v70_pairs_engine_2_calls_10_20s_thread_wrappers",
+            "v70_historical_calibration_6_period_max_60_120s_threads",
             "v69_quant_engine_scan_tiers1to5_yf_dl_helper_30to45s_timeouts",
             "v69_quant_engine_earnings_check_yf_ticker_8s_thread",
             "v69_truth_engine_sp500_source_loop_5d_download_10s_thread",

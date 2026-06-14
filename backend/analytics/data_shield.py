@@ -277,11 +277,17 @@ def safe_batch_download(tickers: list, period: str = "6mo",
         return None
 
     try:
+        import threading as _sbd_thr
         # Try batch first (most efficient)
         for attempt in range(2):
             try:
-                df = yf.download(tickers, period=period, progress=False,
-                                 group_by=group_by, auto_adjust=True)
+                _sbd_r = [None]
+                _sbd_t = _sbd_thr.Thread(
+                    target=lambda r=_sbd_r, tk=tickers, p=period, g=group_by: r.__setitem__(
+                        0, yf.download(tk, period=p, progress=False, group_by=g, auto_adjust=True)),
+                    daemon=True)
+                _sbd_t.start(); _sbd_t.join(timeout=15)
+                df = _sbd_r[0]
                 if df is not None and not df.empty:
                     return df
             except Exception as e:

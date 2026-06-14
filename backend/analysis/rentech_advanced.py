@@ -404,7 +404,7 @@ def ann_predict_direction(ticker: str, price_data=None) -> Dict:
             df = price_data[ticker]
         else:
             _throttle()
-            df = yf.download(ticker, period="2y", progress=False, timeout=15)
+            import threading as _ra_thr; _ra_r = [None]; _ra_t = _ra_thr.Thread(target=lambda r=_ra_r, t=ticker: r.__setitem__(0, yf.download(t, period="2y", progress=False)), daemon=True); _ra_t.start(); _ra_t.join(timeout=15); df = _ra_r[0]
             if df is None or df.empty:
                 try:
                     from analytics.multi_source_adapter import get_historical_any_source
@@ -856,7 +856,7 @@ def monte_carlo_price_simulation(ticker: str, horizon_days: int = 20,
             df = price_data[ticker]
         else:
             _throttle()
-            df = yf.download(ticker, period="1y", progress=False, timeout=15)
+            import threading as _ra1y_thr; _ra1y_r = [None]; _ra1y_t = _ra1y_thr.Thread(target=lambda r=_ra1y_r, t=ticker: r.__setitem__(0, yf.download(t, period="1y", progress=False)), daemon=True); _ra1y_t.start(); _ra1y_t.join(timeout=15); df = _ra1y_r[0]
             if df is None or df.empty:
                 try:
                     from analytics.multi_source_adapter import get_historical_any_source
@@ -1054,8 +1054,7 @@ def cointegration_test(sym_a: str, sym_b: str, lookback: int = 120) -> Dict:
         from analysis.quant_engine import _throttle
 
         _throttle()
-        df = yf.download([sym_a, sym_b], period="1y", progress=False,
-                         group_by="ticker", timeout=15)
+        import threading as _ra2_thr; _ra2_r = [None]; _ra2_t = _ra2_thr.Thread(target=lambda r=_ra2_r, a=sym_a, b=sym_b: r.__setitem__(0, yf.download([a, b], period="1y", progress=False, group_by="ticker")), daemon=True); _ra2_t.start(); _ra2_t.join(timeout=15); df = _ra2_r[0]
         # Fallback per leg if yfinance fails
         try:
             import pandas as pd
@@ -1374,7 +1373,7 @@ def hmm_regime_detect(ticker: str = "^GSPC", lookback_days: int = 252,
             df = price_data[ticker]
         else:
             _throttle()
-            df = yf.download(ticker, period="2y", progress=False, timeout=15)
+            import threading as _ra_thr; _ra_r = [None]; _ra_t = _ra_thr.Thread(target=lambda r=_ra_r, t=ticker: r.__setitem__(0, yf.download(t, period="2y", progress=False)), daemon=True); _ra_t.start(); _ra_t.join(timeout=15); df = _ra_r[0]
             if df is None or df.empty:
                 try:
                     from analytics.multi_source_adapter import get_historical_any_source

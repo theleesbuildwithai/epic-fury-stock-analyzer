@@ -85,14 +85,16 @@ def _recompute_ou_zscore(ticker_long: str, ticker_short: str,
     """
     try:
         import yfinance as yf
+        import threading as _pt_thr
 
-        df = yf.download(
-            f"{ticker_long} {ticker_short}",
-            period="90d",
-            progress=False,
-            group_by="ticker",
-            auto_adjust=True,
-        )
+        _pt_r = [None]
+        _pt_t = _pt_thr.Thread(
+            target=lambda r=_pt_r, tl=ticker_long, ts=ticker_short: r.__setitem__(
+                0, yf.download(f"{tl} {ts}", period="90d", progress=False,
+                               group_by="ticker", auto_adjust=True)),
+            daemon=True)
+        _pt_t.start(); _pt_t.join(timeout=10)
+        df = _pt_r[0]
         if df is None or df.empty:
             return None, None, False
 
@@ -175,13 +177,15 @@ def _get_pair_prices(ticker_a: str, ticker_b: str) -> dict:
     result = {}
     try:
         import yfinance as yf
-        df = yf.download(
-            f"{ticker_a} {ticker_b}",
-            period="2d",
-            progress=False,
-            group_by="ticker",
-            auto_adjust=True,
-        )
+        import threading as _fpp_thr
+        _fpp_r = [None]
+        _fpp_t = _fpp_thr.Thread(
+            target=lambda r=_fpp_r, a=ticker_a, b=ticker_b: r.__setitem__(
+                0, yf.download(f"{a} {b}", period="2d", progress=False,
+                               group_by="ticker", auto_adjust=True)),
+            daemon=True)
+        _fpp_t.start(); _fpp_t.join(timeout=8)
+        df = _fpp_r[0]
         if df is None or df.empty:
             return result
         for tk in [ticker_a, ticker_b]:
@@ -680,7 +684,14 @@ def _get_single_price(ticker: str) -> float:
     """
     try:
         import yfinance as yf
-        df = yf.download(ticker, period="2d", progress=False, auto_adjust=True)
+        import threading as _gsp_thr
+        _gsp_r = [None]
+        _gsp_t = _gsp_thr.Thread(
+            target=lambda r=_gsp_r, t=ticker: r.__setitem__(
+                0, yf.download(t, period="2d", progress=False, auto_adjust=True)),
+            daemon=True)
+        _gsp_t.start(); _gsp_t.join(timeout=8)
+        df = _gsp_r[0]
         if df is None or df.empty:
             raise ValueError("empty")
         close = df["Close"]

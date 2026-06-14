@@ -257,15 +257,15 @@ def _fetch_universe_prices() -> dict:
         batch = symbols[i:i + batch_size]
         try:
             _throttle()
-            df = yf.download(
-                batch,
-                period="1y",
-                interval="1d",
-                progress=False,
-                group_by="ticker",
-                auto_adjust=True,
-                threads=False,
-            )
+            import threading as _pe_thr
+            _pe_r = [None]
+            _pe_t = _pe_thr.Thread(
+                target=lambda r=_pe_r, b=batch: r.__setitem__(
+                    0, yf.download(b, period="1y", interval="1d", progress=False,
+                                   group_by="ticker", auto_adjust=True, threads=False)),
+                daemon=True)
+            _pe_t.start(); _pe_t.join(timeout=20)
+            df = _pe_r[0]
             if df is None or len(df) == 0:
                 continue
             for sym in batch:
@@ -438,15 +438,15 @@ def check_exit_for_pair(sym_a: str, sym_b: str) -> dict:
     """
     try:
         _throttle()
-        df = yf.download(
-            [sym_a, sym_b],
-            period="3mo",
-            interval="1d",
-            progress=False,
-            group_by="ticker",
-            auto_adjust=True,
-            threads=False,
-        )
+        import threading as _pe2_thr
+        _pe2_r = [None]
+        _pe2_t = _pe2_thr.Thread(
+            target=lambda r=_pe2_r, a=sym_a, b=sym_b: r.__setitem__(
+                0, yf.download([a, b], period="3mo", interval="1d", progress=False,
+                               group_by="ticker", auto_adjust=True, threads=False)),
+            daemon=True)
+        _pe2_t.start(); _pe2_t.join(timeout=10)
+        df = _pe2_r[0]
         a = _safe_close_series(df, sym_a)
         b = _safe_close_series(df, sym_b)
         # Fallback per leg if yfinance returned None

@@ -86,9 +86,16 @@ def snapshot_regime() -> dict:
         import yfinance as yf
         end = datetime.utcnow()
         start = end - timedelta(days=300)
-        spy = yf.download("SPY", start=start.strftime("%Y-%m-%d"),
-                          end=end.strftime("%Y-%m-%d"),
-                          progress=False, auto_adjust=True, threads=False)
+        import threading as _rd_thr
+        _spy_r = [None]
+        _spy_t = _rd_thr.Thread(
+            target=lambda r=_spy_r, s=start, e=end: r.__setitem__(
+                0, yf.download("SPY", start=s.strftime("%Y-%m-%d"),
+                               end=e.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=True, threads=False)),
+            daemon=True)
+        _spy_t.start(); _spy_t.join(timeout=15)
+        spy = _spy_r[0]
         if spy is None or spy.empty or len(spy) < 10:
             # Fallback: multi-source historical for SPY
             try:
@@ -96,9 +103,15 @@ def snapshot_regime() -> dict:
                 spy = get_historical_any_source("SPY", "1y")
             except Exception:
                 spy = None
-        vix = yf.download("^VIX", start=(end - timedelta(days=10)).strftime("%Y-%m-%d"),
-                          end=end.strftime("%Y-%m-%d"),
-                          progress=False, auto_adjust=True, threads=False)
+        _vix_r = [None]
+        _vix_t = _rd_thr.Thread(
+            target=lambda r=_vix_r, e=end: r.__setitem__(
+                0, yf.download("^VIX", start=(e - timedelta(days=10)).strftime("%Y-%m-%d"),
+                               end=e.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=True, threads=False)),
+            daemon=True)
+        _vix_t.start(); _vix_t.join(timeout=10)
+        vix = _vix_r[0]
         if spy is None or spy.empty or len(spy) < 200:
             return {"ok": False, "reason": "insufficient_spy_data"}
 

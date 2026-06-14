@@ -55,12 +55,18 @@ def _safe_recent_data(ticker: str, days: int = 30) -> dict:
     Never raises."""
     try:
         import yfinance as yf
+        import threading as _ca_thr
         end = datetime.utcnow()
         start = end - timedelta(days=int(days) + 5)  # buffer for holidays
-        df = yf.download(ticker,
-                         start=start.strftime("%Y-%m-%d"),
-                         end=end.strftime("%Y-%m-%d"),
-                         progress=False, auto_adjust=True, threads=False)
+        _ca_r = [None]
+        _ca_t = _ca_thr.Thread(
+            target=lambda r=_ca_r, t=ticker, s=start, e=end: r.__setitem__(
+                0, yf.download(t, start=s.strftime("%Y-%m-%d"),
+                               end=e.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=True, threads=False)),
+            daemon=True)
+        _ca_t.start(); _ca_t.join(timeout=10)
+        df = _ca_r[0]
         if df is None or df.empty:
             return {}
         closes = df["Close"].dropna().values.tolist()

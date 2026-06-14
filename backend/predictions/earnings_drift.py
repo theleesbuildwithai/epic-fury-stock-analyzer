@@ -81,10 +81,15 @@ def _fetch_earnings_dates(ticker: str, lookback_quarters: int = 8) -> list:
     Empty list on fail. Never raises."""
     try:
         import yfinance as yf
-        t = yf.Ticker(ticker)
+        import threading as _ed_thr
+        _ed_r = [None]
+        _ed_t = _ed_thr.Thread(
+            target=lambda r=_ed_r, t=ticker: r.__setitem__(0, yf.Ticker(t).earnings_dates),
+            daemon=True)
+        _ed_t.start(); _ed_t.join(timeout=8)
         # earnings_dates returns DataFrame with index=date, cols include
         # "EPS Estimate", "Reported EPS", "Surprise(%)"
-        df = t.earnings_dates
+        df = _ed_r[0]
         if df is None or df.empty:
             return []
         events = []
@@ -120,12 +125,19 @@ def _measure_drift(ticker: str, event_date: str) -> dict:
     +1d / +5d / +20d / +60d returns. Returns {} on fail."""
     try:
         import yfinance as yf
+        import threading as _md_thr
         ev_dt = datetime.strptime(event_date, "%Y-%m-%d")
         # Need 1 day before (anchor) + 65 days after
         start = (ev_dt - timedelta(days=2)).strftime("%Y-%m-%d")
         end = (ev_dt + timedelta(days=70)).strftime("%Y-%m-%d")
-        df = yf.download(ticker, start=start, end=end,
-                         progress=False, auto_adjust=True, threads=False)
+        _md_r = [None]
+        _md_t = _md_thr.Thread(
+            target=lambda r=_md_r, t=ticker, s=start, e=end: r.__setitem__(
+                0, yf.download(t, start=s, end=e, progress=False,
+                               auto_adjust=True, threads=False)),
+            daemon=True)
+        _md_t.start(); _md_t.join(timeout=10)
+        df = _md_r[0]
         if df is None or df.empty or len(df) < 5:
             return {}
         closes = df["Close"].dropna().values.tolist()

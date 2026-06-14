@@ -154,20 +154,20 @@ def _fetch_all() -> dict:
     """Download all macro tickers in batches. Returns {sym: closes_array}."""
     out = {}
     # Batch by 8 to stay below Yahoo's silent caps
+    import threading as _cam_thr
     batch_size = 8
     for i in range(0, len(ALL_TICKERS), batch_size):
         batch = ALL_TICKERS[i:i + batch_size]
         try:
             _throttle()
-            df = yf.download(
-                batch,
-                period="3mo",
-                interval="1d",
-                progress=False,
-                group_by="ticker",
-                auto_adjust=True,
-                threads=False,
-            )
+            _cam_r = [None]
+            _cam_t = _cam_thr.Thread(
+                target=lambda r=_cam_r, b=batch: r.__setitem__(
+                    0, yf.download(b, period="3mo", interval="1d", progress=False,
+                                   group_by="ticker", auto_adjust=True, threads=False)),
+                daemon=True)
+            _cam_t.start(); _cam_t.join(timeout=15)
+            df = _cam_r[0]
             if df is None or len(df) == 0:
                 continue
             for sym in batch:

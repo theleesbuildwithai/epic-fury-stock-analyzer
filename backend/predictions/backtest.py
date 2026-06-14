@@ -118,6 +118,7 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
         import yfinance as yf
         import pandas as pd
         import time as _time
+        import threading as _bt_thr
 
         def _extract(df, syms):
             """Extract closes from a yf result into out dict.  Returns
@@ -152,8 +153,13 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
 
         # TIER 1: bulk fetch (fastest path)
         try:
-            df = yf.download(tickers, **kwargs)
-            _extract(df, tickers)
+            _bt1_r = [None]
+            _bt1_t = _bt_thr.Thread(
+                target=lambda r=_bt1_r, tk=list(tickers), kw=dict(kwargs): r.__setitem__(
+                    0, yf.download(tk, **kw)),
+                daemon=True)
+            _bt1_t.start(); _bt1_t.join(timeout=30)
+            _extract(_bt1_r[0], tickers)
         except Exception as e:
             logger.debug(f"_safe_yf_download bulk tier failed: {e}")
 
@@ -167,8 +173,13 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
         for i in range(0, len(missing), CHUNK_SIZE):
             chunk = missing[i:i + CHUNK_SIZE]
             try:
-                df = yf.download(chunk, **kwargs)
-                _extract(df, chunk)
+                _bt2_r = [None]
+                _bt2_t = _bt_thr.Thread(
+                    target=lambda r=_bt2_r, c=chunk, kw=dict(kwargs): r.__setitem__(
+                        0, yf.download(c, **kw)),
+                    daemon=True)
+                _bt2_t.start(); _bt2_t.join(timeout=20)
+                _extract(_bt2_r[0], chunk)
                 _time.sleep(0.5)  # gentle on rate limits
             except Exception as e:
                 logger.debug(f"_safe_yf_download chunk fail [{i}]: {e}")
@@ -179,8 +190,13 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
         if still_missing and len(still_missing) <= 30:
             for sym in still_missing:
                 try:
-                    df = yf.download([sym], **kwargs)
-                    _extract(df, [sym])
+                    _bt3_r = [None]
+                    _bt3_t = _bt_thr.Thread(
+                        target=lambda r=_bt3_r, s=sym, kw=dict(kwargs): r.__setitem__(
+                            0, yf.download([s], **kw)),
+                        daemon=True)
+                    _bt3_t.start(); _bt3_t.join(timeout=10)
+                    _extract(_bt3_r[0], [sym])
                     _time.sleep(1.0)
                 except Exception:
                     continue

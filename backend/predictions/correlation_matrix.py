@@ -48,12 +48,19 @@ def _safe_recent_closes(tickers: list, days: int) -> dict:
     try:
         import yfinance as yf
         import pandas as pd
+        import threading as _cm_thr
         end = datetime.utcnow()
         start = end - timedelta(days=int(days) + 5)
-        df = yf.download(tickers, start=start.strftime("%Y-%m-%d"),
-                         end=end.strftime("%Y-%m-%d"),
-                         progress=False, auto_adjust=True, threads=True,
-                         group_by="ticker")
+        _cm_r = [None]
+        _cm_t = _cm_thr.Thread(
+            target=lambda r=_cm_r, tk=list(tickers), s=start, e=end: r.__setitem__(
+                0, yf.download(tk, start=s.strftime("%Y-%m-%d"),
+                               end=e.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=True, threads=True,
+                               group_by="ticker")),
+            daemon=True)
+        _cm_t.start(); _cm_t.join(timeout=15)
+        df = _cm_r[0]
         if df is None or df.empty:
             return out
         for t in tickers:

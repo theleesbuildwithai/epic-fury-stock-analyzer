@@ -787,7 +787,14 @@ def _fetch_sectors_from_yfinance(symbols, symbol_to_name):
     as_of_date = None
     _throttle()
     try:
-        df = yf.download(symbols, period="5d", progress=False, group_by="ticker")
+        import threading as _sec_thr
+        _sec_r = [None]
+        _sec_t = _sec_thr.Thread(
+            target=lambda r=_sec_r, s=symbols: r.__setitem__(
+                0, yf.download(s, period="5d", progress=False, group_by="ticker")),
+            daemon=True)
+        _sec_t.start(); _sec_t.join(timeout=12)
+        df = _sec_r[0]
     except Exception:
         return out, as_of_date
 
@@ -1036,7 +1043,14 @@ def get_daily_picks():
         # Download all candidates at once (1 API call)
         _throttle()
         try:
-            df = yf.download(PICK_CANDIDATES, period="3mo", progress=False, group_by="ticker")
+            import threading as _pk_thr
+            _pk_r = [None]
+            _pk_t = _pk_thr.Thread(
+                target=lambda r=_pk_r: r.__setitem__(
+                    0, yf.download(PICK_CANDIDATES, period="3mo", progress=False, group_by="ticker")),
+                daemon=True)
+            _pk_t.start(); _pk_t.join(timeout=20)
+            df = _pk_r[0]
         except Exception:
             return {"picks": [], "generated_at": datetime.now().isoformat(), "error": "Could not fetch data"}
 
@@ -1296,11 +1310,16 @@ def get_earnings_calendar():
         for symbol, name in priority_stocks:
             try:
                 _throttle()
-                stock = yf.Ticker(symbol)
+                import threading as _ed_thr
+                _ed_r = [None]
+                _ed_t = _ed_thr.Thread(
+                    target=lambda r=_ed_r, sym=symbol: r.__setitem__(0, yf.Ticker(sym).earnings_dates),
+                    daemon=True)
+                _ed_t.start(); _ed_t.join(timeout=8)
 
                 # Try earnings_dates first (more reliable than calendar)
                 try:
-                    ed_df = stock.earnings_dates
+                    ed_df = _ed_r[0]
                     if ed_df is not None and not ed_df.empty:
                         for idx in ed_df.index:
                             try:
