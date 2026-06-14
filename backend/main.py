@@ -5051,9 +5051,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v68-thread-all-remaining-yf-calls-gap-chasing-gspc-spy-truth",
+        "commit_marker": "feat-v69-zero-bare-yf-calls-all-paths-thread-protected",
         "date": "2026-06-13",
         "fixes_in_build": [
+            "v69_quant_engine_scan_tiers1to5_yf_dl_helper_30to45s_timeouts",
+            "v69_quant_engine_earnings_check_yf_ticker_8s_thread",
+            "v69_truth_engine_sp500_source_loop_5d_download_10s_thread",
+            "v69_regime_playbook_safe_period_returns_download_15s_thread",
             "v68_paper_trader_gap_chasing_fast_info_8s_thread_wrapper",
             "v68_paper_trader_gspc_portfolio_stats_10s_thread_wrappers",
             "v68_paper_trader_exit_earnings_shield_calendar_8s_thread",

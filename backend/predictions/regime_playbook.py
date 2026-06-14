@@ -177,8 +177,15 @@ def _safe_period_returns(tickers: list, start: str, end: str) -> dict:
     try:
         import yfinance as yf
         import pandas as pd
-        df = yf.download(tickers, start=start, end=end, progress=False,
-                         auto_adjust=True, threads=True, group_by="ticker")
+        import threading as _spr_thr
+        _spr_r = [None]
+        _spr_t = _spr_thr.Thread(
+            target=lambda r=_spr_r, tk=tickers, s=start, e=end: r.__setitem__(
+                0, yf.download(tk, start=s, end=e, progress=False,
+                               auto_adjust=True, threads=True, group_by="ticker")),
+            daemon=True)
+        _spr_t.start(); _spr_t.join(timeout=15)
+        df = _spr_r[0]
         if df is None or df.empty:
             return out
 

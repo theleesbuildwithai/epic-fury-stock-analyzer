@@ -268,11 +268,18 @@ def get_sp500_truth(force_refresh: bool = False) -> dict:
     for source_name, symbol, multiplier in sources:
         try:
             import yfinance as yf
+            import threading as _sp_src_thr
             # Throttle to avoid rate limits
             time.sleep(0.2)
             # Pull last 5 trading days so we can compute daily %
-            df = yf.download(symbol, period="5d", progress=False,
-                             auto_adjust=False, threads=False)
+            _sp_src_r = [None]
+            _sp_src_t = _sp_src_thr.Thread(
+                target=lambda r=_sp_src_r, sym=symbol: r.__setitem__(
+                    0, yf.download(sym, period="5d", progress=False,
+                                   auto_adjust=False, threads=False)),
+                daemon=True)
+            _sp_src_t.start(); _sp_src_t.join(timeout=10)
+            df = _sp_src_r[0]
             if df is None or len(df) < 1:
                 continue
             try:

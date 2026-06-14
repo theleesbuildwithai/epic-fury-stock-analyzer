@@ -3859,9 +3859,14 @@ def check_earnings_proximity(symbol: str) -> dict:
 
     try:
         _throttle()
-        stock = yf.Ticker(symbol)
+        import threading as _earn_thr
+        _earn_r = [None]
+        _earn_t = _earn_thr.Thread(
+            target=lambda r=_earn_r, sym=symbol: r.__setitem__(0, yf.Ticker(sym).earnings_dates),
+            daemon=True)
+        _earn_t.start(); _earn_t.join(timeout=8)
+        ed_df = _earn_r[0]
         try:
-            ed_df = stock.earnings_dates
             if ed_df is not None and not ed_df.empty:
                 today = datetime.now().date()
                 for idx in ed_df.index:
@@ -4039,6 +4044,17 @@ def _generate_quant_picks_impl() -> dict:
         def _over_budget():
             return _time_scan.time() > _scan_deadline
 
+        # Thread-safe yf.download with timeout — prevents TCP hang from blocking entire scan
+        import threading as _scan_thr
+        def _yf_dl(syms, period="1y", timeout=30):
+            _r = [None]
+            _t = _scan_thr.Thread(
+                target=lambda r=_r, s=syms, p=period: r.__setitem__(
+                    0, yf.download(s, period=p, progress=False)),
+                daemon=True)
+            _t.start(); _t.join(timeout=timeout)
+            return _r[0]
+
         def _extract_batch(df, syms):
             """Add successful per-ticker frames from a yf bulk download
             result into price_data. Returns count newly added.
@@ -4094,7 +4110,7 @@ def _generate_quant_picks_impl() -> dict:
             if _over_budget(): break
             _throttle()
             try:
-                df = yf.download(batch, period="1y", progress=False)
+                df = _yf_dl(batch, timeout=45)
                 _extract_batch(df, batch)
             except Exception as e:
                 logger.warning(f"Tier 1 batch download failed: {e}")
@@ -4111,7 +4127,7 @@ def _generate_quant_picks_impl() -> dict:
                 chunk = m[i:i+50]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False)
+                    df = _yf_dl(chunk, timeout=30)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 2 chunk failed: {e}")
@@ -4126,7 +4142,7 @@ def _generate_quant_picks_impl() -> dict:
                 chunk = m[i:i+20]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False)
+                    df = _yf_dl(chunk, timeout=20)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 3 chunk failed: {e}")
@@ -4141,7 +4157,7 @@ def _generate_quant_picks_impl() -> dict:
                 chunk = m[i:i+10]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False)
+                    df = _yf_dl(chunk, timeout=15)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 4 chunk failed: {e}")
@@ -4156,7 +4172,7 @@ def _generate_quant_picks_impl() -> dict:
                 chunk = m[i:i+5]
                 _throttle()
                 try:
-                    df = yf.download(chunk, period="1y", progress=False)
+                    df = _yf_dl(chunk, timeout=10)
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 5 chunk failed: {e}")
