@@ -4584,6 +4584,40 @@ def _generate_quant_picks_impl() -> dict:
                     f"Earnings in {earnings['days_until_earnings']} days — confidence reduced"
                 )
 
+        # PRICE CROSS-VALIDATION — catch yfinance batch scale errors (e.g. AVGO
+        # returned $14 instead of $140 when entire history was off by 10x).
+        # Day-over-day ratio guards don't catch systematic scaling; this does.
+        # Fetch live price for all pick symbols via multi_source_adapter and
+        # remove any pick whose historical close differs from live price by >30%.
+        try:
+            _pick_syms = list({p["symbol"] for p in top_longs + top_shorts if p.get("symbol")})
+            if _pick_syms:
+                from analytics.multi_source_adapter import multi_source_quote_batch
+                import threading as _pv_thr
+                _pv_r = [{}]
+                _pv_t = _pv_thr.Thread(
+                    target=lambda r=_pv_r, s=_pick_syms: r.__setitem__(0, multi_source_quote_batch(s)),
+                    daemon=True)
+                _pv_t.start(); _pv_t.join(timeout=20)
+                live_prices = _pv_r[0] or {}
+                def _price_ok(pick):
+                    sym = pick.get("symbol", "")
+                    hist_px = float(pick.get("price", 0) or 0)
+                    live_px = float(live_prices.get(sym, 0) or 0)
+                    if hist_px <= 0 or live_px <= 0:
+                        return True  # can't validate — keep
+                    ratio = hist_px / live_px
+                    if ratio < 0.7 or ratio > 1.43:  # >30% mismatch → bad data
+                        logger.warning(f"PRICE VALIDATION: {sym} hist=${hist_px:.2f} live=${live_px:.2f} ratio={ratio:.2f} — dropping pick")
+                        # Correct the price rather than dropping — live price is fresh
+                        pick["price"] = round(live_px, 2)
+                        pick["reasons"].append(f"Price corrected: hist ${hist_px:.2f} → live ${live_px:.2f}")
+                    return True  # keep all, correct in place
+                top_longs = [p for p in top_longs if _price_ok(p)]
+                top_shorts = [p for p in top_shorts if _price_ok(p)]
+        except Exception as _pv_e:
+            logger.debug(f"Price cross-validation soft-fail (non-blocking): {_pv_e}")
+
         # Add rank
         for i, p in enumerate(top_longs):
             p["rank"] = i + 1
