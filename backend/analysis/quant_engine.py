@@ -5244,6 +5244,14 @@ def _generate_quant_picks_impl() -> dict:
         except Exception as _e:
             logger.debug(f"DB picks backup failed (non-fatal): {_e}")
 
+    # Update in-memory cache so STB + paper-portfolio stop reporting
+    # cache_is_restoring=True after a successful live scan.  Previously
+    # only disk/S3/DB were written — _quant_cache["quant_picks"] kept
+    # time=0 from the startup restore forever, making every subsequent
+    # call re-generate picks instead of serving the hot cache.
+    if not _picks_are_empty(result):
+        _quant_cache["quant_picks"] = {"data": result, "time": time.time()}
+
     return result
 
 
