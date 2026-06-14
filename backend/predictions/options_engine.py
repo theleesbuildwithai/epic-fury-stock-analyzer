@@ -46,8 +46,16 @@ def fetch_option_chain(symbol: str, max_expiries: int = 4) -> dict:
     """
     try:
         _throttle()
-        ticker = yf.Ticker(symbol)
-        expiry_dates = ticker.options  # list of date strings
+        import threading as _oe_thr1
+        _oe_r1 = [None]
+        _oe_t1 = _oe_thr1.Thread(
+            target=lambda r=_oe_r1, s=symbol: r.__setitem__(0, yf.Ticker(s)),
+            daemon=True)
+        _oe_t1.start(); _oe_t1.join(timeout=10)
+        ticker = _oe_r1[0]
+        if ticker is None:
+            return {}
+        expiry_dates = getattr(ticker, "options", None) or []
         if not expiry_dates:
             logger.debug(f"No options available for {symbol}")
             return {}
@@ -372,8 +380,16 @@ def get_current_premium(symbol: str, strike: float, expiry: str,
     """
     try:
         _throttle()
-        ticker = yf.Ticker(symbol)
-        chain = ticker.option_chain(expiry)
+        import threading as _oe_thr2
+        _oe_r2 = [None]
+        _oe_t2 = _oe_thr2.Thread(
+            target=lambda r=_oe_r2, s=symbol, ex=expiry: r.__setitem__(
+                0, yf.Ticker(s).option_chain(ex)
+            ), daemon=True)
+        _oe_t2.start(); _oe_t2.join(timeout=10)
+        chain = _oe_r2[0]
+        if chain is None:
+            return 0.0
         df = chain.calls if option_type == "call" else chain.puts
 
         if df is None or df.empty:

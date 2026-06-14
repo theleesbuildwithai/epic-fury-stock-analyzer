@@ -136,10 +136,29 @@ def check_black_swan() -> dict:
     """
     try:
         import yfinance as yf
-        ticker = yf.Ticker("SPY")
-        info = ticker.fast_info
-        prev_close = float(info.get("previousClose") or 0)
-        cur = float(info.get("lastPrice") or 0)
+        import threading as _bs_thr
+        _bs_r = [None]
+        _bs_t = _bs_thr.Thread(
+            target=lambda r=_bs_r: r.__setitem__(0, yf.Ticker("SPY").fast_info),
+            daemon=True)
+        _bs_t.start(); _bs_t.join(timeout=10)
+        info = _bs_r[0]
+        prev_close = 0.0
+        cur = 0.0
+        if info is not None:
+            prev_close = float(info.get("previousClose") or 0)
+            cur = float(info.get("lastPrice") or 0)
+        # Fallback: use multi_source_adapter if yfinance timed out or gave 0
+        if prev_close <= 0 or cur <= 0:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                _spy_df = get_historical_any_source("SPY", "5d")
+                if _spy_df is not None and len(_spy_df) >= 2:
+                    _cl = _spy_df["Close"].dropna().values.astype(float)
+                    prev_close = float(_cl[-2])
+                    cur = float(_cl[-1])
+            except Exception:
+                pass
         if prev_close <= 0 or cur <= 0:
             return {"ok": False, "is_swan": False, "severity": "unknown",
                     "spy_pct_change": 0, "action": "normal",

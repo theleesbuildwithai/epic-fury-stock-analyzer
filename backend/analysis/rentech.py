@@ -305,9 +305,23 @@ def calculate_stock_beta(ticker: str, price_data: dict, spy_returns=None) -> flo
             if "SPY" in price_data:
                 spy_closes = _safe_col(price_data["SPY"], "Close").values.astype(float)
             else:
-                # SPY not in price_data — try to fetch (with throttle)
+                # SPY not in price_data — try to fetch (with throttle + thread)
                 _throttle_rentech()
-                spy_df = yf.download("SPY", period="6mo", progress=False)
+                import threading as _rt_spy_thr
+                _rt_spy_r = [None]
+                _rt_spy_t = _rt_spy_thr.Thread(
+                    target=lambda r=_rt_spy_r: r.__setitem__(
+                        0, yf.download("SPY", period="6mo", progress=False)
+                    ), daemon=True)
+                _rt_spy_t.start(); _rt_spy_t.join(timeout=10)
+                spy_df = _rt_spy_r[0]
+                if spy_df is None or len(spy_df) < 60:
+                    # Fallback: multi_source historical
+                    try:
+                        from analytics.multi_source_adapter import get_historical_any_source
+                        spy_df = get_historical_any_source("SPY", "6mo")
+                    except Exception:
+                        pass
                 if spy_df is None or len(spy_df) < 60:
                     _beta_cache[ticker] = {"data": beta, "time": now}
                     return beta
@@ -1954,7 +1968,20 @@ def calculate_portfolio_beta(open_trades: list, price_data: dict) -> dict:
     """Calculate portfolio beta to S&P 500 and suggest hedging."""
     try:
         _throttle_rentech()
-        spy = yf.download("SPY", period="3mo", progress=False)
+        import threading as _pb_thr
+        _pb_r = [None]
+        _pb_t = _pb_thr.Thread(
+            target=lambda r=_pb_r: r.__setitem__(
+                0, yf.download("SPY", period="3mo", progress=False)
+            ), daemon=True)
+        _pb_t.start(); _pb_t.join(timeout=10)
+        spy = _pb_r[0]
+        if spy is None or len(spy) < 30:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                spy = get_historical_any_source("SPY", "3mo")
+            except Exception:
+                pass
         if spy is None or len(spy) < 30:
             return {"beta": 0, "hedge_needed": False}
 

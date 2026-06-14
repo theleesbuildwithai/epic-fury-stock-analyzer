@@ -409,11 +409,24 @@ def _classify_current_regime() -> dict:
         spy = _safe_period_returns(["SPY"], None, None)  # may not work without dates
         # Better: pull recent SPY history directly
         import yfinance as yf
+        import threading as _rp_thr
         end_dt = datetime.utcnow()
         start_dt = end_dt - timedelta(days=300)
-        df = yf.download("SPY", start=start_dt.strftime("%Y-%m-%d"),
-                         end=end_dt.strftime("%Y-%m-%d"),
-                         progress=False, auto_adjust=True)
+        _rp_r = [None]
+        _rp_t = _rp_thr.Thread(
+            target=lambda r=_rp_r, s=start_dt, e=end_dt: r.__setitem__(
+                0, yf.download("SPY", start=s.strftime("%Y-%m-%d"),
+                               end=e.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=True)
+            ), daemon=True)
+        _rp_t.start(); _rp_t.join(timeout=15)
+        df = _rp_r[0]
+        if df is None or df.empty or len(df) < 200:
+            try:
+                from analytics.multi_source_adapter import get_historical_any_source
+                df = get_historical_any_source("SPY", "1y")
+            except Exception:
+                pass
         if df is None or df.empty or len(df) < 200:
             return {"ok": False, "reason": "insufficient_spy_data"}
         closes_raw = df["Close"].dropna().values.tolist()

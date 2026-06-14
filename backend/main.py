@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v66b-cache-age-fix-symbols-to-buy-endpoint",
+        "commit_marker": "feat-v67-thread-timeouts-multisource-all-unprotected-yf-calls",
         "date": "2026-06-13",
         "fixes_in_build": [
             "v66_exit_checker_trail_start_2p5x_5pct_matches_main_loop",

@@ -204,7 +204,14 @@ def _try_fetch_yfinance(ticker: str = "^VIX") -> tuple:
     import math as _m
     try:
         import yfinance as yf
-        df = yf.download(ticker, period="2d", progress=False, timeout=10)
+        import threading as _vg_thr
+        _vg_r = [None]
+        _vg_t = _vg_thr.Thread(
+            target=lambda r=_vg_r, t=ticker: r.__setitem__(
+                0, yf.download(t, period="2d", progress=False)
+            ), daemon=True)
+        _vg_t.start(); _vg_t.join(timeout=10)
+        df = _vg_r[0]
         if df is None or df.empty:
             return None, "empty_response"
         try:
