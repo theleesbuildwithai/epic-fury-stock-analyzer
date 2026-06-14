@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v76-price-crossval-layer2-internal-hist-consistency-check",
+        "commit_marker": "feat-v77-price-crossval-fastinfo-split-adjusted-source",
         "date": "2026-06-14",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",

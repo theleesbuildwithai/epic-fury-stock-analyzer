@@ -4600,22 +4600,28 @@ def _generate_quant_picks_impl() -> dict:
                     f"Earnings in {earnings['days_until_earnings']} days — confidence reduced"
                 )
 
-        # PRICE CROSS-VALIDATION — catch yfinance batch scale errors (e.g. AVGO
-        # returned $14 instead of $140 when entire history was off by 10x).
-        # Day-over-day ratio guards don't catch systematic scaling; this does.
-        # Fetch live price for all pick symbols via multi_source_adapter and
-        # remove any pick whose historical close differs from live price by >30%.
+        # PRICE CROSS-VALIDATION — catch yfinance batch scale errors and
+        # split-adjustment mismatches (e.g. GOOGL batch returns pre-split $1062
+        # while the adjusted current price is $359).
+        # Uses yf.Ticker.fast_info["last_price"] — same adjusted-price source
+        # as /api/quote endpoint — fetched in parallel threads for pick symbols only.
         try:
             _pick_syms = list({p["symbol"] for p in top_longs + top_shorts if p.get("symbol")})
             if _pick_syms:
-                from analytics.multi_source_adapter import multi_source_quote_batch
                 import threading as _pv_thr
-                _pv_r = [{}]
-                _pv_t = _pv_thr.Thread(
-                    target=lambda r=_pv_r, s=_pick_syms: r.__setitem__(0, multi_source_quote_batch(s)),
-                    daemon=True)
-                _pv_t.start(); _pv_t.join(timeout=20)
-                live_prices = _pv_r[0] or {}
+                live_prices = {}
+                def _get_fp(sym, out):
+                    try:
+                        fi = yf.Ticker(sym).fast_info
+                        p = getattr(fi, "last_price", None) or fi.get("last_price")
+                        if p and float(p) > 0:
+                            out[sym] = {"price": float(p)}
+                    except Exception:
+                        pass
+                _pv_threads = [_pv_thr.Thread(target=_get_fp, args=(s, live_prices), daemon=True)
+                               for s in _pick_syms]
+                for _pv_t in _pv_threads: _pv_t.start()
+                for _pv_t in _pv_threads: _pv_t.join(timeout=15)
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
