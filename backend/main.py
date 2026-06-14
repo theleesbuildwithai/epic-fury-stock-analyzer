@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v72-force-regen-race-condition-fix-no-time0-reset-while-scan-running",
+        "commit_marker": "feat-v73-quant-picks-stale-serve-12h-not-30min-no-cold-screen",
         "date": "2026-06-14",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",
@@ -5309,8 +5309,12 @@ def quant_picks(force_refresh: bool = False):
                     globals()["_qp_regen_in_progress"] = False
                     logger.debug(f"quant-picks bg regen failed: {_bg_e}")
 
-        # Serve stale in-memory cache if it has picks and is < 30 min old
-        _STALE_SERVE_TTL = 1800  # 30 min — show old picks while regen runs in background
+        # Serve stale in-memory cache if it has picks and is < 12 hours old.
+        # Previously 30 min — but scans take 20+ min and can fall back to
+        # disk/S3 data that's hours old.  30 min caused cold screen all day
+        # when the cache timestamp was >30 min old.  12h keeps quant-picks
+        # showing real picks while a fresh regen runs in the background.
+        _STALE_SERVE_TTL = 43200  # 12 hours — always prefer stale picks over cold screen
         if _cached_has_picks and _cache_age_s < _STALE_SERVE_TTL:
             result = dict(_cached_data)
             _long_tickers_seen = set()
