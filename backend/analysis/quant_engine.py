@@ -4611,9 +4611,11 @@ def _generate_quant_picks_impl() -> dict:
                 import threading as _pv_thr
                 live_prices = {}
                 def _get_fp(sym, out):
+                    """Fetch current adjusted price via the same path as /api/quote."""
                     try:
-                        fi = yf.Ticker(sym).fast_info
-                        p = getattr(fi, "last_price", None) or fi.get("last_price")
+                        from analysis.market_data import get_stock_info
+                        info = get_stock_info(sym)
+                        p = info.get("current_price") or info.get("regularMarketPrice")
                         if p and float(p) > 0:
                             out[sym] = {"price": float(p)}
                     except Exception:
@@ -4621,7 +4623,7 @@ def _generate_quant_picks_impl() -> dict:
                 _pv_threads = [_pv_thr.Thread(target=_get_fp, args=(s, live_prices), daemon=True)
                                for s in _pick_syms]
                 for _pv_t in _pv_threads: _pv_t.start()
-                for _pv_t in _pv_threads: _pv_t.join(timeout=15)
+                for _pv_t in _pv_threads: _pv_t.join(timeout=20)
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
