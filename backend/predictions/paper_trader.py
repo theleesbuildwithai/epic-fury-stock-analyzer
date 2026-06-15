@@ -3958,14 +3958,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     _rp["reward_risk_ratio"] = _rr
                 except Exception:
                     _rr = 0
-            # Keep pick if R:R >= 2.0 OR no stop/target data (can't compute)
-            if _rr >= 2.0 or not _stop or not _target:
+            # Keep pick if R:R >= 1.5 OR no stop/target data (can't compute)
+            # v91: lowered 2.0→1.5. At 2.0, ARM/NXPI/MCHP (R:R=1.6) were being
+            # filtered — blocking all trades. Quant engine already ensures R:R >= 1.5x
+            # via ATR-based targets. 1.5 is still positive expected value with 50% win rate.
+            if _rr >= 1.5 or not _stop or not _target:
                 _rr_filtered.append(_rp)
             else:
-                logger.info(f"R:R FILTER: skipped {_rp.get('symbol','?')} {_rp.get('direction','?')} R:R={_rr:.2f} < 2.0")
+                logger.info(f"R:R FILTER: skipped {_rp.get('symbol','?')} {_rp.get('direction','?')} R:R={_rr:.2f} < 1.5")
         all_picks = _rr_filtered
         if len(all_picks) < _pre_rr_count:
-            logger.info(f"R:R FILTER: dropped {_pre_rr_count - len(all_picks)} picks (R:R < 2.0x), {len(all_picks)} remain")
+            logger.info(f"R:R FILTER: dropped {_pre_rr_count - len(all_picks)} picks (R:R < 1.5x), {len(all_picks)} remain")
 
         # Sort by adjusted confidence (highest first)
         all_picks.sort(key=lambda x: x.get("_adj_confidence", x["confidence"]), reverse=True)

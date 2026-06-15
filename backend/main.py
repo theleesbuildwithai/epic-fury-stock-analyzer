@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v90-force-trade-v3-conf-only-deploy-capital",
+        "commit_marker": "feat-v91-scale-stop-target-on-price-correction-rr-1.5",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",

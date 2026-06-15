@@ -4641,7 +4641,11 @@ def _generate_quant_picks_impl() -> dict:
                         ratio = hist_px / live_px
                         if ratio < 0.80 or ratio > 1.25:  # >25% mismatch = bad data (was 30% — too loose for volatile stocks)
                             logger.warning(f"PRICE VALIDATION L1: {sym} hist=${hist_px:.2f} live=${live_px:.2f} ratio={ratio:.2f} — correcting")
+                            _scale = live_px / hist_px if hist_px > 0 else 1.0
                             pick["price"] = round(live_px, 2)
+                            # Scale stop_loss and target_price by same ratio so R:R stays valid
+                            if pick.get("stop_loss"): pick["stop_loss"] = round(float(pick["stop_loss"]) * _scale, 2)
+                            if pick.get("target_price"): pick["target_price"] = round(float(pick["target_price"]) * _scale, 2)
                             pick["reasons"].append(f"Price corrected (API): ${hist_px:.2f}→${live_px:.2f}")
                             hist_px = live_px
                             corrected = True
@@ -4662,6 +4666,9 @@ def _generate_quant_picks_impl() -> dict:
                                         ratio2 = hist_px / prior_avg
                                         if ratio2 < 0.75 or ratio2 > 1.25:  # was 0.57/1.75 — too loose (ARM 540/400=1.35 was slipping through)
                                             logger.warning(f"PRICE VALIDATION L2: {sym} last=${hist_px:.2f} 5d_avg=${prior_avg:.2f} ratio={ratio2:.2f} — correcting to 5d avg")
+                                            _scale_l2 = prior_avg / hist_px if hist_px > 0 else 1.0
+                                            if pick.get("stop_loss"): pick["stop_loss"] = round(float(pick["stop_loss"]) * _scale_l2, 2)
+                                            if pick.get("target_price"): pick["target_price"] = round(float(pick["target_price"]) * _scale_l2, 2)
                                             pick["price"] = round(prior_avg, 2)
                                             pick["reasons"].append(f"Price corrected (L2): ${hist_px:.2f}→${prior_avg:.2f}")
                         except Exception as _l2e:
@@ -4682,6 +4689,9 @@ def _generate_quant_picks_impl() -> dict:
                                         if ratio_to_peak > 1.10:
                                             corrected_px = round(prior_avg5, 2) if prior_avg5 > 0 else round(prior_peak, 2)
                                             logger.warning(f"PRICE VALIDATION L2b: {sym} last=${hist_px:.2f} prior_peak=${prior_peak:.2f} ratio={ratio_to_peak:.2f} — correcting to ${corrected_px:.2f}")
+                                            _scale_l2b = corrected_px / hist_px if hist_px > 0 else 1.0
+                                            if pick.get("stop_loss"): pick["stop_loss"] = round(float(pick["stop_loss"]) * _scale_l2b, 2)
+                                            if pick.get("target_price"): pick["target_price"] = round(float(pick["target_price"]) * _scale_l2b, 2)
                                             pick["price"] = corrected_px
                                             pick["reasons"].append(f"Price corrected (L2b-peak): ${hist_px:.2f}→${corrected_px:.2f}")
                                             corrected = True
