@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v86-fast-info-missing-fallback-to-Ticker-info",
+        "commit_marker": "feat-v87-serial-get-stock-info-1s-gap-definitive-price-fix",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",

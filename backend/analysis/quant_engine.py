@@ -4608,64 +4608,24 @@ def _generate_quant_picks_impl() -> dict:
         try:
             _pick_syms = list({p["symbol"] for p in top_longs + top_shorts if p.get("symbol")})
             if _pick_syms:
-                # Price validation using fast_info with year_high corruption detection.
-                # Strategy:
-                #   1. Get fast_info.last_price (fast, real-time)
-                #   2. Get fast_info.year_high (52-week high from exchange)
-                #   3. If last_price > year_high × 1.05 → data corrupt (e.g. ARM $540 > $427 52wk high)
-                #      → fall back to Ticker.info["regularMarketPrice"] for that stock only
-                #   4. Stagger thread starts 350ms apart to prevent rate-limiting
-                # This catches stocks where yfinance batch AND fast_info are both corrupt
-                # but Ticker.info still returns the correct regularMarketPrice.
+                # SERIAL price validation via get_stock_info() — same path as /api/quote.
+                # Every approach using threads failed for ARM/NXPI because yfinance's
+                # batch, fast_info, and history() all return the same corrupt price when
+                # called in parallel (rate-limited → falls back to same corrupt source).
+                # get_stock_info() works correctly in /api/quote because it's called ONE
+                # AT A TIME. 1s sleep between calls = zero rate-limiting, guaranteed.
+                # 23 stocks × ~1.5s avg = ~35s total. Acceptable for background regen.
                 live_prices = {}
-                import yfinance as _pv_yf
-                import threading as _pv_thr
-                _lp_lock = _pv_thr.Lock()
-
-                def _get_validated_price(sym):
+                from analysis.market_data import get_stock_info as _pv_gsi
+                for _pvs in _pick_syms:
                     try:
-                        _pvt = _pv_yf.Ticker(sym)
-                        _fi = _pvt.fast_info
-                        _lp = float(getattr(_fi, "last_price", 0) or getattr(_fi, "lastPrice", 0) or 0)
-                        _yh = float(getattr(_fi, "year_high", 0) or getattr(_fi, "yearHigh", 0) or 0)
-                        if _lp > 0 and _yh > 0 and _lp > _yh * 1.05:
-                            # fast_info itself is corrupt (price > 52wk high) — use Ticker.info
-                            logger.warning(f"PRICE VAL fast_info corrupt: {sym} last_price=${_lp:.2f} > year_high=${_yh:.2f} — calling Ticker.info")
-                            _inf = _pvt.info
-                            _p = float(_inf.get("regularMarketPrice") or _inf.get("currentPrice") or 0)
-                            if _p > 0:
-                                with _lp_lock:
-                                    live_prices[sym] = {"price": _p}
-                                return
-                            # Ticker.info also failed — cap at year_high as best estimate
-                            with _lp_lock:
-                                live_prices[sym] = {"price": round(_yh * 0.97, 2)}
-                        elif _lp > 0:
-                            with _lp_lock:
-                                live_prices[sym] = {"price": _lp}
-                        else:
-                            # fast_info.last_price unavailable for this ticker — go straight to Ticker.info
-                            logger.warning(f"PRICE VAL fast_info missing for {sym} — falling back to Ticker.info")
-                            _inf = _pvt.info
-                            _p = float(_inf.get("regularMarketPrice") or _inf.get("currentPrice") or 0)
-                            if _p > 0:
-                                with _lp_lock:
-                                    live_prices[sym] = {"price": _p}
+                        _info = _pv_gsi(_pvs)
+                        _p = _info.get("current_price") or _info.get("regularMarketPrice")
+                        if _p and float(_p) > 0:
+                            live_prices[_pvs] = {"price": float(_p)}
                     except Exception:
                         pass
-
-                _pv_threads = [_pv_thr.Thread(target=_get_validated_price, args=(s,), daemon=True)
-                               for s in _pick_syms]
-                # Start threads with 100ms stagger (light rate-limit protection)
-                for _i, _t in enumerate(_pv_threads):
-                    _t.start()
-                    if _i < len(_pv_threads) - 1:
-                        time.sleep(0.10)
-                # TOTAL budget 20s for ALL threads — not 15s per thread
-                _val_deadline = time.time() + 20.0
-                for _t in _pv_threads:
-                    _remaining = max(0.05, _val_deadline - time.time())
-                    _t.join(timeout=_remaining)
+                    time.sleep(1.0)  # 1s between calls — eliminates all rate-limiting
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
