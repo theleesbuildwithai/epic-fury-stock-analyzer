@@ -4920,9 +4920,18 @@ def _generate_quant_picks_impl() -> dict:
             top_longs.sort(key=lambda x: x.get("confidence", 0), reverse=True)
             top_shorts.sort(key=lambda x: x.get("confidence", 0), reverse=True)
 
-            # --- Remove picks that dropped below minimum confidence ---
-            top_longs = [p for p in top_longs if p.get("confidence", 0) >= 30]
-            top_shorts = [p for p in top_shorts if p.get("confidence", 0) >= 30]
+            # --- BULL regime: apply confidence floor so longs reflect regime strength ---
+            regime_str_conf = regime.get("regime", "SIDEWAYS") if isinstance(regime, dict) else "SIDEWAYS"
+            regime_conf_pct = regime.get("confidence", 50) if isinstance(regime, dict) else 50
+            if regime_str_conf == "BULL" and regime_conf_pct >= 85:
+                for pick in top_longs:
+                    if pick.get("confidence", 0) < 60:
+                        pick["confidence"] = 60
+                        pick["reasons"].append("BULL 85%+ regime floor applied")
+
+            # --- Remove picks below 55% — paper-trader won't touch <57%, users shouldn't see <55% ---
+            top_longs = [p for p in top_longs if p.get("confidence", 0) >= 55]
+            top_shorts = [p for p in top_shorts if p.get("confidence", 0) >= 55]
 
             logger.info(f"POST-FILTER: {len(top_longs)} longs, {len(top_shorts)} shorts after smart filters")
 
