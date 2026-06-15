@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v89-multi-source-L1-bypass-yfinance-ARM-NXPI-fix",
+        "commit_marker": "feat-v90-force-trade-v3-conf-only-deploy-capital",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -7435,6 +7435,77 @@ def admin_force_trade_now_v2(request: Request):
         }
     except Exception as e:
         logger.error(f"Force-trade-now-v2 error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/force-trade-now-v3")
+def admin_force_trade_now_v3(request: Request):
+    """v3: no composite_score filter — uses confidence-only gate (min 52%).
+    v2 was silently opening 0 trades because composite_score < 2.5 for all
+    picks (score is model-normalized, rarely exceeds 2.0). v3 skips that
+    filter and lets execute_trades_from_signals apply its own gates.
+    Different flag file from v1/v2 so it works after those were used.
+    """
+    import os as _os_v3f
+    _flag_v3f = _os_v3f.path.join(_os_v3f.path.dirname(__file__), ".force_trade_now_v3_done")
+    if _os_v3f.path.exists(_flag_v3f):
+        return {"ok": False, "reason": "already_used", "message": "v3 already used this deploy"}
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.paper_trader import execute_trades_from_signals
+        from analysis.quant_engine import generate_quant_picks
+        picks = generate_quant_picks()
+        if not isinstance(picks, dict):
+            return {"ok": False, "reason": "picks_gen_failed"}
+        original_long = len(picks.get("long_picks", []))
+        original_short = len(picks.get("short_picks", []))
+
+        # Filter by confidence only — no composite_score barrier.
+        # composite_score is model-normalized and rarely exceeds 2.0; filtering
+        # at 2.5 silently eliminated every pick in v2.
+        MIN_CONF = 52
+        conf_longs = [p for p in picks.get("long_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+        conf_shorts = [p for p in picks.get("short_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+
+        picks["long_picks"] = conf_longs
+        picks["short_picks"] = conf_shorts
+        picks["force_market_open"] = True
+        picks["force_anytime"] = True
+        result = execute_trades_from_signals(picks)
+        opened_count = len(result.get("opened", []))
+        closed_count = len(result.get("closed", []))
+        skipped_count = len(result.get("skipped", []))
+
+        try:
+            with open(_flag_v3f, "w") as _f:
+                _f.write(f"used at {dt.now().isoformat()} opened={opened_count}")
+        except Exception:
+            pass
+
+        try:
+            auto_trade_stats["total_cycles"] += 1
+            auto_trade_stats["last_run"] = dt.now().isoformat()
+            auto_trade_stats["total_trades_opened"] += opened_count
+            auto_trade_stats["total_trades_closed"] += closed_count
+        except Exception:
+            pass
+
+        logger.warning(f"FORCE-TRADE-NOW-v3: {original_long}+{original_short} picks → conf_filtered={len(conf_longs)}+{len(conf_shorts)} → opened={opened_count}")
+        return {
+            "ok": True,
+            "endpoint": "/api/admin/force-trade-now-v3",
+            "original_picks": {"longs": original_long, "shorts": original_short},
+            "conf_filtered": {"longs": len(conf_longs), "shorts": len(conf_shorts), "min_conf": MIN_CONF},
+            "opened": opened_count,
+            "closed": closed_count,
+            "skipped": skipped_count,
+            "opened_tickers": [o.get("symbol") for o in result.get("opened", [])][:30],
+            "skipped_first_5": [s.get("reason", "")[:120] for s in result.get("skipped", [])][:5],
+            "portfolio_after": result.get("portfolio_after", {}),
+            "endpoint_status": "DISABLED — self-locked after this run",
+        }
+    except Exception as e:
+        logger.error(f"Force-trade-now-v3 error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
