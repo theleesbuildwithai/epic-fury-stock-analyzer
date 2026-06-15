@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v81-price-validation-ticker-history-autoadjust-staggered",
+        "commit_marker": "feat-v82-price-L2-threshold-1.75-to-1.25-catches-ARM-corruption",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",

@@ -4662,7 +4662,10 @@ def _generate_quant_picks_impl() -> dict:
                             corrected = True
                     # Layer 2: internal historical consistency — compare last close
                     # against 5-day prior average using already-downloaded batch data.
-                    # Catches bad last-row yfinance data even when external API fails.
+                    # Threshold 1.25/0.75: catches yfinance last-row corruption (e.g. ARM
+                    # $540 vs prior avg $400 = 1.35x) while allowing legit 24% moves through.
+                    # NOTE: L1 external API often returns the same corrupt data (same yfinance
+                    # source), so L2 is the primary reliable catch for batch data corruption.
                     if not corrected:
                         try:
                             sym_df = price_data.get(sym)
@@ -4672,10 +4675,10 @@ def _generate_quant_picks_impl() -> dict:
                                     prior_avg = float(np.nanmean(_cl[-6:-1]))
                                     if prior_avg > 0:
                                         ratio2 = hist_px / prior_avg
-                                        if ratio2 < 0.57 or ratio2 > 1.75:
+                                        if ratio2 < 0.75 or ratio2 > 1.25:  # was 0.57/1.75 — too loose (ARM 540/400=1.35 was slipping through)
                                             logger.warning(f"PRICE VALIDATION L2: {sym} last=${hist_px:.2f} 5d_avg=${prior_avg:.2f} ratio={ratio2:.2f} — correcting to 5d avg")
                                             pick["price"] = round(prior_avg, 2)
-                                            pick["reasons"].append(f"Price corrected (internal): ${hist_px:.2f}→${prior_avg:.2f}")
+                                            pick["reasons"].append(f"Price corrected (L2): ${hist_px:.2f}→${prior_avg:.2f}")
                         except Exception as _l2e:
                             logger.debug(f"Price L2 check failed for {sym}: {_l2e}")
                     return True  # keep all, correct in place
