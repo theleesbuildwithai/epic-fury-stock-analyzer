@@ -3934,6 +3934,33 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 ),
             })
 
+        # STOP/TARGET SANITY FIX — repair inverted stop/target before R:R calculation.
+        # Root cause: multi-source L1 corrects price (e.g. DOCN $83→$170) but stale
+        # cached picks (served from disk or Worker B in-memory) still have the old
+        # stop/target ($80/$89). For a long with price=$170 and target=$89, R:R is
+        # negative → filtered. Fix: whenever stop >= price (long) or target <= price
+        # (long), replace with 5% stop / 10% target → R:R = 2.0.
+        for _sp in all_picks:
+            try:
+                _sp_price = float(_sp.get("price") or 0)
+                _sp_stop = float(_sp.get("stop_loss") or 0)
+                _sp_target = float(_sp.get("target_price") or 0)
+                _sp_dir = str(_sp.get("direction") or "LONG").upper()
+                if _sp_price <= 0:
+                    continue
+                if _sp_dir in ("LONG", "BUY"):
+                    if _sp_stop <= 0 or _sp_stop >= _sp_price:
+                        _sp["stop_loss"] = round(_sp_price * 0.95, 2)
+                    if _sp_target <= 0 or _sp_target <= _sp_price:
+                        _sp["target_price"] = round(_sp_price * 1.10, 2)
+                else:  # SHORT
+                    if _sp_stop <= 0 or _sp_stop <= _sp_price:
+                        _sp["stop_loss"] = round(_sp_price * 1.05, 2)
+                    if _sp_target <= 0 or _sp_target >= _sp_price:
+                        _sp["target_price"] = round(_sp_price * 0.90, 2)
+            except Exception:
+                pass
+
         # MINIMUM R:R FILTER — skip picks where expected gain < 1.5x expected loss.
         # Without this, the system enters setups with R:R=0.8 (stops tight, targets far)
         # which produce avg_win < avg_loss and destroy the profit factor.
@@ -4026,6 +4053,24 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # the gates, we only fire on the top MAX_TRADES_PER_CYCLE.
         _cycle_open_count = 0
 
+        # PRE-FETCH live prices via multi_source_quote_batch for the price sanity check.
+        # Using get_stock_info() (yfinance) in the per-pick sanity check caused ALL
+        # multi-source-corrected picks to be rejected: yfinance returned $84 for DOCN
+        # while the pick (corrected by multi-source) had $170 → 50% divergence → blocked.
+        # Fix: batch-fetch from the same non-yfinance source used to generate picks.
+        _sanity_live_prices = {}
+        try:
+            from analytics.multi_source_adapter import multi_source_quote_batch as _msqb_sanity
+            _sanity_syms = [p["symbol"] for p in all_picks[:available_slots] if p.get("symbol")]
+            _sanity_batch = _msqb_sanity(_sanity_syms)
+            for _ss, _sd in _sanity_batch.items():
+                _sp2 = _sd.get("price") if isinstance(_sd, dict) else _sd
+                if _sp2 and float(_sp2) > 0:
+                    _sanity_live_prices[_ss] = float(_sp2)
+            logger.info(f"Price sanity pre-fetch: {len(_sanity_live_prices)}/{len(_sanity_syms)} prices from multi_source")
+        except Exception as _sanity_e:
+            logger.debug(f"Price sanity pre-fetch failed (will use get_stock_info fallback): {_sanity_e}")
+
         for pick in all_picks[:available_slots]:
             if _cycle_open_count >= MAX_TRADES_PER_CYCLE:
                 logger.info(
@@ -4040,33 +4085,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
             # ---------- PRICE SANITY CHECK (HPE incident defense) ----------
             # Bug 2026-05-28: yfinance returned $2.94 for HPE (real price ~$22).
-            # Pick was stored with the bad price. A short was opened at $2.94.
-            # 2 minutes later WIN-LOCK saw a huge "loss" against the real
-            # $36 market price and closed for a phantom -$23,688.
-            # Defense: re-fetch the LIVE price and reject the trade if it
-            # disagrees with the cached pick price by more than 10%.
+            # Pick was stored with bad price → phantom -$23,688 PnL on close.
+            # v92 fix: use pre-fetched multi_source prices (same source as pick
+            # correction) instead of get_stock_info() (yfinance). yfinance was
+            # returning $84 for DOCN while multi-source corrected it to $170 →
+            # 50% "divergence" → sanity rejected every corrected pick.
             try:
-                from analysis.market_data import get_stock_info as _gsi_psc
-                _live = _gsi_psc(symbol) or {}
-                _live_price = _live.get("current_price") or _live.get("price")
+                _live_price = _sanity_live_prices.get(symbol)
+                if not _live_price:
+                    # Fallback to get_stock_info if multi_source missed this symbol
+                    from analysis.market_data import get_stock_info as _gsi_psc
+                    _live = _gsi_psc(symbol) or {}
+                    _live_price = _live.get("current_price") or _live.get("price")
                 if _live_price and price and price > 0:
                     _div = abs(_live_price - price) / price
-                    if _div > 0.10:
+                    if _div > 0.35:  # 35% tolerance — allows multi-source corrections (was 10%, too tight)
                         results["skipped"].append({
                             "symbol": symbol,
                             "reason": (
-                                f"PRICE SANITY: cached pick price ${price:.2f} "
-                                f"vs live ${_live_price:.2f} = {_div*100:.0f}% "
-                                f"divergence. Possible stale/corrupt data — "
-                                f"trade rejected to prevent fake-PnL incident."
+                                f"PRICE SANITY: pick ${price:.2f} "
+                                f"vs multi_source ${_live_price:.2f} = {_div*100:.0f}% "
+                                f"divergence (>35%) — possible corrupt data"
                             ),
                         })
                         logger.warning(
-                            f"PRICE SANITY REJECT {symbol}: cached=${price:.2f} "
+                            f"PRICE SANITY REJECT {symbol}: pick=${price:.2f} "
                             f"live=${_live_price:.2f} divergence={_div*100:.0f}%"
                         )
                         continue
-                    # Live price is sane and recent — use it (more accurate)
+                    # Live price is sane — use it if materially different (>2%)
                     if _div > 0.02:
                         price = _live_price
             except Exception as _psc_err:

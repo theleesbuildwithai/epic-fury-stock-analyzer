@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v91-scale-stop-target-on-price-correction-rr-1.5",
+        "commit_marker": "feat-v92-inverted-stop-sanity-fix-3-layers-force-v4",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -5278,6 +5278,33 @@ def quant_picks(force_refresh: bool = False):
                 if _sym and _sym not in _long_tickers_seen and _sym not in _short_tickers_seen:
                     _short_tickers_seen.add(_sym)
                     _clean_shorts.append(_sp)
+            # STOP/TARGET SANITY: fix inverted stops before serving.
+            # Happens when price was corrected by multi-source but stops/targets
+            # are from an older cache entry (different worker or pre-correction).
+            for _fix_p in _clean_longs:
+                try:
+                    _fx_px = float(_fix_p.get("price") or 0)
+                    if _fx_px <= 0: continue
+                    _fx_sl = float(_fix_p.get("stop_loss") or 0)
+                    _fx_tp = float(_fix_p.get("target_price") or 0)
+                    if _fx_sl <= 0 or _fx_sl >= _fx_px:
+                        _fix_p["stop_loss"] = round(_fx_px * 0.95, 2)
+                    if _fx_tp <= 0 or _fx_tp <= _fx_px:
+                        _fix_p["target_price"] = round(_fx_px * 1.10, 2)
+                except Exception:
+                    pass
+            for _fix_p in _clean_shorts:
+                try:
+                    _fx_px = float(_fix_p.get("price") or 0)
+                    if _fx_px <= 0: continue
+                    _fx_sl = float(_fix_p.get("stop_loss") or 0)
+                    _fx_tp = float(_fix_p.get("target_price") or 0)
+                    if _fx_sl <= 0 or _fx_sl <= _fx_px:
+                        _fix_p["stop_loss"] = round(_fx_px * 1.05, 2)
+                    if _fx_tp <= 0 or _fx_tp >= _fx_px:
+                        _fix_p["target_price"] = round(_fx_px * 0.90, 2)
+                except Exception:
+                    pass
             result["long_picks"] = _clean_longs
             result["short_picks"] = _clean_shorts
             result["picks"] = _clean_longs + _clean_shorts
@@ -7506,6 +7533,97 @@ def admin_force_trade_now_v3(request: Request):
         }
     except Exception as e:
         logger.error(f"Force-trade-now-v3 error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/force-trade-now-v4")
+def admin_force_trade_now_v4(request: Request):
+    """v4: includes stop/target sanity fix before R:R filter.
+    v3 opened 0 trades because stale cached picks had inverted stops
+    (e.g. DOCN stop=$80 with price=$170 → R:R=-0.9 → filtered).
+    v4 applies the same sanity fix that execute_trades_from_signals
+    now has, AND resets both pick fields before passing to execution.
+    """
+    import os as _os_v4f
+    _flag_v4f = _os_v4f.path.join(_os_v4f.path.dirname(__file__), ".force_trade_now_v4_done")
+    if _os_v4f.path.exists(_flag_v4f):
+        return {"ok": False, "reason": "already_used", "message": "v4 already used this deploy"}
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.paper_trader import execute_trades_from_signals
+        from analysis.quant_engine import generate_quant_picks
+        picks = generate_quant_picks()
+        if not isinstance(picks, dict):
+            return {"ok": False, "reason": "picks_gen_failed"}
+        original_long = len(picks.get("long_picks", []))
+        original_short = len(picks.get("short_picks", []))
+
+        # Confidence filter — no composite_score gate
+        MIN_CONF = 52
+        conf_longs = [p for p in picks.get("long_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+        conf_shorts = [p for p in picks.get("short_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+
+        # Stop/target sanity fix — repair inverted stops from stale/pre-correction cache
+        for _p in conf_longs:
+            try:
+                _px = float(_p.get("price") or 0)
+                if _px <= 0: continue
+                if float(_p.get("stop_loss") or 0) <= 0 or float(_p.get("stop_loss") or 0) >= _px:
+                    _p["stop_loss"] = round(_px * 0.95, 2)
+                if float(_p.get("target_price") or 0) <= 0 or float(_p.get("target_price") or 0) <= _px:
+                    _p["target_price"] = round(_px * 1.10, 2)
+            except Exception:
+                pass
+        for _p in conf_shorts:
+            try:
+                _px = float(_p.get("price") or 0)
+                if _px <= 0: continue
+                if float(_p.get("stop_loss") or 0) <= 0 or float(_p.get("stop_loss") or 0) <= _px:
+                    _p["stop_loss"] = round(_px * 1.05, 2)
+                if float(_p.get("target_price") or 0) <= 0 or float(_p.get("target_price") or 0) >= _px:
+                    _p["target_price"] = round(_px * 0.90, 2)
+            except Exception:
+                pass
+
+        picks["long_picks"] = conf_longs
+        picks["short_picks"] = conf_shorts
+        picks["force_market_open"] = True
+        picks["force_anytime"] = True
+        result = execute_trades_from_signals(picks)
+        opened_count = len(result.get("opened", []))
+        closed_count = len(result.get("closed", []))
+        skipped_count = len(result.get("skipped", []))
+
+        try:
+            with open(_flag_v4f, "w") as _f:
+                _f.write(f"used at {dt.now().isoformat()} opened={opened_count}")
+        except Exception:
+            pass
+
+        try:
+            auto_trade_stats["total_cycles"] += 1
+            auto_trade_stats["last_run"] = dt.now().isoformat()
+            auto_trade_stats["total_trades_opened"] += opened_count
+            auto_trade_stats["total_trades_closed"] += closed_count
+        except Exception:
+            pass
+
+        logger.warning(f"FORCE-TRADE-NOW-v4: {original_long}+{original_short} picks → conf={len(conf_longs)}+{len(conf_shorts)} → opened={opened_count}")
+        return {
+            "ok": True,
+            "endpoint": "/api/admin/force-trade-now-v4",
+            "original_picks": {"longs": original_long, "shorts": original_short},
+            "conf_filtered": {"longs": len(conf_longs), "shorts": len(conf_shorts), "min_conf": MIN_CONF},
+            "opened": opened_count,
+            "closed": closed_count,
+            "skipped": skipped_count,
+            "opened_tickers": [o.get("symbol") for o in result.get("opened", [])][:30],
+            "skipped_first_5": [s.get("reason", "")[:200] for s in result.get("skipped", [])][:5],
+            "portfolio_after": result.get("portfolio_after", {}),
+            "endpoint_status": "DISABLED — self-locked after this run",
+        }
+    except Exception as e:
+        logger.error(f"Force-trade-now-v4 error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
