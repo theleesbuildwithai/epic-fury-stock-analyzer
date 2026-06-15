@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v78-price-crossval-get-stock-info-same-as-api-quote",
+        "commit_marker": "feat-v79-price-crossval-threshold-25pct-catches-arm-nxpi",
         "date": "2026-06-14",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",

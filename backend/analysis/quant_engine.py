@@ -4635,7 +4635,7 @@ def _generate_quant_picks_impl() -> dict:
                     live_px = float((_lv.get("price", 0) if isinstance(_lv, dict) else _lv) or 0)
                     if live_px > 0:
                         ratio = hist_px / live_px
-                        if ratio < 0.7 or ratio > 1.43:
+                        if ratio < 0.80 or ratio > 1.25:  # >25% mismatch = bad data (was 30% — too loose for volatile stocks)
                             logger.warning(f"PRICE VALIDATION L1: {sym} hist=${hist_px:.2f} live=${live_px:.2f} ratio={ratio:.2f} — correcting")
                             pick["price"] = round(live_px, 2)
                             pick["reasons"].append(f"Price corrected (API): ${hist_px:.2f}→${live_px:.2f}")
