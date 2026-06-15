@@ -5051,9 +5051,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v88-L2b-pure-batch-peak-price-fix-ARM-NXPI",
+        "commit_marker": "feat-v89-multi-source-L1-bypass-yfinance-ARM-NXPI-fix",
         "date": "2026-06-15",
         "fixes_in_build": [
+            "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
+            "v89_bypasses_yfinance_lib_entirely_for_price_validation",
+            "v89_yahoo_direct_v7v8_stockanalysis_finviz_chain_returns_real_price",
+            "v89_ARM_yfinance_auto_adjust_forward_corrupts_all_rows_not_just_last",
             "v88_L2b_pure_batch_peak_check_last_close_vs_prior_peak_1.10x_threshold",
             "v88_catches_ARM_540_vs_peak_428_ratio_1.26_corrects_to_5d_avg_393",
             "v88_catches_NXPI_404_vs_peak_340_ratio_1.19_corrects_to_5d_avg_310",

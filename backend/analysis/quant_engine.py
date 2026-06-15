@@ -4608,24 +4608,26 @@ def _generate_quant_picks_impl() -> dict:
         try:
             _pick_syms = list({p["symbol"] for p in top_longs + top_shorts if p.get("symbol")})
             if _pick_syms:
-                # SERIAL price validation via get_stock_info() — same path as /api/quote.
-                # Every approach using threads failed for ARM/NXPI because yfinance's
-                # batch, fast_info, and history() all return the same corrupt price when
-                # called in parallel (rate-limited → falls back to same corrupt source).
-                # get_stock_info() works correctly in /api/quote because it's called ONE
-                # AT A TIME. 1s sleep between calls = zero rate-limiting, guaranteed.
-                # 23 stocks × ~1.5s avg = ~35s total. Acceptable for background regen.
+                # MULTI-SOURCE batch price validation — bypasses yfinance library entirely.
+                # Root cause of ARM/NXPI corruption: yfinance auto_adjust=True applies
+                # incorrect forward adjustment factors to ALL historical rows AND to
+                # Ticker.info["currentPrice"]. So get_stock_info() returns $540 for ARM
+                # even though the actual market price is $397. Every yfinance API path
+                # (batch download, fast_info, Ticker.info) returns the same corrupt value.
+                # Fix: use multi_source_quote_batch() which calls Yahoo direct HTTP (v7/v8),
+                # stockanalysis.com, and finviz.com — all completely independent of the
+                # yfinance library. These sources return the actual market price ($397 ARM).
                 live_prices = {}
-                from analysis.market_data import get_stock_info as _pv_gsi
-                for _pvs in _pick_syms:
-                    try:
-                        _info = _pv_gsi(_pvs)
-                        _p = _info.get("current_price") or _info.get("regularMarketPrice")
+                try:
+                    from analytics.multi_source_adapter import multi_source_quote_batch as _msqb
+                    _ms_result = _msqb(_pick_syms)
+                    for _pvs, _qdata in _ms_result.items():
+                        _p = _qdata.get("price") if isinstance(_qdata, dict) else _qdata
                         if _p and float(_p) > 0:
                             live_prices[_pvs] = {"price": float(_p)}
-                    except Exception:
-                        pass
-                    time.sleep(1.0)  # 1s between calls — eliminates all rate-limiting
+                    logger.info(f"Price validation multi_source batch: {len(live_prices)}/{len(_pick_syms)} prices fetched")
+                except Exception as _ms_e:
+                    logger.warning(f"multi_source_quote_batch failed, L1 validation skipped: {_ms_e}")
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
@@ -4647,8 +4649,8 @@ def _generate_quant_picks_impl() -> dict:
                     # against 5-day prior average using already-downloaded batch data.
                     # Threshold 1.25/0.75: catches yfinance last-row corruption (e.g. ARM
                     # $540 vs prior avg $400 = 1.35x) while allowing legit 24% moves through.
-                    # NOTE: L1 external API often returns the same corrupt data (same yfinance
-                    # source), so L2 is the primary reliable catch for batch data corruption.
+                    # NOTE: L1 now uses multi_source_quote_batch (non-yfinance). L2 is backup
+                    # in case all external sources are unavailable.
                     if not corrected:
                         try:
                             sym_df = price_data.get(sym)
