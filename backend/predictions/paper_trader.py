@@ -299,8 +299,20 @@ def _short_aware_positions_value(open_trades, current_prices) -> float:
             entry = float(t.get("entry_price") or 0)
             shares = float(t.get("shares") or 0)
             direction = (t.get("direction") or "long").lower()
+            instrument_type = (t.get("instrument_type") or "equity").lower()
             if entry <= 0 or shares == 0:
                 continue
+
+            # OPTIONS: entry_price is premium per share, shares is contracts.
+            # current_prices returns the STOCK price, not option premium — using
+            # the short/long formula with stock price gives wildly wrong NAV.
+            # Use entry value (premium × contracts × 100) as stable approximation.
+            # The audit reconciliation tolerance is widened to absorb normal
+            # option premium fluctuation (see _check_nav_reconciliation).
+            if instrument_type in ("call", "put"):
+                total += entry * shares * 100
+                continue
+
             price = current_prices.get(ticker)
             # F8 fix: if price is missing / non-finite, fall back to
             # entry (treated as flat) rather than crashing or producing NaN
