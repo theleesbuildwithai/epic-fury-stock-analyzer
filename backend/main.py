@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v83-price-validation-serial-fast-info-no-rate-limiting",
+        "commit_marker": "feat-v84-year-high-corruption-detector-Ticker-info-fallback",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",
