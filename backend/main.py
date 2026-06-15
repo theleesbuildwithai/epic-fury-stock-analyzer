@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v98-force-scan-now-unlock",
+        "commit_marker": "feat-v99-force-scan-background-thread",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -6290,29 +6290,36 @@ def audit_halt_clear(request: Request):
 
 @app.post("/api/admin/force-scan-now")
 def admin_force_scan_now(request: Request):
-    """Reset stuck scan lock and run a fresh scan synchronously.
-    Use when quant-picks shows cache_status=cold for >5 minutes —
-    means _SCAN_RUNNING is stuck True from a previous hung scan.
-    Resets _SCAN_RUNNING=False, clears cache, then runs scan directly.
-    WARNING: slow endpoint (~2-4 min). Do not call concurrently."""
+    """Reset stuck scan lock and kick off a fresh scan in a background
+    thread. Returns immediately — scan takes 2-4 min in background.
+    Poll GET /api/quant-picks until cache_status != 'cold'.
+    Use when cache_status=cold for >5 min (stuck _SCAN_RUNNING lock)."""
     check_rate_limit(request.client.host)
     try:
+        import threading as _threading
         import analysis.quant_engine as _qe
-        # Reset stuck lock
+
+        # Reset stuck lock and clear cache on this worker
         _qe._SCAN_RUNNING = False
         _qe._quant_cache.clear()
-        logger.warning("FORCE-SCAN: reset _SCAN_RUNNING=False and cleared cache — running fresh scan")
-        # Run scan (slow — blocks until complete)
-        result = _qe.generate_quant_picks()
-        longs = len(result.get("long_picks", []))
-        shorts = len(result.get("short_picks", []))
-        logger.warning(f"FORCE-SCAN: complete — {longs} longs, {shorts} shorts")
+        logger.warning("FORCE-SCAN: reset _SCAN_RUNNING=False + cleared cache — launching background thread")
+
+        def _run_scan():
+            try:
+                result = _qe.generate_quant_picks()
+                longs = len(result.get("long_picks", []))
+                shorts = len(result.get("short_picks", []))
+                logger.warning(f"FORCE-SCAN thread complete: {longs} longs {shorts} shorts")
+            except Exception as _se:
+                logger.error(f"FORCE-SCAN thread error: {_se}")
+
+        _t = _threading.Thread(target=_run_scan, daemon=True, name="force-scan-now")
+        _t.start()
+
         return {
             "ok": True,
-            "long_picks": longs,
-            "short_picks": shorts,
-            "regime": result.get("regime"),
-            "sample_longs": [{"symbol": p.get("symbol"), "price": p.get("price"), "confidence": p.get("confidence")} for p in result.get("long_picks", [])[:5]],
+            "message": "Scan started in background thread. Poll GET /api/quant-picks every 30s until cache_status != cold",
+            "estimated_wait": "2-4 minutes",
         }
     except Exception as e:
         logger.error(f"FORCE-SCAN error: {e}")
