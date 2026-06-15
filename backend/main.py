@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v92-inverted-stop-sanity-fix-3-layers-force-v4",
+        "commit_marker": "feat-v92-inverted-stop-sanity-dedup-price-sanity-force-v4",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -7562,6 +7562,10 @@ def admin_force_trade_now_v4(request: Request):
         MIN_CONF = 52
         conf_longs = [p for p in picks.get("long_picks", []) if p.get("confidence", 0) >= MIN_CONF]
         conf_shorts = [p for p in picks.get("short_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+
+        # Dedup — a ticker must never be in both long and short lists
+        _v4_long_syms = {p.get("symbol") for p in conf_longs}
+        conf_shorts = [p for p in conf_shorts if p.get("symbol") not in _v4_long_syms]
 
         # Stop/target sanity fix — repair inverted stops from stale/pre-correction cache
         for _p in conf_longs:

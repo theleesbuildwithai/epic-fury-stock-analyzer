@@ -4703,6 +4703,27 @@ def _generate_quant_picks_impl() -> dict:
         except Exception as _pv_e:
             logger.debug(f"Price cross-validation soft-fail (non-blocking): {_pv_e}")
 
+        # DEDUP: a ticker must never appear in both long and short lists.
+        # STB and paper portfolio must never open opposite legs on the same name.
+        # If conflict exists, keep the higher-confidence side only.
+        _long_syms = {p.get("symbol") for p in top_longs}
+        _deduped_shorts = []
+        for _ds in top_shorts:
+            _dsym = _ds.get("symbol")
+            if _dsym in _long_syms:
+                _long_conf = next((p.get("confidence", 0) for p in top_longs if p.get("symbol") == _dsym), 0)
+                _short_conf = _ds.get("confidence", 0)
+                if _short_conf > _long_conf:
+                    top_longs = [p for p in top_longs if p.get("symbol") != _dsym]
+                    _long_syms.discard(_dsym)
+                    _deduped_shorts.append(_ds)
+                    logger.warning(f"DEDUP: {_dsym} in both lists — keeping SHORT (conf {_short_conf} > long {_long_conf})")
+                else:
+                    logger.warning(f"DEDUP: {_dsym} in both lists — keeping LONG (conf {_long_conf} >= short {_short_conf})")
+            else:
+                _deduped_shorts.append(_ds)
+        top_shorts = _deduped_shorts
+
         # Add rank
         for i, p in enumerate(top_longs):
             p["rank"] = i + 1
