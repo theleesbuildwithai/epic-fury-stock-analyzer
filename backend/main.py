@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v92-inverted-stop-sanity-dedup-price-sanity-force-v4",
+        "commit_marker": "feat-v93-direction-fix-kelly-floor-force-v5",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -7628,6 +7628,153 @@ def admin_force_trade_now_v4(request: Request):
         }
     except Exception as e:
         logger.error(f"Force-trade-now-v4 error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/force-trade-now-v5")
+def admin_force_trade_now_v5(request: Request):
+    """v5: direction enforcement + Kelly size floor + close wrong-direction positions.
+
+    Fixes two bugs from v4:
+    1. DOCN/AMAT opened as SHORTs — pick["direction"] field was wrong.
+       v5 explicitly sets direction="LONG" for all conf_longs and
+       direction="SHORT" for conf_shorts before passing to execution.
+    2. Position sizes were ~1-2% because Kelly with thin history returns
+       tiny fractions; v5 applies a 12% floor for BULL long trades via
+       the fix in execute_trades_from_signals (paper_trader.py line 4397).
+    3. Closes any existing wrong-direction positions (DOCN/AMAT shorts that
+       should have been longs) before opening new ones.
+    """
+    import os as _os_v5f
+    _flag_v5f = _os_v5f.path.join(_os_v5f.path.dirname(__file__), ".force_trade_now_v5_done")
+    if _os_v5f.path.exists(_flag_v5f):
+        return {"ok": False, "reason": "already_used", "message": "v5 already used this deploy"}
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.paper_trader import execute_trades_from_signals, get_portfolio_state
+        from predictions.models import get_open_trades, get_cash, close_paper_trade
+        from analysis.quant_engine import generate_quant_picks
+
+        # Step 1: Close any wrong-direction positions (e.g. DOCN/AMAT opened as shorts)
+        closed_wrong = []
+        try:
+            open_trades = get_open_trades()
+            # Fetch live prices for close
+            _wrong_syms = [t["ticker"] for t in open_trades if t.get("direction", "").upper() in ("SHORT", "SELL")]
+            _close_prices = {}
+            if _wrong_syms:
+                try:
+                    from analytics.multi_source_adapter import multi_source_quote_batch as _msqb_v5
+                    _cp_batch = _msqb_v5(_wrong_syms)
+                    for _cs, _cd in _cp_batch.items():
+                        _cp = _cd.get("price") if isinstance(_cd, dict) else _cd
+                        if _cp and float(_cp) > 0:
+                            _close_prices[_cs] = float(_cp)
+                except Exception:
+                    pass
+            # We only want to close positions that were incorrectly opened as shorts
+            # (i.e., DOCN and AMAT from v4 which should have been longs)
+            _known_wrong_shorts = {"DOCN", "AMAT"}
+            for t in open_trades:
+                _ticker = t.get("ticker", "")
+                _dir = str(t.get("direction", "")).upper()
+                if _ticker in _known_wrong_shorts and _dir in ("SHORT", "SELL"):
+                    _cpx = _close_prices.get(_ticker, t.get("entry_price", 0))
+                    try:
+                        close_paper_trade(t["id"], _cpx)
+                        closed_wrong.append({"id": t["id"], "ticker": _ticker, "direction": _dir, "close_price": _cpx})
+                        logger.warning(f"FORCE-TRADE-v5: closed wrong-direction SHORT {_ticker} at ${_cpx}")
+                    except Exception as _ce:
+                        logger.error(f"FORCE-TRADE-v5: failed to close {_ticker}: {_ce}")
+        except Exception as _cw_e:
+            logger.error(f"FORCE-TRADE-v5: close-wrong-positions error: {_cw_e}")
+
+        # Step 2: Generate fresh picks
+        picks = generate_quant_picks()
+        if not isinstance(picks, dict):
+            return {"ok": False, "reason": "picks_gen_failed", "closed_wrong": closed_wrong}
+        original_long = len(picks.get("long_picks", []))
+        original_short = len(picks.get("short_picks", []))
+
+        # Step 3: Confidence filter
+        MIN_CONF = 52
+        conf_longs = [p for p in picks.get("long_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+        conf_shorts = [p for p in picks.get("short_picks", []) if p.get("confidence", 0) >= MIN_CONF]
+
+        # Step 4: Dedup
+        _v5_long_syms = {p.get("symbol") for p in conf_longs}
+        conf_shorts = [p for p in conf_shorts if p.get("symbol") not in _v5_long_syms]
+
+        # Step 5: DIRECTION ENFORCEMENT — this is the root cause fix for DOCN/AMAT
+        # pick["direction"] field may say "SHORT" even when it came from long_picks.
+        # Explicitly override so execute_trades_from_signals sees the correct direction.
+        for _p in conf_longs:
+            _p["direction"] = "LONG"
+        for _p in conf_shorts:
+            _p["direction"] = "SHORT"
+
+        # Step 6: Stop/target sanity fix
+        for _p in conf_longs:
+            try:
+                _px = float(_p.get("price") or 0)
+                if _px <= 0: continue
+                if float(_p.get("stop_loss") or 0) <= 0 or float(_p.get("stop_loss") or 0) >= _px:
+                    _p["stop_loss"] = round(_px * 0.95, 2)
+                if float(_p.get("target_price") or 0) <= 0 or float(_p.get("target_price") or 0) <= _px:
+                    _p["target_price"] = round(_px * 1.10, 2)
+            except Exception:
+                pass
+        for _p in conf_shorts:
+            try:
+                _px = float(_p.get("price") or 0)
+                if _px <= 0: continue
+                if float(_p.get("stop_loss") or 0) <= 0 or float(_p.get("stop_loss") or 0) <= _px:
+                    _p["stop_loss"] = round(_px * 1.05, 2)
+                if float(_p.get("target_price") or 0) <= 0 or float(_p.get("target_price") or 0) >= _px:
+                    _p["target_price"] = round(_px * 0.90, 2)
+            except Exception:
+                pass
+
+        picks["long_picks"] = conf_longs
+        picks["short_picks"] = conf_shorts
+        picks["force_market_open"] = True
+        picks["force_anytime"] = True
+        result = execute_trades_from_signals(picks)
+        opened_count = len(result.get("opened", []))
+        closed_count = len(result.get("closed", []))
+        skipped_count = len(result.get("skipped", []))
+
+        try:
+            with open(_flag_v5f, "w") as _f:
+                _f.write(f"used at {dt.now().isoformat()} opened={opened_count}")
+        except Exception:
+            pass
+
+        try:
+            auto_trade_stats["total_cycles"] += 1
+            auto_trade_stats["last_run"] = dt.now().isoformat()
+            auto_trade_stats["total_trades_opened"] += opened_count
+            auto_trade_stats["total_trades_closed"] += closed_count + len(closed_wrong)
+        except Exception:
+            pass
+
+        logger.warning(f"FORCE-TRADE-NOW-v5: {original_long}+{original_short} picks → conf={len(conf_longs)}+{len(conf_shorts)} → closed_wrong={len(closed_wrong)} → opened={opened_count}")
+        return {
+            "ok": True,
+            "endpoint": "/api/admin/force-trade-now-v5",
+            "closed_wrong_direction": closed_wrong,
+            "original_picks": {"longs": original_long, "shorts": original_short},
+            "conf_filtered": {"longs": len(conf_longs), "shorts": len(conf_shorts), "min_conf": MIN_CONF},
+            "opened": opened_count,
+            "closed": closed_count,
+            "skipped": skipped_count,
+            "opened_tickers": [o.get("symbol") for o in result.get("opened", [])][:30],
+            "skipped_first_5": [s.get("reason", "")[:200] for s in result.get("skipped", [])][:5],
+            "portfolio_after": result.get("portfolio_after", {}),
+            "endpoint_status": "DISABLED — self-locked after this run",
+        }
+    except Exception as e:
+        logger.error(f"Force-trade-now-v5 error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

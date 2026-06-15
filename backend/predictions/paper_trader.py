@@ -4395,7 +4395,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if regime == "BEAR":
                 size_pct = min(0.12, kelly_size * 1.2) if direction == "short" else min(0.08, kelly_size * 0.8)
             elif regime == "BULL":
-                size_pct = min(0.12, kelly_size * 1.2) if direction == "long" else min(0.06, kelly_size * 0.7)
+                if direction == "long":
+                    # Kelly can reduce below target but never below configured floor (12%)
+                    size_pct = max(_get_position_size_pct(), min(0.12, kelly_size * 1.2))
+                else:
+                    size_pct = min(0.06, kelly_size * 0.7)
             else:
                 size_pct = kelly_size
 
