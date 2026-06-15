@@ -4027,7 +4027,7 @@ def _generate_quant_picks_impl() -> dict:
         except NameError:
             _PRICE_DATA_LASTGOOD = {}
 
-        N_BATCHES = 10
+        N_BATCHES = 20  # 2026-06-15: was 10 → smaller batches (~36 stocks each) so more complete in 180s deadline
         batch_size = (len(QUANT_UNIVERSE) + N_BATCHES - 1) // N_BATCHES
         batches = [QUANT_UNIVERSE[i:i+batch_size] for i in range(0, len(QUANT_UNIVERSE), batch_size)]
 
@@ -4040,7 +4040,7 @@ def _generate_quant_picks_impl() -> dict:
         # (CPI, FOMC) yfinance batch downloads can hang indefinitely, causing
         # the entire picks engine to stall for 25 min. 120s total is enough
         # for a clean fetch and lets us fall back to cache quickly on bad days.
-        _scan_deadline = _time_scan.time() + 120
+        _scan_deadline = _time_scan.time() + 180  # 2026-06-15: was 120s — background thread has no HTTP timeout so allow 3min
         def _over_budget():
             return _time_scan.time() > _scan_deadline
 
@@ -4105,12 +4105,12 @@ def _generate_quant_picks_impl() -> dict:
                     continue
             return n_added
 
-        # --- TIER 1: bulk batches of ~73 ---
+        # --- TIER 1: bulk batches of ~36 ---
         for batch in batches:
             if _over_budget(): break
             _throttle()
             try:
-                df = _yf_dl(batch, timeout=45)
+                df = _yf_dl(batch, timeout=20)  # 2026-06-15: was 45s — 20s times out hung batches faster, fitting more in 180s budget
                 _extract_batch(df, batch)
             except Exception as e:
                 logger.warning(f"Tier 1 batch download failed: {e}")
@@ -4127,7 +4127,7 @@ def _generate_quant_picks_impl() -> dict:
                 chunk = m[i:i+50]
                 _throttle()
                 try:
-                    df = _yf_dl(chunk, timeout=30)
+                    df = _yf_dl(chunk, timeout=15)  # 2026-06-15: was 30s
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 2 chunk failed: {e}")

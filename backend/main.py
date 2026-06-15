@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v99-force-scan-background-thread",
+        "commit_marker": "feat-v100-scan-coverage-kelly-floor-force-trade-v10",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -8149,6 +8149,83 @@ def admin_force_trade_now_v9(request: Request):
         }
     except Exception as e:
         logger.error(f"Force-trade-now-v9 error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/force-trade-now-v10")
+def admin_force_trade_now_v10(request: Request):
+    """v10 (2026-06-15): PERMANENT reusable force-trade endpoint.
+    - NO self-lock — can be called repeatedly
+    - Reads picks directly from quant cache (no cache clear)
+    - Sets force_anytime=True to bypass off-hours block
+    - Opens up to 8 positions per call at full Kelly-floored size
+    - Use when portfolio exposure is below target and market is closed
+    """
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.paper_trader import execute_trades_from_signals
+        from analysis.quant_engine import generate_quant_picks, _quant_cache
+
+        # Read picks from in-memory cache — do NOT clear it first
+        picks = generate_quant_picks()
+
+        long_picks = picks.get("long_picks") or []
+        short_picks = picks.get("short_picks") or []
+        original_long = len(long_picks)
+        original_short = len(short_picks)
+
+        MIN_CONF = 52  # same as BULL gate
+        conf_longs = [p for p in long_picks if p.get("confidence", 0) >= MIN_CONF]
+        conf_shorts = [p for p in short_picks if p.get("confidence", 0) >= 52]
+
+        # Enforce correct directions
+        for p in conf_longs:
+            p["direction"] = "LONG"
+        for p in conf_shorts:
+            p["direction"] = "SHORT"
+
+        picks_to_send = {
+            **picks,
+            "long_picks": conf_longs,
+            "short_picks": conf_shorts,
+            "force_anytime": True,   # bypass off-hours block
+        }
+
+        pick_snapshot = [
+            {"symbol": p.get("symbol"), "direction": "LONG", "confidence": p.get("confidence"),
+             "score": p.get("composite_score")} for p in conf_longs[:10]
+        ] + [
+            {"symbol": p.get("symbol"), "direction": "SHORT", "confidence": p.get("confidence"),
+             "score": p.get("composite_score")} for p in conf_shorts[:5]
+        ]
+
+        result = execute_trades_from_signals(picks_to_send)
+        opened_count = len(result.get("opened", []))
+        closed_count = len(result.get("closed", []))
+        skipped = result.get("skipped", [])
+
+        logger.warning(
+            f"FORCE-TRADE-V10: opened={opened_count} closed={closed_count} "
+            f"skipped={len(skipped)} longs_in={original_long} shorts_in={original_short}"
+        )
+
+        return {
+            "ok": True,
+            "endpoint": "/api/admin/force-trade-now-v10",
+            "reusable": True,
+            "original_picks": {"longs": original_long, "shorts": original_short},
+            "conf_filtered": {"longs": len(conf_longs), "shorts": len(conf_shorts), "min_conf": MIN_CONF},
+            "picks_sent": pick_snapshot,
+            "opened": opened_count,
+            "closed": closed_count,
+            "skipped": len(skipped),
+            "opened_tickers": [o.get("symbol") for o in result.get("opened", [])][:30],
+            "all_skip_reasons": [{"symbol": s.get("symbol", "?"), "reason": s.get("reason", "")[:300]} for s in skipped],
+            "portfolio_after": result.get("portfolio_after", {}),
+            "endpoint_status": "REUSABLE — call again to open more positions",
+        }
+    except Exception as e:
+        logger.error(f"Force-trade-now-v10 error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

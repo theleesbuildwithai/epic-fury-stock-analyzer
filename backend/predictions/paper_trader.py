@@ -4412,8 +4412,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     size_pct = max(_get_position_size_pct(), min(0.12, kelly_size * 1.2))
                 else:
                     size_pct = min(0.06, kelly_size * 0.7)
-            else:
-                size_pct = kelly_size
+            else:  # SIDEWAYS or unknown
+                # Floor at configured size — Kelly with thin history gives tiny sizes
+                # that leave the portfolio perpetually under-deployed.
+                # 2026-06-15: was bare kelly_size → ARM opened at 1.9% instead of 12%
+                size_pct = max(_get_position_size_pct(), kelly_size)
 
             # INTELLIGENCE OVERLAY size factor (Level 6) — cuts size before
             # known macro events (FOMC/CPI) and when sector concentration
