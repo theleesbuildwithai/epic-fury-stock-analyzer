@@ -5051,8 +5051,8 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v80-bull-conf-floor-60pct-min-display-55pct",
-        "date": "2026-06-14",
+        "commit_marker": "feat-v81-price-validation-ticker-history-autoadjust-staggered",
+        "date": "2026-06-15",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",
             "v70_market_data_get_stock_info_8s_thread",
