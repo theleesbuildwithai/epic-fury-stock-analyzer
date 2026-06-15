@@ -116,13 +116,16 @@ export default function AnalysisDashboard({ data }) {
           </div>
 
           {/* Hold reasoning */}
-          {data.hold_duration.reasoning && data.hold_duration.reasoning.length > 0 && (
+          {data.hold_duration.reasoning && (
             <div className="mt-4 pt-4 border-t border-neutral-800">
               <p className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Analysis</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {data.hold_duration.reasoning.map((r, i) => (
-                  <p key={i} className="text-neutral-400 text-sm">• {r}</p>
-                ))}
+                {Array.isArray(data.hold_duration.reasoning)
+                  ? data.hold_duration.reasoning.map((r, i) => (
+                      <p key={i} className="text-neutral-400 text-sm">• {r}</p>
+                    ))
+                  : <p className="text-neutral-400 text-sm">• {data.hold_duration.reasoning}</p>
+                }
               </div>
             </div>
           )}
