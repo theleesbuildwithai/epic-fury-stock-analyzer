@@ -4608,41 +4608,30 @@ def _generate_quant_picks_impl() -> dict:
         try:
             _pick_syms = list({p["symbol"] for p in top_longs + top_shorts if p.get("symbol")})
             if _pick_syms:
-                import threading as _pv_thr
+                # Serial price validation — avoids rate-limiting that parallel threads cause.
+                # fast_info.last_price = real-time market price (NOT historical close),
+                # so it returns $392 for ARM even when batch history shows $540 for all rows.
+                # Parallel threads all hit yfinance simultaneously → rate-limited →
+                # fall back to the same corrupted source → validation defeated.
                 live_prices = {}
-                def _get_fp(sym, out):
-                    """Fetch current ADJUSTED price via Ticker.history(auto_adjust=True).
-                    This avoids the pre-split price bug from yf.download() batch path.
-                    Falls back to fast_info.last_price (also adjusted) if history fails.
-                    NOTE: get_stock_info() was previously used here but falls back to
-                    yf.download() (unadjusted) when rate-limited, defeating validation."""
+                import yfinance as _pv_yf
+                for _pvs in _pick_syms:
                     try:
-                        import yfinance as _yf
-                        t = _yf.Ticker(sym)
-                        # Primary: Ticker.history with auto_adjust=True always returns
-                        # split-adjusted prices (different API path from yf.download batch)
-                        h = t.history(period="2d", auto_adjust=True)
-                        if h is not None and not h.empty:
-                            p = float(h["Close"].iloc[-1])
-                            if p > 0:
-                                out[sym] = {"price": p}
-                                return
-                        # Fallback: fast_info.last_price (also always adjusted)
-                        fi = t.fast_info
-                        lp = getattr(fi, "last_price", None) or getattr(fi, "lastPrice", None)
-                        if lp and float(lp) > 0:
-                            out[sym] = {"price": float(lp)}
+                        _pvt = _pv_yf.Ticker(_pvs)
+                        # Primary: fast_info.last_price — real-time, never from historical batch
+                        _fi = _pvt.fast_info
+                        _lp = getattr(_fi, "last_price", None) or getattr(_fi, "lastPrice", None)
+                        if _lp and float(_lp) > 0:
+                            live_prices[_pvs] = {"price": float(_lp)}
+                        else:
+                            # Fallback: regularMarketPrice from .info
+                            _inf = _pvt.info
+                            _p = _inf.get("regularMarketPrice") or _inf.get("currentPrice")
+                            if _p and float(_p) > 0:
+                                live_prices[_pvs] = {"price": float(_p)}
                     except Exception:
                         pass
-                _pv_threads = [_pv_thr.Thread(target=_get_fp, args=(s, live_prices), daemon=True)
-                               for s in _pick_syms]
-                # Stagger starts 250ms apart to prevent simultaneous yfinance rate-limiting
-                # (23 stocks × 0.25s = 5.75s spread, well within 25s total timeout)
-                for _i, _pv_t in enumerate(_pv_threads):
-                    _pv_t.start()
-                    if _i < len(_pv_threads) - 1:
-                        time.sleep(0.25)
-                for _pv_t in _pv_threads: _pv_t.join(timeout=25)
+                    time.sleep(0.4)  # 0.4s between calls — 23 stocks ≈ 9s total, no rate-limiting
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
