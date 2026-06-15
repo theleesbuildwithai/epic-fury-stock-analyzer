@@ -4664,6 +4664,27 @@ def _generate_quant_picks_impl() -> dict:
                                             pick["reasons"].append(f"Price corrected (L2): ${hist_px:.2f}→${prior_avg:.2f}")
                         except Exception as _l2e:
                             logger.debug(f"Price L2 check failed for {sym}: {_l2e}")
+                    # L2b: last close vs prior batch peak (no external API — pure arithmetic)
+                    # ARM: $540 vs prior_peak=$427.99 → ratio=1.26 > 1.10 → corrupt
+                    # NXPI: $404 vs prior_peak=$339.95 → ratio=1.19 > 1.10 → corrupt
+                    if not corrected:
+                        try:
+                            sym_df = price_data.get(sym)
+                            if sym_df is not None and not sym_df.empty:
+                                _cl = _safe_close(sym_df).values.astype(float)
+                                if len(_cl) >= 10:
+                                    prior_peak = float(np.nanmax(_cl[:-1]))
+                                    prior_avg5 = float(np.nanmean(_cl[-6:-1]))
+                                    if prior_peak > 0:
+                                        ratio_to_peak = hist_px / prior_peak
+                                        if ratio_to_peak > 1.10:
+                                            corrected_px = round(prior_avg5, 2) if prior_avg5 > 0 else round(prior_peak, 2)
+                                            logger.warning(f"PRICE VALIDATION L2b: {sym} last=${hist_px:.2f} prior_peak=${prior_peak:.2f} ratio={ratio_to_peak:.2f} — correcting to ${corrected_px:.2f}")
+                                            pick["price"] = corrected_px
+                                            pick["reasons"].append(f"Price corrected (L2b-peak): ${hist_px:.2f}→${corrected_px:.2f}")
+                                            corrected = True
+                        except Exception as _l2be:
+                            logger.debug(f"Price L2b check failed for {sym}: {_l2be}")
                     return True  # keep all, correct in place
                 top_longs = [p for p in top_longs if _price_ok(p)]
                 top_shorts = [p for p in top_shorts if _price_ok(p)]

@@ -5051,9 +5051,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v87-serial-get-stock-info-1s-gap-definitive-price-fix",
+        "commit_marker": "feat-v88-L2b-pure-batch-peak-price-fix-ARM-NXPI",
         "date": "2026-06-15",
         "fixes_in_build": [
+            "v88_L2b_pure_batch_peak_check_last_close_vs_prior_peak_1.10x_threshold",
+            "v88_catches_ARM_540_vs_peak_428_ratio_1.26_corrects_to_5d_avg_393",
+            "v88_catches_NXPI_404_vs_peak_340_ratio_1.19_corrects_to_5d_avg_310",
+            "v88_no_external_api_calls_pure_arithmetic_zero_rate_limit_risk",
             "v70_market_data_download_recent_10s_thread",
             "v70_market_data_get_stock_info_8s_thread",
             "v70_market_data_historical_tiers1_2_25_thread_wrappers",
