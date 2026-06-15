@@ -3742,7 +3742,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                           and p["symbol"] not in open_tickers]
         short_candidates = [p for p in quant_picks.get("short_picks", [])
                            if p["confidence"] >= _short_min_conf
-                           and p.get("composite_score", 0) <= -min_score
+                           and abs(p.get("composite_score", 0)) >= min_score
                            and p["symbol"] not in open_tickers]
 
         # ────────────────────────────────────────────────────────────────
@@ -3854,9 +3854,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _geo_dir = quant_picks.get("macro", {}).get("geo_impact_analysis", {}).get("geo_direction", "neutral")
             ceasefire_active = _geo_dir == "deescalation" or quant_picks.get("macro", {}).get("ceasefire_overlay", False)
 
-            _bull_longs = [p for p in long_candidates if p.get("confidence", 0) >= 60]
+            _bull_longs = [p for p in long_candidates if p.get("confidence", 0) >= 52]
             if len(_bull_longs) < len(long_candidates):
-                logger.warning(f"BULL LONG GATE: {len(long_candidates)} candidates → {len(_bull_longs)} passed (conf>=60%)")
+                logger.warning(f"BULL LONG GATE: {len(long_candidates)} candidates → {len(_bull_longs)} passed (conf>=52%)")
             for p in _bull_longs:
                 p["_adj_confidence"] = p["confidence"] + 15
                 all_picks.append(p)
@@ -3864,8 +3864,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             if ceasefire_active:
                 # TACO TRADE: NO new shorts during ceasefire — everything is up
                 logger.warning("TACO TRADE ACTIVE: Ceasefire detected — blocking ALL new short entries")
-                # Only allow 1 short max, and only if extremely high conviction
-                top_shorts = [p for p in short_candidates if p["confidence"] >= 75 and abs(p.get("composite_score", 0)) >= 6]
+                # Only allow 1 short max, and only if high conviction
+                top_shorts = [p for p in short_candidates if p["confidence"] >= 65 and abs(p.get("composite_score", 0)) >= 2]
                 for p in top_shorts[:1]:
                     p["_adj_confidence"] = p["confidence"] - 20
                     all_picks.append(p)
