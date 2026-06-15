@@ -4643,6 +4643,14 @@ def _generate_quant_picks_impl() -> dict:
                         elif _lp > 0:
                             with _lp_lock:
                                 live_prices[sym] = {"price": _lp}
+                        else:
+                            # fast_info.last_price unavailable for this ticker — go straight to Ticker.info
+                            logger.warning(f"PRICE VAL fast_info missing for {sym} — falling back to Ticker.info")
+                            _inf = _pvt.info
+                            _p = float(_inf.get("regularMarketPrice") or _inf.get("currentPrice") or 0)
+                            if _p > 0:
+                                with _lp_lock:
+                                    live_prices[sym] = {"price": _p}
                     except Exception:
                         pass
 
