@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v97-cache-clear-force-v9",
+        "commit_marker": "feat-v98-force-scan-now-unlock",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -6285,6 +6285,37 @@ def audit_halt_clear(request: Request):
         from predictions.continuous_audit import clear_audit_halt
         return clear_audit_halt(reason="manual_admin_endpoint")
     except Exception as e:
+        return {"ok": False, "reason": str(e)[:300]}
+
+
+@app.post("/api/admin/force-scan-now")
+def admin_force_scan_now(request: Request):
+    """Reset stuck scan lock and run a fresh scan synchronously.
+    Use when quant-picks shows cache_status=cold for >5 minutes —
+    means _SCAN_RUNNING is stuck True from a previous hung scan.
+    Resets _SCAN_RUNNING=False, clears cache, then runs scan directly.
+    WARNING: slow endpoint (~2-4 min). Do not call concurrently."""
+    check_rate_limit(request.client.host)
+    try:
+        import analysis.quant_engine as _qe
+        # Reset stuck lock
+        _qe._SCAN_RUNNING = False
+        _qe._quant_cache.clear()
+        logger.warning("FORCE-SCAN: reset _SCAN_RUNNING=False and cleared cache — running fresh scan")
+        # Run scan (slow — blocks until complete)
+        result = _qe.generate_quant_picks()
+        longs = len(result.get("long_picks", []))
+        shorts = len(result.get("short_picks", []))
+        logger.warning(f"FORCE-SCAN: complete — {longs} longs, {shorts} shorts")
+        return {
+            "ok": True,
+            "long_picks": longs,
+            "short_picks": shorts,
+            "regime": result.get("regime"),
+            "sample_longs": [{"symbol": p.get("symbol"), "price": p.get("price"), "confidence": p.get("confidence")} for p in result.get("long_picks", [])[:5]],
+        }
+    except Exception as e:
+        logger.error(f"FORCE-SCAN error: {e}")
         return {"ok": False, "reason": str(e)[:300]}
 
 
