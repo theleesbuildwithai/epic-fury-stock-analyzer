@@ -393,7 +393,7 @@ def _get_position_size_pct() -> float:
         return _live_safety_float("LIVE_POSITION_SIZE_PCT", 0.09)
     if _is_preservation_mode():
         return 0.03  # 3% per position — half size in preservation mode
-    return 0.08  # 8% per position — aggressive conviction sizing
+    return 0.12  # 12% per position — needs 6 positions to hit 72% target (was 8%, too slow to deploy)
 
 
 # Auto-tune confidence floor based on recent win rate ───────────────────
@@ -476,7 +476,7 @@ def _get_min_confidence() -> int:
     elif _is_preservation_mode():
         base = 65
     else:
-        base = 58
+        base = 52  # Lowered 58→52: BULL regime generating 55-83% picks; 58 was too tight for early-cycle portfolio (was 10% deployed)
     # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
     final = max(base - 3, min(base + 5, base + shift))

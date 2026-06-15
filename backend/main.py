@@ -5051,7 +5051,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v84-year-high-corruption-detector-Ticker-info-fallback",
+        "commit_marker": "feat-v85-fix-thread-budget-12pct-possize-52pct-min-conf",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v70_market_data_download_recent_10s_thread",

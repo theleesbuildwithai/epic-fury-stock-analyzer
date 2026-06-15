@@ -4648,12 +4648,16 @@ def _generate_quant_picks_impl() -> dict:
 
                 _pv_threads = [_pv_thr.Thread(target=_get_validated_price, args=(s,), daemon=True)
                                for s in _pick_syms]
+                # Start threads with 100ms stagger (light rate-limit protection)
                 for _i, _t in enumerate(_pv_threads):
                     _t.start()
                     if _i < len(_pv_threads) - 1:
-                        time.sleep(0.35)  # stagger 350ms — prevents simultaneous yfinance rate-limiting
+                        time.sleep(0.10)
+                # TOTAL budget 20s for ALL threads — not 15s per thread
+                _val_deadline = time.time() + 20.0
                 for _t in _pv_threads:
-                    _t.join(timeout=15)  # 15s: enough for fast_info + Ticker.info fallback
+                    _remaining = max(0.05, _val_deadline - time.time())
+                    _t.join(timeout=_remaining)
                 def _price_ok(pick):
                     sym = pick.get("symbol", "")
                     hist_px = float(pick.get("price", 0) or 0)
