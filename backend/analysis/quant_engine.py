@@ -4040,7 +4040,7 @@ def _generate_quant_picks_impl() -> dict:
         # (CPI, FOMC) yfinance batch downloads can hang indefinitely, causing
         # the entire picks engine to stall for 25 min. 120s total is enough
         # for a clean fetch and lets us fall back to cache quickly on bad days.
-        _scan_deadline = _time_scan.time() + 180  # 2026-06-15: was 120s — background thread has no HTTP timeout so allow 3min
+        _scan_deadline = _time_scan.time() + 270  # 2026-06-15: 270s = 4.5min — 20 batches × 30s = 600s max, deadline cuts at 9 batches (9×30=270) → ~320 stocks
         def _over_budget():
             return _time_scan.time() > _scan_deadline
 
@@ -4110,7 +4110,7 @@ def _generate_quant_picks_impl() -> dict:
             if _over_budget(): break
             _throttle()
             try:
-                df = _yf_dl(batch, timeout=20)  # 2026-06-15: was 45s — 20s times out hung batches faster, fitting more in 180s budget
+                df = _yf_dl(batch, timeout=30)  # 2026-06-15: 30s per batch — 20s was too aggressive, yfinance needs 25-35s on cold start
                 _extract_batch(df, batch)
             except Exception as e:
                 logger.warning(f"Tier 1 batch download failed: {e}")
