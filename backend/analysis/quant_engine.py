@@ -1132,12 +1132,15 @@ def _validate_vix(raw_value) -> tuple:
         last_good = None  # too stale, can't use for jump check
 
     # Layer 3 — jump detection (only if we have a fresh-enough last_good)
+    # 2026-06-16 FIX: one-directional only. Previously used bidirectional ratio
+    # which blocked VIX RECOVERY (41.6→15.97 ratio=2.6 > 2.0 → guard rejected
+    # the real value and kept serving stale 41.6 → 0.45x position sizing forever).
+    # VIX can recover rapidly in real markets; only upward spikes are implausible.
     if last_good is not None and 5 < last_good < 90:
         try:
-            ratio = max(v, last_good) / min(v, last_good)
-            if ratio > 2.0:
-                # Implausible jump.  Return last good, mark as corrupt.
-                # Don't persist the bad value.
+            if v > last_good * 2.5:
+                # Implausible upward spike only. Return last good, mark as corrupt.
+                # Downward moves (recovery) are always accepted.
                 return last_good, True
         except (ZeroDivisionError, ValueError):
             pass

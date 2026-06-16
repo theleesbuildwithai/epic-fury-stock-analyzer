@@ -4083,6 +4083,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         except Exception as _sanity_e:
             logger.debug(f"Price sanity pre-fetch failed (will use get_stock_info fallback): {_sanity_e}")
 
+        # 2026-06-16: build set of LONG-pick tickers to block contradictory puts.
+        # A put on a ticker that's also a long pick bets against our own long signal.
+        _long_pick_symbols = {
+            p["symbol"] for p in all_picks
+            if p.get("direction", "").upper() == "LONG" and p.get("symbol")
+        }
+
         for pick in all_picks[:available_slots]:
             if _cycle_open_count >= MAX_TRADES_PER_CYCLE:
                 logger.info(
@@ -4654,6 +4661,19 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
                 if opts_decision.get("use_options"):
                     strategy = opts_decision["strategy"]
+
+                    # 2026-06-16: block puts on tickers that are also LONG picks.
+                    # Opening a put on DOCN while DOCN is #1 long pick is contradictory —
+                    # one position bets up, the other bets down on the same name.
+                    _is_put_strategy = strategy not in ("buy_call", "sell_covered_call")
+                    if _is_put_strategy and symbol in _long_pick_symbols:
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": f"CONTRADICTORY PUT BLOCKED: {symbol} is also a long pick — no puts on long signals",
+                        })
+                        logger.info(f"OPTIONS: blocked put on {symbol} — also in long_picks")
+                        continue
+
                     chain_data = fetch_option_chain(symbol, max_expiries=3)
 
                     if chain_data:

@@ -1290,6 +1290,35 @@ except Exception as e:
     logger.warning(f"Fresh start v12 error (non-fatal): {e}")
 
 
+# --- VIX LAST-GOOD RESET (2026-06-16) ---
+# VIX guard stuck at 41.6 (old spike). Real VIX is ~16. The bidirectional
+# jump check blocked recovery (41.6→16 ratio=2.6 > 2.0). Clear the cached
+# value so the guard accepts the real reading on next fetch.
+try:
+    from predictions.models import (
+        get_trading_state as _gts_vix_clr, set_trading_state as _sts_vix_clr,
+    )
+    _vix_clr_done = _gts_vix_clr("vix_last_good_reset_v1_done", "0")
+    if _vix_clr_done != "1":
+        _old_vix = _gts_vix_clr("vix_last_good", "")
+        # Clear quant_engine's own VIX last-good key
+        _sts_vix_clr("vix_last_good", "")
+        _sts_vix_clr("vix_last_good_ts", "")
+        # Also clear vix_guard.py's separate last-known-good key so both
+        # layers re-seed from live data on next fetch (not a stale crisis value)
+        _old_vix_guard = _gts_vix_clr("vix_guard_last_known_good", "")
+        _sts_vix_clr("vix_guard_last_known_good", "")
+        _sts_vix_clr("vix_guard_last_known_good_ts", "")
+        _sts_vix_clr("vix_last_good_reset_v1_done", "1")
+        logger.warning(
+            f"VIX LAST-GOOD RESET: cleared quant_engine key={_old_vix} "
+            f"vix_guard key={_old_vix_guard} "
+            f"(was blocking VIX recovery detection). Both layers will re-seed on next fetch."
+        )
+except Exception as _e:
+    logger.debug(f"VIX last-good reset (non-fatal): {_e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must
@@ -5225,9 +5254,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v104-fix-short-put-nav-inflation-reset-132k",
-        "date": "2026-06-15",
+        "commit_marker": "feat-v105-fix-vix-stuck-contradictory-puts-one-directional-guard",
+        "date": "2026-06-16",
         "fixes_in_build": [
+            "v105_vix_one_directional_jump_only_blocks_spikes_not_recovery",
+            "v105_vix_reset_clears_both_quant_engine_and_vix_guard_db_keys",
+            "v105_contradictory_puts_blocked_long_pick_symbols_set",
+            "v105_opt_dir_always_long_no_short_options",
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
             "v89_bypasses_yfinance_lib_entirely_for_price_validation",
             "v89_yahoo_direct_v7v8_stockanalysis_finviz_chain_returns_real_price",
