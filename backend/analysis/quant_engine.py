@@ -406,14 +406,37 @@ def get_cross_asset_signals() -> dict:
 
 
 def _get_cached(key, fetch_fn, ttl=None):
-    """Cache with configurable TTL."""
+    """Cache with configurable TTL.
+
+    2026-06-15 FIX: Never cache empty quant_picks results.
+    Previously, a failed scan (0 picks) stored {data:{}, time:now} which
+    blocked all re-scans for 15 minutes (TTL). This caused persistent cold
+    state — the system appeared to scan but never produced picks because the
+    cache 'fresh miss' path was never reached again within the TTL window.
+    Fix: if key==quant_picks and result has no long_picks/short_picks,
+    skip caching so the next call always re-runs fetch().
+    """
     if ttl is None:
         ttl = _QUANT_CACHE_TTL
     now = time.time()
     if key in _quant_cache and now - _quant_cache[key]["time"] < ttl:
-        return _quant_cache[key]["data"]
+        cached_data = _quant_cache[key]["data"]
+        # Don't serve stale empty picks from cache — let next call re-fetch
+        if key == "quant_picks" and isinstance(cached_data, dict):
+            if not cached_data.get("long_picks") and not cached_data.get("short_picks"):
+                pass  # fall through to fetch()
+            else:
+                return cached_data
+        else:
+            return cached_data
     data = fetch_fn()
-    _quant_cache[key] = {"data": data, "time": now}
+    # Only cache non-empty picks results — empty results must re-scan immediately
+    if key == "quant_picks" and isinstance(data, dict):
+        if data.get("long_picks") or data.get("short_picks"):
+            _quant_cache[key] = {"data": data, "time": now}
+        # else: don't cache — allows immediate retry on next call
+    else:
+        _quant_cache[key] = {"data": data, "time": now}
     return data
 
 
@@ -4027,7 +4050,7 @@ def _generate_quant_picks_impl() -> dict:
         except NameError:
             _PRICE_DATA_LASTGOOD = {}
 
-        N_BATCHES = 20  # 2026-06-15: was 10 → smaller batches (~36 stocks each) so more complete in 180s deadline
+        N_BATCHES = 10  # 2026-06-15 REVERTED: 20 batches caused too many orphaned yfinance threads → rate-limiting → 0 stocks. 10 batches × 73 stocks with fewer round trips works reliably.
         batch_size = (len(QUANT_UNIVERSE) + N_BATCHES - 1) // N_BATCHES
         batches = [QUANT_UNIVERSE[i:i+batch_size] for i in range(0, len(QUANT_UNIVERSE), batch_size)]
 
@@ -4040,7 +4063,7 @@ def _generate_quant_picks_impl() -> dict:
         # (CPI, FOMC) yfinance batch downloads can hang indefinitely, causing
         # the entire picks engine to stall for 25 min. 120s total is enough
         # for a clean fetch and lets us fall back to cache quickly on bad days.
-        _scan_deadline = _time_scan.time() + 270  # 2026-06-15: 270s = 4.5min — 20 batches × 30s = 600s max, deadline cuts at 9 batches (9×30=270) → ~320 stocks
+        _scan_deadline = _time_scan.time() + 300  # 2026-06-15: 300s = 5min — 10 batches × 45s timeout = 450s max; deadline cuts at ~6 batches (6×45=270) → ~438 stocks. Background thread only, no HTTP timeout.
         def _over_budget():
             return _time_scan.time() > _scan_deadline
 
@@ -4110,7 +4133,7 @@ def _generate_quant_picks_impl() -> dict:
             if _over_budget(): break
             _throttle()
             try:
-                df = _yf_dl(batch, timeout=30)  # 2026-06-15: 30s per batch — 20s was too aggressive, yfinance needs 25-35s on cold start
+                df = _yf_dl(batch, timeout=45)  # 2026-06-15: restored to 45s — 30s was too short for 73-stock batches, caused 0-stock scans
                 _extract_batch(df, batch)
             except Exception as e:
                 logger.warning(f"Tier 1 batch download failed: {e}")
@@ -4127,7 +4150,7 @@ def _generate_quant_picks_impl() -> dict:
                 chunk = m[i:i+50]
                 _throttle()
                 try:
-                    df = _yf_dl(chunk, timeout=15)  # 2026-06-15: was 30s
+                    df = _yf_dl(chunk, timeout=30)  # restored
                     _extract_batch(df, chunk)
                 except Exception as e:
                     logger.debug(f"Tier 2 chunk failed: {e}")

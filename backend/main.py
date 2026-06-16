@@ -1146,6 +1146,58 @@ except Exception as e:
     logger.warning(f"Fresh start v9 error (non-fatal): {e}")
 
 
+# --- FRESH START v10 (2026-06-15): Reset to $32k actual capital ---
+# User: "reset stats for quant hf, return to 32k"
+# Closes all positions, sets cash=$32k (actual available capital),
+# resets stats epoch so win-rate/Sharpe/PnL restart from 0.
+# ORIGINAL_CAPITAL in paper_trader.py is also updated to $32k so
+# return % calculations are correct going forward.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v10, set_trading_state as _set_state_v10,
+    )
+    _v10_done = _get_state_v10("fresh_start_v10_done", "0")
+    if _v10_done != "1":
+        from predictions.models import (
+            get_open_trades as _v10_get_open,
+            close_paper_trade as _v10_close,
+            set_cash as _v10_set_cash,
+            get_db as _v10_get_db,
+            save_portfolio_snapshot as _v10_snap,
+        )
+        from datetime import datetime as _dt_v10
+        # 1. Close all open positions at entry price (clean slate)
+        _v10_open = _v10_get_open() or []
+        _v10_closed = 0
+        for _v10_t in _v10_open:
+            try:
+                _v10_close(_v10_t["id"], _v10_t.get("entry_price", 0))
+                _v10_closed += 1
+            except Exception as _v10_ce:
+                logger.warning(f"RESET v10: failed to close {_v10_t.get('ticker')}: {_v10_ce}")
+        # 2. Set cash to $32,000 (actual available capital)
+        _V10_CASH = 32_000.00
+        _v10_set_cash(_V10_CASH, caller="fresh_start_v10",
+                      reason="2026-06-15 reset to $32k actual capital — fresh start",
+                      bypass_sentinel=True)
+        # 3. Reset stats epoch (Sharpe/win-rate/PnL restart from 0)
+        _v10_epoch = _dt_v10.utcnow().isoformat()
+        _set_state_v10("stats_epoch", _v10_epoch)
+        # 4. Wipe old snapshots, write clean $32k baseline
+        _v10_conn = _v10_get_db()
+        _v10_conn.execute("DELETE FROM portfolio_snapshots")
+        _v10_conn.commit()
+        _v10_snap(_V10_CASH, _V10_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v10("fresh_start_v10_done", "1")
+        logger.warning(
+            f"FRESH START v10: closed {_v10_closed} positions, "
+            f"cash=${_V10_CASH:,.0f}, stats reset. "
+            f"ORIGINAL_CAPITAL updated to $32k in paper_trader.py."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v10 error (non-fatal): {e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must
@@ -5051,7 +5103,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v100-scan-coverage-kelly-floor-force-trade-v10",
+        "commit_marker": "feat-v101-get-cached-fix-32k-reset-stb-fallback-force-trade-v10",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -7192,14 +7244,41 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             except Exception:
                 pass
 
-        if not cache_entry or not cache_entry.get("data"):
-            return {
-                "ok": False, "reason": "no_picks_yet",
-                "message": ("Picks cache empty — first scan still running. "
-                            "Try again in a couple of minutes."),
-                "long_picks": [], "short_picks": [],
-            }
-        data = cache_entry["data"]
+        if not cache_entry or not cache_entry.get("data") or not _stb_has_picks:
+            # Try DB backup before returning empty — picks from last successful scan
+            # survive container restarts and deploys
+            _stb_db_data = None
+            try:
+                from predictions.models import get_trading_state as _stb_gts
+                import json as _stb_json
+                _stb_raw = _stb_gts("quant_picks_db_backup", "")
+                if _stb_raw:
+                    _stb_db = _stb_json.loads(_stb_raw)
+                    _stb_db_longs = len(_stb_db.get("long_picks") or [])
+                    _stb_db_shorts = len(_stb_db.get("short_picks") or [])
+                    if _stb_db_longs + _stb_db_shorts > 0:
+                        _stb_db_data = _stb_db
+                        # Seed in-memory cache so quant-picks endpoint also serves them
+                        from analysis.quant_engine import _quant_cache as _stb_qc
+                        import time as _stb_t
+                        _stb_qc["quant_picks"] = {"data": _stb_db, "time": _stb_t.time() - 899}
+                        logger.warning(
+                            f"STB: serving DB backup picks "
+                            f"({_stb_db_longs}L {_stb_db_shorts}S) while scan runs"
+                        )
+            except Exception as _stb_dbe:
+                logger.debug(f"STB DB backup load failed: {_stb_dbe}")
+
+            if not _stb_db_data:
+                return {
+                    "ok": False, "reason": "no_picks_yet",
+                    "message": ("Picks cache empty — scan running now. "
+                                "Try again in 5 minutes."),
+                    "long_picks": [], "short_picks": [],
+                }
+            data = _stb_db_data
+        else:
+            data = cache_entry["data"]
 
         # Source of picks: the same cached output from the picks engine
         # that /api/quant-picks serves.  The engine emits the top 30 longs
@@ -8171,6 +8250,25 @@ def admin_force_trade_now_v10(request: Request):
 
         long_picks = picks.get("long_picks") or []
         short_picks = picks.get("short_picks") or []
+
+        # DB backup fallback: if live scan returned 0 picks, serve last known good picks
+        if not long_picks and not short_picks:
+            try:
+                from predictions.models import get_trading_state as _v10t_gts
+                import json as _v10t_json
+                _v10t_raw = _v10t_gts("quant_picks_db_backup", "")
+                if _v10t_raw:
+                    _v10t_db = _v10t_json.loads(_v10t_raw)
+                    _v10t_lp = _v10t_db.get("long_picks") or []
+                    _v10t_sp = _v10t_db.get("short_picks") or []
+                    if _v10t_lp or _v10t_sp:
+                        long_picks = _v10t_lp
+                        short_picks = _v10t_sp
+                        picks = {**picks, "long_picks": long_picks, "short_picks": short_picks}
+                        logger.warning(f"FORCE-TRADE-V10: using DB backup picks ({len(long_picks)}L {len(short_picks)}S)")
+            except Exception as _v10t_e:
+                logger.debug(f"v10 DB backup load failed: {_v10t_e}")
+
         original_long = len(long_picks)
         original_short = len(short_picks)
 
