@@ -529,7 +529,7 @@ MIN_CONFIDENCE = 35  # Default — overridden by _get_min_confidence() at trade 
 # one batch of picks. With ~3 trade cycles per day, this gives a
 # theoretical max of 15 trades/day (vs the 22 yesterday that included
 # DOCN's -55% harpoon). Real expected: 5-12/day.
-MAX_TRADES_PER_CYCLE = 6   # 2026-06-13 v64: was 12 — quality over quantity. Fewer trades, higher IC.
+MAX_TRADES_PER_CYCLE = 10  # 2026-06-16: raised from 6 — need more positions per cycle for target exposure
 
 # 2026-06-05: Minimum hours an EQUITY position must be held before
 # any soft exit (profit-lock, time-decay, bear-protection) can fire.
@@ -576,9 +576,9 @@ def _can_soft_exit(trade) -> bool:
 # can never hit 100% (always keeps a cash buffer) and never collapses
 # below the minimum trading level.
 
-DYNAMIC_EXPOSURE_MIN = 0.70  # Hard floor — always trade at least 70% (was 0.65)
-DYNAMIC_EXPOSURE_MAX = 0.80  # Hard ceiling — 70-80% deployed in good markets
-DYNAMIC_EXPOSURE_BASE = 0.75  # Starting point — targets 25% cash buffer (raised from 0.65)
+DYNAMIC_EXPOSURE_MIN = 0.75  # Hard floor — always trade at least 75%
+DYNAMIC_EXPOSURE_MAX = 0.92  # Hard ceiling — raised to 90%+ in BULL markets
+DYNAMIC_EXPOSURE_BASE = 0.85  # Starting point — targets 15% cash buffer (raised from 0.75)
 # Position-size floor: the product of all 11 sizing multipliers cannot
 # crush a trade below this fraction of nominal. Without this, multiplier
 # stacking (~0.7^11) was reducing trades to ~2% of intended size,
@@ -735,14 +735,14 @@ def _compute_dynamic_exposure_target(vix_level=None, drawdown_pct=None, regime=N
         # uses the regime-specific min/max.
         _regime_str = str(regime or "").upper()
         if "BULL" in _regime_str:
-            target = 0.75
-            _regime_min, _regime_max = 0.70, 0.85
+            target = 0.88  # Raised from 0.75 — target 85-92% deployed in bull
+            _regime_min, _regime_max = 0.80, 0.92
         elif "BEAR" in _regime_str:
             target = 0.50
             _regime_min, _regime_max = 0.40, 0.60
         elif _regime_str in ("SIDEWAYS", "NEUTRAL"):
-            target = 0.72  # Raised from 0.65 — target 70-80% gross exposure
-            _regime_min, _regime_max = 0.65, 0.80
+            target = 0.78  # Raised from 0.72 — target 75-85% gross exposure
+            _regime_min, _regime_max = 0.72, 0.88
         else:
             target = DYNAMIC_EXPOSURE_BASE
             _regime_min, _regime_max = DYNAMIC_EXPOSURE_MIN, DYNAMIC_EXPOSURE_MAX
@@ -1221,11 +1221,11 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
 
     # Regime-aware Kelly clamps — tighter in dangerous markets
     if regime == "BEAR":
-        kelly_adjusted = max(0.02, min(0.08, kelly_adjusted))  # Max 8% in bear
+        kelly_adjusted = max(0.02, min(0.08, kelly_adjusted))  # Max 8% in bear — conservative in downtrend
     elif regime == "VOLATILE":
         kelly_adjusted = max(0.02, min(0.06, kelly_adjusted))  # Max 6% in volatile
     else:
-        kelly_adjusted = max(0.02, min(0.12, kelly_adjusted))  # Normal 12% cap
+        kelly_adjusted = max(0.02, min(0.15, kelly_adjusted))  # Normal 15% cap (raised from 12%)
 
     # VIX override: high VIX caps Kelly regardless of regime
     if vix_level is not None and vix_level > 25:
@@ -1264,7 +1264,7 @@ def _kelly_position_size(confidence, composite_score, sector, regime, direction,
             elif regime == "VOLATILE":
                 kelly_adjusted = max(0.02, min(0.06, kelly_adjusted))
             else:
-                kelly_adjusted = max(0.02, min(0.12, kelly_adjusted))
+                kelly_adjusted = max(0.02, min(0.15, kelly_adjusted))  # Normal 15% cap (raised from 12%)
     except Exception:
         pass
 
@@ -4415,8 +4415,8 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 size_pct = min(0.12, kelly_size * 1.2) if direction == "short" else min(0.08, kelly_size * 0.8)
             elif regime == "BULL":
                 if direction == "long":
-                    # Kelly can reduce below target but never below configured floor (12%)
-                    size_pct = max(_get_position_size_pct(), min(0.12, kelly_size * 1.2))
+                    # Kelly can reduce below target but never below configured floor (15%)
+                    size_pct = max(_get_position_size_pct(), min(0.15, kelly_size * 1.3))
                 else:
                     size_pct = min(0.06, kelly_size * 0.7)
             else:  # SIDEWAYS or unknown
@@ -4564,16 +4564,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _sizing_base = max(50_000.0, min(total_value, ORIGINAL_CAPITAL * 5.0))
             position_value = _sizing_base * size_pct * _reducer_product
 
-            # HARD CAP: NO single position may exceed 15% of ORIGINAL_CAPITAL
-            # ($15k on $100k start). This is an absolute ceiling. Even if
+            # HARD CAP: NO single position may exceed 20% of ORIGINAL_CAPITAL
+            # ($20k on $100k start). This is an absolute ceiling. Even if
             # Kelly + multipliers + base all conspire to demand more, this
             # caps it. Prevents the 62% single-position concentration we saw.
-            _max_position_dollars = ORIGINAL_CAPITAL * 0.15
+            _max_position_dollars = ORIGINAL_CAPITAL * 0.20
             if position_value > _max_position_dollars:
                 logger.warning(
                     f"POSITION SIZE GUARD {symbol}: clamped "
                     f"${position_value:,.0f} → ${_max_position_dollars:,.0f} "
-                    f"(15% of ${ORIGINAL_CAPITAL:,.0f} hard cap)"
+                    f"(20% of ${ORIGINAL_CAPITAL:,.0f} hard cap)"
                 )
                 position_value = _max_position_dollars
 

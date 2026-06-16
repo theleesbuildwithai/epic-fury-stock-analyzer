@@ -5354,7 +5354,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v113-fix-email-portfolio-state-correct-function",
+        "commit_marker": "feat-v114-higher-exposure-bull-regime-15pct-positions",
         "date": "2026-06-16",
         "fixes_in_build": [
             "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
