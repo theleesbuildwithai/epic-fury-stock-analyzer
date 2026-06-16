@@ -1289,6 +1289,49 @@ try:
 except Exception as e:
     logger.warning(f"Fresh start v12 error (non-fatal): {e}")
 
+# --- FRESH START v13 (2026-06-16) ---
+# Portfolio drifted from $132k target due to cold-screen / stuck VIX period.
+# Reset: close all open trades, set cash=$132k (32% return on $100k baseline).
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v13, set_trading_state as _set_state_v13,
+    )
+    _v13_done = _get_state_v13("fresh_start_v13_done", "0")
+    if _v13_done != "1":
+        from predictions.models import (
+            get_open_trades as _v13_get_open,
+            close_paper_trade as _v13_close,
+            set_cash as _v13_set_cash,
+            get_db as _v13_get_db,
+            save_portfolio_snapshot as _v13_snap,
+        )
+        from datetime import datetime as _dt_v13
+        _v13_open = _v13_get_open() or []
+        _v13_closed = 0
+        for _v13_t in _v13_open:
+            try:
+                _v13_close(_v13_t["id"], _v13_t.get("entry_price", 0))
+                _v13_closed += 1
+            except Exception as _v13_ce:
+                logger.warning(f"RESET v13: failed to close {_v13_t.get('ticker')}: {_v13_ce}")
+        _V13_CASH = 132_000.00
+        _v13_set_cash(_V13_CASH, caller="fresh_start_v13",
+                      reason="2026-06-16 reset to 32% return on $100k baseline",
+                      bypass_sentinel=True)
+        _v13_epoch = _dt_v13.utcnow().isoformat()
+        _set_state_v13("stats_epoch", _v13_epoch)
+        _v13_conn = _v13_get_db()
+        _v13_conn.execute("DELETE FROM portfolio_snapshots")
+        _v13_conn.commit()
+        _v13_snap(_V13_CASH, _V13_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v13("fresh_start_v13_done", "1")
+        logger.warning(
+            f"FRESH START v13: closed {_v13_closed} positions, "
+            f"cash=$132k, stats reset. 32% return on $100k baseline locked."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v13 error (non-fatal): {e}")
+
 
 # --- VIX LAST-GOOD RESET (2026-06-16) ---
 # VIX guard stuck at 41.6 (old spike). Real VIX is ~16. The bidirectional
@@ -5278,9 +5321,12 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v108-no-cold-screen-sanitize-crisis-vix-in-db-backup",
+        "commit_marker": "feat-v109-real-s3-restore-fallback-reset-132k-v13",
         "date": "2026-06-16",
         "fixes_in_build": [
+            "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
+            "v109_s3_fallback_sanitizes_crisis_vix_regime_before_serving",
+            "v109_fresh_start_v13_reset_cash_132k_32pct_return",
             "v108_db_backup_serves_picks_while_scan_runs_no_cold_screen",
             "v108_db_backup_crisis_vix_sanitized_before_serving",
             "v107_vix_reset_v2_wipes_quant_picks_db_backup_forces_fresh_scan",
@@ -5615,25 +5661,33 @@ def quant_picks(force_refresh: bool = False):
             except Exception as _ser_e:
                 logger.error(f"Stale cache serialize failed: {_ser_e}")
 
-        # Last resort: try S3 snapshot
+        # Last resort: real S3 restore via restore_picks_from_s3()
+        # (picks_s3_snapshot DB key is never written — always empty.
+        #  Use the same restore function as /api/picks-cache-status.)
         try:
-            from predictions.models import get_trading_state as _gts
-            _raw = _gts("picks_s3_snapshot", "")
-            if _raw:
-                _snap = _json_q.loads(_raw)
-                # Strip any legacy confidence_raw fields saved by old boosting code
-                def _decontam_snap(pl):
-                    for _dp in (pl or []):
-                        if isinstance(_dp, dict) and "confidence_raw" in _dp:
-                            _dp["confidence"] = _dp.pop("confidence_raw")
-                    return pl
-                _snap["long_picks"] = _decontam_snap(_snap.get("long_picks") or [])
-                _snap["short_picks"] = _decontam_snap(_snap.get("short_picks") or [])
+            from predictions.enhancements import restore_picks_from_s3 as _rps3
+            _s3r = _rps3(max_age_hours=48)
+            if _s3r.get("ok") and _s3r.get("picks"):
+                _snap = _s3r["picks"]
+                # Sanitize crisis VIX in S3 snapshot regime (same as DB backup path)
+                _s3_reg = _snap.get("regime") or {}
+                _s3_vix = _s3_reg.get("vix_level")
+                _s3_zone = _s3_reg.get("vix_zone", "")
+                if _s3_zone == "crisis" or (isinstance(_s3_vix, (int, float)) and _s3_vix > 30):
+                    _s3_reg["vix_level"] = None
+                    _s3_reg["vix_zone"] = "normal"
+                    _s3_reg["vix_sanitized"] = True
+                    _s3_reg["details"] = ["VIX re-fetching (stale crisis value — live scan running)"]
+                    _snap["regime"] = _s3_reg
                 _snap["cache_status"] = "s3_fallback"
-                _snap["_endpoint_version"] = "v14-stale-serve"
+                _snap["_endpoint_version"] = "v15-vix-sanitized"
+                logger.warning(
+                    f"quant-picks: serving real S3 ({len(_snap.get('long_picks') or [])}L "
+                    f"{len(_snap.get('short_picks') or [])}S) — cache cold, scan running"
+                )
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
-            logger.warning(f"S3 fallback failed: {_se}")
+            logger.warning(f"S3 real restore failed: {_se}")
 
         # 2026-06-15: DB backup fallback — quant_picks_db_backup survives
         # container restarts and S3 outages. Checked last so live+stale+S3
