@@ -1327,9 +1327,12 @@ try:
         _sts_vix_clr("vix_last_good_ts", "")
         _sts_vix_clr("vix_guard_last_known_good", "")
         _sts_vix_clr("vix_guard_last_known_good_ts", "")
-        # Also wipe the quant picks DB backup so the stale regime (VIX=41.6)
-        # is not served on boot. Next call will trigger a fresh live scan.
-        _sts_vix_clr("quant_picks_db_backup", "")
+        # NOTE: intentionally NOT clearing quant_picks_db_backup.
+        # The DB backup has valid picks (29 longs). Clearing it causes the
+        # endpoint to show cold/LOADING for 5-10 min while the scan runs.
+        # Instead, the endpoint sanitizes the regime block before serving
+        # (strips crisis VIX so it shows NORMAL, not CRISIS). The fresh
+        # scan overwrites the DB backup with correct VIX when it completes.
         _sts_vix_clr("vix_last_good_reset_v2_done", "1")
         logger.warning(
             f"VIX RESET v2: cleared quant_engine={_old_vix2} "
@@ -5275,9 +5278,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v107-vix-reset-v2-also-wipes-quant-picks-db-backup",
+        "commit_marker": "feat-v108-no-cold-screen-sanitize-crisis-vix-in-db-backup",
         "date": "2026-06-16",
         "fixes_in_build": [
+            "v108_db_backup_serves_picks_while_scan_runs_no_cold_screen",
+            "v108_db_backup_crisis_vix_sanitized_before_serving",
             "v107_vix_reset_v2_wipes_quant_picks_db_backup_forces_fresh_scan",
             "v106_vix_reset_v2_fires_on_this_deploy_clears_stuck_41p6",
             "v105_vix_one_directional_jump_only_blocks_spikes_not_recovery",
@@ -5641,8 +5646,24 @@ def quant_picks(force_refresh: bool = False):
                 _db_qp_l = len(_db_qp.get("long_picks") or [])
                 _db_qp_s = len(_db_qp.get("short_picks") or [])
                 if _db_qp_l + _db_qp_s > 0:
+                    # Sanitize regime VIX in DB backup — the backup may have been
+                    # saved during a VIX spike (e.g. 41.6). Strip crisis VIX so we
+                    # don't serve CRISIS regime while the fresh scan runs.
+                    _db_regime = _db_qp.get("regime") or {}
+                    _db_vix = _db_regime.get("vix_level")
+                    _db_zone = _db_regime.get("vix_zone", "")
+                    if _db_zone == "crisis" or (isinstance(_db_vix, (int, float)) and _db_vix > 30):
+                        _db_regime["vix_level"] = None
+                        _db_regime["vix_zone"] = "normal"
+                        _db_regime["vix_sanitized"] = True
+                        _db_regime["details"] = ["VIX re-fetching (stale crisis value cleared — live scan running)"]
+                        _db_qp["regime"] = _db_regime
+                        logger.warning(
+                            f"quant-picks DB backup: sanitized crisis VIX "
+                            f"(was {_db_vix}/{_db_zone}) — fresh scan running"
+                        )
                     _db_qp["cache_status"] = "db_backup"
-                    _db_qp["_endpoint_version"] = "v14-stale-serve"
+                    _db_qp["_endpoint_version"] = "v15-vix-sanitized"
                     logger.warning(
                         f"quant-picks: serving DB backup ({_db_qp_l}L {_db_qp_s}S) "
                         f"— S3+cache both empty"
