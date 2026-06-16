@@ -1245,6 +1245,51 @@ except Exception as e:
     logger.warning(f"Fresh start v11 error (non-fatal): {e}")
 
 
+# --- FRESH START v12 (2026-06-16): Reset to $132k — wipe inflated short-put NAV ---
+# Short put options were debiting cash but inflating positions_value when ITM
+# (est_premium > entry_premium → phantom NAV gain). Fixed in paper_trader.py
+# (opt_dir always "long"). This reset clears the contaminated positions.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v12, set_trading_state as _set_state_v12,
+    )
+    _v12_done = _get_state_v12("fresh_start_v12_done", "0")
+    if _v12_done != "1":
+        from predictions.models import (
+            get_open_trades as _v12_get_open,
+            close_paper_trade as _v12_close,
+            set_cash as _v12_set_cash,
+            get_db as _v12_get_db,
+            save_portfolio_snapshot as _v12_snap,
+        )
+        from datetime import datetime as _dt_v12
+        _v12_open = _v12_get_open() or []
+        _v12_closed = 0
+        for _v12_t in _v12_open:
+            try:
+                _v12_close(_v12_t["id"], _v12_t.get("entry_price", 0))
+                _v12_closed += 1
+            except Exception as _v12_ce:
+                logger.warning(f"RESET v12: failed to close {_v12_t.get('ticker')}: {_v12_ce}")
+        _V12_CASH = 132_000.00
+        _v12_set_cash(_V12_CASH, caller="fresh_start_v12",
+                      reason="2026-06-16 wipe inflated short-put NAV, reset to $132k",
+                      bypass_sentinel=True)
+        _v12_epoch = _dt_v12.utcnow().isoformat()
+        _set_state_v12("stats_epoch", _v12_epoch)
+        _v12_conn = _v12_get_db()
+        _v12_conn.execute("DELETE FROM portfolio_snapshots")
+        _v12_conn.commit()
+        _v12_snap(_V12_CASH, _V12_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v12("fresh_start_v12_done", "1")
+        logger.warning(
+            f"FRESH START v12: closed {_v12_closed} positions (incl. inflated puts), "
+            f"cash=$132k, stats reset. Short-put opt_dir bug fixed."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v12 error (non-fatal): {e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must
@@ -5180,7 +5225,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v103-restore-100k-baseline-32pct-locked-132k",
+        "commit_marker": "feat-v104-fix-short-put-nav-inflation-reset-132k",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",

@@ -4663,8 +4663,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                         else:
                             opt_type = "put"
 
-                        # Select strike
-                        opt_dir = "long" if strategy.startswith("buy") else "short"
+                        # 2026-06-16 FIX: always buy options (direction=long).
+                        # Short options (sell_put/sell_covered_call) use inverted
+                        # accounting: save_paper_trade always debits cash, so a
+                        # short put going ITM inflates positions_value by up to
+                        # 3× the premium → phantom NAV gain. Safest fix: only
+                        # ever BUY options (puts for short picks, calls for longs).
+                        opt_dir = "long"
                         strike_info = select_strike(
                             chain_data, price, opt_type,
                             conviction=pick.get("confidence", 50),
