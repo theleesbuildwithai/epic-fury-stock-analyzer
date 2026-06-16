@@ -1315,7 +1315,10 @@ try:
             f"vix_guard key={_old_vix_guard} "
             f"(was blocking VIX recovery detection). Both layers will re-seed on next fetch."
         )
-    # v2 reset: clears BOTH keys regardless of v1 flag (v1 already fired in prior deploy)
+    # v2 reset: clears BOTH VIX keys AND the quant_picks DB backup (v1 already fired in prior deploy).
+    # The DB backup contains a frozen regime snapshot with VIX=41.6 baked in.
+    # Wiping it forces the next /api/quant-picks call to trigger a fresh scan
+    # that reads the real live VIX instead of serving the stale cached regime.
     _vix_clr2_done = _gts_vix_clr("vix_last_good_reset_v2_done", "0")
     if _vix_clr2_done != "1":
         _old_vix2 = _gts_vix_clr("vix_last_good", "")
@@ -1324,10 +1327,14 @@ try:
         _sts_vix_clr("vix_last_good_ts", "")
         _sts_vix_clr("vix_guard_last_known_good", "")
         _sts_vix_clr("vix_guard_last_known_good_ts", "")
+        # Also wipe the quant picks DB backup so the stale regime (VIX=41.6)
+        # is not served on boot. Next call will trigger a fresh live scan.
+        _sts_vix_clr("quant_picks_db_backup", "")
         _sts_vix_clr("vix_last_good_reset_v2_done", "1")
         logger.warning(
             f"VIX RESET v2: cleared quant_engine={_old_vix2} "
-            f"vix_guard={_old_vixg2} — both layers re-seed on next fetch."
+            f"vix_guard={_old_vixg2} + wiped quant_picks_db_backup — "
+            f"fresh scan will re-seed all VIX layers from live data."
         )
 except Exception as _e:
     logger.debug(f"VIX last-good reset (non-fatal): {_e}")
@@ -5268,9 +5275,10 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v106-vix-reset-v2-clears-both-keys-on-redeploy",
+        "commit_marker": "feat-v107-vix-reset-v2-also-wipes-quant-picks-db-backup",
         "date": "2026-06-16",
         "fixes_in_build": [
+            "v107_vix_reset_v2_wipes_quant_picks_db_backup_forces_fresh_scan",
             "v106_vix_reset_v2_fires_on_this_deploy_clears_stuck_41p6",
             "v105_vix_one_directional_jump_only_blocks_spikes_not_recovery",
             "v105_vix_reset_clears_both_quant_engine_and_vix_guard_db_keys",
