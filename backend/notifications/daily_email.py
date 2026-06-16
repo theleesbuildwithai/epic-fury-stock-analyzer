@@ -33,8 +33,8 @@ def _collect_report_data() -> dict:
 
     # ── Portfolio: use paper-portfolio path (same as website) ──
     try:
-        from predictions.paper_trader import get_portfolio_stats
-        stats = get_portfolio_stats()
+        from predictions.paper_trader import get_portfolio_state
+        stats = get_portfolio_state()
         data["nav"]        = float(stats.get("total_value") or 0)
         data["cash"]       = float(stats.get("cash") or 0)
         data["return_pct"] = float(stats.get("total_return_pct") or 0)
@@ -138,8 +138,8 @@ def _run_health_checks() -> list:
 
     # Portfolio NAV sanity
     try:
-        from predictions.paper_trader import get_portfolio_stats
-        nav = float(get_portfolio_stats().get("total_value") or 0)
+        from predictions.paper_trader import get_portfolio_state
+        nav = float(get_portfolio_state().get("total_value") or 0)
         if nav <= 0:
             checks.append({"label": "Portfolio", "status": "error",
                            "detail": "NAV = $0 — data missing"})
