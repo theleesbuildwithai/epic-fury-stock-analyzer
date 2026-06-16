@@ -2463,10 +2463,10 @@ scheduler.add_job(
     misfire_grace_time=7200,
 )
 
-# --- DAILY PERFORMANCE EMAIL (4:30 PM ET, Mon-Fri) ---
+# --- DAILY PERFORMANCE EMAIL (3:00 PM ET, Mon-Fri) ---
 # Sends an HTML report to jacksonwhanglee@gmail.com with:
-# NAV, return vs $100k baseline, open positions, closed today,
-# top picks for tomorrow, VIX/regime, win rate.
+# System health (auto-detected problems), NAV, return vs $100k baseline,
+# today P&L, open positions, closed today, top picks, VIX/regime, win rate.
 # Requires GMAIL_APP_PASSWORD env var in App Runner.
 def _send_daily_email_job():
     try:
@@ -2475,7 +2475,9 @@ def _send_daily_email_job():
         if result.get("ok"):
             logger.warning(
                 f"DAILY EMAIL: sent — NAV={result.get('nav')} "
-                f"return={result.get('return')}"
+                f"return={result.get('return')} "
+                f"errors={result.get('health_errors',0)} "
+                f"warns={result.get('health_warns',0)}"
             )
         else:
             logger.error(f"DAILY EMAIL: failed — {result.get('error')}")
@@ -2486,10 +2488,10 @@ scheduler.add_job(
     _send_daily_email_job,
     "cron",
     day_of_week="mon-fri",
-    hour=16,
-    minute=30,
+    hour=15,
+    minute=0,
     id="daily_email_report",
-    name="Daily Performance Email (4:30 PM ET)",
+    name="Daily Performance Email (3:00 PM ET)",
     max_instances=1,
     misfire_grace_time=1800,
 )
@@ -5352,7 +5354,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v110-daily-email-report-4pm-ET-gmail-smtp",
+        "commit_marker": "feat-v111-daily-email-3pm-system-health-today-pnl",
         "date": "2026-06-16",
         "fixes_in_build": [
             "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
