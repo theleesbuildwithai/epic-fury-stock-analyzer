@@ -2463,6 +2463,37 @@ scheduler.add_job(
     misfire_grace_time=7200,
 )
 
+# --- DAILY PERFORMANCE EMAIL (4:30 PM ET, Mon-Fri) ---
+# Sends an HTML report to jacksonwhanglee@gmail.com with:
+# NAV, return vs $100k baseline, open positions, closed today,
+# top picks for tomorrow, VIX/regime, win rate.
+# Requires GMAIL_APP_PASSWORD env var in App Runner.
+def _send_daily_email_job():
+    try:
+        from notifications.daily_email import send_daily_report
+        result = send_daily_report()
+        if result.get("ok"):
+            logger.warning(
+                f"DAILY EMAIL: sent — NAV={result.get('nav')} "
+                f"return={result.get('return')}"
+            )
+        else:
+            logger.error(f"DAILY EMAIL: failed — {result.get('error')}")
+    except Exception as e:
+        logger.error(f"DAILY EMAIL: error — {e}")
+
+scheduler.add_job(
+    _send_daily_email_job,
+    "cron",
+    day_of_week="mon-fri",
+    hour=16,
+    minute=30,
+    id="daily_email_report",
+    name="Daily Performance Email (4:30 PM ET)",
+    max_instances=1,
+    misfire_grace_time=1800,
+)
+
 # --- HISTORICAL CALIBRATION (50-year pattern analysis) ---
 # Runs 15 min after startup and weekly on Sunday 8am.
 # Downloads max history, analyzes seasonal/rotation/regime/momentum patterns.
@@ -5321,7 +5352,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v109-real-s3-restore-fallback-reset-132k-v13",
+        "commit_marker": "feat-v110-daily-email-report-4pm-ET-gmail-smtp",
         "date": "2026-06-16",
         "fixes_in_build": [
             "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
@@ -7767,6 +7798,21 @@ def api_picks_cache_status(request: Request):
         }, "generated_at": dt.now().isoformat()}
     except Exception as e:
         return {"ok": False, "reason": str(e)[:200]}
+
+
+@app.post("/api/admin/send-daily-report")
+def api_admin_send_daily_report(request: Request):
+    """Manually trigger the daily performance email.
+    Useful for testing or sending an ad-hoc report outside of 4:30 PM ET.
+    Requires GMAIL_APP_PASSWORD env var."""
+    check_rate_limit(request.client.host)
+    try:
+        from notifications.daily_email import send_daily_report
+        result = send_daily_report()
+        return {"ok": result.get("ok"), "result": result,
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
 
 
 @app.post("/api/admin/black-swan-protect")
