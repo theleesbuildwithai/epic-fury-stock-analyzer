@@ -1315,6 +1315,20 @@ try:
             f"vix_guard key={_old_vix_guard} "
             f"(was blocking VIX recovery detection). Both layers will re-seed on next fetch."
         )
+    # v2 reset: clears BOTH keys regardless of v1 flag (v1 already fired in prior deploy)
+    _vix_clr2_done = _gts_vix_clr("vix_last_good_reset_v2_done", "0")
+    if _vix_clr2_done != "1":
+        _old_vix2 = _gts_vix_clr("vix_last_good", "")
+        _old_vixg2 = _gts_vix_clr("vix_guard_last_known_good", "")
+        _sts_vix_clr("vix_last_good", "")
+        _sts_vix_clr("vix_last_good_ts", "")
+        _sts_vix_clr("vix_guard_last_known_good", "")
+        _sts_vix_clr("vix_guard_last_known_good_ts", "")
+        _sts_vix_clr("vix_last_good_reset_v2_done", "1")
+        logger.warning(
+            f"VIX RESET v2: cleared quant_engine={_old_vix2} "
+            f"vix_guard={_old_vixg2} — both layers re-seed on next fetch."
+        )
 except Exception as _e:
     logger.debug(f"VIX last-good reset (non-fatal): {_e}")
 
@@ -5254,9 +5268,10 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v105-fix-vix-stuck-contradictory-puts-one-directional-guard",
+        "commit_marker": "feat-v106-vix-reset-v2-clears-both-keys-on-redeploy",
         "date": "2026-06-16",
         "fixes_in_build": [
+            "v106_vix_reset_v2_fires_on_this_deploy_clears_stuck_41p6",
             "v105_vix_one_directional_jump_only_blocks_spikes_not_recovery",
             "v105_vix_reset_clears_both_quant_engine_and_vix_guard_db_keys",
             "v105_contradictory_puts_blocked_long_pick_symbols_set",
