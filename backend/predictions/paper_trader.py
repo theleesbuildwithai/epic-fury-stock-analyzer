@@ -253,8 +253,8 @@ def prewarm_benchmark_cache():
 #   - Total return reads correctly as +32% from $100k baseline
 #   - Fresh DB init = $100k cash + 0% return (clean baseline)
 #   - No phantom +9% on fresh start either
-ORIGINAL_CAPITAL = 32_000.0   # 2026-06-15: reset to $32k — actual available capital (fresh start v10)
-INITIAL_CAPITAL = 32_000.0    # Cash init for fresh DB — aligned with ORIGINAL
+ORIGINAL_CAPITAL = 100_000.0  # 2026-06-16: RESTORED — fund baseline is $100k. +32% return = $132k total.
+INITIAL_CAPITAL = 100_000.0   # Cash init for fresh DB — aligned with ORIGINAL
 MAX_POSITIONS = 999  # No limit — only constrained by cash
 STOP_LOSS_PCT = 0.05  # Default fallback — overridden by per-stock ATR calculation
 DEFAULT_HOLD_DAYS = 30

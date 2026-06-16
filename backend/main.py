@@ -1198,6 +1198,53 @@ except Exception as e:
     logger.warning(f"Fresh start v10 error (non-fatal): {e}")
 
 
+# --- FRESH START v11 (2026-06-16): Restore $100k baseline, lock in +32% = $132k ---
+# v10 incorrectly set ORIGINAL_CAPITAL=$32k (misread "return to 32k" as cash reset).
+# Correct state: ORIGINAL_CAPITAL=$100k (original investment), cash=$132k (+32% gain locked).
+# Position hard cap is also ORIGINAL_CAPITAL×15% — was $4.8k (too small), now $15k.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v11, set_trading_state as _set_state_v11,
+    )
+    _v11_done = _get_state_v11("fresh_start_v11_done", "0")
+    if _v11_done != "1":
+        from predictions.models import (
+            get_open_trades as _v11_get_open,
+            close_paper_trade as _v11_close,
+            set_cash as _v11_set_cash,
+            get_db as _v11_get_db,
+            save_portfolio_snapshot as _v11_snap,
+        )
+        from datetime import datetime as _dt_v11
+        _v11_open = _v11_get_open() or []
+        _v11_closed = 0
+        for _v11_t in _v11_open:
+            try:
+                _v11_close(_v11_t["id"], _v11_t.get("entry_price", 0))
+                _v11_closed += 1
+            except Exception as _v11_ce:
+                logger.warning(f"RESET v11: failed to close {_v11_t.get('ticker')}: {_v11_ce}")
+        # $100k × 1.32 = $132k — locks in the confirmed +32% return as starting cash
+        _V11_CASH = 132_000.00
+        _v11_set_cash(_V11_CASH, caller="fresh_start_v11",
+                      reason="2026-06-16 restore $100k baseline + lock in +32% = $132k",
+                      bypass_sentinel=True)
+        _v11_epoch = _dt_v11.utcnow().isoformat()
+        _set_state_v11("stats_epoch", _v11_epoch)
+        _v11_conn = _v11_get_db()
+        _v11_conn.execute("DELETE FROM portfolio_snapshots")
+        _v11_conn.commit()
+        _v11_snap(_V11_CASH, _V11_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v11("fresh_start_v11_done", "1")
+        logger.warning(
+            f"FRESH START v11: closed {_v11_closed} positions, "
+            f"cash=$132k (+32% on $100k baseline), stats reset. "
+            f"ORIGINAL_CAPITAL restored to $100k."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v11 error (non-fatal): {e}")
+
+
 # --- DAILY PAUSE FORCE-CLEAR v2 (2026-06-04) ---
 # The daily-profit-limit rewrite (5% threshold + no-pause) ships in this
 # same deploy. If any prior pause flag survived in trading_state, it must
@@ -5133,7 +5180,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v102-db-backup-all-cycles-quant-picks-fallback",
+        "commit_marker": "feat-v103-restore-100k-baseline-32pct-locked-132k",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
