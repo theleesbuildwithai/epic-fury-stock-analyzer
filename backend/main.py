@@ -7802,10 +7802,26 @@ def api_picks_cache_status(request: Request):
         return {"ok": False, "reason": str(e)[:200]}
 
 
+@app.get("/api/admin/health-check")
+def api_admin_health_check(request: Request):
+    """Run system health checks and return full results (no email sent)."""
+    check_rate_limit(request.client.host)
+    try:
+        from notifications.daily_email import _run_health_checks
+        checks = _run_health_checks()
+        n_errors = sum(1 for c in checks if c["status"] == "error")
+        n_warns  = sum(1 for c in checks if c["status"] == "warn")
+        return {"ok": True, "checks": checks,
+                "summary": {"errors": n_errors, "warnings": n_warns},
+                "generated_at": dt.now().isoformat()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
 @app.post("/api/admin/send-daily-report")
 def api_admin_send_daily_report(request: Request):
     """Manually trigger the daily performance email.
-    Useful for testing or sending an ad-hoc report outside of 4:30 PM ET.
+    Useful for testing or sending an ad-hoc report outside of 3:00 PM ET.
     Requires GMAIL_APP_PASSWORD env var."""
     check_rate_limit(request.client.host)
     try:
