@@ -1908,6 +1908,22 @@ def _smart_trade_monitor():
         # 1. Generate fresh quant picks (analyzes 200+ stocks)
         picks = generate_quant_picks()
 
+        # DB backup fallback: if live scan returned 0 picks, use last known good picks
+        # 2026-06-15: prevents missed trade cycles when yfinance rate-limits on scan
+        if not picks.get("long_picks") and not picks.get("short_picks"):
+            try:
+                from predictions.models import get_trading_state as _stm_gts
+                import json as _stm_json
+                _stm_raw = _stm_gts("quant_picks_db_backup", "")
+                if _stm_raw:
+                    _stm_db = _stm_json.loads(_stm_raw)
+                    if _stm_db.get("long_picks") or _stm_db.get("short_picks"):
+                        picks = {**picks, "long_picks": _stm_db.get("long_picks", []),
+                                 "short_picks": _stm_db.get("short_picks", [])}
+                        logger.warning("MONITOR: using DB backup picks (live scan returned 0)")
+            except Exception:
+                pass
+
         # If MARKET OPEN trigger fired, set force_market_open so we trade
         # the 9:30-9:45 window instead of waiting (with reduced size for safety).
         reasons_str = " ".join(decision.get("reasons", []))
@@ -1984,6 +2000,20 @@ def _run_auto_trade_cycle():
     try:
         logger.warning(f"MANUAL TRADE CYCLE #{auto_trade_stats['total_cycles']} starting")
         picks = generate_quant_picks()
+        # DB backup fallback: if live scan returned 0 picks, use last known good picks
+        if not picks.get("long_picks") and not picks.get("short_picks"):
+            try:
+                from predictions.models import get_trading_state as _atc_gts
+                import json as _atc_json
+                _atc_raw = _atc_gts("quant_picks_db_backup", "")
+                if _atc_raw:
+                    _atc_db = _atc_json.loads(_atc_raw)
+                    if _atc_db.get("long_picks") or _atc_db.get("short_picks"):
+                        picks = {**picks, "long_picks": _atc_db.get("long_picks", []),
+                                 "short_picks": _atc_db.get("short_picks", [])}
+                        logger.warning("TRADE CYCLE: using DB backup picks (live scan returned 0)")
+            except Exception:
+                pass
         result = execute_trades_from_signals(picks)
         try:
             auto_adjust_weights()
@@ -5103,7 +5133,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v101-get-cached-fix-32k-reset-stb-fallback-force-trade-v10",
+        "commit_marker": "feat-v102-db-backup-all-cycles-quant-picks-fallback",
         "date": "2026-06-15",
         "fixes_in_build": [
             "v89_L1_uses_multi_source_quote_batch_not_get_stock_info",
@@ -5451,6 +5481,28 @@ def quant_picks(force_refresh: bool = False):
                 return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 fallback failed: {_se}")
+
+        # 2026-06-15: DB backup fallback — quant_picks_db_backup survives
+        # container restarts and S3 outages. Checked last so live+stale+S3
+        # are all preferred over the DB copy (may be hours old).
+        try:
+            from predictions.models import get_trading_state as _gts_qp
+            _raw_qp = _gts_qp("quant_picks_db_backup", "")
+            if _raw_qp:
+                _db_qp = _json_q.loads(_raw_qp)
+                _db_qp_l = len(_db_qp.get("long_picks") or [])
+                _db_qp_s = len(_db_qp.get("short_picks") or [])
+                if _db_qp_l + _db_qp_s > 0:
+                    _db_qp["cache_status"] = "db_backup"
+                    _db_qp["_endpoint_version"] = "v14-stale-serve"
+                    logger.warning(
+                        f"quant-picks: serving DB backup ({_db_qp_l}L {_db_qp_s}S) "
+                        f"— S3+cache both empty"
+                    )
+                    return JSONResponse(content=_safe_serialize(_db_qp))
+        except Exception as _dbe:
+            logger.debug(f"quant-picks DB backup fallback failed: {_dbe}")
+
         return JSONResponse(content={
             "regime": {"regime": "LOADING", "description": "Picks engine warming up"},
             "long_picks": [],
