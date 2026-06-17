@@ -5807,11 +5807,38 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     if df is not None and not df.empty:
         try:
             import pandas as _pd_stb
-            close = df["Close"] if "Close" in df.columns else None
-            if close is not None and hasattr(close, "columns"):
+            # Handle both yfinance column formats:
+            #   Old (<0.2.18): flat MultiIndex (Ticker, Field) — df[sym]["Close"]
+            #   New (>=0.2.18): MultiIndex (Price/Field, Ticker) — df["Close"][sym]
+            # Also handle single-level columns for single-ticker fallback.
+            _cols = df.columns
+            if isinstance(_cols, _pd_stb.MultiIndex):
+                _lvl0 = _cols.get_level_values(0).tolist()
+                _lvl1 = _cols.get_level_values(1).tolist()
+                if "Close" in _lvl0:
+                    # New yfinance: (Price, Ticker) — df["Close"] is a ticker-indexed DataFrame
+                    _close_df = df["Close"]
+                    for sym in _STB_UNIVERSE:
+                        try:
+                            col = _close_df[sym].dropna()
+                            if len(col) >= 20:
+                                price_data[sym] = col.values
+                        except Exception:
+                            pass
+                elif "Close" in _lvl1:
+                    # Old yfinance: (Ticker, Field) — df[sym]["Close"] per ticker
+                    for sym in _STB_UNIVERSE:
+                        try:
+                            col = df[sym]["Close"].dropna()
+                            if len(col) >= 20:
+                                price_data[sym] = col.values
+                        except Exception:
+                            pass
+            elif "Close" in _cols:
+                # Single-ticker flat DataFrame
                 for sym in _STB_UNIVERSE:
                     try:
-                        col = close[sym].dropna()
+                        col = df["Close"].dropna()
                         if len(col) >= 20:
                             price_data[sym] = col.values
                     except Exception:
