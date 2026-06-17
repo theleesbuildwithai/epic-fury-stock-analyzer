@@ -3533,6 +3533,18 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                 t_pnl = ((t_entry / t_price) - 1) * 100
                 target_achieved = (t_entry - t_price) / (t_entry - t_target + 0.01) if t_entry > t_target else 1.0
 
+            # PnL SANITY VETO (mirrors check_and_exit_positions guard):
+            # If t_pnl is >50%, the entry_price is almost certainly corrupted
+            # (e.g. option premium $4.72 vs stock price $61.80 = +1209%).
+            # Refuse to close and let the position sit until reconciled.
+            if abs(t_pnl) > 50.0:
+                logger.error(
+                    f"WIN-LOCK PnL SANITY VETO: {t_ticker} {t_dir} "
+                    f"entry=${t_entry} current=${t_price} pnl={t_pnl:+.1f}% "
+                    f"— refusing to close (likely corrupted entry_price)."
+                )
+                continue
+
             # F20 fix: dropped the `t_pnl < 0` predicate. Previous logic
             # force-realized any losing position whenever the BOOK had an
             # up day — converting paper losses into realized losses for

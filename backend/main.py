@@ -1379,6 +1379,54 @@ except Exception as e:
     logger.warning(f"Fresh start v14 error (non-fatal): {e}")
 
 
+# --- FRESH START v15 (2026-06-17) ---
+# Options trades (MRNA put $4.72, QCOM call $16) were closed by win-lock using
+# stock prices instead of option premiums → +1209%/+1231% fake gains → portfolio
+# inflated from $132k to $196k. Root causes fixed:
+#   1. models.py: options close validator tightened 15x → 8x
+#   2. paper_trader.py: in-cycle win-lock now has PnL sanity veto (>50% refuses)
+# Reset: close all open positions, return cash to $132k (32% on $100k baseline).
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v15, set_trading_state as _set_state_v15,
+    )
+    _v15_done = _get_state_v15("fresh_start_v15_done", "0")
+    if _v15_done != "1":
+        from predictions.models import (
+            get_open_trades as _v15_get_open,
+            close_paper_trade as _v15_close,
+            set_cash as _v15_set_cash,
+            get_db as _v15_get_db,
+            save_portfolio_snapshot as _v15_snap,
+        )
+        from datetime import datetime as _dt_v15
+        _v15_open = _v15_get_open() or []
+        _v15_closed = 0
+        for _v15_t in _v15_open:
+            try:
+                _v15_close(_v15_t["id"], _v15_t.get("entry_price", 0))
+                _v15_closed += 1
+            except Exception as _v15_ce:
+                logger.warning(f"RESET v15: failed to close {_v15_t.get('ticker')}: {_v15_ce}")
+        _V15_CASH = 132_000.00
+        _v15_set_cash(_V15_CASH, caller="fresh_start_v15",
+                      reason="2026-06-17 options fake-gain fix — reset to $132k (32% on $100k)",
+                      bypass_sentinel=True)
+        _v15_epoch = _dt_v15.utcnow().isoformat()
+        _set_state_v15("stats_epoch", _v15_epoch)
+        _v15_conn = _v15_get_db()
+        _v15_conn.execute("DELETE FROM portfolio_snapshots")
+        _v15_conn.commit()
+        _v15_snap(_V15_CASH, _V15_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v15("fresh_start_v15_done", "1")
+        logger.warning(
+            f"FRESH START v15: closed {_v15_closed} positions, "
+            f"cash=$132k, stats reset. Options validator tightened 15x→8x."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v15 error (non-fatal): {e}")
+
+
 # --- VIX LAST-GOOD RESET (2026-06-16) ---
 # VIX guard stuck at 41.6 (old spike). Real VIX is ~16. The bidirectional
 # jump check blocked recovery (41.6→16 ratio=2.6 > 2.0). Clear the cached
@@ -5400,7 +5448,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v127-stb-picks-from-quant-cache-no-yfinance-cold-deploy",
+        "commit_marker": "feat-v128-options-validator-8x-winlock-pnl-veto-fresh-start-v15",
         "date": "2026-06-17",
         "fixes_in_build": [
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",

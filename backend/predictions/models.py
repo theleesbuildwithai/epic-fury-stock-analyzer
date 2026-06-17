@@ -842,9 +842,9 @@ def close_paper_trade(trade_id: int, exit_price: float):
                 #   - EQUITY low-price guard: entry < $20 + ratio > 2x is
                 #     overwhelmingly an options trade with NULL instrument_type.
                 if _is_option:
-                    if ratio > 15:
+                    if ratio > 8:
                         _reject = True
-                        _reject_reason = f"option exit/entry ratio {ratio:.2f}x exceeds 15x ceiling"
+                        _reject_reason = f"option exit/entry ratio {ratio:.2f}x exceeds 8x ceiling (tightened from 15x after 13x slip-through incident)"
                 else:
                     # EQUITY path
                     if ratio > 3:
