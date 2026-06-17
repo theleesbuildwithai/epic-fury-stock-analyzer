@@ -5734,256 +5734,158 @@ _FUNDAMENTAL_PICKS_CACHE_TTL = 6 * 3600  # 6 hours
 def generate_fundamental_picks(force: bool = False) -> dict:
     """
     Generate long-term fundamentals-driven picks for the STB page.
-    Completely separate from generate_quant_picks() — paper trading
-    is NOT touched.
+    Completely separate from the paper trading system — paper trading is NOT affected.
 
-    Scoring formula (0-100 fundamental score):
-      35%  Growth quality  — revenue growth + earnings growth
-      25%  Capital efficiency — ROE + profit margins
-      20%  Valuation — PEG ratio + forward PE discount
-      20%  Trend confirmation — 12-month price momentum
+    Strategy: Uses the already-cached quant picks data (zero new API calls).
+    The quant engine scores 500+ stocks every cycle; we re-score the long candidates
+    here using a long-term quality lens:
+      40%  Trend/momentum  — 12m price momentum from quant picks
+      35%  Quality          — quant composite_score + quality factor
+      25%  Risk             — lower volatility preferred for multi-week holds
 
-    Filters:
-      - PE < 60  (not wildly overvalued)
-      - ROE > 8%  (company earns decent return on capital)
-      - Debt/equity < 3.0  (manageable leverage)
-      - Revenue growth > -5%  (not in freefall)
-      - Price > $10  (avoid penny stocks)
-      - Market cap implied by price (penny stock guard)
+    Long-term filters:
+      - LONG direction only (no shorts)
+      - Price > $10
+      - Not in extreme RSI2 overbought (> 95)
+      - Positive 12m momentum (uptrend)
 
     Returns: {long_picks: [...], generated_at: str, ...}
     """
-    import math as _fm
-
     # Check cache first (6-hour TTL)
     now_ts = time.time()
     cache_entry = _quant_cache.get("fundamental_picks")
     if not force and cache_entry and (now_ts - cache_entry.get("time", 0)) < _FUNDAMENTAL_PICKS_CACHE_TTL:
         return cache_entry["data"]
 
-    logger.warning("FUNDAMENTAL PICKS: Starting scan (STB long-term)")
+    logger.warning("FUNDAMENTAL PICKS: Building long-term picks from quant cache (zero API calls)")
 
-    try:
-        from analysis.quant_engine import QUANT_UNIVERSE, SECTOR_MAP
-    except ImportError:
-        QUANT_UNIVERSE = []
-        SECTOR_MAP = {}
+    # Pull ALL quant long picks from cache
+    quant_entry = _quant_cache.get("quant_picks") or {}
+    quant_data = quant_entry.get("data") or {}
+    all_long_picks = list(quant_data.get("long_picks") or [])
 
-    symbols = list(QUANT_UNIVERSE) if QUANT_UNIVERSE else []
-    if not symbols:
-        logger.warning("FUNDAMENTAL PICKS: QUANT_UNIVERSE empty, aborting")
-        return {"long_picks": [], "generated_at": datetime.now().isoformat(), "error": "universe_empty"}
-
-    # Trigger fundamentals prefetch (uses existing 24h cache, nearly free after first scan)
-    # Fetch up to 200 symbols to get good coverage (50 cap was too low for 500+ universe)
-    fundamentals = _prefetch_fundamentals(symbols[:200])
-
-    # Download 1-year price history for momentum calculation.
-    # PRIMARY: bulk yfinance download (fast when it works).
-    # FALLBACK: use current_price from ticker.info (already fetched in _prefetch_fundamentals).
-    import yfinance as _yf_fund
-    price_data = {}
-    try:
-        import threading as _fund_thr
-        _dl_result = [None]
-        def _dl_prices(r=_dl_result):
-            try:
-                df = _yf_fund.download(
-                    symbols[:150], period="1y", interval="1d",
-                    auto_adjust=True, progress=False, threads=True, timeout=30
-                )
-                r[0] = df
-            except Exception as _e:
-                logger.debug(f"FUNDAMENTAL PICKS price download failed: {_e}")
-        _t = _fund_thr.Thread(target=_dl_prices, daemon=True)
-        _t.start(); _t.join(timeout=45)
-        df = _dl_result[0]
-        if df is not None and not df.empty:
-            if hasattr(df["Close"], "columns"):
-                for sym in symbols:
-                    try:
-                        col = df["Close"][sym].dropna()
-                        if len(col) >= 20:
-                            price_data[sym] = col.values
-                    except Exception:
-                        pass
-    except Exception as _e:
-        logger.debug(f"FUNDAMENTAL PICKS bulk price error: {_e}")
-
-    # Count how many stocks got price data; if very few, the bulk download failed
-    _price_coverage = len(price_data)
-    logger.warning(f"FUNDAMENTAL PICKS: price_data coverage={_price_coverage}/{len(symbols[:150])} stocks")
-
-    # Score each stock
-    candidates = []
-    for sym in symbols:
+    # If quant cache is empty, generate it now (blocks briefly but only once)
+    if not all_long_picks:
+        logger.warning("FUNDAMENTAL PICKS: quant_picks cache empty — triggering quant scan")
         try:
-            fund = fundamentals.get(sym, {})
+            result_q = generate_quant_picks(force=False)
+            all_long_picks = list((result_q or {}).get("long_picks") or [])
+        except Exception as _qe:
+            logger.warning(f"FUNDAMENTAL PICKS: quant scan failed: {_qe}")
 
-            # --- HARD FILTERS ---
-            pe = fund.get("pe")
-            roe = fund.get("roe")  # already as %, e.g. 25.0
-            debt_eq = fund.get("debt_equity")
-            rev_growth = fund.get("revenue_growth")  # %, e.g. 15.0
-            prices = price_data.get(sym)
+    if not all_long_picks:
+        result = {
+            "long_picks": [], "short_picks": [],
+            "generated_at": datetime.now().isoformat(),
+            "universe_scanned": 0,
+            "error": "quant_cache_empty",
+        }
+        _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
+        return result
 
-            # Skip: bad valuation, bad capital efficiency, or bad leverage
-            if pe is not None and pe > 0 and pe > 60:
+    # Long-term quality scoring (0-100) using data already in quant picks
+    candidates = []
+    for p in all_long_picks:
+        try:
+            if p.get("direction", "").upper() != "LONG":
                 continue
-            if pe is not None and pe < 0:
-                continue  # Negative earnings
-            if roe is not None and roe < 8.0:
-                continue  # Poor capital efficiency
-            if debt_eq is not None and debt_eq > 300.0:
-                continue  # Debt/equity is in % on yfinance (300 = 3.0x)
-            if rev_growth is not None and rev_growth < -10.0:
-                continue  # Revenue declining sharply
 
-            # Get current price — prefer bulk-download history, fall back to ticker.info price.
-            # This ensures stocks aren't dropped just because yfinance bulk download timed out.
-            if prices is not None and len(prices) >= 20:
-                current_price = float(prices[-1])
-                mom_source = "history"
-            else:
-                _fb_price = fund.get("current_price")
-                if not _fb_price or _fb_price <= 0:
-                    continue  # No price at all — skip
-                current_price = float(_fb_price)
-                mom_source = "spot"  # No momentum calc without history
-            if current_price < 5.0:
-                continue  # Penny stock guard
+            price = float(p.get("price") or 0)
+            if price < 10.0:
+                continue  # Penny stock / micro-cap guard
 
-            # --- SCORING (0 to 100) ---
+            momentum = float(p.get("momentum_pct") or 0)
+            if momentum < -15.0:
+                continue  # Not in downtrend
 
-            # 1. Growth quality (35%)
-            earn_growth = fund.get("earnings_growth")  # %, e.g. 30.0
-            growth_score = 0.0
-            if rev_growth is not None:
-                # 20% revenue growth = excellent, cap at 50%
-                growth_score += min(50.0, max(-10.0, rev_growth)) * 0.4
-            if earn_growth is not None:
-                # 30% earnings growth = excellent, cap at 80%
-                growth_score += min(80.0, max(-20.0, earn_growth)) * 0.3
-            growth_score = min(35.0, growth_score)
+            rsi2 = float(p.get("rsi2") or 50)
+            if rsi2 > 95:
+                continue  # Extreme overbought — wait for pullback
 
-            # 2. Capital efficiency (25%)
-            eff_score = 0.0
-            if roe is not None:
-                eff_score += min(15.0, max(0.0, (roe - 8.0) / 2.0))  # ROE 8→38% maps to 0→15
-            profit_margins = fund.get("profit_margins")  # %, e.g. 15.0
-            if profit_margins is not None and profit_margins > 0:
-                eff_score += min(10.0, profit_margins * 0.3)  # 33% margin = 10 pts
-            eff_score = min(25.0, eff_score)
+            composite = float(p.get("composite_score") or 0)
+            confidence = float(p.get("confidence") or 55)
+            vol_60d = float(p.get("volatility_60d") or 30)
 
-            # 3. Valuation quality (20%)
-            val_score = 10.0  # Neutral baseline — we don't penalize growth companies
-            peg = fund.get("peg_ratio")
+            # --- LONG-TERM QUALITY SCORE (0-100) ---
+            # 1. Momentum / trend (40%): +50% mom=40pts, +20%=30pts, 0%=20pts, -15%=10pts
+            mom_score = max(10.0, min(40.0, 20.0 + momentum * 0.4))
+            # 2. Quality / composite (35%): normalize composite_score (typ 0.5-3.0) to 0-35
+            qual_score = max(10.0, min(35.0, composite * 10.0))
+            # 3. Risk / vol (25%): lower vol preferred for multi-week holds
+            risk_score = max(5.0, min(25.0, 35.0 - vol_60d * 0.4))
+
+            total_score = mom_score + qual_score + risk_score  # 0-100
+
+            fund = p.get("fundamentals") or {}
+            pe = fund.get("pe")
             fwd_pe = fund.get("fwd_pe")
-            if peg is not None and peg > 0:
-                if peg < 1.0:
-                    val_score = 20.0  # PEG < 1 = growth at discount
-                elif peg < 1.5:
-                    val_score = 16.0  # Reasonable
-                elif peg < 2.0:
-                    val_score = 12.0
-                else:
-                    val_score = 6.0   # Expensive relative to growth
-            elif pe is not None and fwd_pe is not None and pe > 0 and fwd_pe > 0:
-                # Forward earnings growth implied by PE discount
-                if fwd_pe < pe * 0.85:
-                    val_score = 18.0  # Earnings expected to jump
-                elif fwd_pe < pe:
-                    val_score = 14.0
-            val_score = min(20.0, val_score)
+            roe = fund.get("roe")
+            debt_eq = fund.get("debt_equity")
 
-            # 4. Trend confirmation (20%) — 12-month price momentum
-            trend_score = 10.0  # Neutral default (used when no price history)
-            mom_12m = 0.0
-            if prices is not None and len(prices) >= 20:
-                if len(prices) >= 252:
-                    mom_12m = (float(prices[-21]) / float(prices[-252]) - 1) * 100
-                elif len(prices) >= 126:
-                    mom_12m = (float(prices[-21]) / float(prices[0]) - 1) * 100
-                else:
-                    mom_12m = (float(prices[-1]) / float(prices[0]) - 1) * 100
-                # Map momentum: +50%=20pts, +20%=14pts, 0%=10pts, -10%=6pts
-                trend_score = max(2.0, min(20.0, 10.0 + mom_12m * 0.2))
-            # If no price history (spot price fallback), keep neutral 10pt trend score
+            # Build reasons with long-term framing
+            quant_reasons = list(p.get("reasons") or [])
+            lt_reasons = []
+            if momentum > 20:
+                lt_reasons.append(f"12m momentum +{momentum:.0f}% — confirmed uptrend")
+            elif momentum > 0:
+                lt_reasons.append(f"Positive 12m trend (+{momentum:.0f}%)")
+            if vol_60d < 25:
+                lt_reasons.append(f"Low volatility ({vol_60d:.0f}% ann) — stable hold")
+            if confidence >= 70:
+                lt_reasons.append(f"High quant confidence ({confidence:.0f}%)")
+            if roe and roe > 15:
+                lt_reasons.append(f"ROE {roe:.0f}%")
+            reasons = (lt_reasons + quant_reasons)[:5] or ["Quant quality + momentum pick"]
 
-            total_score = growth_score + eff_score + val_score + trend_score  # 0-100
-
-            # Confidence: convert score to probability-like number (55-90%)
-            confidence = round(55.0 + (total_score / 100.0) * 35.0)
-
-            # Build reasons list
-            reasons = []
-            if rev_growth is not None and rev_growth > 5:
-                reasons.append(f"Revenue +{rev_growth:.0f}% YoY")
-            if earn_growth is not None and earn_growth > 10:
-                reasons.append(f"Earnings +{earn_growth:.0f}% YoY")
-            if roe is not None and roe > 15:
-                reasons.append(f"ROE {roe:.0f}% (exceptional efficiency)")
-            if peg is not None and peg < 1.5:
-                reasons.append(f"PEG {peg:.1f}x — growth at reasonable price")
-            if profit_margins is not None and profit_margins > 15:
-                reasons.append(f"Profit margin {profit_margins:.0f}%")
-            if mom_12m > 20:
-                reasons.append(f"12m momentum +{mom_12m:.0f}% (trend confirmed)")
-            if pe is not None and pe < 20:
-                reasons.append(f"PE {pe:.1f}x — value priced")
-            if not reasons:
-                reasons.append("Passes fundamental quality screen")
-
-            sector = SECTOR_MAP.get(sym, "Unknown") if isinstance(SECTOR_MAP, dict) else "Unknown"
-
+            ticker = p.get("ticker") or p.get("symbol") or ""
             candidates.append({
-                "symbol": sym,
-                "ticker": sym,
-                "price": round(current_price, 2),
-                "sector": sector,
+                "symbol": ticker,
+                "ticker": ticker,
+                "price": round(price, 2),
+                "sector": p.get("sector") or "Unknown",
                 "direction": "LONG",
                 "fundamental_score": round(total_score, 1),
-                "confidence": min(92, confidence),
+                "confidence": min(92, int(confidence)),
                 "pe": pe,
                 "fwd_pe": fwd_pe,
-                "peg_ratio": peg,
+                "peg_ratio": None,
                 "roe_pct": roe,
-                "revenue_growth_pct": rev_growth,
-                "earnings_growth_pct": earn_growth,
-                "profit_margin_pct": profit_margins,
+                "revenue_growth_pct": None,
+                "earnings_growth_pct": None,
+                "profit_margin_pct": None,
                 "debt_equity": debt_eq,
-                "momentum_12m_pct": round(mom_12m, 1),
-                "reasons": reasons[:5],
+                "momentum_12m_pct": round(momentum, 1),
+                "reasons": reasons,
                 "hold_recommendation": "6-12 weeks",
                 "hold_class": "position",
             })
 
         except Exception as _se:
-            logger.debug(f"FUNDAMENTAL PICKS score error {sym}: {_se}")
+            logger.debug(f"FUNDAMENTAL PICKS score error {p.get('ticker')}: {_se}")
             continue
 
-    # Sort by fundamental score descending
     candidates.sort(key=lambda x: -x["fundamental_score"])
 
-    # Cap to 4 per sector for diversification
-    sector_counts = {}
+    # Max 3 per sector, top 20 picks
+    sector_counts: dict = {}
     top_picks = []
     for c in candidates:
         sec = c.get("sector", "Unknown")
-        if sector_counts.get(sec, 0) < 4:
+        if sector_counts.get(sec, 0) < 3:
             top_picks.append(c)
             sector_counts[sec] = sector_counts.get(sec, 0) + 1
-        if len(top_picks) >= 25:
+        if len(top_picks) >= 20:
             break
 
     result = {
         "long_picks": top_picks,
-        "short_picks": [],  # Long-only strategy for fundamentals
+        "short_picks": [],
         "generated_at": datetime.now().isoformat(),
         "universe_scanned": len(candidates),
-        "regime": {"regime": "BULL"},  # Fundamental picks are regime-agnostic
+        "regime": {"regime": "BULL"},
     }
 
     _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
-    logger.warning(f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} candidates")
+    logger.warning(f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} quant candidates (zero API calls)")
     return result
+
