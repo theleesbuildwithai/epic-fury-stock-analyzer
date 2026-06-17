@@ -5730,149 +5730,156 @@ def get_signal_weights_safe() -> dict:
 _FUNDAMENTAL_PICKS_CACHE_TTL = 6 * 3600  # 6 hours
 
 
+# Fixed large-cap universe for STB — reliable, always downloadable, great for long-term holds
+_STB_UNIVERSE = [
+    # Mega-cap tech
+    "AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","ORCL","CRM",
+    # Financials
+    "BRK-B","JPM","V","MA","BAC","WFC","GS","MS","BLK","SPGI",
+    # Healthcare
+    "UNH","LLY","JNJ","ABBV","MRK","TMO","ABT","DHR","BSX","ELV",
+    # Consumer & Retail
+    "COST","WMT","HD","MCD","SBUX","NKE","TGT","LOW","TJX","AMGN",
+    # Industrials
+    "CAT","RTX","HON","UPS","DE","LMT","GE","MMM","EMR","ETN",
+    # Energy
+    "XOM","CVX","COP","EOG","SLB","PSX","VLO","MPC","OXY","HAL",
+    # Semis / Tech hardware
+    "AMD","INTC","QCOM","MU","AMAT","LRCX","KLAC","TXN","ADI","MCHP",
+    # Communications & Media
+    "NFLX","DIS","CMCSA","T","VZ","CHTR","TMUS",
+    # REITs & Utilities
+    "AMT","PLD","NEE","DUK","SO","AEP","D",
+    # International large-caps
+    "TSM","ASML","NVO","SAP",
+]
+
+
 def generate_fundamental_picks(force: bool = False) -> dict:
     """
     Generate long-term picks for the STB page.
-    Uses _PRICE_DATA_LASTGOOD — the quant engine's 14-day per-ticker price
-    cache — as the primary data source. Zero new API calls required.
 
-    Why: yfinance.download() in bulk is unreliable on App Runner (only 42/726
-    stocks return data per scan due to rate limiting). _PRICE_DATA_LASTGOOD
-    accumulates good price data across all prior scans and persists in memory
-    for up to 14 days — the richest, most reliable data source available.
+    Uses a fixed S&P 100 large-cap universe — reliable yfinance.download()
+    target, always available, great companies for 6-12 week holds.
 
     Scoring (0-100):
-      50%  12-month momentum       — sustained uptrend for 6-12 week holds
+      50%  12-month momentum       — sustained uptrend confirmation
       30%  Trend quality           — 50d vs 200d MA, price above MAs
       20%  Stability               — lower 60d volatility preferred
 
     Filters:
       - Price > $10
-      - 12m momentum > -5% (not in sustained downtrend)
-      - Price above 50d MA (near-term uptrend)
-      - At least 126 trading days (6 months) of history
+      - 12m momentum > -15% (not in severe downtrend)
+      - Price above 50d MA (near-term trend)
+      - At least 126 trading days of history
 
     Returns: {long_picks: [...], generated_at: str, ...}
     """
-    # Check cache first (6-hour TTL)
     now_ts = time.time()
     cache_entry = _quant_cache.get("fundamental_picks")
     if not force and cache_entry and (now_ts - cache_entry.get("time", 0)) < _FUNDAMENTAL_PICKS_CACHE_TTL:
         return cache_entry["data"]
 
-    logger.warning("FUNDAMENTAL PICKS: Scoring from _PRICE_DATA_LASTGOOD (zero API calls)")
+    logger.warning(f"FUNDAMENTAL PICKS: Downloading {len(_STB_UNIVERSE)} large-cap stocks for STB scan")
+
+    import yfinance as _yf_stb
+    import threading as _stb_thr
+    import math as _fm_stb
+    import numpy as _np_stb
+
+    price_data = {}
+    _dl_result = [None]
+
+    def _dl():
+        try:
+            df = _yf_stb.download(
+                _STB_UNIVERSE, period="1y", interval="1d",
+                auto_adjust=True, progress=False, threads=True, timeout=30
+            )
+            _dl_result[0] = df
+        except Exception as _e:
+            logger.debug(f"FUNDAMENTAL PICKS download error: {_e}")
+
+    _t = _stb_thr.Thread(target=_dl, daemon=True)
+    _t.start(); _t.join(timeout=45)
+    df = _dl_result[0]
+
+    if df is not None and not df.empty:
+        try:
+            import pandas as _pd_stb
+            close = df["Close"] if "Close" in df.columns else None
+            if close is not None and hasattr(close, "columns"):
+                for sym in _STB_UNIVERSE:
+                    try:
+                        col = close[sym].dropna()
+                        if len(col) >= 20:
+                            price_data[sym] = col.values
+                    except Exception:
+                        pass
+        except Exception as _pe:
+            logger.debug(f"FUNDAMENTAL PICKS price extraction error: {_pe}")
+
+    # Fallback: also try _PRICE_DATA_LASTGOOD for any missing
+    try:
+        from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _lgs
+        for sym in _STB_UNIVERSE:
+            if sym not in price_data and sym in _lgs:
+                entry = _lgs[sym]
+                _df = entry.get("df") if isinstance(entry, dict) else entry
+                if _df is not None and not _df.empty:
+                    if "Close" in _df.columns:
+                        col = _df["Close"].dropna().values
+                        if len(col) >= 20:
+                            price_data[sym] = col
+    except Exception:
+        pass
+
+    logger.warning(f"FUNDAMENTAL PICKS: {len(price_data)}/{len(_STB_UNIVERSE)} stocks with price data")
 
     try:
-        from analysis.quant_engine import SECTOR_MAP, _PRICE_DATA_LASTGOOD
+        from analysis.quant_engine import SECTOR_MAP
     except ImportError:
         SECTOR_MAP = {}
-        _PRICE_DATA_LASTGOOD = {}
-
-    # _PRICE_DATA_LASTGOOD: {ticker: {"df": DataFrame, "ts": datetime}}
-    if not _PRICE_DATA_LASTGOOD:
-        logger.warning("FUNDAMENTAL PICKS: _PRICE_DATA_LASTGOOD empty — triggering quant scan to populate it")
-        try:
-            # Run a full quant scan (force=True bypasses S3 cache and actually fetches data).
-            # This populates _PRICE_DATA_LASTGOOD so we have stocks to score.
-            # Runs in THIS thread (background from STB endpoint), so it blocks here ~5-10 min.
-            generate_quant_picks(force=True)
-        except Exception as _qe:
-            logger.warning(f"FUNDAMENTAL PICKS: quant scan failed: {_qe}")
-        if not _PRICE_DATA_LASTGOOD:
-            logger.warning("FUNDAMENTAL PICKS: quant scan completed but _PRICE_DATA_LASTGOOD still empty")
-            result = {
-                "long_picks": [], "short_picks": [],
-                "generated_at": datetime.now().isoformat(),
-                "universe_scanned": 0,
-                "error": "price_cache_empty_after_scan",
-            }
-            _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
-            return result
-        logger.warning(f"FUNDAMENTAL PICKS: quant scan done — {len(_PRICE_DATA_LASTGOOD)} stocks in lastgood cache")
-
-    import math as _fm
-    import numpy as _np_fund
 
     candidates = []
-    for sym, entry in _PRICE_DATA_LASTGOOD.items():
+    for sym, closes in price_data.items():
         try:
-            df = entry.get("df") if isinstance(entry, dict) else entry
-            if df is None or df.empty:
+            if len(closes) < 126:
                 continue
-
-            # Extract Close prices
-            if hasattr(df, "columns"):
-                if "Close" in df.columns:
-                    closes = df["Close"].dropna().values
-                elif isinstance(df.columns, __import__("pandas").MultiIndex):
-                    # MultiIndex: (field, ticker) or (ticker, field)
-                    lvl0 = df.columns.get_level_values(0)
-                    if "Close" in lvl0:
-                        closes = df["Close"].iloc[:, 0].dropna().values
-                    else:
-                        continue
-                else:
-                    continue
-            else:
-                continue
-
-            if len(closes) < 126:  # Need at least 6 months
-                continue
-
             current_price = float(closes[-1])
             if current_price < 10.0:
-                continue  # Penny stock / micro-cap guard
-            if current_price > 5000.0:
-                continue  # Sanity check (BRK.A etc)
+                continue
 
             n = len(closes)
-
-            # 12-month momentum (exclude last month to reduce noise)
-            if n >= 252:
-                mom_12m = (float(closes[-21]) / float(closes[-252]) - 1) * 100
-            else:
-                mom_12m = (float(closes[-21]) / float(closes[0]) - 1) * 100
-
+            mom_12m = (float(closes[-21]) / float(closes[-252]) - 1) * 100 if n >= 252 else \
+                      (float(closes[-21]) / float(closes[0]) - 1) * 100
             if mom_12m < -15.0:
-                continue  # Only skip severe sustained downtrends
+                continue
 
-            # Moving averages
-            ma50 = float(_np_fund.mean(closes[-50:])) if n >= 50 else float(_np_fund.mean(closes))
-            ma200 = float(_np_fund.mean(closes[-200:])) if n >= 200 else float(_np_fund.mean(closes))
+            ma50 = float(_np_stb.mean(closes[-50:])) if n >= 50 else float(_np_stb.mean(closes))
+            ma200 = float(_np_stb.mean(closes[-200:])) if n >= 200 else float(_np_stb.mean(closes))
 
-            # Must be above 50d MA for near-term uptrend
             if current_price < ma50 * 0.97:
                 continue
 
-            # 60-day realized volatility (annualized %)
-            rets = _np_fund.diff(closes[-62:]) / closes[-62:-1]
-            vol_60d = float(_np_fund.std(rets[_np_fund.isfinite(rets)])) * _fm.sqrt(252) * 100 if len(rets) > 1 else 30.0
+            rets = _np_stb.diff(closes[-62:]) / closes[-62:-1]
+            valid_rets = rets[_np_stb.isfinite(rets)]
+            vol_60d = float(_np_stb.std(valid_rets)) * _fm_stb.sqrt(252) * 100 if len(valid_rets) > 1 else 30.0
 
-            # --- SCORING (0-100) ---
-            # 1. Momentum (50%): +50%=50pts, +20%=35pts, 0%=25pts, -5%=22pts
+            # Scoring
             mom_score = max(15.0, min(50.0, 25.0 + mom_12m * 0.5))
-
-            # 2. Trend quality (30%): MA alignment + price vs MAs
             trend_score = 10.0
             if n >= 200:
-                if ma50 > ma200:
-                    trend_score += 10.0  # Golden cross
-                if current_price > ma200:
-                    trend_score += 5.0
-                if current_price > ma50 * 1.03:
-                    trend_score += 5.0
+                if ma50 > ma200: trend_score += 10.0
+                if current_price > ma200: trend_score += 5.0
+                if current_price > ma50 * 1.03: trend_score += 5.0
             else:
-                if current_price > ma50 * 1.02:
-                    trend_score += 10.0
+                if current_price > ma50 * 1.02: trend_score += 10.0
             trend_score = min(30.0, trend_score)
-
-            # 3. Stability / low-vol (20%): 15% ann vol=20pts, 30%=15pts, 50%=8pts
             stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
-
-            total_score = mom_score + trend_score + stab_score  # 0-100
+            total_score = mom_score + trend_score + stab_score
 
             confidence = round(55.0 + (total_score / 100.0) * 33.0)
-
             sector = SECTOR_MAP.get(sym, "Unknown") if isinstance(SECTOR_MAP, dict) else "Unknown"
 
             reasons = []
@@ -5883,13 +5890,13 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             elif mom_12m > 0:
                 reasons.append(f"Positive 12m trend (+{mom_12m:.1f}%)")
             if n >= 200 and ma50 > ma200:
-                reasons.append("50d MA above 200d MA (golden cross — bullish structure)")
+                reasons.append("50d MA above 200d MA — golden cross")
             if current_price > ma200 * 1.05:
-                reasons.append(f"Price {((current_price/ma200)-1)*100:.0f}% above 200d MA — strong base")
+                reasons.append(f"Price {((current_price/ma200)-1)*100:.0f}% above 200d MA")
             if vol_60d < 20:
                 reasons.append(f"Low volatility ({vol_60d:.0f}% ann) — stable multi-week hold")
             if not reasons:
-                reasons.append("Passes uptrend + trend-quality screen")
+                reasons.append("Passes large-cap uptrend + quality screen")
 
             candidates.append({
                 "symbol": sym,
@@ -5936,8 +5943,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
     _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
     logger.warning(
-        f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} "
-        f"candidates ({len(_PRICE_DATA_LASTGOOD)} stocks in lastgood cache)"
+        f"FUNDAMENTAL PICKS: {len(top_picks)} picks from {len(candidates)} candidates "
+        f"({len(price_data)} stocks with data)"
     )
     return result
 

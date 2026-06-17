@@ -5400,7 +5400,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v122-stb-40-picks-sector-cap-5-momentum-filter-relaxed",
+        "commit_marker": "feat-v123-stb-fixed-100-large-cap-universe-10s-scan",
         "date": "2026-06-17",
         "fixes_in_build": [
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",
