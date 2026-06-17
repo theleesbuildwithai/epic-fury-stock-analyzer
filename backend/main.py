@@ -5400,9 +5400,14 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v116-price-floor-guard-sjm-fix-fresh-start-v14",
+        "commit_marker": "feat-v117-stb-fundamental-scan-always-produces-picks",
         "date": "2026-06-17",
         "fixes_in_build": [
+            "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",
+            "v117_generate_fundamental_picks_spot_price_fallback_no_bulk_download_required",
+            "v117_momentum_calc_guarded_for_spot_price_only_stocks",
+            "v117_stb_endpoint_stuck_regen_flag_auto_reset_after_8min",
+            "v117_stb_endpoint_no_picks_shows_retrying_not_warming_up_forever",
             "v116_price_floor_guard_rejects_price_lt_10_sjm_incident",
             "v116_fresh_start_v14_reset_132k_after_sjm_corruption_loss",
             "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
@@ -7575,11 +7580,20 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         has_picks = bool(cache_entry and cache_entry.get("data") and
                          len(cache_entry["data"].get("long_picks") or []) > 0)
 
+        # Auto-reset stuck regen flag: if it's been >8 minutes, assume the thread died
+        _regen_start = globals().get("_fundamental_regen_start_ts", 0)
+        _regen_in_prog = globals().get("_fundamental_regen_in_progress", False)
+        if _regen_in_prog and (_t_stb.time() - _regen_start) > 480:
+            logger.warning("STB: fundamental regen stuck >8min — resetting flag")
+            globals()["_fundamental_regen_in_progress"] = False
+            _regen_in_prog = False
+
         if force_refresh or not has_picks or (cache_age is not None and cache_age > 21600):
             # Kick off background regen (6h TTL, so this rarely fires)
             import threading as _stb_thr
-            if not globals().get("_fundamental_regen_in_progress", False):
+            if not _regen_in_prog:
                 globals()["_fundamental_regen_in_progress"] = True
+                globals()["_fundamental_regen_start_ts"] = _t_stb.time()
                 def _bg_fund():
                     try:
                         generate_fundamental_picks(force=True)
@@ -7591,9 +7605,18 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                                 name="stb-fundamental-regen").start()
 
         if not has_picks:
+            # If there IS a cache entry but it just has 0 picks, the scan completed
+            # with no results (bad yfinance session). Show a better message and
+            # don't loop forever — the regen above will retry on the next request.
+            _scan_ran = cache_entry is not None
             return {
-                "ok": False, "reason": "warming_up",
-                "message": "Fundamental scan running — check back in ~2 minutes.",
+                "ok": False,
+                "reason": "warming_up" if not _scan_ran else "no_picks_yet",
+                "message": (
+                    "Fundamental scan running — check back in ~2 minutes."
+                    if not _scan_ran else
+                    "Fundamental scan complete but no qualifying picks found yet — retrying. Refresh in 60s."
+                ),
                 "long_picks": [], "short_picks": [],
             }
 

@@ -91,8 +91,9 @@ def _prefetch_fundamentals(symbols: list) -> dict:
         else:
             uncached.append(sym)
 
-    # Fetch uncached symbols in small batches (max 5 at a time to avoid rate limits)
-    for sym in uncached[:50]:  # Cap at 50 to avoid excessive API calls
+    # Fetch uncached symbols — cap at 150 to avoid excessive API calls.
+    # (was 50 — too low for 500+ universe, left most stocks without fundamental data)
+    for sym in uncached[:150]:  # Cap at 150
         try:
             _throttle()
             import threading as _pf_thr
@@ -123,6 +124,9 @@ def _prefetch_fundamentals(symbols: list) -> dict:
             earnings_yield = (1.0 / pe) * 100 if pe and pe > 0 else None  # higher = cheaper
             book_to_price = (1.0 / pb) * 100 if pb and pb > 0 else None  # higher = cheaper
 
+            # Also capture current price from ticker.info so generate_fundamental_picks
+            # can use it as a fallback when the bulk yfinance download fails.
+            _cp = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
             value_data = {
                 "pe": pe,
                 "fwd_pe": fwd_pe,
@@ -135,6 +139,7 @@ def _prefetch_fundamentals(symbols: list) -> dict:
                 "roe": roe,
                 "profit_margins": profit_margins,
                 "debt_equity": debt_equity,
+                "current_price": float(_cp) if _cp else None,
             }
             result[sym] = value_data
 
@@ -5770,9 +5775,12 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         return {"long_picks": [], "generated_at": datetime.now().isoformat(), "error": "universe_empty"}
 
     # Trigger fundamentals prefetch (uses existing 24h cache, nearly free after first scan)
-    fundamentals = _prefetch_fundamentals(symbols)
+    # Fetch up to 200 symbols to get good coverage (50 cap was too low for 500+ universe)
+    fundamentals = _prefetch_fundamentals(symbols[:200])
 
-    # Download 1-year price history for momentum calculation
+    # Download 1-year price history for momentum calculation.
+    # PRIMARY: bulk yfinance download (fast when it works).
+    # FALLBACK: use current_price from ticker.info (already fetched in _prefetch_fundamentals).
     import yfinance as _yf_fund
     price_data = {}
     try:
@@ -5799,11 +5807,12 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                             price_data[sym] = col.values
                     except Exception:
                         pass
-            else:
-                # Single ticker — shouldn't happen for batch
-                pass
     except Exception as _e:
         logger.debug(f"FUNDAMENTAL PICKS bulk price error: {_e}")
+
+    # Count how many stocks got price data; if very few, the bulk download failed
+    _price_coverage = len(price_data)
+    logger.warning(f"FUNDAMENTAL PICKS: price_data coverage={_price_coverage}/{len(symbols[:150])} stocks")
 
     # Score each stock
     candidates = []
@@ -5830,10 +5839,17 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             if rev_growth is not None and rev_growth < -10.0:
                 continue  # Revenue declining sharply
 
-            # Need at least some price history
-            if prices is None or len(prices) < 20:
-                continue
-            current_price = float(prices[-1])
+            # Get current price — prefer bulk-download history, fall back to ticker.info price.
+            # This ensures stocks aren't dropped just because yfinance bulk download timed out.
+            if prices is not None and len(prices) >= 20:
+                current_price = float(prices[-1])
+                mom_source = "history"
+            else:
+                _fb_price = fund.get("current_price")
+                if not _fb_price or _fb_price <= 0:
+                    continue  # No price at all — skip
+                current_price = float(_fb_price)
+                mom_source = "spot"  # No momentum calc without history
             if current_price < 5.0:
                 continue  # Penny stock guard
 
@@ -5881,15 +5897,18 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             val_score = min(20.0, val_score)
 
             # 4. Trend confirmation (20%) — 12-month price momentum
-            trend_score = 10.0  # Neutral
-            if len(prices) >= 252:
-                mom_12m = (float(prices[-21]) / float(prices[-252]) - 1) * 100
-            elif len(prices) >= 126:
-                mom_12m = (float(prices[-21]) / float(prices[0]) - 1) * 100
-            else:
-                mom_12m = (float(prices[-1]) / float(prices[0]) - 1) * 100
-            # Map momentum: +50%=20pts, +20%=14pts, 0%=10pts, -10%=6pts
-            trend_score = max(2.0, min(20.0, 10.0 + mom_12m * 0.2))
+            trend_score = 10.0  # Neutral default (used when no price history)
+            mom_12m = 0.0
+            if prices is not None and len(prices) >= 20:
+                if len(prices) >= 252:
+                    mom_12m = (float(prices[-21]) / float(prices[-252]) - 1) * 100
+                elif len(prices) >= 126:
+                    mom_12m = (float(prices[-21]) / float(prices[0]) - 1) * 100
+                else:
+                    mom_12m = (float(prices[-1]) / float(prices[0]) - 1) * 100
+                # Map momentum: +50%=20pts, +20%=14pts, 0%=10pts, -10%=6pts
+                trend_score = max(2.0, min(20.0, 10.0 + mom_12m * 0.2))
+            # If no price history (spot price fallback), keep neutral 10pt trend score
 
             total_score = growth_score + eff_score + val_score + trend_score  # 0-100
 
