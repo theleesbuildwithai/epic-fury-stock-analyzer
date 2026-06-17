@@ -5400,7 +5400,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v120-stb-lastgood-cache-quant-more-stocks",
+        "commit_marker": "feat-v121-stb-triggers-quant-scan-if-lastgood-empty",
         "date": "2026-06-17",
         "fixes_in_build": [
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",

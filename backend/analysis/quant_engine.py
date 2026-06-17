@@ -5770,15 +5770,25 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
     # _PRICE_DATA_LASTGOOD: {ticker: {"df": DataFrame, "ts": datetime}}
     if not _PRICE_DATA_LASTGOOD:
-        logger.warning("FUNDAMENTAL PICKS: _PRICE_DATA_LASTGOOD empty — quant engine hasn't scanned yet")
-        result = {
-            "long_picks": [], "short_picks": [],
-            "generated_at": datetime.now().isoformat(),
-            "universe_scanned": 0,
-            "error": "price_cache_empty_wait_for_quant_scan",
-        }
-        _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
-        return result
+        logger.warning("FUNDAMENTAL PICKS: _PRICE_DATA_LASTGOOD empty — triggering quant scan to populate it")
+        try:
+            # Run a full quant scan (force=True bypasses S3 cache and actually fetches data).
+            # This populates _PRICE_DATA_LASTGOOD so we have stocks to score.
+            # Runs in THIS thread (background from STB endpoint), so it blocks here ~5-10 min.
+            generate_quant_picks(force=True)
+        except Exception as _qe:
+            logger.warning(f"FUNDAMENTAL PICKS: quant scan failed: {_qe}")
+        if not _PRICE_DATA_LASTGOOD:
+            logger.warning("FUNDAMENTAL PICKS: quant scan completed but _PRICE_DATA_LASTGOOD still empty")
+            result = {
+                "long_picks": [], "short_picks": [],
+                "generated_at": datetime.now().isoformat(),
+                "universe_scanned": 0,
+                "error": "price_cache_empty_after_scan",
+            }
+            _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
+            return result
+        logger.warning(f"FUNDAMENTAL PICKS: quant scan done — {len(_PRICE_DATA_LASTGOOD)} stocks in lastgood cache")
 
     import math as _fm
     import numpy as _np_fund
