@@ -74,9 +74,11 @@ _BETA_CACHE_TTL = 86400  # 24 hours
 
 def _prefetch_fundamentals(symbols: list) -> dict:
     """
-    Pre-fetch P/E, P/B, forward P/E for all symbols in universe.
+    Pre-fetch P/E, P/B, forward P/E, growth, ROE, PEG for all symbols.
     Uses 24-hour cache to minimize API calls.
-    Returns dict of {symbol: {pe, pb, fwd_pe, earnings_yield, book_to_price}}.
+    Returns dict of {symbol: {pe, pb, fwd_pe, earnings_yield, book_to_price,
+                               revenue_growth, earnings_growth, roe, profit_margins,
+                               debt_equity, peg_ratio}}.
     Only fetches uncached symbols — typically 0 API calls after first run.
     """
     now = time.time()
@@ -103,6 +105,20 @@ def _prefetch_fundamentals(symbols: list) -> dict:
             pe = info.get("trailingPE")
             fwd_pe = info.get("forwardPE")
             pb = info.get("priceToBook")
+            peg = info.get("pegRatio")
+
+            # Growth metrics (yfinance returns as decimals, e.g. 0.22 = 22%)
+            rev_growth_raw = info.get("revenueGrowth")
+            earn_growth_raw = info.get("earningsGrowth")
+            roe_raw = info.get("returnOnEquity")
+            profit_margin_raw = info.get("profitMargins")
+            debt_equity_raw = info.get("debtToEquity")
+
+            revenue_growth = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
+            earnings_growth = round(earn_growth_raw * 100, 1) if earn_growth_raw is not None else None
+            roe = round(roe_raw * 100, 1) if roe_raw is not None else None
+            profit_margins = round(profit_margin_raw * 100, 1) if profit_margin_raw is not None else None
+            debt_equity = round(debt_equity_raw, 2) if debt_equity_raw is not None else None
 
             earnings_yield = (1.0 / pe) * 100 if pe and pe > 0 else None  # higher = cheaper
             book_to_price = (1.0 / pb) * 100 if pb and pb > 0 else None  # higher = cheaper
@@ -111,8 +127,14 @@ def _prefetch_fundamentals(symbols: list) -> dict:
                 "pe": pe,
                 "fwd_pe": fwd_pe,
                 "pb": pb,
+                "peg_ratio": peg,
                 "earnings_yield": earnings_yield,
                 "book_to_price": book_to_price,
+                "revenue_growth": revenue_growth,
+                "earnings_growth": earnings_growth,
+                "roe": roe,
+                "profit_margins": profit_margins,
+                "debt_equity": debt_equity,
             }
             result[sym] = value_data
 
@@ -5684,3 +5706,265 @@ def get_signal_weights_safe() -> dict:
             "momentum": 0.25, "value": 0.20, "quality": 0.15,
             "low_vol": 0.15, "rsi2": 0.15, "volume": 0.10
         }
+
+
+# ============================================================
+#  FUNDAMENTAL LONG-TERM PICKS  (STB page — separate from paper trading)
+#
+#  Scores stocks on sustainable fundamental quality:
+#    - Revenue & earnings growth (compounders)
+#    - Return on equity (capital efficiency)
+#    - Valuation relative to growth (PEG)
+#    - 12-month price momentum (trend confirmation)
+#    - Profit margins + low debt (financial durability)
+#
+#  Hold horizon: 4-12 weeks.  No shorts.
+#  Cache TTL: 6 hours (fundamentals don't change daily).
+#  Paper trading is NOT affected by this function.
+# ============================================================
+
+_FUNDAMENTAL_PICKS_CACHE_TTL = 6 * 3600  # 6 hours
+
+
+def generate_fundamental_picks(force: bool = False) -> dict:
+    """
+    Generate long-term fundamentals-driven picks for the STB page.
+    Completely separate from generate_quant_picks() — paper trading
+    is NOT touched.
+
+    Scoring formula (0-100 fundamental score):
+      35%  Growth quality  — revenue growth + earnings growth
+      25%  Capital efficiency — ROE + profit margins
+      20%  Valuation — PEG ratio + forward PE discount
+      20%  Trend confirmation — 12-month price momentum
+
+    Filters:
+      - PE < 60  (not wildly overvalued)
+      - ROE > 8%  (company earns decent return on capital)
+      - Debt/equity < 3.0  (manageable leverage)
+      - Revenue growth > -5%  (not in freefall)
+      - Price > $10  (avoid penny stocks)
+      - Market cap implied by price (penny stock guard)
+
+    Returns: {long_picks: [...], generated_at: str, ...}
+    """
+    import math as _fm
+
+    # Check cache first (6-hour TTL)
+    now_ts = time.time()
+    cache_entry = _quant_cache.get("fundamental_picks")
+    if not force and cache_entry and (now_ts - cache_entry.get("time", 0)) < _FUNDAMENTAL_PICKS_CACHE_TTL:
+        return cache_entry["data"]
+
+    logger.warning("FUNDAMENTAL PICKS: Starting scan (STB long-term)")
+
+    try:
+        from analysis.quant_engine import QUANT_UNIVERSE, SECTOR_MAP
+    except ImportError:
+        QUANT_UNIVERSE = []
+        SECTOR_MAP = {}
+
+    symbols = list(QUANT_UNIVERSE) if QUANT_UNIVERSE else []
+    if not symbols:
+        logger.warning("FUNDAMENTAL PICKS: QUANT_UNIVERSE empty, aborting")
+        return {"long_picks": [], "generated_at": datetime.now().isoformat(), "error": "universe_empty"}
+
+    # Trigger fundamentals prefetch (uses existing 24h cache, nearly free after first scan)
+    fundamentals = _prefetch_fundamentals(symbols)
+
+    # Download 1-year price history for momentum calculation
+    import yfinance as _yf_fund
+    price_data = {}
+    try:
+        import threading as _fund_thr
+        _dl_result = [None]
+        def _dl_prices(r=_dl_result):
+            try:
+                df = _yf_fund.download(
+                    symbols[:150], period="1y", interval="1d",
+                    auto_adjust=True, progress=False, threads=True, timeout=30
+                )
+                r[0] = df
+            except Exception as _e:
+                logger.debug(f"FUNDAMENTAL PICKS price download failed: {_e}")
+        _t = _fund_thr.Thread(target=_dl_prices, daemon=True)
+        _t.start(); _t.join(timeout=45)
+        df = _dl_result[0]
+        if df is not None and not df.empty:
+            if hasattr(df["Close"], "columns"):
+                for sym in symbols:
+                    try:
+                        col = df["Close"][sym].dropna()
+                        if len(col) >= 20:
+                            price_data[sym] = col.values
+                    except Exception:
+                        pass
+            else:
+                # Single ticker — shouldn't happen for batch
+                pass
+    except Exception as _e:
+        logger.debug(f"FUNDAMENTAL PICKS bulk price error: {_e}")
+
+    # Score each stock
+    candidates = []
+    for sym in symbols:
+        try:
+            fund = fundamentals.get(sym, {})
+
+            # --- HARD FILTERS ---
+            pe = fund.get("pe")
+            roe = fund.get("roe")  # already as %, e.g. 25.0
+            debt_eq = fund.get("debt_equity")
+            rev_growth = fund.get("revenue_growth")  # %, e.g. 15.0
+            prices = price_data.get(sym)
+
+            # Skip: bad valuation, bad capital efficiency, or bad leverage
+            if pe is not None and pe > 0 and pe > 60:
+                continue
+            if pe is not None and pe < 0:
+                continue  # Negative earnings
+            if roe is not None and roe < 8.0:
+                continue  # Poor capital efficiency
+            if debt_eq is not None and debt_eq > 300.0:
+                continue  # Debt/equity is in % on yfinance (300 = 3.0x)
+            if rev_growth is not None and rev_growth < -10.0:
+                continue  # Revenue declining sharply
+
+            # Need at least some price history
+            if prices is None or len(prices) < 20:
+                continue
+            current_price = float(prices[-1])
+            if current_price < 5.0:
+                continue  # Penny stock guard
+
+            # --- SCORING (0 to 100) ---
+
+            # 1. Growth quality (35%)
+            earn_growth = fund.get("earnings_growth")  # %, e.g. 30.0
+            growth_score = 0.0
+            if rev_growth is not None:
+                # 20% revenue growth = excellent, cap at 50%
+                growth_score += min(50.0, max(-10.0, rev_growth)) * 0.4
+            if earn_growth is not None:
+                # 30% earnings growth = excellent, cap at 80%
+                growth_score += min(80.0, max(-20.0, earn_growth)) * 0.3
+            growth_score = min(35.0, growth_score)
+
+            # 2. Capital efficiency (25%)
+            eff_score = 0.0
+            if roe is not None:
+                eff_score += min(15.0, max(0.0, (roe - 8.0) / 2.0))  # ROE 8→38% maps to 0→15
+            profit_margins = fund.get("profit_margins")  # %, e.g. 15.0
+            if profit_margins is not None and profit_margins > 0:
+                eff_score += min(10.0, profit_margins * 0.3)  # 33% margin = 10 pts
+            eff_score = min(25.0, eff_score)
+
+            # 3. Valuation quality (20%)
+            val_score = 10.0  # Neutral baseline — we don't penalize growth companies
+            peg = fund.get("peg_ratio")
+            fwd_pe = fund.get("fwd_pe")
+            if peg is not None and peg > 0:
+                if peg < 1.0:
+                    val_score = 20.0  # PEG < 1 = growth at discount
+                elif peg < 1.5:
+                    val_score = 16.0  # Reasonable
+                elif peg < 2.0:
+                    val_score = 12.0
+                else:
+                    val_score = 6.0   # Expensive relative to growth
+            elif pe is not None and fwd_pe is not None and pe > 0 and fwd_pe > 0:
+                # Forward earnings growth implied by PE discount
+                if fwd_pe < pe * 0.85:
+                    val_score = 18.0  # Earnings expected to jump
+                elif fwd_pe < pe:
+                    val_score = 14.0
+            val_score = min(20.0, val_score)
+
+            # 4. Trend confirmation (20%) — 12-month price momentum
+            trend_score = 10.0  # Neutral
+            if len(prices) >= 252:
+                mom_12m = (float(prices[-21]) / float(prices[-252]) - 1) * 100
+            elif len(prices) >= 126:
+                mom_12m = (float(prices[-21]) / float(prices[0]) - 1) * 100
+            else:
+                mom_12m = (float(prices[-1]) / float(prices[0]) - 1) * 100
+            # Map momentum: +50%=20pts, +20%=14pts, 0%=10pts, -10%=6pts
+            trend_score = max(2.0, min(20.0, 10.0 + mom_12m * 0.2))
+
+            total_score = growth_score + eff_score + val_score + trend_score  # 0-100
+
+            # Confidence: convert score to probability-like number (55-90%)
+            confidence = round(55.0 + (total_score / 100.0) * 35.0)
+
+            # Build reasons list
+            reasons = []
+            if rev_growth is not None and rev_growth > 5:
+                reasons.append(f"Revenue +{rev_growth:.0f}% YoY")
+            if earn_growth is not None and earn_growth > 10:
+                reasons.append(f"Earnings +{earn_growth:.0f}% YoY")
+            if roe is not None and roe > 15:
+                reasons.append(f"ROE {roe:.0f}% (exceptional efficiency)")
+            if peg is not None and peg < 1.5:
+                reasons.append(f"PEG {peg:.1f}x — growth at reasonable price")
+            if profit_margins is not None and profit_margins > 15:
+                reasons.append(f"Profit margin {profit_margins:.0f}%")
+            if mom_12m > 20:
+                reasons.append(f"12m momentum +{mom_12m:.0f}% (trend confirmed)")
+            if pe is not None and pe < 20:
+                reasons.append(f"PE {pe:.1f}x — value priced")
+            if not reasons:
+                reasons.append("Passes fundamental quality screen")
+
+            sector = SECTOR_MAP.get(sym, "Unknown") if isinstance(SECTOR_MAP, dict) else "Unknown"
+
+            candidates.append({
+                "symbol": sym,
+                "ticker": sym,
+                "price": round(current_price, 2),
+                "sector": sector,
+                "direction": "LONG",
+                "fundamental_score": round(total_score, 1),
+                "confidence": min(92, confidence),
+                "pe": pe,
+                "fwd_pe": fwd_pe,
+                "peg_ratio": peg,
+                "roe_pct": roe,
+                "revenue_growth_pct": rev_growth,
+                "earnings_growth_pct": earn_growth,
+                "profit_margin_pct": profit_margins,
+                "debt_equity": debt_eq,
+                "momentum_12m_pct": round(mom_12m, 1),
+                "reasons": reasons[:5],
+                "hold_recommendation": "6-12 weeks",
+                "hold_class": "position",
+            })
+
+        except Exception as _se:
+            logger.debug(f"FUNDAMENTAL PICKS score error {sym}: {_se}")
+            continue
+
+    # Sort by fundamental score descending
+    candidates.sort(key=lambda x: -x["fundamental_score"])
+
+    # Cap to 4 per sector for diversification
+    sector_counts = {}
+    top_picks = []
+    for c in candidates:
+        sec = c.get("sector", "Unknown")
+        if sector_counts.get(sec, 0) < 4:
+            top_picks.append(c)
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        if len(top_picks) >= 25:
+            break
+
+    result = {
+        "long_picks": top_picks,
+        "short_picks": [],  # Long-only strategy for fundamentals
+        "generated_at": datetime.now().isoformat(),
+        "universe_scanned": len(candidates),
+        "regime": {"regime": "BULL"},  # Fundamental picks are regime-agnostic
+    }
+
+    _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
+    logger.warning(f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} candidates")
+    return result

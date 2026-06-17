@@ -5354,7 +5354,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v114-higher-exposure-bull-regime-15pct-positions",
+        "commit_marker": "feat-v115-stb-fundamental-long-term-picks-6-12-week",
         "date": "2026-06-16",
         "fixes_in_build": [
             "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
@@ -7503,279 +7503,130 @@ def api_finnhub_status(request: Request):
 
 @app.get("/api/symbols-to-buy")
 def api_symbols_to_buy(request: Request, force_refresh: bool = False):
-    """SYMBOLS TO BUY — manual swing-trading reference page.
+    """SYMBOLS TO BUY — fundamental long-term picks (4-12 week holds).
 
-    Returns the top 25 LONG and top 25 SHORT candidates intended for
-    multi-day to multi-month holds (NO day trading; minimum recommended
-    hold 3-5 days).  This is the page the user trades from manually
-    while the IBKR API connection is unavailable.
+    Powered by generate_fundamental_picks() — a SEPARATE engine from the
+    paper trading system. Picks are scored on:
+      - Revenue + earnings growth (compounders)
+      - Return on equity (capital efficiency)
+      - PEG ratio (growth at reasonable price)
+      - 12-month momentum (trend confirmation)
 
-    GUARANTEES:
-      - Always returns at least SOME picks.  If the live picks engine
-        only produces 5 longs today, this endpoint will fill the rest
-        from the next-best candidates by relaxing the cap to 25.
-      - Direction-safety verified: long score>=0, short score<=0.
-      - Each pick includes entry hint (current price), stop, target,
-        confidence, sector, key reasons, and recommended hold band.
-      - Stops/targets sized for swing horizon (wider than intraday).
+    Paper trading is NOT affected by this endpoint.
+    Cache TTL: 6 hours (fundamentals don't change daily).
     """
     check_rate_limit(request.client.host)
     try:
-        from analysis.quant_engine import _quant_cache, generate_quant_picks
+        from analysis.quant_engine import _quant_cache, generate_fundamental_picks
         import time as _t_stb
-
-        # Try to use the existing picks cache (avoids hammering yfinance).
-        # Only regen if cache is stale.
-        cache_entry = _quant_cache.get("quant_picks")
-        cache_age = (_t_stb.time() - cache_entry["time"]) if cache_entry else None
-        _stb_data = cache_entry["data"] if cache_entry else None
-        _stb_has_picks = bool(_stb_data and (
-            len(_stb_data.get("long_picks") or []) + len(_stb_data.get("short_picks") or []) > 0
-        ))
-        # 2026-06-11: also regen if picks are empty (failed regen blocks retry for 15 min)
-        if force_refresh or cache_age is None or cache_age > 900 or not _stb_has_picks:
-            try:
-                import threading
-                if not globals().get("_picks_regen_in_progress", False):
-                    globals()["_picks_regen_in_progress"] = True
-                    globals()["_picks_regen_started_at"] = _t_stb.time()
-                    def _bg():
-                        try:
-                            generate_quant_picks()
-                        except Exception as _e:
-                            logger.warning(f"symbols-to-buy bg regen failed: {_e}")
-                        finally:
-                            globals()["_picks_regen_in_progress"] = False
-                            globals()["_picks_regen_started_at"] = 0
-                    threading.Thread(target=_bg, daemon=True,
-                                     name="symbols-to-buy-regen").start()
-            except Exception:
-                pass
-
-        if not cache_entry or not cache_entry.get("data") or not _stb_has_picks:
-            # Try DB backup before returning empty — picks from last successful scan
-            # survive container restarts and deploys
-            _stb_db_data = None
-            try:
-                from predictions.models import get_trading_state as _stb_gts
-                import json as _stb_json
-                _stb_raw = _stb_gts("quant_picks_db_backup", "")
-                if _stb_raw:
-                    _stb_db = _stb_json.loads(_stb_raw)
-                    _stb_db_longs = len(_stb_db.get("long_picks") or [])
-                    _stb_db_shorts = len(_stb_db.get("short_picks") or [])
-                    if _stb_db_longs + _stb_db_shorts > 0:
-                        _stb_db_data = _stb_db
-                        # Seed in-memory cache so quant-picks endpoint also serves them
-                        from analysis.quant_engine import _quant_cache as _stb_qc
-                        import time as _stb_t
-                        _stb_qc["quant_picks"] = {"data": _stb_db, "time": _stb_t.time() - 899}
-                        logger.warning(
-                            f"STB: serving DB backup picks "
-                            f"({_stb_db_longs}L {_stb_db_shorts}S) while scan runs"
-                        )
-            except Exception as _stb_dbe:
-                logger.debug(f"STB DB backup load failed: {_stb_dbe}")
-
-            if not _stb_db_data:
-                return {
-                    "ok": False, "reason": "no_picks_yet",
-                    "message": ("Picks cache empty — scan running now. "
-                                "Try again in 5 minutes."),
-                    "long_picks": [], "short_picks": [],
-                }
-            data = _stb_db_data
-        else:
-            data = cache_entry["data"]
-
-        # Source of picks: the same cached output from the picks engine
-        # that /api/quant-picks serves.  The engine emits the top 30 longs
-        # and top 20 shorts (after its own engine-level sector cap), so
-        # symbols-to-buy can fill up to 30/20 — fewer if today's regime
-        # only qualified a small number.
-        all_longs = list(data.get("long_picks", []) or [])
-        all_shorts = list(data.get("short_picks", []) or [])
-
-        # Direction safety: trust the engine's direction assignment (already
-        # enforced/normalized by /api/quant-picks). Only require a valid
-        # price > 0 for stop/target math. Score-sign check removed —
-        # mean-reversion picks legitimately have negative scores in long_picks
-        # (they're contrarian setups, not momentum). 2026-06-11.
-        def _safe_pick(p, want_long: bool) -> bool:
-            try:
-                d = str(p.get("direction", "")).upper()
-                px = float(p.get("price", 0) or 0)
-            except (TypeError, ValueError):
-                return False
-            if px <= 0:
-                return False
-            return d == "LONG" if want_long else d == "SHORT"
-
-        all_longs  = [p for p in all_longs  if _safe_pick(p, True)]
-        all_shorts = [p for p in all_shorts if _safe_pick(p, False)]
-
-        # RANK BEST-TO-WORST by CONFIDENCE first (user request 2026-05-29).
-        # Confidence is now calibrated through PAV isotonic regression, so
-        # the displayed value is a TRUE probability of win.  Sorting by it
-        # surfaces the highest-conviction picks first.  Ties broken by
-        # composite_score (LONG: highest first; SHORT: most negative first).
-        def _quality(p):
-            try:
-                c = float(p.get("confidence", 0) or 0)
-                s = abs(float(p.get("composite_score", 0) or 0))
-            except (TypeError, ValueError):
-                return 0.0
-            return c * s   # exposed in payload only — no longer the primary sort key
-
-        all_longs.sort(key=lambda p: (
-            -float(p.get("confidence", 0) or 0),
-            -float(p.get("composite_score", 0) or 0)
-        ))
-        all_shorts.sort(key=lambda p: (
-            -float(p.get("confidence", 0) or 0),
-            float(p.get("composite_score", 0) or 0)
-        ))
-
-        # 2026-06-05: ALIGNED with /api/quant-picks filter parameters so
-        # the two pages show the same/similar picks. Previously Symbols-
-        # to-Buy used max_per_sec=5 + want=25 while Quant HF used
-        # max_per_sec=4 + hard_cap=30/20, causing different pick lists
-        # to be shown to the user. Now both use sec=4, longs=30, shorts=20.
-        def _cap_by_sector(picks, max_per_sec=4, want=30):
-            kept, counts, overflow = [], {}, []
-            for p in picks:
-                sec = (p.get("sector") or "Unknown").strip() or "Unknown"
-                if counts.get(sec, 0) < max_per_sec:
-                    kept.append(p); counts[sec] = counts.get(sec, 0) + 1
-                else:
-                    overflow.append(p)
-                if len(kept) >= want:
-                    break
-            # If diverse picks ran out before we hit target, top up from overflow
-            if len(kept) < want and overflow:
-                kept.extend(overflow[: want - len(kept)])
-            return kept
-
-        top_longs  = _cap_by_sector(all_longs,  max_per_sec=5, want=40)
-        top_shorts = _cap_by_sector(all_shorts, max_per_sec=5, want=25)
-
-        # SWING-HOLD STOPS/TARGETS: wider than the intraday execution
-        # path because manual holds are days-to-months.  Stop = 5-12%
-        # (vol-adjusted), target = 10-25%.  Always at least 2x reward:risk.
         import math as _math_stb
-        def _swing_levels(p):
+
+        # Try cached fundamental picks first (6h TTL)
+        cache_entry = _quant_cache.get("fundamental_picks")
+        cache_age = (_t_stb.time() - cache_entry.get("time", 0)) if cache_entry else None
+        has_picks = bool(cache_entry and cache_entry.get("data") and
+                         len(cache_entry["data"].get("long_picks") or []) > 0)
+
+        if force_refresh or not has_picks or (cache_age is not None and cache_age > 21600):
+            # Kick off background regen (6h TTL, so this rarely fires)
+            import threading as _stb_thr
+            if not globals().get("_fundamental_regen_in_progress", False):
+                globals()["_fundamental_regen_in_progress"] = True
+                def _bg_fund():
+                    try:
+                        generate_fundamental_picks(force=True)
+                    except Exception as _e:
+                        logger.warning(f"STB fundamental regen failed: {_e}")
+                    finally:
+                        globals()["_fundamental_regen_in_progress"] = False
+                _stb_thr.Thread(target=_bg_fund, daemon=True,
+                                name="stb-fundamental-regen").start()
+
+        if not has_picks:
+            return {
+                "ok": False, "reason": "warming_up",
+                "message": "Fundamental scan running — check back in ~2 minutes.",
+                "long_picks": [], "short_picks": [],
+            }
+
+        data = cache_entry["data"]
+        raw_longs = list(data.get("long_picks") or [])
+
+        # Format each pick with long-term stops/targets
+        # Stop: 8-12% (room to breathe over weeks), Target: 20-40% (let winners run)
+        def _lt_levels(p):
             try:
                 px = float(p.get("price", 0) or 0)
-                vol = float(p.get("volatility_60d", 25.0) or 25.0)
                 if px <= 0:
                     return None, None
-                # daily $ vol
-                d_vol = vol / _math_stb.sqrt(252) * px / 100.0
-                # Stop ~3 ATRs but clamped 5-12% of price
-                stop_dist = max(px * 0.05, min(px * 0.12, d_vol * 3.0))
-                # Target ~6 ATRs but clamped 10-25% of price
-                tgt_dist  = max(px * 0.10, min(px * 0.25, d_vol * 6.0))
-                # Ensure 2:1 reward/risk minimum
-                if tgt_dist < stop_dist * 2:
-                    tgt_dist = stop_dist * 2
+                # Estimate daily vol from momentum: higher momentum = higher vol
+                mom = abs(float(p.get("momentum_12m_pct", 25.0) or 25.0))
+                annual_vol_est = max(20.0, min(60.0, mom * 0.6 + 15.0))  # rough estimate
+                d_vol = annual_vol_est / _math_stb.sqrt(252) * px / 100.0
+                # Stop: 4-week ATR equivalent, clamped 8-12%
+                stop_dist = max(px * 0.08, min(px * 0.12, d_vol * 15.0))
+                # Target: 20-40% for multi-week fundamental holds (3:1 minimum R:R)
+                tgt_dist = max(stop_dist * 3.0, min(px * 0.40, stop_dist * 4.0))
                 return round(stop_dist, 2), round(tgt_dist, 2)
             except Exception:
                 return None, None
 
-        # 2026-06-07 Fix 5: tag each pick with live_tradeable flag based
-        # on the actual live-safety gates. UI can filter to show only
-        # tradeable picks, or mark research-only ones distinctly.
-        try:
-            from predictions.paper_trader import (
-                _get_min_confidence as _gate_conf,
-                _get_min_composite_score as _gate_score,
-            )
-            _live_min_conf = _gate_conf()
-            _live_min_score = _gate_score()
-        except Exception:
-            _live_min_conf = 55
-            _live_min_score = 1.5
-
-        def _format(p, direction: str, rank: int):
+        def _format_fund(p, rank: int) -> dict:
             px = float(p.get("price", 0) or 0)
-            stop_dist, tgt_dist = _swing_levels(p)
-            # Use `is not None` so a freak 0.0 distance still computes
-            # rather than silently returning None for stop/target.
-            has_stop = stop_dist is not None and px > 0
-            has_tgt  = tgt_dist  is not None and px > 0
-            if direction == "long":
-                stop = round(px - stop_dist, 2) if has_stop else None
-                target = round(px + tgt_dist, 2) if has_tgt else None
-            else:
-                stop = round(px + stop_dist, 2) if has_stop else None
-                target = round(px - tgt_dist, 2) if has_tgt else None
-            # Live-tradeable check: confidence + score gates from
-            # paper_trader (same gates the execution loop applies).
-            try:
-                _conf = float(p.get("confidence", 0) or 0)
-                _score_abs = abs(float(p.get("composite_score", 0) or 0))
-                _live_ok = (_conf >= _live_min_conf and _score_abs >= _live_min_score)
-            except Exception:
-                _live_ok = False
+            stop_dist, tgt_dist = _lt_levels(p)
+            has_s = stop_dist is not None and px > 0
+            has_t = tgt_dist is not None and px > 0
+            stop = round(px - stop_dist, 2) if has_s else None
+            target = round(px + tgt_dist, 2) if has_t else None
+            rr = round(tgt_dist / stop_dist, 2) if (has_s and has_t and stop_dist > 0) else None
             return {
                 "rank": rank,
                 "ticker": p.get("ticker") or p.get("symbol"),
                 "sector": p.get("sector") or "Unknown",
-                "direction": direction.upper(),
+                "direction": "LONG",
                 "entry_price": px,
                 "stop_loss": stop,
                 "target_price": target,
-                "stop_distance_pct": round((stop_dist / px) * 100, 2) if has_stop else None,
-                "target_distance_pct": round((tgt_dist / px) * 100, 2) if has_tgt else None,
-                "reward_risk_ratio": (round(tgt_dist / stop_dist, 2)
-                                       if (has_stop and has_tgt and stop_dist > 0) else None),
+                "stop_distance_pct": round((stop_dist / px) * 100, 1) if has_s else None,
+                "target_distance_pct": round((tgt_dist / px) * 100, 1) if has_t else None,
+                "reward_risk_ratio": rr,
                 "confidence": p.get("confidence"),
-                "composite_score": p.get("composite_score"),
-                "quality_rank_score": round(_quality(p), 2),
-                "rsi14": p.get("rsi14"),
-                "volatility_60d_pct": p.get("volatility_60d"),
-                "momentum_pct": p.get("momentum_pct"),
+                "fundamental_score": p.get("fundamental_score"),
+                "composite_score": p.get("fundamental_score"),  # alias for frontend compat
+                "pe": p.get("pe"),
+                "fwd_pe": p.get("fwd_pe"),
+                "peg_ratio": p.get("peg_ratio"),
+                "roe_pct": p.get("roe_pct"),
+                "revenue_growth_pct": p.get("revenue_growth_pct"),
+                "earnings_growth_pct": p.get("earnings_growth_pct"),
+                "profit_margin_pct": p.get("profit_margin_pct"),
+                "momentum_pct": p.get("momentum_12m_pct"),
+                "hold_class": "position",
                 "reasons": (p.get("reasons") or [])[:5],
-                "recommended_hold": "3-5 days minimum; up to 8-12 weeks if trend holds",
+                "recommended_hold": "6-12 weeks · fundamentals-driven",
                 "no_day_trading": True,
-                # F5 tag — distinguishes live-tradeable vs research-only
-                "live_tradeable": _live_ok,
-                "tier": "live" if _live_ok else "research",
+                "live_tradeable": True,
+                "tier": "fundamental",
             }
 
-        formatted_longs = [_format(p, "long", i + 1) for i, p in enumerate(top_longs)]
-        formatted_shorts = [_format(p, "short", i + 1) for i, p in enumerate(top_shorts)]
-        # 2026-06-10: removed ×1.35 confidence boost — show true model confidence only
-        live_longs = sum(1 for p in formatted_longs if p.get("live_tradeable"))
-        live_shorts = sum(1 for p in formatted_shorts if p.get("live_tradeable"))
+        formatted_longs = [_format_fund(p, i + 1) for i, p in enumerate(raw_longs[:25])]
+
         return {
             "ok": True,
             "generated_at": data.get("generated_at") or "unknown",
-            # Cap at 86400s: time=0 cold-start restore produces ~1.78B sec (nonsensical).
-            # None signals frontend to show "Refreshing…" instead of a huge number.
             "cache_age_seconds": (round(cache_age, 1) if (cache_age is not None and cache_age < 86400) else None),
-            "cache_is_restoring": (cache_entry is not None and cache_entry.get("time", 1) == 0),
-            "regime": (data.get("regime") or {}).get("regime", "unknown"),
-            "regime_confidence": (data.get("regime") or {}).get("confidence", 0),
+            "cache_is_restoring": not has_picks,
+            "regime": "FUNDAMENTAL",
+            "regime_confidence": 100,
             "long_picks": formatted_longs,
-            "short_picks": formatted_shorts,
-            "long_count": len(top_longs),
-            "short_count": len(top_shorts),
-            "live_tradeable_count": {
-                "longs": live_longs,
-                "shorts": live_shorts,
-                "total": live_longs + live_shorts,
-            },
-            "live_gates": {
-                "min_confidence": _live_min_conf,
-                "min_composite_score": _live_min_score,
-            },
-            "universe_size": data.get("universe_size", 0),
-            "stocks_with_data": data.get("stocks_with_data", 0),
+            "short_picks": [],  # Long-only fundamental strategy
+            "long_count": len(formatted_longs),
+            "short_count": 0,
+            "universe_scanned": data.get("universe_scanned", 0),
             "guidance": (
-                "Hold each position 3-5 days minimum (no day trading). "
-                "Best winners often run 4-8 weeks. Honor the stop. "
-                "Re-check this page weekly for new candidates."
+                "Fundamental quality picks — hold 6-12 weeks. "
+                "These companies have strong earnings growth, high ROE, and reasonable valuations. "
+                "Honor the 8-12% stop. Targets are 20-40% gains. Refreshes every 6 hours."
             ),
         }
     except Exception as e:

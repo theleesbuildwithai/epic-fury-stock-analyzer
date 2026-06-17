@@ -1,177 +1,194 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 
-// SYMBOLS TO BUY — manual swing-trading reference page.
-// Shows top 25 LONG + top 25 SHORT picks from /api/symbols-to-buy.
-// Clicking a row navigates to /symbol/:ticker for the why-to-buy detail.
-//
-// 2026-05-29 update:
-//   - Picks now ranked best→worst by CONFIDENCE (calibrated probability)
-//   - Added Cash Allocator: enter your account balance, see exactly how
-//     many shares + $ to deploy per pick under a fixed allocation policy
-//     (default 1.5% per long, 1.0% per short; capped at 10 longs / 5 shorts).
-//   - Input placeholder shows '0' and clears the moment you focus it.
+// SYMBOLS TO BUY — Fundamental long-term picks (6-12 week holds).
+// Powered by generate_fundamental_picks() — separate from the paper trading system.
+// Scores on: revenue/earnings growth, ROE, PEG ratio, 12-month momentum.
 
-function formatPct(v) {
+function fmt(v, suffix = '', dec = 1) {
   if (v == null || isNaN(v)) return '—'
   const n = Number(v)
-  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
+  return (n >= 0 ? '+' : '') + n.toFixed(dec) + suffix
 }
-function formatPrice(v) {
+function fmtPos(v, suffix = '', dec = 1) {
+  if (v == null || isNaN(v)) return '—'
+  return Number(v).toFixed(dec) + suffix
+}
+function fmtPrice(v) {
   if (v == null || isNaN(v)) return '—'
   return '$' + Number(v).toFixed(2)
 }
-function formatMoney(v) {
+function fmtMoney(v) {
   if (v == null || isNaN(v) || !isFinite(v)) return '—'
   return '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
-function confidenceColor(c) {
+function confColor(c) {
   if (c == null) return 'text-neutral-500'
-  if (c >= 70) return 'text-emerald-400'
-  if (c >= 55) return 'text-amber-300'
+  if (c >= 75) return 'text-emerald-400'
+  if (c >= 65) return 'text-amber-300'
+  return 'text-neutral-400'
+}
+function growthColor(v) {
+  if (v == null || isNaN(v)) return 'text-neutral-500'
+  if (v >= 20) return 'text-emerald-400'
+  if (v >= 5) return 'text-emerald-300/70'
+  if (v < 0) return 'text-rose-400'
+  return 'text-neutral-400'
+}
+function scoreColor(s) {
+  if (s == null) return 'text-neutral-500'
+  if (s >= 70) return 'text-emerald-400'
+  if (s >= 55) return 'text-amber-300'
   return 'text-neutral-400'
 }
 
-// Allocation policy (per-pick % of total balance, capped to top N per side)
-const LONG_PCT_PER_PICK = 0.015   // 1.5% per long
-const SHORT_PCT_PER_PICK = 0.010  // 1.0% per short (smaller — shorts asymmetric)
-const MAX_LONGS_TO_FUND = 10
-const MAX_SHORTS_TO_FUND = 5
+// Allocation: 5% per pick, top 10 longs
+const ALLOC_PCT = 0.05
+const MAX_FUNDED = 10
 
-function calcAlloc(cash, pick, side, rank) {
-  const isLong = side === 'long'
-  const maxRank = isLong ? MAX_LONGS_TO_FUND : MAX_SHORTS_TO_FUND
-  if (!cash || cash <= 0) return { dollars: null, shares: null, fund: false }
-  if ((pick.rank || rank) > maxRank) return { dollars: 0, shares: 0, fund: false }
-  const pct = isLong ? LONG_PCT_PER_PICK : SHORT_PCT_PER_PICK
-  const dollars = cash * pct
-  const price = pick.entry_price
+function calcAlloc(cash, price, rank) {
+  if (!cash || cash <= 0 || rank > MAX_FUNDED) return { dollars: 0, shares: 0, fund: false }
+  const dollars = cash * ALLOC_PCT
   if (!price || price <= 0) return { dollars: Math.round(dollars), shares: null, fund: true }
   const shares = Math.floor(dollars / price)
   return { dollars: Math.round(shares * price), shares, fund: shares > 0 }
 }
 
-function PickRow({ p, side, rank, cash }) {
-  const isLong = side === 'long'
-  const dirColor = isLong ? 'text-emerald-400' : 'text-rose-400'
-  const dirBg = isLong ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-rose-500/10 border-rose-500/30'
-  const alloc = calcAlloc(cash, p, side, rank)
+function PickRow({ p, rank, cash }) {
+  const alloc = calcAlloc(cash, p.entry_price, rank)
+  const rrColor = !p.reward_risk_ratio ? 'text-neutral-500'
+    : p.reward_risk_ratio >= 3 ? 'text-emerald-400'
+    : p.reward_risk_ratio >= 2 ? 'text-amber-300'
+    : 'text-rose-400'
+
   return (
     <Link
-      to={`/symbol/${p.ticker}?side=${side}`}
-      className="grid grid-cols-12 gap-2 px-4 py-3 border-b border-neutral-800/40 hover:bg-neutral-800/30 transition-colors items-center text-sm group"
+      to={`/symbol/${p.ticker}?side=long`}
+      className="grid grid-cols-12 gap-1 px-4 py-3 border-b border-neutral-800/40 hover:bg-neutral-800/30 transition-colors items-center text-sm group"
     >
+      {/* #  Ticker  Sector */}
       <div className="col-span-2 flex items-center gap-2">
-        <span className="text-neutral-600 text-xs font-mono w-5 text-right">#{p.rank || rank}</span>
+        <span className="text-neutral-600 text-xs font-mono w-5 text-right">#{rank}</span>
         <span className="font-bold text-white text-base group-hover:text-blue-300">{p.ticker}</span>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${dirBg} ${dirColor}`}>
-          {isLong ? 'LONG' : 'SHORT'}
-        </span>
       </div>
-      <div className="col-span-1 text-neutral-400 text-xs truncate">{p.sector || 'Unknown'}</div>
-      <div className="col-span-1 text-right font-mono text-neutral-200">{formatPrice(p.entry_price)}</div>
-      <div className={`col-span-1 text-right font-mono ${confidenceColor(p.confidence)}`}>
-        {p.confidence != null ? Math.round(p.confidence) + '%' : '—'}
+      <div className="col-span-1 text-neutral-400 text-xs truncate">{p.sector || '—'}</div>
+
+      {/* Entry */}
+      <div className="col-span-1 text-right font-mono text-neutral-200 text-xs">{fmtPrice(p.entry_price)}</div>
+
+      {/* Fund Score */}
+      <div className={`col-span-1 text-right font-mono text-xs font-bold ${scoreColor(p.fundamental_score)}`}>
+        {p.fundamental_score != null ? p.fundamental_score.toFixed(0) : '—'}
       </div>
-      <div className="col-span-1 text-right font-mono text-neutral-300">{p.composite_score?.toFixed(2) ?? '—'}</div>
-      <div className="col-span-1 text-right font-mono text-rose-300/80 text-xs">
-        {formatPrice(p.stop_loss)}
-        <div className="text-[10px] text-neutral-500">{formatPct(p.stop_distance_pct && -p.stop_distance_pct)}</div>
+
+      {/* Rev Growth */}
+      <div className={`col-span-1 text-right font-mono text-xs ${growthColor(p.revenue_growth_pct)}`}>
+        {fmt(p.revenue_growth_pct, '%', 0)}
       </div>
-      <div className="col-span-1 text-right font-mono text-emerald-300/80 text-xs">
-        {formatPrice(p.target_price)}
-        <div className="text-[10px] text-neutral-500">{formatPct(p.target_distance_pct)}</div>
+
+      {/* Earn Growth */}
+      <div className={`col-span-1 text-right font-mono text-xs ${growthColor(p.earnings_growth_pct)}`}>
+        {fmt(p.earnings_growth_pct, '%', 0)}
       </div>
-      <div className="col-span-1 text-right font-mono text-blue-300 text-xs">
-        {p.reward_risk_ratio != null ? p.reward_risk_ratio.toFixed(2) + 'x' : '—'}
+
+      {/* ROE */}
+      <div className={`col-span-1 text-right font-mono text-xs ${growthColor(p.roe_pct)}`}>
+        {fmtPos(p.roe_pct, '%', 0)}
       </div>
+
+      {/* PEG */}
+      <div className={`col-span-1 text-right font-mono text-xs ${
+        p.peg_ratio == null ? 'text-neutral-500'
+        : p.peg_ratio < 1 ? 'text-emerald-400'
+        : p.peg_ratio < 2 ? 'text-amber-300'
+        : 'text-rose-400'
+      }`}>
+        {fmtPos(p.peg_ratio, 'x', 1)}
+      </div>
+
+      {/* Stop / Target */}
       <div className="col-span-1 text-right font-mono text-xs">
+        <div className="text-rose-300/80">{fmtPrice(p.stop_loss)}</div>
+        <div className="text-emerald-300/80">{fmtPrice(p.target_price)}</div>
+      </div>
+
+      {/* R:R */}
+      <div className={`col-span-1 text-right font-mono text-xs ${rrColor}`}>
+        {p.reward_risk_ratio != null ? p.reward_risk_ratio.toFixed(1) + 'x' : '—'}
+      </div>
+
+      {/* Allocation */}
+      <div className="col-span-1 text-right text-xs">
         {!cash || cash <= 0 ? (
           <span className="text-neutral-600">—</span>
         ) : !alloc.fund ? (
-          <span className="text-neutral-600 text-[11px]">skip</span>
+          <span className="text-neutral-600 text-[10px]">skip</span>
         ) : (
           <div>
             <div className="text-amber-200 font-bold">{alloc.shares} sh</div>
-            <div className="text-[10px] text-neutral-500">{formatMoney(alloc.dollars)}</div>
+            <div className="text-[10px] text-neutral-500">{fmtMoney(alloc.dollars)}</div>
           </div>
         )}
-      </div>
-      <div className="col-span-1 text-right text-neutral-500 text-[11px] truncate">
-        {(p.reasons && p.reasons[0]) || '—'}
-      </div>
-      <div className={`col-span-1 text-right text-[10px] font-bold ${p.hold_class === 'position' ? 'text-blue-400' : 'text-neutral-500'}`}>
-        {p.hold_class === 'position' ? 'POSITION' : p.hold_class === 'intraday' ? 'INTRADAY' : 'SWING'}
       </div>
     </Link>
   )
 }
 
-function PickTable({ picks, side, title, cash }) {
+function PickTable({ picks, cash }) {
   if (!picks || !picks.length) {
     return (
       <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-8 text-center text-neutral-500">
-        No {side} picks available right now. Picks regenerate every ~30 min.
+        No picks available yet — fundamental scan warming up. Check back in 2 minutes.
       </div>
     )
   }
-  const isLong = side === 'long'
   return (
     <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
-      <div className={`px-4 py-3 border-b border-neutral-800/60 flex items-center justify-between ${isLong ? 'bg-emerald-950/20' : 'bg-rose-950/20'}`}>
+      <div className="px-4 py-3 border-b border-neutral-800/60 flex items-center justify-between bg-blue-950/20">
         <div>
-          <h2 className={`text-lg font-bold ${isLong ? 'text-emerald-300' : 'text-rose-300'}`}>{title}</h2>
+          <h2 className="text-lg font-bold text-blue-300">Long-Term Fundamental Picks</h2>
           <p className="text-xs text-neutral-500 mt-0.5">
-            {picks.length} pick{picks.length !== 1 ? 's' : ''} · Sorted by confidence high→low · Click any row for full why-to-buy
+            {picks.length} picks · Ranked by fundamental score · Click row for details
           </p>
         </div>
-        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
-          {picks[0]?.hold_class === 'position' ? 'Position trade (30-60d)' : 'Swing trade (5-14d)'}
+        <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 border border-blue-800/40 px-2 py-1 rounded">
+          6-12 Week Hold
         </span>
       </div>
-      <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60 text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+
+      {/* Header */}
+      <div className="grid grid-cols-12 gap-1 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60 text-[10px] font-bold uppercase tracking-wider text-neutral-500">
         <div className="col-span-2">Ticker</div>
         <div className="col-span-1">Sector</div>
         <div className="col-span-1 text-right">Entry</div>
-        <div className="col-span-1 text-right">Conf</div>
         <div className="col-span-1 text-right">Score</div>
-        <div className="col-span-1 text-right">Stop</div>
-        <div className="col-span-1 text-right">Target</div>
-        <div className="col-span-1 text-right">R/R</div>
+        <div className="col-span-1 text-right">Rev Gr</div>
+        <div className="col-span-1 text-right">EPS Gr</div>
+        <div className="col-span-1 text-right">ROE</div>
+        <div className="col-span-1 text-right">PEG</div>
+        <div className="col-span-1 text-right">Stop/Tgt</div>
+        <div className="col-span-1 text-right">R:R</div>
         <div className="col-span-1 text-right">Allocate</div>
-        <div className="col-span-1 text-right">Reason</div>
-        <div className="col-span-1 text-right">Hold</div>
       </div>
-      <div className="max-h-[700px] overflow-y-auto">
-        {picks.map((p, i) => <PickRow key={p.ticker} p={p} side={side} rank={i + 1} cash={cash} />)}
+
+      <div className="max-h-[800px] overflow-y-auto">
+        {picks.map((p, i) => <PickRow key={p.ticker} p={p} rank={i + 1} cash={cash} />)}
       </div>
     </div>
   )
 }
 
-// Cash balance input — placeholder shows '0', clears on focus.
 function CashInput({ value, onChange }) {
-  const [focused, setFocused] = useState(false)
-  const display = value === 0 || value === null || value === undefined || value === ''
-    ? (focused ? '' : '')
-    : String(value)
   return (
     <div className="flex items-center gap-3">
-      <label className="text-xs uppercase tracking-wider font-bold text-neutral-400">
-        Your Cash Balance
-      </label>
+      <label className="text-xs uppercase tracking-wider font-bold text-neutral-400">Your Balance</label>
       <div className="relative">
         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 font-mono">$</span>
         <input
-          type="number"
-          inputMode="numeric"
-          min="0"
-          step="100"
-          value={display}
+          type="number" inputMode="numeric" min="0" step="100"
+          value={value || ''}
           placeholder="0"
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onChange={(e) => {
+          onChange={e => {
             const v = e.target.value
             if (v === '') return onChange(null)
             const n = Number(v)
@@ -182,8 +199,8 @@ function CashInput({ value, onChange }) {
       </div>
       {value > 0 && (
         <div className="text-[11px] text-neutral-500">
-          Auto-allocates {(LONG_PCT_PER_PICK * 100).toFixed(1)}% per long · {(SHORT_PCT_PER_PICK * 100).toFixed(1)}% per short
-          · top {MAX_LONGS_TO_FUND}L / {MAX_SHORTS_TO_FUND}S
+          {(ALLOC_PCT * 100).toFixed(0)}% per pick · top {MAX_FUNDED} positions
+          · total deploy ≈ {fmtMoney(value * ALLOC_PCT * Math.min(MAX_FUNDED, 10))}
         </div>
       )}
     </div>
@@ -195,7 +212,6 @@ export default function SymbolsToBuy() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
-  // Cash balance persists in localStorage so user doesn't retype
   const [cash, setCash] = useState(() => {
     try {
       const stored = localStorage.getItem('stb_cash')
@@ -219,7 +235,7 @@ export default function SymbolsToBuy() {
       const res = await fetch(`/api/symbols-to-buy${force ? '?force_refresh=true' : ''}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const j = await res.json()
-      if (!j.ok && j.reason) throw new Error(j.message || j.reason)
+      if (!j.ok && j.reason && j.reason !== 'warming_up') throw new Error(j.message || j.reason)
       setData(j)
     } catch (e) {
       setError(e.message)
@@ -231,31 +247,18 @@ export default function SymbolsToBuy() {
 
   useEffect(() => { load(false) }, [])
 
-  // Totals across all funded picks
-  const totals = (() => {
-    if (!data || !cash || cash <= 0) return null
-    const fundedLongs = (data.long_picks || []).slice(0, MAX_LONGS_TO_FUND)
-    const fundedShorts = (data.short_picks || []).slice(0, MAX_SHORTS_TO_FUND)
-    const longDollars = fundedLongs.reduce((s, p, i) => {
-      const a = calcAlloc(cash, p, 'long', i + 1)
-      return s + (a.dollars || 0)
-    }, 0)
-    const shortDollars = fundedShorts.reduce((s, p, i) => {
-      const a = calcAlloc(cash, p, 'short', i + 1)
-      return s + (a.dollars || 0)
-    }, 0)
-    const gross = longDollars + shortDollars
-    return { longDollars, shortDollars, gross, grossPct: (gross / cash) * 100 }
-  })()
+  const cacheMinutes = data?.cache_age_seconds != null
+    ? Math.round(data.cache_age_seconds / 60)
+    : null
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-6">
         <div className="flex items-end justify-between mb-2">
           <div>
-            <h1 className="text-3xl font-black text-white tracking-tight">Symbols to Buy</h1>
+            <h1 className="text-3xl font-black text-white tracking-tight">Stocks to Buy</h1>
             <p className="text-sm text-neutral-400 mt-1">
-              Manual swing-trading queue · 3-5 day minimum holds · No day trading
+              Fundamentals-driven · 6-12 week holds · Revenue growth + ROE + valuation
             </p>
           </div>
           <button
@@ -267,41 +270,30 @@ export default function SymbolsToBuy() {
           </button>
         </div>
 
-        {/* Cash balance input (always visible) */}
-        <div className="mt-4 bg-neutral-900/40 border border-neutral-800/60 rounded-xl px-4 py-3 flex flex-wrap items-center gap-4">
+        {/* Cash input */}
+        <div className="mt-4 bg-neutral-900/40 border border-neutral-800/60 rounded-xl px-4 py-3">
           <CashInput value={cash} onChange={setCash} />
-          {totals && (
-            <div className="flex flex-wrap items-center gap-3 text-xs ml-auto">
-              <span className="px-2 py-1 bg-emerald-950/30 border border-emerald-800/40 rounded text-emerald-300">
-                Long deploy: <span className="font-bold">{formatMoney(totals.longDollars)}</span>
-              </span>
-              <span className="px-2 py-1 bg-rose-950/30 border border-rose-800/40 rounded text-rose-300">
-                Short deploy: <span className="font-bold">{formatMoney(totals.shortDollars)}</span>
-              </span>
-              <span className="px-2 py-1 bg-blue-950/30 border border-blue-800/40 rounded text-blue-300">
-                Gross: <span className="font-bold">{formatMoney(totals.gross)}</span>
-                <span className="ml-1 text-neutral-500">({totals.grossPct.toFixed(1)}%)</span>
-              </span>
-            </div>
-          )}
         </div>
 
+        {/* Meta bar */}
         {data && (
           <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-500 mt-3">
-            <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Regime: <span className="text-white font-bold">{data.regime}</span>
-              {data.regime_confidence != null ? ` (${Math.round(data.regime_confidence)}%)` : ''}
+            <span className="px-2 py-1 bg-blue-950/30 rounded border border-blue-900/40 text-blue-300 font-bold">
+              FUNDAMENTAL ENGINE
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Universe: <span className="text-white font-bold">{data.universe_size}</span> tickers
+              Picks: <span className="text-white font-bold">{data.long_count ?? 0}</span>
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Cache age: <span className={data.cache_is_restoring ? "text-yellow-400 font-bold" : "text-white font-bold"}>
-                {data.cache_is_restoring ? 'Refreshing…' : data.cache_age_seconds != null ? Math.round(data.cache_age_seconds / 60) + ' min' : '—'}
+              Universe scanned: <span className="text-white font-bold">{data.universe_scanned ?? '—'}</span>
+            </span>
+            <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
+              Cache age: <span className={data.cache_is_restoring ? 'text-yellow-400 font-bold' : 'text-white font-bold'}>
+                {data.cache_is_restoring ? 'Warming up…' : cacheMinutes != null ? `${cacheMinutes} min` : '—'}
               </span>
             </span>
-            <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Longs: <span className="text-emerald-300 font-bold">{data.long_count}</span> · Shorts: <span className="text-rose-300 font-bold">{data.short_count}</span>
+            <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800 text-neutral-500">
+              Refreshes every 6h
             </span>
           </div>
         )}
@@ -309,7 +301,7 @@ export default function SymbolsToBuy() {
 
       {loading && (
         <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-12 text-center text-neutral-500">
-          Loading picks…
+          Loading fundamental picks…
         </div>
       )}
 
@@ -323,11 +315,22 @@ export default function SymbolsToBuy() {
         <div className="space-y-6">
           {data.guidance && (
             <div className="bg-blue-950/20 border border-blue-800/40 rounded-lg px-4 py-3 text-sm text-blue-200">
-              <span className="font-bold mr-2">Guidance:</span>{data.guidance}
+              <span className="font-bold mr-2">Strategy:</span>{data.guidance}
             </div>
           )}
-          <PickTable picks={data.long_picks} side="long" title="LONG Queue" cash={cash} />
-          <PickTable picks={data.short_picks} side="short" title="SHORT Queue" cash={cash} />
+
+          {/* Score legend */}
+          <div className="flex flex-wrap gap-4 text-xs text-neutral-500">
+            <span><span className="text-emerald-400 font-bold">Score 70+</span> = Strong buy</span>
+            <span><span className="text-amber-300 font-bold">Score 55-70</span> = Good quality</span>
+            <span><span className="font-bold text-neutral-400">Rev Gr</span> = YoY revenue growth</span>
+            <span><span className="font-bold text-neutral-400">EPS Gr</span> = YoY earnings growth</span>
+            <span><span className="font-bold text-neutral-400">ROE</span> = Return on equity</span>
+            <span><span className="font-bold text-neutral-400">PEG</span> = Price/earnings-to-growth ({"<"}1.5 = good)</span>
+            <span><span className="font-bold text-neutral-400">R:R</span> = Reward:risk ratio (3x+ = ideal)</span>
+          </div>
+
+          <PickTable picks={data.long_picks} cash={cash} />
         </div>
       )}
     </div>
