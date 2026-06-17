@@ -5733,21 +5733,20 @@ _FUNDAMENTAL_PICKS_CACHE_TTL = 6 * 3600  # 6 hours
 
 def generate_fundamental_picks(force: bool = False) -> dict:
     """
-    Generate long-term fundamentals-driven picks for the STB page.
-    Completely separate from the paper trading system — paper trading is NOT affected.
+    Generate long-term picks for the STB page. Zero ticker.info calls —
+    uses only yfinance.download() (bulk price history, which works reliably)
+    and the existing SECTOR_MAP.
 
-    Strategy: Uses the already-cached quant picks data (zero new API calls).
-    The quant engine scores 500+ stocks every cycle; we re-score the long candidates
-    here using a long-term quality lens:
-      40%  Trend/momentum  — 12m price momentum from quant picks
-      35%  Quality          — quant composite_score + quality factor
-      25%  Risk             — lower volatility preferred for multi-week holds
+    Scoring (0-100):
+      50%  12-month momentum       — sustained uptrend for multi-week holds
+      30%  Trend quality           — 50d vs 200d MA, price above MAs
+      20%  Stability               — lower 60d volatility preferred
 
-    Long-term filters:
-      - LONG direction only (no shorts)
+    Filters:
       - Price > $10
-      - Not in extreme RSI2 overbought (> 95)
-      - Positive 12m momentum (uptrend)
+      - 12m momentum > -5% (not in sustained downtrend)
+      - Price above 50-day MA (near-term uptrend)
+      - At least 6 months of price history
 
     Returns: {long_picks: [...], generated_at: str, ...}
     """
@@ -5757,111 +5756,172 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     if not force and cache_entry and (now_ts - cache_entry.get("time", 0)) < _FUNDAMENTAL_PICKS_CACHE_TTL:
         return cache_entry["data"]
 
-    logger.warning("FUNDAMENTAL PICKS: Building long-term picks from quant cache (zero API calls)")
+    logger.warning("FUNDAMENTAL PICKS: Starting price-based scan (no ticker.info calls)")
 
-    # Pull ALL quant long picks from cache
-    quant_entry = _quant_cache.get("quant_picks") or {}
-    quant_data = quant_entry.get("data") or {}
-    all_long_picks = list(quant_data.get("long_picks") or [])
+    try:
+        from analysis.quant_engine import QUANT_UNIVERSE, SECTOR_MAP
+    except ImportError:
+        QUANT_UNIVERSE = []
+        SECTOR_MAP = {}
 
-    # If quant cache is empty, generate it now (blocks briefly but only once)
-    if not all_long_picks:
-        logger.warning("FUNDAMENTAL PICKS: quant_picks cache empty — triggering quant scan")
-        try:
-            result_q = generate_quant_picks(force=False)
-            all_long_picks = list((result_q or {}).get("long_picks") or [])
-        except Exception as _qe:
-            logger.warning(f"FUNDAMENTAL PICKS: quant scan failed: {_qe}")
-
-    if not all_long_picks:
-        result = {
-            "long_picks": [], "short_picks": [],
-            "generated_at": datetime.now().isoformat(),
-            "universe_scanned": 0,
-            "error": "quant_cache_empty",
-        }
+    symbols = list(QUANT_UNIVERSE) if QUANT_UNIVERSE else []
+    if not symbols:
+        logger.warning("FUNDAMENTAL PICKS: QUANT_UNIVERSE empty, aborting")
+        result = {"long_picks": [], "short_picks": [], "generated_at": datetime.now().isoformat(), "universe_scanned": 0}
         _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
         return result
 
-    # Long-term quality scoring (0-100) using data already in quant picks
-    candidates = []
-    for p in all_long_picks:
+    # Bulk download 1-year price history for the universe.
+    # yfinance.download() works reliably on App Runner (bulk, no per-ticker auth).
+    import yfinance as _yf_fund
+    import threading as _fund_thr
+
+    price_data = {}
+    batch_size = 200
+
+    def _dl_batch(syms, r):
         try:
-            if p.get("direction", "").upper() != "LONG":
+            df = _yf_fund.download(
+                syms, period="1y", interval="1d",
+                auto_adjust=True, progress=False, threads=True, timeout=45
+            )
+            if df is not None and not df.empty:
+                close = df["Close"] if "Close" in df.columns else df
+                if hasattr(close, "columns"):
+                    for s in syms:
+                        try:
+                            col = close[s].dropna()
+                            if len(col) >= 20:
+                                r[s] = col.values
+                        except Exception:
+                            pass
+                else:
+                    # Single ticker fallback
+                    col = close.dropna()
+                    if len(col) >= 20 and len(syms) == 1:
+                        r[syms[0]] = col.values
+        except Exception as _e:
+            logger.debug(f"FUNDAMENTAL PICKS batch download failed: {_e}")
+
+    # Download full universe in batches of 200 (yfinance handles bulk well)
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+        _r = {}
+        _t = _fund_thr.Thread(target=_dl_batch, args=(batch, _r), daemon=True)
+        _t.start(); _t.join(timeout=90)
+        price_data.update(_r)
+        logger.warning(f"FUNDAMENTAL PICKS: batch {i//batch_size + 1} → {len(_r)}/{len(batch)} stocks with data")
+
+    if not price_data:
+        logger.warning("FUNDAMENTAL PICKS: no price data at all — aborting")
+        result = {"long_picks": [], "short_picks": [], "generated_at": datetime.now().isoformat(), "universe_scanned": 0, "error": "no_price_data"}
+        _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
+        return result
+
+    import math as _fm
+    import numpy as _np_fund
+
+    candidates = []
+    for sym, prices in price_data.items():
+        try:
+            if len(prices) < 126:  # Need at least 6 months
                 continue
 
-            price = float(p.get("price") or 0)
-            if price < 10.0:
-                continue  # Penny stock / micro-cap guard
+            current_price = float(prices[-1])
+            if current_price < 10.0:
+                continue  # Penny stock guard
 
-            momentum = float(p.get("momentum_pct") or 0)
-            if momentum < -15.0:
-                continue  # Not in downtrend
+            # 12-month momentum (exclude last month to avoid short-term noise)
+            n = len(prices)
+            if n >= 252:
+                mom_12m = (float(prices[-21]) / float(prices[-252]) - 1) * 100
+            else:
+                mom_12m = (float(prices[-21]) / float(prices[0]) - 1) * 100
 
-            rsi2 = float(p.get("rsi2") or 50)
-            if rsi2 > 95:
-                continue  # Extreme overbought — wait for pullback
+            if mom_12m < -5.0:
+                continue  # Sustained downtrend — skip
 
-            composite = float(p.get("composite_score") or 0)
-            confidence = float(p.get("confidence") or 55)
-            vol_60d = float(p.get("volatility_60d") or 30)
+            # Moving averages
+            ma50 = float(_np_fund.mean(prices[-50:])) if n >= 50 else float(_np_fund.mean(prices))
+            ma200 = float(_np_fund.mean(prices[-200:])) if n >= 200 else float(_np_fund.mean(prices))
 
-            # --- LONG-TERM QUALITY SCORE (0-100) ---
-            # 1. Momentum / trend (40%): +50% mom=40pts, +20%=30pts, 0%=20pts, -15%=10pts
-            mom_score = max(10.0, min(40.0, 20.0 + momentum * 0.4))
-            # 2. Quality / composite (35%): normalize composite_score (typ 0.5-3.0) to 0-35
-            qual_score = max(10.0, min(35.0, composite * 10.0))
-            # 3. Risk / vol (25%): lower vol preferred for multi-week holds
-            risk_score = max(5.0, min(25.0, 35.0 - vol_60d * 0.4))
+            # Must be above 50d MA (near-term uptrend confirmation)
+            if current_price < ma50 * 0.97:
+                continue
 
-            total_score = mom_score + qual_score + risk_score  # 0-100
+            # 60-day realized volatility (annualized %)
+            rets = _np_fund.diff(prices[-62:]) / prices[-62:-1]
+            vol_60d = float(_np_fund.std(rets)) * _fm.sqrt(252) * 100 if len(rets) > 1 else 30.0
 
-            fund = p.get("fundamentals") or {}
-            pe = fund.get("pe")
-            fwd_pe = fund.get("fwd_pe")
-            roe = fund.get("roe")
-            debt_eq = fund.get("debt_equity")
+            # --- SCORING (0-100) ---
+            # 1. Momentum (50%): +50%=50, +20%=35, 0%=25, -5%=20
+            mom_score = max(15.0, min(50.0, 25.0 + mom_12m * 0.5))
 
-            # Build reasons with long-term framing
-            quant_reasons = list(p.get("reasons") or [])
-            lt_reasons = []
-            if momentum > 20:
-                lt_reasons.append(f"12m momentum +{momentum:.0f}% — confirmed uptrend")
-            elif momentum > 0:
-                lt_reasons.append(f"Positive 12m trend (+{momentum:.0f}%)")
-            if vol_60d < 25:
-                lt_reasons.append(f"Low volatility ({vol_60d:.0f}% ann) — stable hold")
-            if confidence >= 70:
-                lt_reasons.append(f"High quant confidence ({confidence:.0f}%)")
-            if roe and roe > 15:
-                lt_reasons.append(f"ROE {roe:.0f}%")
-            reasons = (lt_reasons + quant_reasons)[:5] or ["Quant quality + momentum pick"]
+            # 2. Trend quality (30%): MA alignment + price vs MAs
+            trend_score = 10.0
+            if n >= 200:
+                if ma50 > ma200:
+                    trend_score += 10.0  # Golden cross
+                if current_price > ma200:
+                    trend_score += 5.0
+                if current_price > ma50 * 1.03:
+                    trend_score += 5.0
+            else:
+                # Shorter history: just check price vs MA50
+                if current_price > ma50 * 1.02:
+                    trend_score += 10.0
+                trend_score = min(30.0, trend_score)
+            trend_score = min(30.0, trend_score)
 
-            ticker = p.get("ticker") or p.get("symbol") or ""
+            # 3. Stability / low-vol (20%): 15% ann vol=20, 30%=15, 50%=8
+            stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
+
+            total_score = mom_score + trend_score + stab_score  # 0-100
+
+            # Confidence: 55-88% range
+            confidence = round(55.0 + (total_score / 100.0) * 33.0)
+
+            sector = SECTOR_MAP.get(sym, "Unknown") if isinstance(SECTOR_MAP, dict) else "Unknown"
+
+            # Reasons
+            reasons = []
+            if mom_12m > 30:
+                reasons.append(f"12m momentum +{mom_12m:.0f}% — strong uptrend")
+            elif mom_12m > 10:
+                reasons.append(f"12m momentum +{mom_12m:.0f}% — uptrend confirmed")
+            if n >= 200 and ma50 > ma200:
+                reasons.append("50d MA above 200d MA (golden cross)")
+            if current_price > ma200 * 1.05:
+                reasons.append(f"Price {((current_price/ma200)-1)*100:.0f}% above 200d MA")
+            if vol_60d < 20:
+                reasons.append(f"Low volatility ({vol_60d:.0f}% ann) — stable multi-week hold")
+            if not reasons:
+                reasons.append("Passes uptrend + stability screen")
+
             candidates.append({
-                "symbol": ticker,
-                "ticker": ticker,
-                "price": round(price, 2),
-                "sector": p.get("sector") or "Unknown",
+                "symbol": sym,
+                "ticker": sym,
+                "price": round(current_price, 2),
+                "sector": sector,
                 "direction": "LONG",
                 "fundamental_score": round(total_score, 1),
-                "confidence": min(92, int(confidence)),
-                "pe": pe,
-                "fwd_pe": fwd_pe,
+                "confidence": min(88, confidence),
+                "pe": None,
+                "fwd_pe": None,
                 "peg_ratio": None,
-                "roe_pct": roe,
+                "roe_pct": None,
                 "revenue_growth_pct": None,
                 "earnings_growth_pct": None,
                 "profit_margin_pct": None,
-                "debt_equity": debt_eq,
-                "momentum_12m_pct": round(momentum, 1),
-                "reasons": reasons,
+                "debt_equity": None,
+                "momentum_12m_pct": round(mom_12m, 1),
+                "reasons": reasons[:5],
                 "hold_recommendation": "6-12 weeks",
                 "hold_class": "position",
             })
 
         except Exception as _se:
-            logger.debug(f"FUNDAMENTAL PICKS score error {p.get('ticker')}: {_se}")
+            logger.debug(f"FUNDAMENTAL PICKS score error {sym}: {_se}")
             continue
 
     candidates.sort(key=lambda x: -x["fundamental_score"])
@@ -5886,6 +5946,6 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     }
 
     _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
-    logger.warning(f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} quant candidates (zero API calls)")
+    logger.warning(f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} candidates ({len(price_data)} stocks had price data)")
     return result
 
