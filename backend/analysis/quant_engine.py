@@ -4238,12 +4238,11 @@ def _generate_quant_picks_impl() -> dict:
         # The 120s batch budget is consumed by throttle delays (3s × batches)
         # before individual tiers 6/7 can run. Give yfinance individual tiers
         # 90s to grab whatever they can, then Finnhub tier8 resets to 900s fresh.
-        if len(price_data) < 30:
-            _scan_deadline = _time_scan.time() + 90
+        if len(price_data) < 200:
+            _scan_deadline = _time_scan.time() + 300
             logger.warning(
                 f"UNIVERSE SCAN: only {len(price_data)} stocks from batch tiers "
-                f"— extending deadline 90 s for individual yfinance tiers (6/7), "
-                f"then Finnhub tier8 gets fresh 900 s"
+                f"— extending deadline 300 s for individual yfinance tiers (6/7)"
             )
 
         # --- TIER 6: individual yf.download with 1 s inter-call sleep ---
@@ -4256,7 +4255,7 @@ def _generate_quant_picks_impl() -> dict:
                 if _over_budget():
                     logger.warning(f"UNIVERSE SCAN tier6 hit time budget — falling through to tier7")
                     break
-                _time_scan.sleep(1.0)
+                _time_scan.sleep(0.5)
                 try:
                     import threading as _t6_thr_mod
                     _t6_r = [None]
@@ -4304,7 +4303,7 @@ def _generate_quant_picks_impl() -> dict:
                 if _over_budget():
                     logger.warning(f"UNIVERSE SCAN tier7 hit time budget — falling through to Finnhub tier8")
                     break
-                _time_scan.sleep(1.0)
+                _time_scan.sleep(0.5)
                 try:
                     import threading as _t7_thr_mod
                     _t7_r = [None]
@@ -5733,20 +5732,25 @@ _FUNDAMENTAL_PICKS_CACHE_TTL = 6 * 3600  # 6 hours
 
 def generate_fundamental_picks(force: bool = False) -> dict:
     """
-    Generate long-term picks for the STB page. Zero ticker.info calls —
-    uses only yfinance.download() (bulk price history, which works reliably)
-    and the existing SECTOR_MAP.
+    Generate long-term picks for the STB page.
+    Uses _PRICE_DATA_LASTGOOD — the quant engine's 14-day per-ticker price
+    cache — as the primary data source. Zero new API calls required.
+
+    Why: yfinance.download() in bulk is unreliable on App Runner (only 42/726
+    stocks return data per scan due to rate limiting). _PRICE_DATA_LASTGOOD
+    accumulates good price data across all prior scans and persists in memory
+    for up to 14 days — the richest, most reliable data source available.
 
     Scoring (0-100):
-      50%  12-month momentum       — sustained uptrend for multi-week holds
+      50%  12-month momentum       — sustained uptrend for 6-12 week holds
       30%  Trend quality           — 50d vs 200d MA, price above MAs
       20%  Stability               — lower 60d volatility preferred
 
     Filters:
       - Price > $10
       - 12m momentum > -5% (not in sustained downtrend)
-      - Price above 50-day MA (near-term uptrend)
-      - At least 6 months of price history
+      - Price above 50d MA (near-term uptrend)
+      - At least 126 trading days (6 months) of history
 
     Returns: {long_picks: [...], generated_at: str, ...}
     """
@@ -5756,65 +5760,23 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     if not force and cache_entry and (now_ts - cache_entry.get("time", 0)) < _FUNDAMENTAL_PICKS_CACHE_TTL:
         return cache_entry["data"]
 
-    logger.warning("FUNDAMENTAL PICKS: Starting price-based scan (no ticker.info calls)")
+    logger.warning("FUNDAMENTAL PICKS: Scoring from _PRICE_DATA_LASTGOOD (zero API calls)")
 
     try:
-        from analysis.quant_engine import QUANT_UNIVERSE, SECTOR_MAP
+        from analysis.quant_engine import SECTOR_MAP, _PRICE_DATA_LASTGOOD
     except ImportError:
-        QUANT_UNIVERSE = []
         SECTOR_MAP = {}
+        _PRICE_DATA_LASTGOOD = {}
 
-    symbols = list(QUANT_UNIVERSE) if QUANT_UNIVERSE else []
-    if not symbols:
-        logger.warning("FUNDAMENTAL PICKS: QUANT_UNIVERSE empty, aborting")
-        result = {"long_picks": [], "short_picks": [], "generated_at": datetime.now().isoformat(), "universe_scanned": 0}
-        _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
-        return result
-
-    # Bulk download 1-year price history for the universe.
-    # yfinance.download() works reliably on App Runner (bulk, no per-ticker auth).
-    import yfinance as _yf_fund
-    import threading as _fund_thr
-
-    price_data = {}
-    batch_size = 200
-
-    def _dl_batch(syms, r):
-        try:
-            df = _yf_fund.download(
-                syms, period="1y", interval="1d",
-                auto_adjust=True, progress=False, threads=True, timeout=45
-            )
-            if df is not None and not df.empty:
-                close = df["Close"] if "Close" in df.columns else df
-                if hasattr(close, "columns"):
-                    for s in syms:
-                        try:
-                            col = close[s].dropna()
-                            if len(col) >= 20:
-                                r[s] = col.values
-                        except Exception:
-                            pass
-                else:
-                    # Single ticker fallback
-                    col = close.dropna()
-                    if len(col) >= 20 and len(syms) == 1:
-                        r[syms[0]] = col.values
-        except Exception as _e:
-            logger.debug(f"FUNDAMENTAL PICKS batch download failed: {_e}")
-
-    # Download full universe in batches of 200 (yfinance handles bulk well)
-    for i in range(0, len(symbols), batch_size):
-        batch = symbols[i:i + batch_size]
-        _r = {}
-        _t = _fund_thr.Thread(target=_dl_batch, args=(batch, _r), daemon=True)
-        _t.start(); _t.join(timeout=90)
-        price_data.update(_r)
-        logger.warning(f"FUNDAMENTAL PICKS: batch {i//batch_size + 1} → {len(_r)}/{len(batch)} stocks with data")
-
-    if not price_data:
-        logger.warning("FUNDAMENTAL PICKS: no price data at all — aborting")
-        result = {"long_picks": [], "short_picks": [], "generated_at": datetime.now().isoformat(), "universe_scanned": 0, "error": "no_price_data"}
+    # _PRICE_DATA_LASTGOOD: {ticker: {"df": DataFrame, "ts": datetime}}
+    if not _PRICE_DATA_LASTGOOD:
+        logger.warning("FUNDAMENTAL PICKS: _PRICE_DATA_LASTGOOD empty — quant engine hasn't scanned yet")
+        result = {
+            "long_picks": [], "short_picks": [],
+            "generated_at": datetime.now().isoformat(),
+            "universe_scanned": 0,
+            "error": "price_cache_empty_wait_for_quant_scan",
+        }
         _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
         return result
 
@@ -5822,39 +5784,62 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     import numpy as _np_fund
 
     candidates = []
-    for sym, prices in price_data.items():
+    for sym, entry in _PRICE_DATA_LASTGOOD.items():
         try:
-            if len(prices) < 126:  # Need at least 6 months
+            df = entry.get("df") if isinstance(entry, dict) else entry
+            if df is None or df.empty:
                 continue
 
-            current_price = float(prices[-1])
-            if current_price < 10.0:
-                continue  # Penny stock guard
-
-            # 12-month momentum (exclude last month to avoid short-term noise)
-            n = len(prices)
-            if n >= 252:
-                mom_12m = (float(prices[-21]) / float(prices[-252]) - 1) * 100
+            # Extract Close prices
+            if hasattr(df, "columns"):
+                if "Close" in df.columns:
+                    closes = df["Close"].dropna().values
+                elif isinstance(df.columns, __import__("pandas").MultiIndex):
+                    # MultiIndex: (field, ticker) or (ticker, field)
+                    lvl0 = df.columns.get_level_values(0)
+                    if "Close" in lvl0:
+                        closes = df["Close"].iloc[:, 0].dropna().values
+                    else:
+                        continue
+                else:
+                    continue
             else:
-                mom_12m = (float(prices[-21]) / float(prices[0]) - 1) * 100
+                continue
+
+            if len(closes) < 126:  # Need at least 6 months
+                continue
+
+            current_price = float(closes[-1])
+            if current_price < 10.0:
+                continue  # Penny stock / micro-cap guard
+            if current_price > 5000.0:
+                continue  # Sanity check (BRK.A etc)
+
+            n = len(closes)
+
+            # 12-month momentum (exclude last month to reduce noise)
+            if n >= 252:
+                mom_12m = (float(closes[-21]) / float(closes[-252]) - 1) * 100
+            else:
+                mom_12m = (float(closes[-21]) / float(closes[0]) - 1) * 100
 
             if mom_12m < -5.0:
-                continue  # Sustained downtrend — skip
+                continue  # Sustained downtrend — skip for long-term hold
 
             # Moving averages
-            ma50 = float(_np_fund.mean(prices[-50:])) if n >= 50 else float(_np_fund.mean(prices))
-            ma200 = float(_np_fund.mean(prices[-200:])) if n >= 200 else float(_np_fund.mean(prices))
+            ma50 = float(_np_fund.mean(closes[-50:])) if n >= 50 else float(_np_fund.mean(closes))
+            ma200 = float(_np_fund.mean(closes[-200:])) if n >= 200 else float(_np_fund.mean(closes))
 
-            # Must be above 50d MA (near-term uptrend confirmation)
+            # Must be above 50d MA for near-term uptrend
             if current_price < ma50 * 0.97:
                 continue
 
             # 60-day realized volatility (annualized %)
-            rets = _np_fund.diff(prices[-62:]) / prices[-62:-1]
-            vol_60d = float(_np_fund.std(rets)) * _fm.sqrt(252) * 100 if len(rets) > 1 else 30.0
+            rets = _np_fund.diff(closes[-62:]) / closes[-62:-1]
+            vol_60d = float(_np_fund.std(rets[_np_fund.isfinite(rets)])) * _fm.sqrt(252) * 100 if len(rets) > 1 else 30.0
 
             # --- SCORING (0-100) ---
-            # 1. Momentum (50%): +50%=50, +20%=35, 0%=25, -5%=20
+            # 1. Momentum (50%): +50%=50pts, +20%=35pts, 0%=25pts, -5%=22pts
             mom_score = max(15.0, min(50.0, 25.0 + mom_12m * 0.5))
 
             # 2. Trend quality (30%): MA alignment + price vs MAs
@@ -5867,36 +5852,34 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 if current_price > ma50 * 1.03:
                     trend_score += 5.0
             else:
-                # Shorter history: just check price vs MA50
                 if current_price > ma50 * 1.02:
                     trend_score += 10.0
-                trend_score = min(30.0, trend_score)
             trend_score = min(30.0, trend_score)
 
-            # 3. Stability / low-vol (20%): 15% ann vol=20, 30%=15, 50%=8
+            # 3. Stability / low-vol (20%): 15% ann vol=20pts, 30%=15pts, 50%=8pts
             stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
 
             total_score = mom_score + trend_score + stab_score  # 0-100
 
-            # Confidence: 55-88% range
             confidence = round(55.0 + (total_score / 100.0) * 33.0)
 
             sector = SECTOR_MAP.get(sym, "Unknown") if isinstance(SECTOR_MAP, dict) else "Unknown"
 
-            # Reasons
             reasons = []
             if mom_12m > 30:
-                reasons.append(f"12m momentum +{mom_12m:.0f}% — strong uptrend")
+                reasons.append(f"12m momentum +{mom_12m:.0f}% — strong sustained uptrend")
             elif mom_12m > 10:
                 reasons.append(f"12m momentum +{mom_12m:.0f}% — uptrend confirmed")
+            elif mom_12m > 0:
+                reasons.append(f"Positive 12m trend (+{mom_12m:.1f}%)")
             if n >= 200 and ma50 > ma200:
-                reasons.append("50d MA above 200d MA (golden cross)")
+                reasons.append("50d MA above 200d MA (golden cross — bullish structure)")
             if current_price > ma200 * 1.05:
-                reasons.append(f"Price {((current_price/ma200)-1)*100:.0f}% above 200d MA")
+                reasons.append(f"Price {((current_price/ma200)-1)*100:.0f}% above 200d MA — strong base")
             if vol_60d < 20:
                 reasons.append(f"Low volatility ({vol_60d:.0f}% ann) — stable multi-week hold")
             if not reasons:
-                reasons.append("Passes uptrend + stability screen")
+                reasons.append("Passes uptrend + trend-quality screen")
 
             candidates.append({
                 "symbol": sym,
@@ -5906,13 +5889,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 "direction": "LONG",
                 "fundamental_score": round(total_score, 1),
                 "confidence": min(88, confidence),
-                "pe": None,
-                "fwd_pe": None,
-                "peg_ratio": None,
-                "roe_pct": None,
-                "revenue_growth_pct": None,
-                "earnings_growth_pct": None,
-                "profit_margin_pct": None,
+                "pe": None, "fwd_pe": None, "peg_ratio": None,
+                "roe_pct": None, "revenue_growth_pct": None,
+                "earnings_growth_pct": None, "profit_margin_pct": None,
                 "debt_equity": None,
                 "momentum_12m_pct": round(mom_12m, 1),
                 "reasons": reasons[:5],
@@ -5946,6 +5925,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     }
 
     _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
-    logger.warning(f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} candidates ({len(price_data)} stocks had price data)")
+    logger.warning(
+        f"FUNDAMENTAL PICKS: Generated {len(top_picks)} picks from {len(candidates)} "
+        f"candidates ({len(_PRICE_DATA_LASTGOOD)} stocks in lastgood cache)"
+    )
     return result
 
