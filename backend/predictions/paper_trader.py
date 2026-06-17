@@ -4102,6 +4102,25 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             price = pick["price"]
             direction = "long" if pick["direction"] == "LONG" else "short"
 
+            # ---------- ABSOLUTE PRICE FLOOR (SJM incident defense) ----------
+            # Bug 2026-06-17: yfinance returned $1.90 for SJM (real price ~$100).
+            # The 35% divergence check failed because _sanity_live_prices also
+            # had the corrupted price.  Any S&P 500 / universe stock should be
+            # above $10; below that we assume a data-corruption event and skip.
+            if price is not None and price < 10.0:
+                results["skipped"].append({
+                    "symbol": symbol,
+                    "reason": (
+                        f"PRICE FLOOR: pick price ${price:.2f} < $10 — "
+                        f"assumed corrupt yfinance data (SJM-type incident)"
+                    ),
+                })
+                logger.warning(
+                    f"PRICE FLOOR REJECT {symbol}: pick price=${price:.2f} < $10 "
+                    f"— likely corrupt data, skipping trade"
+                )
+                continue
+
             # ---------- PRICE SANITY CHECK (HPE incident defense) ----------
             # Bug 2026-05-28: yfinance returned $2.94 for HPE (real price ~$22).
             # Pick was stored with bad price → phantom -$23,688 PnL on close.

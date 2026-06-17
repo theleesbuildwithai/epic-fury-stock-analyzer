@@ -1333,6 +1333,52 @@ except Exception as e:
     logger.warning(f"Fresh start v13 error (non-fatal): {e}")
 
 
+# --- FRESH START v14 (2026-06-17) ---
+# SJM entered at $1.90 (corrupted yfinance price, real ~$100) → -$2,748 loss.
+# Price floor guard added to paper_trader to block price < $10.
+# Reset: close all open positions, set cash=$132,000 (32% on $100k baseline),
+# advance stats_epoch so win-rate/P&L counters restart clean.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v14, set_trading_state as _set_state_v14,
+    )
+    _v14_done = _get_state_v14("fresh_start_v14_done", "0")
+    if _v14_done != "1":
+        from predictions.models import (
+            get_open_trades as _v14_get_open,
+            close_paper_trade as _v14_close,
+            set_cash as _v14_set_cash,
+            get_db as _v14_get_db,
+            save_portfolio_snapshot as _v14_snap,
+        )
+        from datetime import datetime as _dt_v14
+        _v14_open = _v14_get_open() or []
+        _v14_closed = 0
+        for _v14_t in _v14_open:
+            try:
+                _v14_close(_v14_t["id"], _v14_t.get("entry_price", 0))
+                _v14_closed += 1
+            except Exception as _v14_ce:
+                logger.warning(f"RESET v14: failed to close {_v14_t.get('ticker')}: {_v14_ce}")
+        _V14_CASH = 132_000.00
+        _v14_set_cash(_V14_CASH, caller="fresh_start_v14",
+                      reason="2026-06-17 SJM price-corruption fix — reset to $132k (32% on $100k)",
+                      bypass_sentinel=True)
+        _v14_epoch = _dt_v14.utcnow().isoformat()
+        _set_state_v14("stats_epoch", _v14_epoch)
+        _v14_conn = _v14_get_db()
+        _v14_conn.execute("DELETE FROM portfolio_snapshots")
+        _v14_conn.commit()
+        _v14_snap(_V14_CASH, _V14_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v14("fresh_start_v14_done", "1")
+        logger.warning(
+            f"FRESH START v14: closed {_v14_closed} positions, "
+            f"cash=$132k, stats reset. Price floor guard active — no more sub-$10 entries."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v14 error (non-fatal): {e}")
+
+
 # --- VIX LAST-GOOD RESET (2026-06-16) ---
 # VIX guard stuck at 41.6 (old spike). Real VIX is ~16. The bidirectional
 # jump check blocked recovery (41.6→16 ratio=2.6 > 2.0). Clear the cached
@@ -5354,9 +5400,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v115-stb-fundamental-long-term-picks-6-12-week",
-        "date": "2026-06-16",
+        "commit_marker": "feat-v116-price-floor-guard-sjm-fix-fresh-start-v14",
+        "date": "2026-06-17",
         "fixes_in_build": [
+            "v116_price_floor_guard_rejects_price_lt_10_sjm_incident",
+            "v116_fresh_start_v14_reset_132k_after_sjm_corruption_loss",
             "v109_quant_picks_endpoint_uses_restore_picks_from_s3_not_db_key",
             "v109_s3_fallback_sanitizes_crisis_vix_regime_before_serving",
             "v109_fresh_start_v13_reset_cash_132k_32pct_return",
