@@ -65,6 +65,7 @@ _SCAN_RUNNING = False
 
 # Fundamentals cache — 24-hour TTL for yfinance .info data
 _fundamentals_cache = {}
+_PRICE_DATA_LASTGOOD: dict = {}  # per-ticker last-good price cache (14-day TTL), populated by generate_quant_picks()
 _FUNDAMENTALS_CACHE_TTL = 86400  # 24 hours
 
 # Beta cache — stores beta vs SPY for each stock (24h TTL, same as fundamentals)
@@ -4074,11 +4075,7 @@ def _generate_quant_picks_impl() -> dict:
         # Persistent per-ticker last-good price-data cache (module global,
         # initialized lazily). This is the "memory" that prevents a single
         # rate-limited scan from collapsing our usable universe.
-        global _PRICE_DATA_LASTGOOD
-        try:
-            _PRICE_DATA_LASTGOOD
-        except NameError:
-            _PRICE_DATA_LASTGOOD = {}
+        global _PRICE_DATA_LASTGOOD  # declared at module level, populated here
 
         N_BATCHES = 10  # 2026-06-15 REVERTED: 20 batches caused too many orphaned yfinance threads → rate-limiting → 0 stocks. 10 batches × 73 stocks with fewer round trips works reliably.
         batch_size = (len(QUANT_UNIVERSE) + N_BATCHES - 1) // N_BATCHES
@@ -5846,22 +5843,24 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         except Exception as _pe:
             logger.debug(f"FUNDAMENTAL PICKS price extraction error: {_pe}")
 
-    # Fallback: also try _PRICE_DATA_LASTGOOD for any missing
-    try:
-        from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _lgs
-        for sym in _STB_UNIVERSE:
-            if sym not in price_data and sym in _lgs:
-                entry = _lgs[sym]
-                _df = entry.get("df") if isinstance(entry, dict) else entry
-                if _df is not None and not _df.empty:
-                    if "Close" in _df.columns:
-                        col = _df["Close"].dropna().values
-                        if len(col) >= 20:
-                            price_data[sym] = col
-    except Exception:
-        pass
+    # Fallback: use _PRICE_DATA_LASTGOOD (module-level, populated by generate_quant_picks)
+    # Direct access — no import needed since we're in the same module.
+    for sym in _STB_UNIVERSE:
+        if sym in price_data:
+            continue
+        entry = _PRICE_DATA_LASTGOOD.get(sym)
+        if not entry:
+            continue
+        try:
+            _df = entry.get("df") if isinstance(entry, dict) else entry
+            if _df is not None and not _df.empty and "Close" in _df.columns:
+                col = _df["Close"].dropna().values
+                if len(col) >= 20:
+                    price_data[sym] = col
+        except Exception:
+            pass
 
-    logger.warning(f"FUNDAMENTAL PICKS: {len(price_data)}/{len(_STB_UNIVERSE)} stocks with price data")
+    logger.warning(f"FUNDAMENTAL PICKS: bulk download gave {len(price_data)}/{len(_STB_UNIVERSE)} stocks; lastgood has {len(_PRICE_DATA_LASTGOOD)} stocks")
 
     try:
         from analysis.quant_engine import SECTOR_MAP

@@ -5400,7 +5400,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v124-stb-fix-yfinance-multiindex-column-extraction",
+        "commit_marker": "feat-v125-stb-fix-lastgood-import-module-level-init",
         "date": "2026-06-17",
         "fixes_in_build": [
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",
