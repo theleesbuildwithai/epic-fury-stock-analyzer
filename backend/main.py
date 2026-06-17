@@ -5400,7 +5400,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v121-stb-triggers-quant-scan-if-lastgood-empty",
+        "commit_marker": "feat-v122-stb-40-picks-sector-cap-5-momentum-filter-relaxed",
         "date": "2026-06-17",
         "fixes_in_build": [
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",
@@ -7680,7 +7680,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 "tier": "fundamental",
             }
 
-        formatted_longs = [_format_fund(p, i + 1) for i, p in enumerate(raw_longs[:25])]
+        formatted_longs = [_format_fund(p, i + 1) for i, p in enumerate(raw_longs[:40])]
 
         return {
             "ok": True,

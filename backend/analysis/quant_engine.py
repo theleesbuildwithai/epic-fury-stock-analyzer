@@ -5833,8 +5833,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             else:
                 mom_12m = (float(closes[-21]) / float(closes[0]) - 1) * 100
 
-            if mom_12m < -5.0:
-                continue  # Sustained downtrend — skip for long-term hold
+            if mom_12m < -15.0:
+                continue  # Only skip severe sustained downtrends
 
             # Moving averages
             ma50 = float(_np_fund.mean(closes[-50:])) if n >= 50 else float(_np_fund.mean(closes))
@@ -5915,15 +5915,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
     candidates.sort(key=lambda x: -x["fundamental_score"])
 
-    # Max 3 per sector, top 20 picks
+    # Max 5 per sector, top 40 picks
     sector_counts: dict = {}
     top_picks = []
     for c in candidates:
         sec = c.get("sector", "Unknown")
-        if sector_counts.get(sec, 0) < 3:
+        if sector_counts.get(sec, 0) < 5:
             top_picks.append(c)
             sector_counts[sec] = sector_counts.get(sec, 0) + 1
-        if len(top_picks) >= 20:
+        if len(top_picks) >= 40:
             break
 
     result = {
