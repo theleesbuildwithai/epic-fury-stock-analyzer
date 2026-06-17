@@ -5400,7 +5400,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v126-stb-debug-endpoint-diagnose-0-picks",
+        "commit_marker": "feat-v127-stb-picks-from-quant-cache-no-yfinance-cold-deploy",
         "date": "2026-06-17",
         "fixes_in_build": [
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",
@@ -7554,58 +7554,6 @@ def api_finnhub_status(request: Request):
         return {"ok": False, "reason": str(e)[:200]}
 
 
-
-@app.get("/api/stb-debug")
-def stb_debug():
-    """Temporary debug endpoint — shows what STB scan sees internally."""
-    try:
-        from analysis.quant_engine import _PRICE_DATA_LASTGOOD, _STB_UNIVERSE
-        import numpy as _np
-        import math as _m
-
-        lastgood_count = len(_PRICE_DATA_LASTGOOD)
-        stb_in_lastgood = [s for s in _STB_UNIVERSE if s in _PRICE_DATA_LASTGOOD]
-
-        # Try to score first 3 stocks in lastgood to see why they fail
-        debug_stocks = []
-        for sym in stb_in_lastgood[:10]:
-            entry = _PRICE_DATA_LASTGOOD.get(sym)
-            try:
-                _df = entry.get("df") if isinstance(entry, dict) else entry
-                info = {
-                    "sym": sym,
-                    "df_type": str(type(_df)),
-                    "columns": str(list(_df.columns)[:5]) if hasattr(_df, "columns") else "N/A",
-                    "has_close": "Close" in _df.columns if hasattr(_df, "columns") else False,
-                    "len": len(_df) if _df is not None else 0,
-                }
-                if info["has_close"]:
-                    closes = _df["Close"].dropna().values
-                    info["closes_len"] = len(closes)
-                    if len(closes) >= 20:
-                        info["last_price"] = float(closes[-1])
-                        n = len(closes)
-                        if n >= 252:
-                            mom = (float(closes[-21]) / float(closes[-252]) - 1) * 100
-                        else:
-                            mom = (float(closes[-21]) / float(closes[0]) - 1) * 100
-                        info["mom_12m"] = round(mom, 1)
-                        ma50 = float(_np.mean(closes[-50:])) if n >= 50 else float(_np.mean(closes))
-                        info["ma50"] = round(ma50, 2)
-                        info["above_ma50_97"] = bool(float(closes[-1]) >= ma50 * 0.97)
-                debug_stocks.append(info)
-            except Exception as e:
-                debug_stocks.append({"sym": sym, "error": str(e)[:100]})
-
-        return {
-            "lastgood_total": lastgood_count,
-            "stb_universe_size": len(_STB_UNIVERSE),
-            "stb_in_lastgood": len(stb_in_lastgood),
-            "stb_in_lastgood_list": stb_in_lastgood[:20],
-            "sample_stocks": debug_stocks,
-        }
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @app.get("/api/symbols-to-buy")
