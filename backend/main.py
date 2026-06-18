@@ -10021,11 +10021,32 @@ def queued_trades(request: Request):
         portfolio = get_portfolio_state()
         open_tickers = set(p["ticker"] for p in portfolio.get("positions", []))
 
+        # v141b: pick the reason that aligns with trade direction so display
+        # is never confusing (e.g. "bullish" reason on a SHORT pick).
+        # Tries to find a directionally-matching reason; falls back to first reason.
+        _LONG_WORDS = ("bullish", "uptrend", "momentum", "strength", "golden", "above ma", "breakout", "accumul")
+        _SHORT_WORDS = ("bearish", "overbought", "reversal", "extended", "sell", "below ma", "distribution", "mean rev")
+
+        def _pick_reason(reasons, is_long):
+            if not reasons:
+                return "Multi-factor signal"
+            target_words = _LONG_WORDS if is_long else _SHORT_WORDS
+            for r in reasons:
+                if any(w in r.lower() for w in target_words):
+                    return r
+            # No directionally-aligned reason found — return first but add context
+            base = reasons[0]
+            if not is_long and "bullish" in base.lower():
+                return base.replace("bullish", "overbought (mean reversion short)")
+            if is_long and "bearish" in base.lower():
+                return base.replace("bearish", "oversold (contrarian long)")
+            return base
+
         queued_longs = [
             {"symbol": p["symbol"], "direction": "LONG", "confidence": p["confidence"],
              "score": p.get("composite_score") or p.get("fundamental_score") or 0,
              "price": p["price"], "sector": p.get("sector"),
-             "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
+             "reason": _pick_reason(p.get("reasons") or [], True),
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("long_picks", [])
             # v141: 70% minimum + reject picks mislabeled as SHORT inside long_picks
@@ -10035,7 +10056,7 @@ def queued_trades(request: Request):
             {"symbol": p["symbol"], "direction": "SHORT", "confidence": p["confidence"],
              "score": p.get("composite_score") or p.get("fundamental_score") or 0,
              "price": p["price"], "sector": p.get("sector"),
-             "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
+             "reason": _pick_reason(p.get("reasons") or [], False),
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("short_picks", [])
             if p["confidence"] >= 70  # v141: raised 55→70 to match all other floors
