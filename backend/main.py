@@ -5448,9 +5448,10 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v131-company-names-complete",
+        "commit_marker": "feat-v132-confidence-70-90-range",
         "date": "2026-06-18",
         "fixes_in_build": [
+            "v132_bull_long_base_conf_67to75_78to83_stacking_floor_10to5_targets_70_90_range",
             "v131_company_names_mrvl_dxcm_ulta_abnb_riot_snow_gps_gd_veev_regn_sbux_ge_mchp_klac_hon_wfc_pltr_rok",
             "v130_bull_long_gate_52_to_45_post_scan_penalty_stacking_fix",
             "v130_company_names_added_hood_hca_uri_sjm_cb_pool_ttwo",

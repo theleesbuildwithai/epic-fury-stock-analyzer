@@ -3637,10 +3637,10 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
 
         if final_score >= long_threshold_high:
             direction = "LONG"
-            confidence = min(95, 78 + int(final_score * 4))   # v57b: score=2.5→88%, score=3→90%
+            confidence = min(95, 83 + int(final_score * 4))   # 2026-06-18: raised 78→83; score=2.0→91, score=2.5→93
         elif final_score >= long_threshold_low:
             direction = "LONG"
-            confidence = min(90, 67 + int(final_score * 5))   # v57b: score=1.5→74%, score=2→77%
+            confidence = min(92, 75 + int(final_score * 5))   # 2026-06-18: raised 67→75; score=0.6→78, score=1.0→80, score=1.5→82
         elif final_score <= short_threshold_high:
             direction = "SHORT"
             confidence = min(95, 78 + int(abs(final_score) * 4))
@@ -3742,10 +3742,11 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
             ensemble = None
 
         # STACKING FLOOR: compound multiplier penalties (momentum_crash, gap, ADX, trend,
-        # ensemble) can stack to collapse a strong pick from 88% → 45%.  Cap total
-        # multiplier damage at 10 points so high-conviction picks stay in the 75-88% range.
+        # ensemble) can stack to collapse a strong pick from 88% → 60%.  Cap total
+        # multiplier damage at 5 points so high-conviction picks stay in the 75-90% range.
+        # 2026-06-18: tightened -10 → -5 to target 70-90 confidence band.
         if direction != "NEUTRAL":
-            confidence = max(_base_confidence - 10, confidence)
+            confidence = max(_base_confidence - 5, confidence)
 
         # Build factor breakdown for transparency
         factor_breakdown = {
