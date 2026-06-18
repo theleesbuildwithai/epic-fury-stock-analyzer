@@ -4415,6 +4415,24 @@ def _generate_quant_picks_impl() -> dict:
             from datetime import datetime as _dt_save
             now_ts = _dt_save.utcnow()
             for t, df in price_data.items():
+                # v141: sanity gate — if new price is <40% of existing median, it's corrupted data
+                # (e.g. option premium $18 vs actual stock $400+). Keep old lastgood instead.
+                try:
+                    _prev = _PRICE_DATA_LASTGOOD.get(t)
+                    if _prev and isinstance(_prev, dict) and "df" in _prev:
+                        _prev_closes = _prev["df"]["Close"].dropna()
+                        _new_closes = df["Close"].dropna()
+                        if len(_prev_closes) > 0 and len(_new_closes) > 0:
+                            _prev_median = float(_prev_closes.median())
+                            _new_close = float(_new_closes.iloc[-1])
+                            if _prev_median > 0 and _new_close > 0 and _new_close < _prev_median * 0.40:
+                                logger.warning(
+                                    f"LASTGOOD CORRUPT GUARD {t}: new=${_new_close:.2f} vs "
+                                    f"prev_median=${_prev_median:.2f} — keeping old lastgood"
+                                )
+                                continue  # skip update, keep old clean data
+                except Exception:
+                    pass  # any error in guard → proceed with normal update
                 _PRICE_DATA_LASTGOOD[t] = {"df": df, "ts": now_ts}
         except Exception:
             pass
@@ -6035,10 +6053,40 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             if current_price > ma50 * 1.02: trend_score += 10.0
         trend_score = min(30.0, trend_score)
         stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
-        total_score = mom_score + trend_score + stab_score
-        # v135: raised base 55→65, range now 73-92 for qualified picks
-        confidence = round(65.0 + (total_score / 100.0) * 27.0)
+
+        # v141: 3-month momentum acceleration bonus (additive only — no disqualification)
+        mom_3m_score = 0.0
+        if n >= 63:
+            mom_3m = (float(closes[-1]) / float(closes[-63]) - 1) * 100
+        else:
+            mom_3m = mom_12m / 4.0
+        mom_3m_score = max(0.0, min(15.0, 7.5 + mom_3m * 0.3))
+
+        # v141: RSI health bonus — 40-70 zone = healthy uptrend, not overbought
+        # Pure bonus: any RSI zone still qualifies, just less extra credit
+        rsi_score = 0.0
+        try:
+            if n >= 15:
+                _g = [max(0.0, float(closes[-14 + i]) - float(closes[-15 + i])) for i in range(14)]
+                _l = [max(0.0, float(closes[-15 + i]) - float(closes[-14 + i])) for i in range(14)]
+                _ag = sum(_g) / 14
+                _al = sum(_l) / 14 + 1e-10
+                rsi = 100.0 - (100.0 / (1.0 + _ag / _al))
+                if 40 <= rsi <= 70:
+                    rsi_score = 10.0   # ideal uptrend zone
+                elif (30 <= rsi < 40) or (70 < rsi <= 80):
+                    rsi_score = 5.0    # acceptable
+                # RSI <30 (oversold) or >80 (overbought) = 0 bonus but NOT disqualified
+        except Exception:
+            pass
+
+        total_score = mom_score + trend_score + stab_score + mom_3m_score + rsi_score
+        # v141: max total ~115 (mom 50 + trend 30 + stab 20 + mom3m 15 + rsi 10)
+        # Range still 73-92 by design — more picks hit upper band with better technicals
+        confidence = round(65.0 + (total_score / 115.0) * 27.0)
         reasons = []
+        if mom_3m > 15:
+            reasons.append(f"3m acceleration +{mom_3m:.0f}% — strong recent momentum")
         if mom_12m > 30:
             reasons.append(f"12m momentum +{mom_12m:.0f}% — strong sustained uptrend")
         elif mom_12m > 10:
