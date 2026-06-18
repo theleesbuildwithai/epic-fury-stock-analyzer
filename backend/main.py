@@ -10024,8 +10024,11 @@ def queued_trades(request: Request):
         # v141b: pick the reason that aligns with trade direction so display
         # is never confusing (e.g. "bullish" reason on a SHORT pick).
         # Tries to find a directionally-matching reason; falls back to first reason.
-        _LONG_WORDS = ("bullish", "uptrend", "momentum", "strength", "golden", "above ma", "breakout", "accumul")
-        _SHORT_WORDS = ("bearish", "overbought", "reversal", "extended", "sell", "below ma", "distribution", "mean rev")
+        # Match DIRECTION words only — not indicator names.
+        # "Relative Strength bearish" contains "strength" but direction is bearish,
+        # so we must NOT match on "strength". Only "bullish"/"bearish" etc are safe.
+        _LONG_WORDS = ("bullish", "uptrend", "above ma", "breakout", "accumul", "golden cross")
+        _SHORT_WORDS = ("bearish", "overbought", "reversal", "extended", "distribution", "mean rev", "death cross")
 
         def _pick_reason(reasons, is_long):
             if not reasons:
