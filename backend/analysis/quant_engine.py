@@ -5032,16 +5032,20 @@ def _generate_quant_picks_impl() -> dict:
             top_shorts.sort(key=lambda x: x.get("confidence", 0), reverse=True)
 
             # --- BULL regime: apply confidence floor so longs reflect regime strength ---
+            # 2026-06-18 v133: raised floor 60→72, removed 85% regime gate (always apply in BULL).
+            # Target confidence range: 70-100%. Post-scan penalties (multi-TF, sector, overnight)
+            # can stack past the main-loop stacking floor. This final floor ensures no BULL long
+            # is displayed or traded below 72 regardless of stacking. Quality enforced by score gate.
             regime_str_conf = regime.get("regime", "SIDEWAYS") if isinstance(regime, dict) else "SIDEWAYS"
-            regime_conf_pct = regime.get("confidence", 50) if isinstance(regime, dict) else 50
-            if regime_str_conf == "BULL" and regime_conf_pct >= 85:
+            if regime_str_conf == "BULL":
                 for pick in top_longs:
-                    if pick.get("confidence", 0) < 60:
-                        pick["confidence"] = 60
-                        pick["reasons"].append("BULL 85%+ regime floor applied")
+                    if pick.get("confidence", 0) < 72:
+                        pick["confidence"] = 72
+                        pick["reasons"].append("BULL regime floor: 72% minimum")
 
-            # --- Remove picks below 55% — paper-trader won't touch <57%, users shouldn't see <55% ---
-            top_longs = [p for p in top_longs if p.get("confidence", 0) >= 55]
+            # --- Remove picks below 70% — only show 70%+ conviction signals ---
+            # 2026-06-18 v133: raised 55→70 to match user target band of 70-100%.
+            top_longs = [p for p in top_longs if p.get("confidence", 0) >= 70]
             top_shorts = [p for p in top_shorts if p.get("confidence", 0) >= 55]
 
             logger.info(f"POST-FILTER: {len(top_longs)} longs, {len(top_shorts)} shorts after smart filters")
@@ -5730,29 +5734,37 @@ def get_signal_weights_safe() -> dict:
 _FUNDAMENTAL_PICKS_CACHE_TTL = 6 * 3600  # 6 hours
 
 
-# Fixed large-cap universe for STB — reliable, always downloadable, great for long-term holds
+# Fixed large-cap + high-quality universe for STB — expanded 2026-06-18 v133
 _STB_UNIVERSE = [
     # Mega-cap tech
     "AAPL","MSFT","NVDA","GOOGL","META","AMZN","TSLA","AVGO","ORCL","CRM",
+    "ADBE","CSCO","NOW","INTU","PANW","CRWD","SNPS","CDNS",
     # Financials
     "BRK-B","JPM","V","MA","BAC","WFC","GS","MS","BLK","SPGI",
+    "CB","AXP","ICE","CME","MCO","MSCI","HCA","URI",
     # Healthcare
     "UNH","LLY","JNJ","ABBV","MRK","TMO","ABT","DHR","BSX","ELV",
+    "VRTX","REGN","IDXX","VEEV","DXCM","ISRG","ZTS","MRNA",
     # Consumer & Retail
     "COST","WMT","HD","MCD","SBUX","NKE","TGT","LOW","TJX","AMGN",
+    "BKNG","MAR","HLT","YUM","ULTA","ABNB","ROST","LULU",
     # Industrials
     "CAT","RTX","HON","UPS","DE","LMT","GE","MMM","EMR","ETN",
+    "ROK","GD","TDG","TT","CTAS","FAST","ODFL","CPRT",
     # Energy
     "XOM","CVX","COP","EOG","SLB","PSX","VLO","MPC","OXY","HAL",
     # Semis / Tech hardware
     "AMD","INTC","QCOM","MU","AMAT","LRCX","KLAC","TXN","ADI","MCHP",
+    "MRVL","NXPI","KEYS","ON","MPWR",
+    # Growth tech / Software
+    "PLTR","SNOW","DDOG","NET","ZS","OKTA","MDB","COIN","HOOD","TTWO",
     # Communications & Media
-    "NFLX","DIS","CMCSA","T","VZ","CHTR","TMUS",
+    "NFLX","DIS","CMCSA","T","VZ","CHTR","TMUS","SPOT","EA",
     # REITs & Utilities
-    "AMT","PLD","NEE","DUK","SO","AEP","D",
+    "AMT","PLD","NEE","DUK","SO","AEP","D","SRE","CCI","EQIX",
     # International large-caps
-    "TSM","ASML","NVO","SAP",
-    # Vanguard core ETFs (user-requested 2026-06-17) — strong trend, low vol, S&P/growth/dividend
+    "TSM","ASML","NVO","SAP","SHOP",
+    # Vanguard core ETFs
     "VOO","VUG","VTI","VGT","VIG",
 ]
 
@@ -5827,7 +5839,7 @@ _COMPANY_NAMES: dict = {
     "CB": "Chubb", "POOL": "Pool Corp", "MS": "Morgan Stanley",
     "GS": "Goldman Sachs", "TTWO": "Take-Two Interactive",
     "W": "Wayfair", "BLK": "BlackRock",
-    # Additional tickers that appear in quant picks
+    # Additional tickers — quant picks + expanded STB universe
     "MRVL": "Marvell Technology", "DXCM": "Dexcom",
     "ULTA": "Ulta Beauty", "ABNB": "Airbnb",
     "RIOT": "Riot Platforms", "SNOW": "Snowflake",
@@ -5837,6 +5849,28 @@ _COMPANY_NAMES: dict = {
     "MCHP": "Microchip Technology", "KLAC": "KLA Corp",
     "HON": "Honeywell", "WFC": "Wells Fargo",
     "PLTR": "Palantir", "ROK": "Rockwell Automation",
+    # Expanded STB universe additions
+    "ADBE": "Adobe", "CSCO": "Cisco", "NOW": "ServiceNow",
+    "INTU": "Intuit", "PANW": "Palo Alto Networks", "CRWD": "CrowdStrike",
+    "SNPS": "Synopsys", "CDNS": "Cadence Design Systems",
+    "ICE": "Intercontinental Exchange", "CME": "CME Group",
+    "MCO": "Moody's", "MSCI": "MSCI Inc.",
+    "VRTX": "Vertex Pharmaceuticals", "ISRG": "Intuitive Surgical",
+    "ZTS": "Zoetis", "MRNA": "Moderna",
+    "BKNG": "Booking Holdings", "MAR": "Marriott International",
+    "HLT": "Hilton Hotels", "YUM": "Yum! Brands",
+    "ROST": "Ross Stores", "LULU": "Lululemon",
+    "TDG": "TransDigm Group", "TT": "Trane Technologies",
+    "CTAS": "Cintas", "FAST": "Fastenal",
+    "ODFL": "Old Dominion Freight", "CPRT": "Copart",
+    "ON": "ON Semiconductor", "MPWR": "Monolithic Power Systems",
+    "DDOG": "Datadog", "NET": "Cloudflare", "ZS": "Zscaler",
+    "OKTA": "Okta", "MDB": "MongoDB",
+    "COIN": "Coinbase", "TTWO": "Take-Two Interactive",
+    "SPOT": "Spotify", "EA": "Electronic Arts",
+    "CCI": "Crown Castle", "EQIX": "Equinix",
+    "SRE": "Sempra", "SHOP": "Shopify",
+    "NXPI": "NXP Semiconductors", "KEYS": "Keysight Technologies",
 }
 
 

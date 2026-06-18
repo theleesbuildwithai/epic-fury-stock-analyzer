@@ -5448,9 +5448,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v132-confidence-70-90-range",
+        "commit_marker": "feat-v133-confidence-70plus-expanded-universe",
         "date": "2026-06-18",
         "fixes_in_build": [
+            "v133_bull_regime_floor_60to72_always_applies_no_85pct_gate",
+            "v133_min_display_filter_55to70_only_show_70pct_conviction",
+            "v133_stb_universe_expanded_62to130plus_tickers",
+            "v133_company_names_30plus_new_additions",
             "v132_bull_long_base_conf_67to75_78to83_stacking_floor_10to5_targets_70_90_range",
             "v131_company_names_mrvl_dxcm_ulta_abnb_riot_snow_gps_gd_veev_regn_sbux_ge_mchp_klac_hon_wfc_pltr_rok",
             "v130_bull_long_gate_52_to_45_post_scan_penalty_stacking_fix",
