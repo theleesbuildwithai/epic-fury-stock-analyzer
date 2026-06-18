@@ -678,6 +678,8 @@ QUANT_UNIVERSE = [
     # Additional ETFs
     "DIA", "MTUM", "VLUE", "QUAL", "SIZE", "XLY", "XLC", "XLB", "XLRE",
     "KWEB", "EEM", "FXI", "EWZ", "EWJ",
+    # Vanguard core ETFs (user-requested 2026-06-17)
+    "VOO", "VUG", "VTI", "VGT", "VIG",
 ]
 
 
@@ -5749,7 +5751,76 @@ _STB_UNIVERSE = [
     "AMT","PLD","NEE","DUK","SO","AEP","D",
     # International large-caps
     "TSM","ASML","NVO","SAP",
+    # Vanguard core ETFs (user-requested 2026-06-17) — strong trend, low vol, S&P/growth/dividend
+    "VOO","VUG","VTI","VGT","VIG",
 ]
+
+
+# Company name lookup — covers all STB universe tickers + ETFs
+_COMPANY_NAMES: dict = {
+    # Mega-cap tech
+    "AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "GOOGL": "Alphabet",
+    "META": "Meta Platforms", "AMZN": "Amazon", "TSLA": "Tesla", "AVGO": "Broadcom",
+    "ORCL": "Oracle", "CRM": "Salesforce", "ADBE": "Adobe",
+    # Financials
+    "BRK-B": "Berkshire Hathaway", "JPM": "JPMorgan Chase", "V": "Visa",
+    "MA": "Mastercard", "BAC": "Bank of America", "WFC": "Wells Fargo",
+    "GS": "Goldman Sachs", "MS": "Morgan Stanley", "BLK": "BlackRock",
+    "SPGI": "S&P Global", "AXP": "American Express", "ICE": "Intercontinental Exchange",
+    "FIS": "Fidelity National Info Svcs",
+    # Healthcare
+    "UNH": "UnitedHealth Group", "LLY": "Eli Lilly", "JNJ": "Johnson & Johnson",
+    "ABBV": "AbbVie", "MRK": "Merck", "TMO": "Thermo Fisher Scientific",
+    "ABT": "Abbott Labs", "DHR": "Danaher", "BSX": "Boston Scientific",
+    "ELV": "Elevance Health", "VRTX": "Vertex Pharmaceuticals",
+    "IDXX": "IDEXX Laboratories", "VEEV": "Veeva Systems",
+    "AMGN": "Amgen", "GILD": "Gilead Sciences", "REGN": "Regeneron",
+    "MRNA": "Moderna", "PFE": "Pfizer", "BMY": "Bristol-Myers Squibb",
+    # Consumer & Retail
+    "COST": "Costco", "WMT": "Walmart", "HD": "Home Depot", "MCD": "McDonald's",
+    "SBUX": "Starbucks", "NKE": "Nike", "TGT": "Target", "LOW": "Lowe's",
+    "TJX": "TJX Companies", "BKNG": "Booking Holdings", "CMG": "Chipotle Mexican Grill",
+    "W": "Wayfair", "ROST": "Ross Stores",
+    # Industrials
+    "CAT": "Caterpillar", "RTX": "RTX Corp", "HON": "Honeywell", "UPS": "UPS",
+    "DE": "John Deere", "LMT": "Lockheed Martin", "GE": "GE Aerospace",
+    "MMM": "3M", "EMR": "Emerson Electric", "ETN": "Eaton",
+    "TDG": "TransDigm Group", "TT": "Trane Technologies", "BA": "Boeing",
+    "ROK": "Rockwell Automation", "GD": "General Dynamics",
+    # Energy
+    "XOM": "ExxonMobil", "CVX": "Chevron", "COP": "ConocoPhillips",
+    "EOG": "EOG Resources", "SLB": "SLB", "PSX": "Phillips 66",
+    "VLO": "Valero Energy", "MPC": "Marathon Petroleum",
+    "OXY": "Occidental Petroleum", "HAL": "Halliburton",
+    # Semis / Tech hardware
+    "AMD": "Advanced Micro Devices", "INTC": "Intel", "QCOM": "Qualcomm",
+    "MU": "Micron Technology", "AMAT": "Applied Materials", "LRCX": "Lam Research",
+    "KLAC": "KLA Corp", "TXN": "Texas Instruments", "ADI": "Analog Devices",
+    "MCHP": "Microchip Technology", "NXPI": "NXP Semiconductors",
+    "KEYS": "Keysight Technologies", "FTNT": "Fortinet",
+    # Communications & Media
+    "NFLX": "Netflix", "DIS": "Walt Disney", "CMCSA": "Comcast", "T": "AT&T",
+    "VZ": "Verizon", "CHTR": "Charter Communications", "TMUS": "T-Mobile", "EA": "Electronic Arts",
+    # Utilities & REITs
+    "AMT": "American Tower", "PLD": "Prologis", "NEE": "NextEra Energy",
+    "DUK": "Duke Energy", "SO": "Southern Company", "AEP": "American Electric Power",
+    "D": "Dominion Energy", "SRE": "Sempra",
+    # International
+    "TSM": "Taiwan Semiconductor", "ASML": "ASML", "NVO": "Novo Nordisk", "SAP": "SAP",
+    # Materials
+    "FCX": "Freeport-McMoRan", "APD": "Air Products & Chemicals",
+    "VMC": "Vulcan Materials", "AA": "Alcoa", "DD": "DuPont",
+    # Consumer Staples
+    "KO": "Coca-Cola", "PEP": "PepsiCo", "PG": "Procter & Gamble",
+    "PM": "Philip Morris", "MO": "Altria",
+    # Vanguard ETFs
+    "VOO": "Vanguard S&P 500 ETF", "VUG": "Vanguard Growth ETF",
+    "VTI": "Vanguard Total Stock Market ETF", "VGT": "Vanguard Info Tech ETF",
+    "VIG": "Vanguard Dividend Appreciation ETF",
+    # Other
+    "DHI": "D.R. Horton", "PLTR": "Palantir", "UBER": "Uber",
+    "SHOP": "Shopify", "GM": "General Motors", "F": "Ford Motor",
+}
 
 
 def generate_fundamental_picks(force: bool = False) -> dict:
@@ -5790,6 +5861,55 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # picks with all price/momentum data pre-computed. This is the fast path.
     quant_data = (_quant_cache.get("quant_picks") or {}).get("data") or {}
     quant_longs = list(quant_data.get("long_picks") or [])
+
+    # ── Live price validation for quant picks ───────────────────────────────
+    # S3-cached quant picks can have stale/corrupted prices (e.g., ROK $15
+    # vs live $458). Cross-check against _PRICE_DATA_LASTGOOD which is
+    # populated by the ongoing quant scan with fresh yfinance data.
+    # Drop any pick whose cached price diverges >50% from the live close.
+    _validated_longs = []
+    for _qp in quant_longs:
+        _sym = _qp.get("ticker") or _qp.get("symbol") or ""
+        _cached_px = float(_qp.get("price") or 0)
+        _live_entry = _PRICE_DATA_LASTGOOD.get(_sym)
+        if _live_entry and _cached_px > 0:
+            try:
+                _live_df = _live_entry.get("df") if isinstance(_live_entry, dict) else _live_entry
+                _live_px = None
+                if _live_df is not None and not _live_df.empty:
+                    import pandas as _pd_lv
+                    if isinstance(getattr(_live_df, "columns", None), _pd_lv.MultiIndex):
+                        _lv0 = _live_df.columns.get_level_values(0).tolist()
+                        if "Close" in _lv0:
+                            _s = _live_df["Close"].stack() if hasattr(_live_df["Close"], "stack") else _live_df["Close"]
+                            _live_px = float(_s.dropna().iloc[-1])
+                    elif "Close" in _live_df.columns:
+                        _live_px = float(_live_df["Close"].dropna().iloc[-1])
+                # Also try spot_price stored directly in the entry dict
+                if _live_px is None and isinstance(_live_entry, dict):
+                    _sp = _live_entry.get("spot_price")
+                    if _sp and float(_sp) > 0:
+                        _live_px = float(_sp)
+                if _live_px and _live_px > 0:
+                    _div = abs(_cached_px - _live_px) / _live_px
+                    if _div > 0.50:
+                        logger.warning(
+                            f"STB PRICE FILTER: dropped {_sym} — cached ${_cached_px:.2f} "
+                            f"vs live ${_live_px:.2f} ({_div*100:.0f}% divergence > 50% threshold)"
+                        )
+                        continue
+                    # Update the cached pick with the validated live price
+                    _qp = dict(_qp)
+                    _qp["price"] = round(_live_px, 2)
+            except Exception:
+                pass
+        _validated_longs.append(_qp)
+    if len(_validated_longs) < len(quant_longs):
+        logger.warning(
+            f"STB PRICE FILTER: dropped {len(quant_longs) - len(_validated_longs)} picks "
+            f"with corrupted cached prices"
+        )
+    quant_longs = _validated_longs
 
     # ── Source 2: _PRICE_DATA_LASTGOOD for STB universe ─────────────────────
     # Populated by the quant scan (~10 min after cold deploy). Gives us extra
@@ -5883,6 +6003,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             reasons.append("Passes uptrend + trend-quality screen")
         return {
             "ticker": sym, "symbol": sym,
+            "company_name": _COMPANY_NAMES.get(sym, sym),
             "price": round(current_price, 2),
             "sector": sector,
             "direction": "LONG",
@@ -5931,6 +6052,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
             candidates.append({
                 "ticker": ticker, "symbol": ticker,
+                "company_name": _COMPANY_NAMES.get(ticker, ticker),
                 "price": round(price, 2),
                 "sector": sector,
                 "direction": "LONG",

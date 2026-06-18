@@ -5448,9 +5448,13 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v128-options-validator-8x-winlock-pnl-veto-fresh-start-v15",
+        "commit_marker": "feat-v129-stb-company-names-etfs-live-price-validation",
         "date": "2026-06-17",
         "fixes_in_build": [
+            "v129_stb_company_names_for_all_tickers_and_etfs",
+            "v129_voo_vug_vti_vgt_vig_added_to_stb_and_quant_universe",
+            "v129_live_price_validation_drops_picks_50pct_divergence",
+            "v128_options_validator_8x_winlock_pnl_veto_fresh_start_v15",
             "v117_prefetch_fundamentals_cap_50_to_150_full_universe_coverage",
             "v117_generate_fundamental_picks_spot_price_fallback_no_bulk_download_required",
             "v117_momentum_calc_guarded_for_spot_price_only_stocks",
@@ -7703,6 +7707,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             return {
                 "rank": rank,
                 "ticker": p.get("ticker") or p.get("symbol"),
+                "company_name": p.get("company_name") or p.get("ticker") or p.get("symbol") or "",
                 "sector": p.get("sector") or "Unknown",
                 "direction": "LONG",
                 "entry_price": px,
