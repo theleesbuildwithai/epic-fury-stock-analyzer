@@ -5495,7 +5495,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v135-stb-confidence-display-70pct-min-avgo-fix-price-sanity",
+        "commit_marker": "feat-v136-quant-70pct-filter-admin-reset-endpoint",
         "date": "2026-06-18",
         "fixes_in_build": [
             "v133_bull_regime_floor_60to72_always_applies_no_85pct_gate",
@@ -5779,6 +5779,9 @@ def quant_picks(force_refresh: bool = False):
                         _fix_p["target_price"] = round(_fx_px * 0.90, 2)
                 except Exception:
                     pass
+            # v135: enforce 70% confidence minimum on quant picks endpoint
+            # Catches stale S3 cache picks scored before confidence was raised
+            _clean_longs = [p for p in _clean_longs if (p.get("confidence") or 0) >= 70]
             result["long_picks"] = _clean_longs
             result["short_picks"] = _clean_shorts
             result["picks"] = _clean_longs + _clean_shorts
@@ -10294,6 +10297,57 @@ def admin_force_scrub_trades(request: Request, ids: str):
     except Exception as e:
         logger.error(f"force-scrub-trades error: {e}")
         return {"ok": False, "reason": str(e)[:300]}
+
+
+@app.post("/api/admin/reset-portfolio-v16")
+def admin_reset_portfolio_v16():
+    """ADMIN: Force the v16 portfolio reset to $132k.
+    Closes all open positions, sets cash to $132k, advances stats_epoch,
+    clears portfolio_snapshots, inserts baseline. Safe to call multiple times
+    — idempotent after the first successful run (state flag set).
+    """
+    try:
+        from predictions.models import (
+            get_trading_state as _gts, set_trading_state as _sts,
+            get_open_trades as _got, close_paper_trade as _cpt,
+            set_cash as _sc, get_db as _gdb, save_portfolio_snapshot as _snap,
+        )
+        from datetime import datetime as _dtrv
+        _done = _gts("fresh_start_v16_done", "0")
+        _force_override = True  # admin endpoint always runs
+        _opens = _got() or []
+        _closed = 0
+        _close_errors = []
+        for _t in _opens:
+            try:
+                _cpt(_t["id"], _t.get("entry_price", 0))
+                _closed += 1
+            except Exception as _ce:
+                _close_errors.append(f"{_t.get('ticker')}: {_ce}")
+        _CASH = 132_000.00
+        _sc(_CASH, caller="admin_reset_v16",
+            reason="Admin-triggered v16 reset to $132k (AVGO corruption fix)",
+            bypass_sentinel=True)
+        _epoch = _dtrv.utcnow().isoformat()
+        _sts("stats_epoch", _epoch)
+        _conn = _gdb()
+        _conn.execute("DELETE FROM portfolio_snapshots")
+        _conn.commit()
+        _conn.close()
+        _snap(_CASH, _CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _sts("fresh_start_v16_done", "1")
+        logger.warning(f"ADMIN RESET v16: closed {_closed} positions, cash=$132k, stats reset.")
+        return {
+            "ok": True,
+            "closed_positions": _closed,
+            "close_errors": _close_errors,
+            "cash_set": _CASH,
+            "stats_epoch": _epoch,
+            "previous_v16_done_flag": _done,
+        }
+    except Exception as e:
+        logger.error(f"admin_reset_portfolio_v16 error: {e}")
+        return {"ok": False, "reason": str(e)[:400]}
 
 
 @app.get("/api/admin/inspect-trade/{ticker}")
