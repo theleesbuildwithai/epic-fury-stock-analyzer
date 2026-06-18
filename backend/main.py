@@ -5495,7 +5495,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v137-no-live-price-reject-options-premium-fix-stb-conf-sort",
+        "commit_marker": "feat-v138-lastgood-price-seed-rate-limit-proof-sanity-check",
         "date": "2026-06-18",
         "fixes_in_build": [
             "v133_bull_regime_floor_60to72_always_applies_no_85pct_gate",

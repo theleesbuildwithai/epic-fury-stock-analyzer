@@ -4089,6 +4089,24 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # while the pick (corrected by multi-source) had $170 → 50% divergence → blocked.
         # Fix: batch-fetch from the same non-yfinance source used to generate picks.
         _sanity_live_prices = {}
+        # Seed from _PRICE_DATA_LASTGOOD first — 8-tier-fetched, zero new API calls,
+        # most rate-limit-resistant. multi_source_quote_batch will overwrite with
+        # fresher data where available, but lastgood ensures we always have baseline.
+        try:
+            from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _pld_seed
+            _sanity_syms_seed = [p["symbol"] for p in all_picks[:available_slots] if p.get("symbol")]
+            for _seed_sym in _sanity_syms_seed:
+                _seed_entry = _pld_seed.get(_seed_sym)
+                if _seed_entry and isinstance(_seed_entry, dict) and "df" in _seed_entry:
+                    try:
+                        _seed_col = _seed_entry["df"]["Close"].dropna()
+                        if len(_seed_col) > 0:
+                            _sanity_live_prices[_seed_sym] = float(_seed_col.iloc[-1])
+                    except Exception:
+                        pass
+            logger.info(f"Price sanity LASTGOOD seed: {len(_sanity_live_prices)}/{len(_sanity_syms_seed)} from 8-tier cache")
+        except Exception as _seed_e:
+            logger.debug(f"LASTGOOD seed failed (non-fatal): {_seed_e}")
         try:
             from analytics.multi_source_adapter import multi_source_quote_batch as _msqb_sanity
             _sanity_syms = [p["symbol"] for p in all_picks[:available_slots] if p.get("symbol")]
@@ -4096,10 +4114,10 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             for _ss, _sd in _sanity_batch.items():
                 _sp2 = _sd.get("price") if isinstance(_sd, dict) else _sd
                 if _sp2 and float(_sp2) > 0:
-                    _sanity_live_prices[_ss] = float(_sp2)
+                    _sanity_live_prices[_ss] = float(_sp2)  # overwrite lastgood with fresher price
             logger.info(f"Price sanity pre-fetch: {len(_sanity_live_prices)}/{len(_sanity_syms)} prices from multi_source")
         except Exception as _sanity_e:
-            logger.debug(f"Price sanity pre-fetch failed (will use get_stock_info fallback): {_sanity_e}")
+            logger.debug(f"Price sanity pre-fetch failed (will use lastgood/get_stock_info fallback): {_sanity_e}")
 
         # 2026-06-16: build set of LONG-pick tickers to block contradictory puts.
         # A put on a ticker that's also a long pick bets against our own long signal.
@@ -4149,11 +4167,30 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             try:
                 _live_price = _sanity_live_prices.get(symbol)
                 if not _live_price:
-                    # Fallback to get_stock_info if multi_source missed this symbol
-                    from analysis.market_data import get_stock_info as _gsi_psc
-                    _live = _gsi_psc(symbol) or {}
-                    _live_price = _live.get("current_price") or _live.get("price")
-                # v137: REQUIRE live price — if we can't verify, never trade
+                    # Fallback 2: get_stock_info (yfinance single-ticker)
+                    try:
+                        from analysis.market_data import get_stock_info as _gsi_psc
+                        _live = _gsi_psc(symbol) or {}
+                        _live_price = _live.get("current_price") or _live.get("price")
+                    except Exception:
+                        pass
+                if not _live_price:
+                    # Fallback 3: _PRICE_DATA_LASTGOOD — already fetched by the
+                    # 8-tier scanner, zero new API calls. Most rate-limit-resistant
+                    # source available. This is why 8 tiers exist — use them here too.
+                    try:
+                        from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _pld_pt
+                        _pld_entry = _pld_pt.get(symbol)
+                        if _pld_entry and isinstance(_pld_entry, dict) and "df" in _pld_entry:
+                            _pld_col = _pld_entry["df"]["Close"].dropna()
+                            if len(_pld_col) > 0:
+                                _live_price = float(_pld_col.iloc[-1])
+                                logger.info(f"Price sanity: using LASTGOOD cache for {symbol} → ${_live_price:.2f}")
+                    except Exception:
+                        pass
+                # v137: REQUIRE live price from at least one source — if we
+                # can't verify entry price (multi_source + yfinance + lastgood
+                # all failed), skip trade. Better to miss than corrupt.
                 if not _live_price:
                     results["skipped"].append({
                         "symbol": symbol,
