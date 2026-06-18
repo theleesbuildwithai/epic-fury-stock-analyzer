@@ -5826,6 +5826,16 @@ _COMPANY_NAMES: dict = {
     "CB": "Chubb", "POOL": "Pool Corp", "MS": "Morgan Stanley",
     "GS": "Goldman Sachs", "TTWO": "Take-Two Interactive",
     "W": "Wayfair", "BLK": "BlackRock",
+    # Additional tickers that appear in quant picks
+    "MRVL": "Marvell Technology", "DXCM": "Dexcom",
+    "ULTA": "Ulta Beauty", "ABNB": "Airbnb",
+    "RIOT": "Riot Platforms", "SNOW": "Snowflake",
+    "GPS": "Gap Inc.", "GD": "General Dynamics",
+    "VEEV": "Veeva Systems", "REGN": "Regeneron",
+    "SBUX": "Starbucks", "GE": "GE Aerospace",
+    "MCHP": "Microchip Technology", "KLAC": "KLA Corp",
+    "HON": "Honeywell", "WFC": "Wells Fargo",
+    "PLTR": "Palantir", "ROK": "Rockwell Automation",
 }
 
 
