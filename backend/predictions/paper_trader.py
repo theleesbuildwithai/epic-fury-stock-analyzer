@@ -488,9 +488,9 @@ def _get_min_confidence() -> int:
     elif _is_preservation_mode():
         base = 65
     else:
-        base = 45  # Lowered 52→45 (2026-06-18): post-scan stacking (multi-TF, sector outflow,
-        # overnight) drives valid picks to 45-51 → 0 trades in BULL. At base=45: SIDEWAYS
-        # gate stays 62, BEAR gate stays 70; only BULL long gate drops 52→45.
+        base = 70  # v139 2026-06-18: raised 45→70. Confidence formula now produces 73-92%
+        # for fresh picks (65+27×score/100 base vs old 55+33). Queued picks below 70%
+        # are stale S3 cache scored before the formula raise — must not fire.
     # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
     final = max(base - 3, min(base + 5, base + shift))
@@ -3755,11 +3755,9 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _long_min_conf = max(min_conf, 70)   # Longs in bear = very high bar
             _short_min_conf = max(min_conf, 58)  # Shorts aligned with trend
         else:  # BULL
-            _long_min_conf = max(min_conf, 45)   # Bull longs — 2026-06-18: lowered 52→45.
-            # Post-scan adjustments (multi-TF LEAN_BEAR -12, sector outflow -8, overnight -5)
-            # stack and drive solid picks below 52 → 0 trades firing. At 45: GS (45,
-            # +50% mom), NKE (48), MS (46) fire; POOL (43, -28% mom) stays blocked.
-            # Quality enforced by composite_score >= 0.8, Kelly sizing, sector cap.
+            _long_min_conf = max(min_conf, 70)   # v139: raised 45→70. Confidence formula
+            # now outputs 73-92% for valid picks. Below 70 = stale cache or options premium,
+            # both must be blocked. BULL floor at 72 in quant_engine ensures fresh picks pass.
             _short_min_conf = max(min_conf, 65)  # Shorts against bull trend = high bar
         logger.info(f"Confidence gates — long:{_long_min_conf} short:{_short_min_conf} (regime:{_regime_for_gate}, base:{min_conf})")
 
