@@ -5495,7 +5495,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v139-bull-gate-70pct-no-sub70-trades-ever",
+        "commit_marker": "feat-v140-queue-filter-70pct-all-layers-locked",
         "date": "2026-06-18",
         "fixes_in_build": [
             "v133_bull_regime_floor_60to72_always_applies_no_85pct_gate",
@@ -10027,7 +10027,7 @@ def queued_trades(request: Request):
              "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("long_picks", [])
-            if p["confidence"] >= 35
+            if p["confidence"] >= 70  # v140: raised 35→70, matches execution gate
         ]
         queued_shorts = [
             {"symbol": p["symbol"], "direction": "SHORT", "confidence": p["confidence"],
@@ -10035,7 +10035,7 @@ def queued_trades(request: Request):
              "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("short_picks", [])
-            if p["confidence"] >= 35
+            if p["confidence"] >= 55  # v140: raised 35→55 for shorts
         ]
 
         return {
