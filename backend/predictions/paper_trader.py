@@ -4155,13 +4155,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     _live_price = _live.get("current_price") or _live.get("price")
                 if _live_price and price and price > 0:
                     _div = abs(_live_price - price) / price
-                    if _div > 0.35:  # 35% tolerance — allows multi-source corrections (was 10%, too tight)
+                    if _div > 0.20:  # 20% tolerance (tightened from 35% — 2026-06-18 AVGO incident)
                         results["skipped"].append({
                             "symbol": symbol,
                             "reason": (
                                 f"PRICE SANITY: pick ${price:.2f} "
                                 f"vs multi_source ${_live_price:.2f} = {_div*100:.0f}% "
-                                f"divergence (>35%) — possible corrupt data"
+                                f"divergence (>20%) — possible corrupt data"
                             ),
                         })
                         logger.warning(
@@ -4172,6 +4172,28 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     # Live price is sane — use it if materially different (>2%)
                     if _div > 0.02:
                         price = _live_price
+
+                # PICK-VS-ENTRY CROSS-CHECK: if the quant pick's recorded price
+                # (pre-validated during scan) diverges >50% from the live entry
+                # price, both sources may be corrupted (AVGO $18 incident — real
+                # price $392 but both pick AND live fetch returned $18).
+                _pick_recorded_price = float(pick.get("price") or 0)
+                if _pick_recorded_price > 0 and price > 0:
+                    _pve_div = abs(price - _pick_recorded_price) / _pick_recorded_price
+                    if _pve_div > 0.50:
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": (
+                                f"PICK-VS-ENTRY: quant pick=${_pick_recorded_price:.2f} "
+                                f"vs entry=${price:.2f} = {_pve_div*100:.0f}% "
+                                f"divergence (>50%) — both sources may be corrupted"
+                            ),
+                        })
+                        logger.warning(
+                            f"PICK-VS-ENTRY REJECT {symbol}: quant=${_pick_recorded_price:.2f} "
+                            f"entry=${price:.2f} divergence={_pve_div*100:.0f}%"
+                        )
+                        continue
             except Exception as _psc_err:
                 logger.debug(f"price sanity check skipped for {symbol}: {_psc_err}")
 

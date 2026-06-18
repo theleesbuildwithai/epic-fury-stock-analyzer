@@ -6036,7 +6036,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         trend_score = min(30.0, trend_score)
         stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
         total_score = mom_score + trend_score + stab_score
-        confidence = round(55.0 + (total_score / 100.0) * 33.0)
+        # v135: raised base 55→65, range now 73-92 for qualified picks
+        confidence = round(65.0 + (total_score / 100.0) * 27.0)
         reasons = []
         if mom_12m > 30:
             reasons.append(f"12m momentum +{mom_12m:.0f}% — strong sustained uptrend")
@@ -6059,7 +6060,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             "sector": sector,
             "direction": "LONG",
             "fundamental_score": round(total_score, 1),
-            "confidence": min(88, confidence),
+            "confidence": min(92, confidence),
             "pe": None, "fwd_pe": None, "peg_ratio": None,
             "roe_pct": None, "revenue_growth_pct": None,
             "earnings_growth_pct": None, "profit_margin_pct": None,
@@ -6108,7 +6109,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 "sector": sector,
                 "direction": "LONG",
                 "fundamental_score": round(total_score, 1),
-                "confidence": min(88, int(confidence)),
+                "confidence": min(92, int(confidence)),
                 "pe": None, "fwd_pe": None, "peg_ratio": None,
                 "roe_pct": None, "revenue_growth_pct": None,
                 "earnings_growth_pct": None, "profit_margin_pct": None,
@@ -6143,6 +6144,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             sector_counts[sec] = sector_counts.get(sec, 0) + 1
         if len(top_picks) >= 40:
             break
+
+    # v135: enforce 70% confidence minimum — nothing below 70 shows in STB
+    top_picks = [p for p in top_picks if p.get("confidence", 0) >= 70]
 
     result = {
         "long_picks": top_picks,

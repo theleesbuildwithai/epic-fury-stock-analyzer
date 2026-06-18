@@ -1427,6 +1427,53 @@ except Exception as e:
     logger.warning(f"Fresh start v15 error (non-fatal): {e}")
 
 
+# --- FRESH START v16 (2026-06-18) ---
+# AVGO price corruption: yfinance returned $18.25 for AVGO (real ~$392).
+# Both pick price AND live sanity fetch were corrupted → sanity check showed
+# 0% divergence → trade opened at $18.25 → closed at $8.52 → fake -53% loss.
+# Portfolio dropped 32.64% → 29.88%. Fix: tighten price sanity 35%→20%,
+# add pick-vs-entry cross-check. Reset all positions and stats to $132k.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v16, set_trading_state as _set_state_v16,
+    )
+    _v16_done = _get_state_v16("fresh_start_v16_done", "0")
+    if _v16_done != "1":
+        from predictions.models import (
+            get_open_trades as _v16_get_open,
+            close_paper_trade as _v16_close,
+            set_cash as _v16_set_cash,
+            get_db as _v16_get_db,
+            save_portfolio_snapshot as _v16_snap,
+        )
+        from datetime import datetime as _dt_v16
+        _v16_open = _v16_get_open() or []
+        _v16_closed = 0
+        for _v16_t in _v16_open:
+            try:
+                _v16_close(_v16_t["id"], _v16_t.get("entry_price", 0))
+                _v16_closed += 1
+            except Exception as _v16_ce:
+                logger.warning(f"RESET v16: failed to close {_v16_t.get('ticker')}: {_v16_ce}")
+        _V16_CASH = 132_000.00
+        _v16_set_cash(_V16_CASH, caller="fresh_start_v16",
+                      reason="2026-06-18 AVGO price corruption fix — reset to $132k",
+                      bypass_sentinel=True)
+        _v16_epoch = _dt_v16.utcnow().isoformat()
+        _set_state_v16("stats_epoch", _v16_epoch)
+        _v16_conn = _v16_get_db()
+        _v16_conn.execute("DELETE FROM portfolio_snapshots")
+        _v16_conn.commit()
+        _v16_snap(_V16_CASH, _V16_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v16("fresh_start_v16_done", "1")
+        logger.warning(
+            f"FRESH START v16: closed {_v16_closed} positions, "
+            f"cash=$132k, stats reset. AVGO price corruption fix."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v16 error (non-fatal): {e}")
+
+
 # --- VIX LAST-GOOD RESET (2026-06-16) ---
 # VIX guard stuck at 41.6 (old spike). Real VIX is ~16. The bidirectional
 # jump check blocked recovery (41.6→16 ratio=2.6 > 2.0). Clear the cached
@@ -5448,7 +5495,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v133-confidence-70plus-expanded-universe",
+        "commit_marker": "feat-v135-stb-confidence-display-70pct-min-avgo-fix-price-sanity",
         "date": "2026-06-18",
         "fixes_in_build": [
             "v133_bull_regime_floor_60to72_always_applies_no_85pct_gate",

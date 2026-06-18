@@ -86,9 +86,9 @@ function PickRow({ p, rank, cash }) {
         {fmt(p.revenue_growth_pct, '%', 0)}
       </div>
 
-      {/* Earn Growth */}
-      <div className={`col-span-1 text-right font-mono text-xs ${growthColor(p.earnings_growth_pct)}`}>
-        {fmt(p.earnings_growth_pct, '%', 0)}
+      {/* Confidence */}
+      <div className={`col-span-1 text-right font-mono text-xs font-bold ${confColor(p.confidence)}`}>
+        {p.confidence != null ? p.confidence + '%' : '—'}
       </div>
 
       {/* ROE */}
@@ -163,7 +163,7 @@ function PickTable({ picks, cash }) {
         <div className="col-span-1 text-right">Entry</div>
         <div className="col-span-1 text-right">Score</div>
         <div className="col-span-1 text-right">Rev Gr</div>
-        <div className="col-span-1 text-right">EPS Gr</div>
+        <div className="col-span-1 text-right">Conf</div>
         <div className="col-span-1 text-right">ROE</div>
         <div className="col-span-1 text-right">PEG</div>
         <div className="col-span-1 text-right">Stop/Tgt</div>
@@ -323,8 +323,8 @@ export default function SymbolsToBuy() {
           <div className="flex flex-wrap gap-4 text-xs text-neutral-500">
             <span><span className="text-emerald-400 font-bold">Score 70+</span> = Strong buy</span>
             <span><span className="text-amber-300 font-bold">Score 55-70</span> = Good quality</span>
+            <span><span className="text-emerald-400 font-bold">Conf 75%+</span> = High conviction · min 70% required</span>
             <span><span className="font-bold text-neutral-400">Rev Gr</span> = YoY revenue growth</span>
-            <span><span className="font-bold text-neutral-400">EPS Gr</span> = YoY earnings growth</span>
             <span><span className="font-bold text-neutral-400">ROE</span> = Return on equity</span>
             <span><span className="font-bold text-neutral-400">PEG</span> = Price/earnings-to-growth ({"<"}1.5 = good)</span>
             <span><span className="font-bold text-neutral-400">R:R</span> = Reward:risk ratio (3x+ = ideal)</span>
