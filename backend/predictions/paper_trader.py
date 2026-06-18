@@ -488,7 +488,9 @@ def _get_min_confidence() -> int:
     elif _is_preservation_mode():
         base = 65
     else:
-        base = 52  # Lowered 58→52: BULL regime generating 55-83% picks; 58 was too tight for early-cycle portfolio (was 10% deployed)
+        base = 45  # Lowered 52→45 (2026-06-18): post-scan stacking (multi-TF, sector outflow,
+        # overnight) drives valid picks to 45-51 → 0 trades in BULL. At base=45: SIDEWAYS
+        # gate stays 62, BEAR gate stays 70; only BULL long gate drops 52→45.
     # Apply auto-tune shift, clamped: -3 (winning streak) to +5 (losing)
     shift = _get_autotune_conf_shift()
     final = max(base - 3, min(base + 5, base + shift))
@@ -3753,7 +3755,11 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _long_min_conf = max(min_conf, 70)   # Longs in bear = very high bar
             _short_min_conf = max(min_conf, 58)  # Shorts aligned with trend
         else:  # BULL
-            _long_min_conf = max(min_conf, 52)   # Bull longs — trend is your friend
+            _long_min_conf = max(min_conf, 45)   # Bull longs — 2026-06-18: lowered 52→45.
+            # Post-scan adjustments (multi-TF LEAN_BEAR -12, sector outflow -8, overnight -5)
+            # stack and drive solid picks below 52 → 0 trades firing. At 45: GS (45,
+            # +50% mom), NKE (48), MS (46) fire; POOL (43, -28% mom) stays blocked.
+            # Quality enforced by composite_score >= 0.8, Kelly sizing, sector cap.
             _short_min_conf = max(min_conf, 65)  # Shorts against bull trend = high bar
         logger.info(f"Confidence gates — long:{_long_min_conf} short:{_short_min_conf} (regime:{_regime_for_gate}, base:{min_conf})")
 

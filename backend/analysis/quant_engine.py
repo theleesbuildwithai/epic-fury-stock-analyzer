@@ -5820,6 +5820,12 @@ _COMPANY_NAMES: dict = {
     # Other
     "DHI": "D.R. Horton", "PLTR": "Palantir", "UBER": "Uber",
     "SHOP": "Shopify", "GM": "General Motors", "F": "Ford Motor",
+    # Financials / other — appear in quant picks but missing names
+    "HOOD": "Robinhood Markets", "HCA": "HCA Healthcare",
+    "URI": "United Rentals", "SJM": "J.M. Smucker",
+    "CB": "Chubb", "POOL": "Pool Corp", "MS": "Morgan Stanley",
+    "GS": "Goldman Sachs", "TTWO": "Take-Two Interactive",
+    "W": "Wayfair", "BLK": "BlackRock",
 }
 
 

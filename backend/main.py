@@ -5448,9 +5448,11 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v129-stb-company-names-etfs-live-price-validation",
-        "date": "2026-06-17",
+        "commit_marker": "feat-v130-bull-gate-45-company-names-fixed",
+        "date": "2026-06-18",
         "fixes_in_build": [
+            "v130_bull_long_gate_52_to_45_post_scan_penalty_stacking_fix",
+            "v130_company_names_added_hood_hca_uri_sjm_cb_pool_ttwo",
             "v129_stb_company_names_for_all_tickers_and_etfs",
             "v129_voo_vug_vti_vgt_vig_added_to_stb_and_quant_universe",
             "v129_live_price_validation_drops_picks_50pct_divergence",
