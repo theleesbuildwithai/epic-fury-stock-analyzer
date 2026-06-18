@@ -3749,16 +3749,16 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # BULL: trend support — base gate is sufficient
         _regime_for_gate = regime  # regime already set above
         if _regime_for_gate == "SIDEWAYS":
-            _long_min_conf = max(min_conf, 62)   # Sideways chops longs hardest
-            _short_min_conf = max(min_conf, 60)  # Sideways shorts also unreliable
+            _long_min_conf = max(min_conf, 70)   # v141: raised 62→70, match universal floor
+            _short_min_conf = max(min_conf, 70)  # v141: raised 60→70, match universal floor
         elif _regime_for_gate == "BEAR":
             _long_min_conf = max(min_conf, 70)   # Longs in bear = very high bar
-            _short_min_conf = max(min_conf, 58)  # Shorts aligned with trend
+            _short_min_conf = max(min_conf, 70)  # v141: raised 58→70, match universal floor
         else:  # BULL
             _long_min_conf = max(min_conf, 70)   # v139: raised 45→70. Confidence formula
             # now outputs 73-92% for valid picks. Below 70 = stale cache or options premium,
             # both must be blocked. BULL floor at 72 in quant_engine ensures fresh picks pass.
-            _short_min_conf = max(min_conf, 65)  # Shorts against bull trend = high bar
+            _short_min_conf = max(min_conf, 70)  # v141: raised 65→70, universal 70% floor everywhere
         logger.info(f"Confidence gates — long:{_long_min_conf} short:{_short_min_conf} (regime:{_regime_for_gate}, base:{min_conf})")
 
         # Score-direction guard: longs must have positive score, shorts negative.

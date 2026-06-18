@@ -10023,20 +10023,33 @@ def queued_trades(request: Request):
 
         queued_longs = [
             {"symbol": p["symbol"], "direction": "LONG", "confidence": p["confidence"],
-             "score": p["composite_score"], "price": p["price"], "sector": p.get("sector"),
+             "score": p.get("composite_score") or p.get("fundamental_score") or 0,
+             "price": p["price"], "sector": p.get("sector"),
              "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("long_picks", [])
-            if p["confidence"] >= 70  # v140: raised 35→70, matches execution gate
+            # v141: 70% minimum + reject picks mislabeled as SHORT inside long_picks
+            if p["confidence"] >= 70 and str(p.get("direction", "LONG")).upper() != "SHORT"
         ]
         queued_shorts = [
             {"symbol": p["symbol"], "direction": "SHORT", "confidence": p["confidence"],
-             "score": p["composite_score"], "price": p["price"], "sector": p.get("sector"),
+             "score": p.get("composite_score") or p.get("fundamental_score") or 0,
+             "price": p["price"], "sector": p.get("sector"),
              "reason": p["reasons"][0] if p.get("reasons") else "Multi-factor signal",
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("short_picks", [])
-            if p["confidence"] >= 55  # v140: raised 35→55 for shorts
+            if p["confidence"] >= 70  # v141: raised 55→70 to match all other floors
         ]
+
+        # v141: deduplicate — if same ticker queued as both LONG and SHORT,
+        # that's a contradictory signal. Execution engine drops ties, display must too.
+        _long_syms = {t["symbol"] for t in queued_longs}
+        _short_syms = {t["symbol"] for t in queued_shorts}
+        _conflicts = _long_syms & _short_syms
+        if _conflicts:
+            logger.warning(f"DISPLAY DEDUP: conflicting long+short signals on {_conflicts} — removed from both")
+            queued_longs = [t for t in queued_longs if t["symbol"] not in _conflicts]
+            queued_shorts = [t for t in queued_shorts if t["symbol"] not in _conflicts]
 
         return {
             "queued_longs": queued_longs,
