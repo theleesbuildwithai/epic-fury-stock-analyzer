@@ -7810,7 +7810,12 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             "short_picks": [],  # Long-only fundamental strategy
             "long_count": len(formatted_longs),
             "short_count": 0,
-            "universe_scanned": data.get("universe_scanned", 0),
+            # v142: full scan funnel breakdown
+            "universe_total": data.get("universe_total", 0),
+            "tickers_attempted": data.get("tickers_attempted", 0),
+            "candidates_scored": data.get("candidates_scored", 0),
+            "picks_selected": data.get("picks_selected", len(formatted_longs)),
+            "universe_scanned": data.get("tickers_attempted", data.get("universe_scanned", 0)),
             "guidance": (
                 "Fundamental quality picks — hold 6-12 weeks. "
                 "These companies have strong earnings growth, high ROE, and reasonable valuations. "

@@ -6081,9 +6081,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             pass
 
         total_score = mom_score + trend_score + stab_score + mom_3m_score + rsi_score
-        # v141: max total ~115 (mom 50 + trend 30 + stab 20 + mom3m 15 + rsi 10)
-        # Range still 73-92 by design — more picks hit upper band with better technicals
-        confidence = round(65.0 + (total_score / 115.0) * 27.0)
+        # v142: STB has its own confidence range 75-95% (distinct from quant HF 71-92%)
+        # Base raised 65→73, multiplier 27→22, max 115 unchanged
+        # Perfect score (115) → 95%, mediocre (60) → 85%, floor → 75%
+        confidence = round(73.0 + (total_score / 115.0) * 22.0)
         reasons = []
         if mom_3m > 15:
             reasons.append(f"3m acceleration +{mom_3m:.0f}% — strong recent momentum")
@@ -6108,7 +6109,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             "sector": sector,
             "direction": "LONG",
             "fundamental_score": round(total_score, 1),
-            "confidence": min(92, confidence),
+            "confidence": min(95, confidence),  # v142: STB cap raised 92→95
             "pe": None, "fwd_pe": None, "peg_ratio": None,
             "roe_pct": None, "revenue_growth_pct": None,
             "earnings_growth_pct": None, "profit_margin_pct": None,
@@ -6136,11 +6137,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             confidence = float(p.get("confidence") or 60)
             sector = p.get("sector") or SECTOR_MAP.get(ticker, "Unknown")
 
-            # Re-score with STB long-term lens
+            # Re-score with STB long-term lens — independent of quant confidence
             mom_score = max(15.0, min(50.0, 25.0 + momentum * 0.5))
             qual_score = max(10.0, min(30.0, composite * 10.0))
             stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
             total_score = mom_score + qual_score + stab_score
+            # v142: STB own confidence formula — max 100, range 75-95%
+            # Higher quality signal (composite score) pushes toward 95%
+            stb_conf = round(73.0 + (total_score / 100.0) * 22.0)
+            stb_conf = max(75, min(95, stb_conf))
 
             reasons = list(p.get("reasons") or [])
             if momentum > 20:
@@ -6157,7 +6162,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 "sector": sector,
                 "direction": "LONG",
                 "fundamental_score": round(total_score, 1),
-                "confidence": min(92, int(confidence)),
+                "confidence": stb_conf,  # v142: STB-own formula, not inherited quant conf
                 "pe": None, "fwd_pe": None, "peg_ratio": None,
                 "roe_pct": None, "revenue_growth_pct": None,
                 "earnings_growth_pct": None, "profit_margin_pct": None,
@@ -6197,17 +6202,30 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # v135: enforce 70% confidence minimum — nothing below 70 shows in STB
     top_picks = [p for p in top_picks if p.get("confidence", 0) >= 70]
 
+    # v142: expose full scan funnel so user can see how much of the universe was processed
+    _tickers_attempted = len(quant_longs) + len(lastgood_stocks)
+    _candidates_scored = len(candidates)  # passed initial filters, got a score
+    _picks_selected = len(top_picks)      # passed 70% confidence minimum
+    _universe_total = len(QUANT_UNIVERSE)
+
     result = {
         "long_picks": top_picks,
         "short_picks": [],
         "generated_at": datetime.now().isoformat(),
-        "universe_scanned": len(candidates),
+        # v142: full scan funnel breakdown
+        "universe_total": _universe_total,          # total tickers in universe
+        "tickers_attempted": _tickers_attempted,    # priced & attempted to score
+        "candidates_scored": _candidates_scored,    # passed initial filters, got a score
+        "picks_selected": _picks_selected,          # passed 70% confidence gate
+        "universe_scanned": _tickers_attempted,     # backward compat alias
         "regime": {"regime": "BULL"},
     }
 
     _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
     logger.warning(
-        f"FUNDAMENTAL PICKS: {len(top_picks)} picks from {len(candidates)} candidates "
+        f"FUNDAMENTAL PICKS: {_picks_selected} picks | funnel: "
+        f"{_universe_total} universe → {_tickers_attempted} attempted "
+        f"→ {_candidates_scored} scored → {_picks_selected} selected "
         f"(quant={len(quant_longs)}, lastgood_supplement={len(lastgood_stocks)})"
     )
     return result

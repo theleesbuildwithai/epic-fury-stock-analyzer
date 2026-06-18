@@ -285,7 +285,13 @@ export default function SymbolsToBuy() {
               Picks: <span className="text-white font-bold">{data.long_count ?? 0}</span>
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Universe scanned: <span className="text-white font-bold">{data.universe_scanned ?? '—'}</span>
+              Universe: <span className="text-white font-bold">{data.universe_total ?? '—'}</span>
+            </span>
+            <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
+              Priced: <span className="text-white font-bold">{data.tickers_attempted ?? data.universe_scanned ?? '—'}</span>
+            </span>
+            <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
+              Scored: <span className="text-white font-bold">{data.candidates_scored ?? '—'}</span>
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
               Cache age: <span className={data.cache_is_restoring ? 'text-yellow-400 font-bold' : 'text-white font-bold'}>
