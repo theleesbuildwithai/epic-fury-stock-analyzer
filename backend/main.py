@@ -10058,7 +10058,11 @@ def queued_trades(request: Request):
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("long_picks", [])
             # v141: 70% minimum + reject picks mislabeled as SHORT inside long_picks
-            if p["confidence"] >= 70 and str(p.get("direction", "LONG")).upper() != "SHORT"
+            # v142: require non-negative composite score — negative = bearish signal,
+            #   should never display as a LONG (and would be blocked at execution anyway)
+            if p["confidence"] >= 70
+            and str(p.get("direction", "LONG")).upper() != "SHORT"
+            and (p.get("composite_score") or 0) >= 0
         ]
         queued_shorts = [
             {"symbol": p["symbol"], "direction": "SHORT", "confidence": p["confidence"],
