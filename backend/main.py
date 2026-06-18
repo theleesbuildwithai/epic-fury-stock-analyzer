@@ -5495,7 +5495,7 @@ def safe_float_or_zero(v):
 @app.get("/api/build-version")
 def build_version():
     return {
-        "commit_marker": "feat-v136-quant-70pct-filter-admin-reset-endpoint",
+        "commit_marker": "feat-v137-no-live-price-reject-options-premium-fix-stb-conf-sort",
         "date": "2026-06-18",
         "fixes_in_build": [
             "v133_bull_regime_floor_60to72_always_applies_no_85pct_gate",
@@ -5877,6 +5877,8 @@ def quant_picks(force_refresh: bool = False):
                     _snap["regime"] = _s3_reg
                 _snap["cache_status"] = "s3_fallback"
                 _snap["_endpoint_version"] = "v15-vix-sanitized"
+                # v136: 70% confidence filter on all fallback paths
+                _snap["long_picks"] = [p for p in (_snap.get("long_picks") or []) if (p.get("confidence") or 0) >= 70]
                 logger.warning(
                     f"quant-picks: serving real S3 ({len(_snap.get('long_picks') or [])}L "
                     f"{len(_snap.get('short_picks') or [])}S) — cache cold, scan running"
@@ -5914,8 +5916,10 @@ def quant_picks(force_refresh: bool = False):
                         )
                     _db_qp["cache_status"] = "db_backup"
                     _db_qp["_endpoint_version"] = "v15-vix-sanitized"
+                    # v136: 70% confidence filter on all fallback paths
+                    _db_qp["long_picks"] = [p for p in (_db_qp.get("long_picks") or []) if (p.get("confidence") or 0) >= 70]
                     logger.warning(
-                        f"quant-picks: serving DB backup ({_db_qp_l}L {_db_qp_s}S) "
+                        f"quant-picks: serving DB backup ({len(_db_qp.get('long_picks') or [])}L {_db_qp_s}S) "
                         f"— S3+cache both empty"
                     )
                     return JSONResponse(content=_safe_serialize(_db_qp))

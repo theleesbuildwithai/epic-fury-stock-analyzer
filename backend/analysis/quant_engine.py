@@ -6132,7 +6132,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         except Exception as _e:
             logger.debug(f"FUNDAMENTAL PICKS lastgood score error {sym}: {_e}")
 
-    candidates.sort(key=lambda x: -x["fundamental_score"])
+    # v137: sort by confidence desc (user request), then score as tiebreaker
+    candidates.sort(key=lambda x: (-x.get("confidence", 0), -x.get("fundamental_score", 0)))
 
     # Max 5 per sector, top 40 picks
     sector_counts: dict = {}

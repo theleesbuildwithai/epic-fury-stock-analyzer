@@ -4153,8 +4153,35 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                     from analysis.market_data import get_stock_info as _gsi_psc
                     _live = _gsi_psc(symbol) or {}
                     _live_price = _live.get("current_price") or _live.get("price")
+                # v137: REQUIRE live price — if we can't verify, never trade
+                if not _live_price:
+                    results["skipped"].append({
+                        "symbol": symbol,
+                        "reason": "NO LIVE PRICE: cannot verify entry — yfinance unavailable, skipping to prevent corrupted entry",
+                    })
+                    logger.warning(f"NO LIVE PRICE REJECT {symbol}: live price unavailable, trade skipped")
+                    continue
                 if _live_price and price and price > 0:
                     _div = abs(_live_price - price) / price
+                    # v137: also catch options premium entries — if price is < 20% of live
+                    # stock price and instrument is CALL/PUT, the entry_price is an option
+                    # premium, not the stock price (yfinance returned stock price correctly
+                    # but pick price is the option premium → mismatch)
+                    _instr = str(direction or "").upper()
+                    if _div > 0.80 and _instr in ("LONG", "CALL", "PUT"):
+                        results["skipped"].append({
+                            "symbol": symbol,
+                            "reason": (
+                                f"OPTIONS PREMIUM MISMATCH: pick=${price:.2f} vs "
+                                f"underlying=${_live_price:.2f} ({_div*100:.0f}% gap) — "
+                                f"entry_price appears to be option premium, not stock price"
+                            ),
+                        })
+                        logger.warning(
+                            f"OPTIONS PREMIUM REJECT {symbol}: pick=${price:.2f} "
+                            f"underlying=${_live_price:.2f} gap={_div*100:.0f}%"
+                        )
+                        continue
                     if _div > 0.20:  # 20% tolerance (tightened from 35% — 2026-06-18 AVGO incident)
                         results["skipped"].append({
                             "symbol": symbol,
