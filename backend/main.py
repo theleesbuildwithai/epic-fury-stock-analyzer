@@ -5849,7 +5849,8 @@ def quant_picks(force_refresh: bool = False):
                     _short_tickers_seen.add(_sym)
                     _clean_shorts.append(_sp)
             _clean_longs = [p for p in _clean_longs
-                            if float(p.get("composite_score") or 0) >= 0
+                            if (p.get("confidence") or 0) >= 70
+                            and float(p.get("composite_score") or 0) >= 0
                             and float(p.get("price") or 0) >= 10]
             result["long_picks"] = _clean_longs
             result["short_picks"] = _clean_shorts
