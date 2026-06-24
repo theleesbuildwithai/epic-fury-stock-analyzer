@@ -31,6 +31,8 @@ Safety nets (lessons from previous bugs):
     - close_paper_trade() called with 2 args only (no reason param)
     - Price fetch failure = HOLD (never exit on bad data)
     - Duplicate guard: one open position per pair_id
+    - Cooldown guard: no re-entry within 4h of last close (prevents open→close→reopen loop)
+    - Minimum hold time: no z-based exit within first 2h (prevents immediate reversion exits)
     - Cash floor: pairs cannot starve directional trades
     - Market hours enforced by caller (never opens off-hours)
     - yfinance multi-ticker fetch with group_by='ticker' (avoids column flattening bug)
@@ -282,6 +284,30 @@ def execute_pairs_from_signals(quant_picks: dict, open_trades: list,
             logger.info(f"PAIRS ENTRY: at max concurrent pairs ({MAX_CONCURRENT_PAIRS})")
             return opened
 
+        # Cooldown guard — don't re-enter a pair within 4h of its last close.
+        # Prevents the loop: open → immediate z-reversion exit → reopen → repeat.
+        PAIR_COOLDOWN_HOURS = 4
+        recently_closed_pairs = set()
+        try:
+            from predictions.models import get_closed_trades
+            _cutoff_ts = datetime.now().timestamp() - (PAIR_COOLDOWN_HOURS * 3600)
+            for _ct in get_closed_trades(limit=200):
+                try:
+                    _exit_str = _ct.get("exit_date") or ""
+                    if not _exit_str:
+                        continue
+                    _exit_ts = datetime.fromisoformat(str(_exit_str)).timestamp()
+                    if _exit_ts < _cutoff_ts:
+                        break  # results are DESC by exit_date, safe to stop
+                    _cf = json.loads(_ct.get("factors") or "{}")
+                    _cpid = _cf.get("pair_id")
+                    if _cpid:
+                        recently_closed_pairs.add(_cpid)
+                except Exception:
+                    continue
+        except Exception as _ce:
+            logger.debug(f"PAIRS COOLDOWN: could not load closed trades: {_ce}")
+
         pairs_cash_budget = cash * MAX_CASH_USAGE_PCT
         pairs_cash_used   = 0.0
 
@@ -299,8 +325,13 @@ def execute_pairs_from_signals(quant_picks: dict, open_trades: list,
 
                 pair_id = f"{sym_a}/{sym_b}"
 
-                # Duplicate guard
+                # Duplicate guard — already open
                 if pair_id in open_pair_ids:
+                    continue
+
+                # Cooldown guard — closed within last 4h, skip to prevent looping
+                if pair_id in recently_closed_pairs:
+                    logger.info(f"PAIRS COOLDOWN: {pair_id} closed within {PAIR_COOLDOWN_HOURS}h — skipping re-entry")
                     continue
 
                 # ---- Validate all numeric signal fields ----
@@ -583,16 +614,27 @@ def check_pairs_exits(open_trades: list) -> list:
                 long_ticker  = long_trade.get("ticker",  "")
                 short_ticker = short_trade.get("ticker", "")
 
-                # Days held
+                # Days held + hours held
+                entry_dt  = None
+                days_held = 0
+                hours_held = 0.0
                 try:
                     entry_dt  = datetime.fromisoformat(
                         long_trade.get("entry_date") or long_trade.get("entry_time", "")
                     )
-                    days_held = (datetime.now() - entry_dt).days
+                    elapsed   = datetime.now() - entry_dt
+                    days_held  = elapsed.days
+                    hours_held = elapsed.total_seconds() / 3600.0
                 except Exception:
-                    days_held = 0
+                    pass
 
                 time_stop = days_held > max(5, int(half_life * 2))
+
+                # Minimum hold time — don't exit on z-based signal within first 2h.
+                # Prevents immediate reversion exits when entry price was from stale
+                # signal data and z-score looks different with fresh data on first check.
+                MIN_HOLD_HOURS = 2.0
+                too_new_for_z_exit = hours_held < MIN_HOLD_HOURS
 
                 # Recompute spread z-score with fresh data
                 z_now, hl_now, ok = _recompute_ou_zscore(
@@ -610,7 +652,17 @@ def check_pairs_exits(open_trades: list) -> list:
 
                 # Determine exit trigger
                 exit_reason = None
-                if abs(z_now) < exit_z_target:
+                if too_new_for_z_exit:
+                    # Too new for z-based exit — only allow stop-loss if spread blew out hard
+                    if abs(z_now) > exit_z_stop * 1.5:  # 1.5x stop for very new positions
+                        exit_reason = f"EMERGENCY_STOP z_now={z_now:.2f} (held {hours_held:.1f}h)"
+                    else:
+                        logger.debug(
+                            f"PAIRS: {pair_id} hold — too new ({hours_held:.1f}h < {MIN_HOLD_HOURS}h) "
+                            f"z={z_now:.2f}"
+                        )
+                        continue
+                elif abs(z_now) < exit_z_target:
                     exit_reason = f"REVERSION z_entry={entry_z:.2f} z_now={z_now:.2f}"
                 elif abs(z_now) > exit_z_stop:
                     exit_reason = f"STOP_LOSS z_now={z_now:.2f} > {exit_z_stop}"
