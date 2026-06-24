@@ -6126,6 +6126,16 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             "hold_class": "position",
         }
 
+    # ── Prefetch fundamentals for all STB candidates ─────────────────────────
+    # _fundamentals_cache is already warmed for most symbols by score_quant_picks().
+    # This fills any gaps (lastgood-only symbols) using the same shared cache.
+    _all_stb_syms = [
+        (p.get("ticker") or p.get("symbol") or "") for p in quant_longs
+    ] + list(lastgood_stocks.keys())
+    _all_stb_syms = [s for s in _all_stb_syms if s]
+    _stb_fundamentals = _prefetch_fundamentals(_all_stb_syms) if _all_stb_syms else {}
+    logger.info(f"STB FUNDAMENTALS: fetched data for {len(_stb_fundamentals)}/{len(_all_stb_syms)} symbols")
+
     # Score quant picks using their pre-computed quant data
     for p in quant_longs:
         try:
@@ -6169,10 +6179,14 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 "direction": "LONG",
                 "fundamental_score": round(total_score, 1),
                 "confidence": stb_conf,  # v142: STB-own formula, not inherited quant conf
-                "pe": None, "fwd_pe": None, "peg_ratio": None,
-                "roe_pct": None, "revenue_growth_pct": None,
-                "earnings_growth_pct": None, "profit_margin_pct": None,
-                "debt_equity": None,
+                "pe": (_stb_fundamentals.get(ticker) or {}).get("pe"),
+                "fwd_pe": (_stb_fundamentals.get(ticker) or {}).get("fwd_pe"),
+                "peg_ratio": (_stb_fundamentals.get(ticker) or {}).get("peg_ratio"),
+                "roe_pct": (_stb_fundamentals.get(ticker) or {}).get("roe"),
+                "revenue_growth_pct": (_stb_fundamentals.get(ticker) or {}).get("revenue_growth"),
+                "earnings_growth_pct": (_stb_fundamentals.get(ticker) or {}).get("earnings_growth"),
+                "profit_margin_pct": (_stb_fundamentals.get(ticker) or {}).get("profit_margins"),
+                "debt_equity": (_stb_fundamentals.get(ticker) or {}).get("debt_equity"),
                 "momentum_12m_pct": round(momentum, 1),
                 "reasons": reasons[:5] or ["Quant quality + long-term momentum pick"],
                 "hold_recommendation": "6-12 weeks",
@@ -6187,6 +6201,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             sector = SECTOR_MAP.get(sym, "Unknown")
             pick = _score_from_history(sym, closes, sector)
             if pick:
+                _fd = _stb_fundamentals.get(sym) or {}
+                pick["pe"] = _fd.get("pe")
+                pick["fwd_pe"] = _fd.get("fwd_pe")
+                pick["peg_ratio"] = _fd.get("peg_ratio")
+                pick["roe_pct"] = _fd.get("roe")
+                pick["revenue_growth_pct"] = _fd.get("revenue_growth")
+                pick["earnings_growth_pct"] = _fd.get("earnings_growth")
+                pick["profit_margin_pct"] = _fd.get("profit_margins")
+                pick["debt_equity"] = _fd.get("debt_equity")
                 candidates.append(pick)
         except Exception as _e:
             logger.debug(f"FUNDAMENTAL PICKS lastgood score error {sym}: {_e}")
