@@ -5780,8 +5780,11 @@ def quant_picks(force_refresh: bool = False):
                 except Exception:
                     pass
             # v135: enforce 70% confidence minimum on quant picks endpoint
-            # Catches stale S3 cache picks scored before confidence was raised
-            _clean_longs = [p for p in _clean_longs if (p.get("confidence") or 0) >= 70]
+            # Also enforce score >= 0 (no bearish MR picks in longs) and price >= $10
+            _clean_longs = [p for p in _clean_longs
+                            if (p.get("confidence") or 0) >= 70
+                            and float(p.get("composite_score") or 0) >= 0
+                            and float(p.get("price") or 0) >= 10]
             result["long_picks"] = _clean_longs
             result["short_picks"] = _clean_shorts
             result["picks"] = _clean_longs + _clean_shorts
@@ -5845,6 +5848,9 @@ def quant_picks(force_refresh: bool = False):
                 if _sym and _sym not in _long_tickers_seen and _sym not in _short_tickers_seen:
                     _short_tickers_seen.add(_sym)
                     _clean_shorts.append(_sp)
+            _clean_longs = [p for p in _clean_longs
+                            if float(p.get("composite_score") or 0) >= 0
+                            and float(p.get("price") or 0) >= 10]
             result["long_picks"] = _clean_longs
             result["short_picks"] = _clean_shorts
             result["picks"] = _clean_longs + _clean_shorts
@@ -5877,8 +5883,11 @@ def quant_picks(force_refresh: bool = False):
                     _snap["regime"] = _s3_reg
                 _snap["cache_status"] = "s3_fallback"
                 _snap["_endpoint_version"] = "v15-vix-sanitized"
-                # v136: 70% confidence filter on all fallback paths
-                _snap["long_picks"] = [p for p in (_snap.get("long_picks") or []) if (p.get("confidence") or 0) >= 70]
+                # v136: confidence + score + price guard on all fallback paths
+                _snap["long_picks"] = [p for p in (_snap.get("long_picks") or [])
+                                       if (p.get("confidence") or 0) >= 70
+                                       and float(p.get("composite_score") or 0) >= 0
+                                       and float(p.get("price") or 0) >= 10]
                 logger.warning(
                     f"quant-picks: serving real S3 ({len(_snap.get('long_picks') or [])}L "
                     f"{len(_snap.get('short_picks') or [])}S) — cache cold, scan running"
@@ -5916,8 +5925,11 @@ def quant_picks(force_refresh: bool = False):
                         )
                     _db_qp["cache_status"] = "db_backup"
                     _db_qp["_endpoint_version"] = "v15-vix-sanitized"
-                    # v136: 70% confidence filter on all fallback paths
-                    _db_qp["long_picks"] = [p for p in (_db_qp.get("long_picks") or []) if (p.get("confidence") or 0) >= 70]
+                    # v136: confidence + score + price guard on all fallback paths
+                    _db_qp["long_picks"] = [p for p in (_db_qp.get("long_picks") or [])
+                                            if (p.get("confidence") or 0) >= 70
+                                            and float(p.get("composite_score") or 0) >= 0
+                                            and float(p.get("price") or 0) >= 10]
                     logger.warning(
                         f"quant-picks: serving DB backup ({len(_db_qp.get('long_picks') or [])}L {_db_qp_s}S) "
                         f"— S3+cache both empty"
