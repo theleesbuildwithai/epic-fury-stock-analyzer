@@ -6208,6 +6208,86 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # v135: enforce 70% confidence minimum — nothing below 70 shows in STB
     top_picks = [p for p in top_picks if p.get("confidence", 0) >= 70]
 
+    # ── Price deduplication guard ──────────────────────────────────────────
+    # Two picks with the same price to the cent = one has contaminated data
+    # (MultiIndex batch mix-up assigns another ticker's prices, e.g. CAT=GS).
+    # Drop ALL picks sharing that price — can't determine which one is wrong.
+    from collections import Counter as _Counter
+    _price_counts = _Counter(p.get("price", 0) for p in top_picks if p.get("price", 0) > 0)
+    _dup_prices = {px for px, cnt in _price_counts.items() if cnt > 1}
+    if _dup_prices:
+        _before_dedup = len(top_picks)
+        top_picks = [p for p in top_picks if p.get("price", 0) not in _dup_prices]
+        logger.warning(
+            f"STB PRICE DEDUP: dropped {_before_dedup - len(top_picks)} contaminated picks "
+            f"(duplicate prices={[round(x,2) for x in _dup_prices]})"
+        )
+
+    # ── Live price refresh ─────────────────────────────────────────────────
+    # Batch-fetch fresh yfinance prices for all STB picks and overwrite any
+    # cached/LASTGOOD price with the live close. Runs once per 6h cache build.
+    # Guarantees correct prices even when LASTGOOD held contaminated values.
+    _live_stb_syms = [p.get("ticker", "") for p in top_picks if p.get("ticker")]
+    if _live_stb_syms:
+        try:
+            import yfinance as _stb_yf
+            import threading as _stb_thr
+            import pandas as _pd_stb
+            _stb_r = [None]
+            _stb_t = _stb_thr.Thread(
+                target=lambda r=_stb_r, s=_live_stb_syms: r.__setitem__(
+                    0, _stb_yf.download(
+                        " ".join(s), period="2d", progress=False,
+                        auto_adjust=True, group_by="ticker"
+                    )
+                ),
+                daemon=True,
+            )
+            _stb_t.start()
+            _stb_t.join(timeout=20)
+            _stb_df = _stb_r[0]
+            if _stb_df is not None and not _stb_df.empty:
+                _fresh_px: dict = {}
+                for _s in _live_stb_syms:
+                    try:
+                        if isinstance(getattr(_stb_df, "columns", None), _pd_stb.MultiIndex):
+                            _l1 = _stb_df.columns.get_level_values(1).tolist()
+                            _l0 = _stb_df.columns.get_level_values(0).tolist()
+                            if _s in _l1:
+                                _cl = _stb_df.xs(_s, axis=1, level=1)["Close"].dropna()
+                            elif _s in _l0:
+                                _cl = _stb_df[_s]["Close"].dropna()
+                            else:
+                                continue
+                        else:
+                            _cl = _stb_df["Close"].dropna()
+                        _p = float(_cl.iloc[-1])
+                        if math.isfinite(_p) and _p > 0:
+                            _fresh_px[_s] = round(_p, 2)
+                    except Exception:
+                        continue
+                _updated = 0
+                for _pick in top_picks:
+                    _s = _pick.get("ticker", "")
+                    if _s not in _fresh_px:
+                        continue
+                    _old = float(_pick.get("price", 0) or 0)
+                    _new = _fresh_px[_s]
+                    if _old != _new:
+                        if _old > 0 and abs(_new / _old - 1) > 0.05:
+                            logger.warning(
+                                f"STB PRICE REFRESH {_s}: ${_old:.2f}→${_new:.2f} "
+                                f"({(_new/_old-1)*100:+.1f}%)"
+                            )
+                        _pick["price"] = _new
+                        _updated += 1
+                logger.info(
+                    f"STB PRICE REFRESH: {_updated}/{len(top_picks)} prices "
+                    f"updated from live yfinance ({len(_fresh_px)} fetched)"
+                )
+        except Exception as _stb_px_err:
+            logger.debug(f"STB PRICE REFRESH: non-fatal — {_stb_px_err}")
+
     # v142: expose full scan funnel so user can see how much of the universe was processed
     _tickers_attempted = len(quant_longs) + len(lastgood_stocks)
     _candidates_scored = len(candidates)  # passed initial filters, got a score
