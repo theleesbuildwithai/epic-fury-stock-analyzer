@@ -10414,6 +10414,50 @@ def admin_reset_portfolio_v16():
         return {"ok": False, "reason": str(e)[:400]}
 
 
+@app.post("/api/admin/reset-portfolio-v17")
+def admin_reset_portfolio_v17():
+    """ADMIN: Reset portfolio to $141,000 (41% return off $100k baseline).
+    Closes all open positions, sets cash to $141k, advances stats_epoch."""
+    try:
+        from predictions.models import (
+            get_trading_state as _gts, set_trading_state as _sts,
+            get_open_trades as _got, close_paper_trade as _cpt,
+            set_cash as _sc, get_db as _gdb, save_portfolio_snapshot as _snap,
+        )
+        from datetime import datetime as _dtrv
+        _opens = _got() or []
+        _closed = 0
+        _close_errors = []
+        for _t in _opens:
+            try:
+                _cpt(_t["id"], _t.get("entry_price", 0))
+                _closed += 1
+            except Exception as _ce:
+                _close_errors.append(f"{_t.get('ticker')}: {_ce}")
+        _CASH = 141_000.00
+        _sc(_CASH, caller="admin_reset_v17",
+            reason="Admin-triggered v17 reset to $141k (41% baseline)",
+            bypass_sentinel=True)
+        _epoch = _dtrv.utcnow().isoformat()
+        _sts("stats_epoch", _epoch)
+        _conn = _gdb()
+        _conn.execute("DELETE FROM portfolio_snapshots")
+        _conn.commit()
+        _conn.close()
+        _snap(_CASH, _CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        logger.warning(f"ADMIN RESET v17: closed {_closed} positions, cash=$141k, stats reset.")
+        return {
+            "ok": True,
+            "closed_positions": _closed,
+            "close_errors": _close_errors,
+            "cash_set": _CASH,
+            "stats_epoch": _epoch,
+        }
+    except Exception as e:
+        logger.error(f"admin_reset_portfolio_v17 error: {e}")
+        return {"ok": False, "reason": str(e)[:400]}
+
+
 @app.get("/api/admin/inspect-trade/{ticker}")
 def admin_inspect_trade(ticker: str, request: Request):
     """Dump ALL raw fields for a specific ticker from paper_trades.

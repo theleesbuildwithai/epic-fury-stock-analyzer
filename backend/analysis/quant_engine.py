@@ -678,9 +678,12 @@ QUANT_UNIVERSE = [
     # Additional ETFs
     "DIA", "MTUM", "VLUE", "QUAL", "SIZE", "XLY", "XLC", "XLB", "XLRE",
     "KWEB", "EEM", "FXI", "EWZ", "EWJ",
-    # Vanguard ETFs (expanded 2026-06-24)
+    # Vanguard US equity ETFs (2026-06-24) — US equity only, no bonds/intl
+    # Bond ETFs (BND, VCIT, VGLT) and intl ETFs (VXUS, VEA) are intentionally
+    # excluded — their return distributions distort z-score normalization for stocks.
+    # They remain in _STB_UNIVERSE for fundamental long-term picks.
     "VOO", "VTI", "VUG", "VGT", "VIG", "VYM", "VYMI", "VHT", "VFH", "VDC",
-    "VNQ", "BND", "VXUS", "VEA", "VCIT", "VGLT", "VPU", "VIS", "VCR", "VDE",
+    "VNQ", "VPU", "VIS", "VCR", "VDE",
 ]
 
 
