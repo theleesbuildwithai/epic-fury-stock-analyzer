@@ -10072,6 +10072,8 @@ def queued_trades(request: Request):
              "status": "queued" if p["symbol"] not in open_tickers else "already_held"}
             for p in picks.get("short_picks", [])
             if p["confidence"] >= 70  # v141: raised 55→70 to match all other floors
+            and str(p.get("direction", "SHORT")).upper() != "LONG"  # reject mislabeled longs
+            and (p.get("composite_score") or 0) <= 0  # positive score = bullish, not a short
         ]
 
         # v141: deduplicate — if same ticker queued as both LONG and SHORT,
