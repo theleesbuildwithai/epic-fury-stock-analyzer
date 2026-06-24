@@ -1474,6 +1474,52 @@ except Exception as e:
     logger.warning(f"Fresh start v16 error (non-fatal): {e}")
 
 
+# --- FRESH START v17 (2026-06-24): Reset to $141k (41% return on $100k baseline) ---
+# User requested portfolio reset to 41% return ($141k) after Vanguard ETF + quant HF
+# quality fixes. Same pattern as v8-v16: closes positions, sets cash, advances epoch,
+# wipes snapshots. Flag persists via S3 so subsequent deploys skip this block.
+try:
+    from predictions.models import (
+        get_trading_state as _get_state_v17s, set_trading_state as _set_state_v17s,
+    )
+    _v17s_done = _get_state_v17s("fresh_start_v17_done", "0")
+    if _v17s_done != "1":
+        from predictions.models import (
+            get_open_trades as _v17s_get_open,
+            close_paper_trade as _v17s_close,
+            set_cash as _v17s_set_cash,
+            get_db as _v17s_get_db,
+            save_portfolio_snapshot as _v17s_snap,
+        )
+        from datetime import datetime as _dt_v17s
+        _v17s_open = _v17s_get_open() or []
+        _v17s_closed = 0
+        for _v17s_t in _v17s_open:
+            try:
+                _v17s_close(_v17s_t["id"], _v17s_t.get("entry_price", 0))
+                _v17s_closed += 1
+            except Exception as _v17s_ce:
+                logger.warning(f"RESET v17s: failed to close {_v17s_t.get('ticker')}: {_v17s_ce}")
+        _V17S_CASH = 141_000.00
+        _v17s_set_cash(_V17S_CASH, caller="fresh_start_v17",
+                       reason="2026-06-24 reset to $141k (41% return on $100k baseline) — Vanguard + quant HF quality upgrade",
+                       bypass_sentinel=True)
+        _v17s_epoch = _dt_v17s.utcnow().isoformat()
+        _set_state_v17s("stats_epoch", _v17s_epoch)
+        _v17s_conn = _v17s_get_db()
+        _v17s_conn.execute("DELETE FROM portfolio_snapshots")
+        _v17s_conn.commit()
+        _v17s_snap(_V17S_CASH, _V17S_CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        _set_state_v17s("fresh_start_v17_done", "1")
+        logger.warning(
+            f"FRESH START v17: closed {_v17s_closed} positions, "
+            f"cash=$141k (41% return on $100k baseline), stats reset. "
+            f"Vanguard ETF suite + quant HF quality filters active."
+        )
+except Exception as e:
+    logger.warning(f"Fresh start v17 error (non-fatal): {e}")
+
+
 # --- VIX LAST-GOOD RESET (2026-06-16) ---
 # VIX guard stuck at 41.6 (old spike). Real VIX is ~16. The bidirectional
 # jump check blocked recovery (41.6→16 ratio=2.6 > 2.0). Clear the cached
@@ -10446,6 +10492,8 @@ def admin_reset_portfolio_v17():
         _conn.commit()
         _conn.close()
         _snap(_CASH, _CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+        # Mark the startup v17 block as done so it won't re-fire on next deploy
+        _sts("fresh_start_v17_done", "1")
         logger.warning(f"ADMIN RESET v17: closed {_closed} positions, cash=$141k, stats reset.")
         return {
             "ok": True,
