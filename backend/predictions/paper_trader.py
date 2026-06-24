@@ -3770,7 +3770,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                           and p["symbol"] not in open_tickers]
         short_candidates = [p for p in quant_picks.get("short_picks", [])
                            if p["confidence"] >= _short_min_conf
-                           and abs(p.get("composite_score", 0)) >= min_score
+                           and p.get("composite_score", 0) <= -min_score  # must be negative (bearish)
                            and p["symbol"] not in open_tickers]
 
         # ────────────────────────────────────────────────────────────────

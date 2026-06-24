@@ -4425,12 +4425,19 @@ def _generate_quant_picks_impl() -> dict:
                         if len(_prev_closes) > 0 and len(_new_closes) > 0:
                             _prev_median = float(_prev_closes.median())
                             _new_close = float(_new_closes.iloc[-1])
-                            if _prev_median > 0 and _new_close > 0 and _new_close < _prev_median * 0.40:
-                                logger.warning(
-                                    f"LASTGOOD CORRUPT GUARD {t}: new=${_new_close:.2f} vs "
-                                    f"prev_median=${_prev_median:.2f} — keeping old lastgood"
-                                )
-                                continue  # skip update, keep old clean data
+                            if _prev_median > 0 and _new_close > 0:
+                                ratio = _new_close / _prev_median
+                                # Bidirectional guard: reject price if it dropped >60%
+                                # OR spiked >150% vs previous median — both indicate
+                                # corrupted data (wrong ticker's prices, stale cache,
+                                # option premium confusion, MultiIndex mix-up, etc.)
+                                if ratio < 0.40 or ratio > 2.50:
+                                    logger.warning(
+                                        f"LASTGOOD CORRUPT GUARD {t}: new=${_new_close:.2f} "
+                                        f"vs prev_median=${_prev_median:.2f} ratio={ratio:.2f} "
+                                        f"({'spike' if ratio > 2.50 else 'drop'}) — keeping old lastgood"
+                                    )
+                                    continue  # skip update, keep old clean data
                 except Exception:
                     pass  # any error in guard → proceed with normal update
                 _PRICE_DATA_LASTGOOD[t] = {"df": df, "ts": now_ts}
@@ -4457,15 +4464,14 @@ def _generate_quant_picks_impl() -> dict:
                 elif _sym in _lvl0:
                     price_data[_sym] = _df[_sym]
                 else:
-                    # Collapse to field names (deduplicate via first-occurrence)
-                    seen = {}
-                    cols = []
-                    for c in _lvl0:
-                        if c not in seen:
-                            seen[c] = True
-                            cols.append(c)
-                    price_data[_sym] = _df.iloc[:, [list(_lvl0).index(c) for c in cols]]
-                    price_data[_sym].columns = cols
+                    # SAFETY: sym not found in either MultiIndex level — this
+                    # DataFrame belongs to a different ticker (batch mix-up).
+                    # Collapsing to first-occurrence columns here would assign
+                    # another ticker's prices to this key (root cause of the
+                    # CAT=$1096/GS=$1096 price contamination bug). DELETE instead.
+                    del price_data[_sym]
+                    _norm_removed += 1
+                    logger.debug(f"POST-FETCH NORM: {_sym} not in MultiIndex levels — removed (data belongs to another ticker)")
             except Exception:
                 del price_data[_sym]
                 _norm_removed += 1
