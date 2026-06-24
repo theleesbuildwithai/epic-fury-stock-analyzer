@@ -678,8 +678,9 @@ QUANT_UNIVERSE = [
     # Additional ETFs
     "DIA", "MTUM", "VLUE", "QUAL", "SIZE", "XLY", "XLC", "XLB", "XLRE",
     "KWEB", "EEM", "FXI", "EWZ", "EWJ",
-    # Vanguard core ETFs (user-requested 2026-06-17)
-    "VOO", "VUG", "VTI", "VGT", "VIG",
+    # Vanguard ETFs (expanded 2026-06-24)
+    "VOO", "VTI", "VUG", "VGT", "VIG", "VYM", "VYMI", "VHT", "VFH", "VDC",
+    "VNQ", "BND", "VXUS", "VEA", "VCIT", "VGLT", "VPU", "VIS", "VCR", "VDE",
 ]
 
 
@@ -994,6 +995,11 @@ SECTOR_MAP = {
     "EWH": "ETF", "EWL": "ETF", "EWP": "ETF", "EWO": "ETF",
     "EWQ": "ETF", "INDA": "ETF", "ASHR": "ETF", "MCHI": "ETF",
     "VEA": "ETF", "VWO": "ETF", "ACWX": "ETF", "ARKK": "ETF",
+    # Vanguard ETFs (expanded 2026-06-24)
+    "VOO": "ETF", "VTI": "ETF", "VUG": "ETF", "VGT": "ETF", "VIG": "ETF",
+    "VYM": "ETF", "VYMI": "ETF", "VHT": "ETF", "VFH": "ETF", "VDC": "ETF",
+    "VNQ": "ETF", "BND": "ETF", "VXUS": "ETF", "VCIT": "ETF", "VGLT": "ETF",
+    "VPU": "ETF", "VIS": "ETF", "VCR": "ETF", "VDE": "ETF",
     "ARKW": "ETF", "ARKG": "ETF", "ARKF": "ETF", "ARKQ": "ETF",
     # Missing names observed in production picks (ROIV, RCI, etc.)
     "ROIV": "Healthcare", "RVMD": "Healthcare", "TEVA": "Healthcare",
@@ -4956,6 +4962,15 @@ def _generate_quant_picks_impl() -> dict:
                     if pick_sector in penalized_sectors:
                         logger.debug(f"MR FILTER: Skipping LONG {sym} — {pick_sector} is macro-penalized")
                         continue
+                    # Guard: MR longs must have non-negative composite score and price >= $10
+                    _mr_cscore = float(mr_pick.get("composite_score", 0) or 0)
+                    _mr_price = float(mr_pick.get("price", 0) or 0)
+                    if _mr_cscore < 0:
+                        logger.debug(f"MR FILTER: Skipping LONG {sym} — composite_score={_mr_cscore:.2f} is bearish")
+                        continue
+                    if _mr_price < 10:
+                        logger.debug(f"MR FILTER: Skipping LONG {sym} — price=${_mr_price:.2f} below $10 minimum")
+                        continue
                     mr_pick["mean_reversion"] = True
                     mr_pick["mr_score"] = mr["mr_score"]
                     mr_pick["reasons"].append(f"Mean reversion: {mr['reasons'][0]}")
@@ -4966,6 +4981,10 @@ def _generate_quant_picks_impl() -> dict:
                     # Don't SHORT sectors the macro is boosting (ceasefire = don't short tech)
                     if pick_sector in boosted_sectors:
                         logger.info(f"MR FILTER: Skipping SHORT {sym} — {pick_sector} is macro-boosted (ceasefire/bullish)")
+                        continue
+                    # Guard: MR shorts must have non-positive composite score
+                    if float(mr_pick.get("composite_score", 0) or 0) > 0:
+                        logger.debug(f"MR FILTER: Skipping SHORT {sym} — composite_score is bullish")
                         continue
                     mr_pick["mean_reversion"] = True
                     mr_pick["mr_score"] = mr["mr_score"]
@@ -5788,8 +5807,9 @@ _STB_UNIVERSE = [
     "AMT","PLD","NEE","DUK","SO","AEP","D","SRE","CCI","EQIX",
     # International large-caps
     "TSM","ASML","NVO","SAP","SHOP",
-    # Vanguard core ETFs
-    "VOO","VUG","VTI","VGT","VIG",
+    # Vanguard ETFs
+    "VOO","VTI","VUG","VGT","VIG","VYM","VYMI","VHT","VFH","VDC",
+    "VNQ","BND","VXUS","VEA","VCIT","VGLT","VPU","VIS","VCR","VDE",
 ]
 
 
@@ -5854,6 +5874,14 @@ _COMPANY_NAMES: dict = {
     "VOO": "Vanguard S&P 500 ETF", "VUG": "Vanguard Growth ETF",
     "VTI": "Vanguard Total Stock Market ETF", "VGT": "Vanguard Info Tech ETF",
     "VIG": "Vanguard Dividend Appreciation ETF",
+    "VYM": "Vanguard High Dividend Yield ETF", "VYMI": "Vanguard Intl High Div Yield ETF",
+    "VHT": "Vanguard Health Care ETF", "VFH": "Vanguard Financials ETF",
+    "VDC": "Vanguard Consumer Staples ETF", "VNQ": "Vanguard Real Estate ETF",
+    "BND": "Vanguard Total Bond Market ETF", "VXUS": "Vanguard Total Intl Stock ETF",
+    "VEA": "Vanguard FTSE Developed Markets ETF", "VCIT": "Vanguard Corp Bond ETF",
+    "VGLT": "Vanguard Long-Term Treasury ETF", "VPU": "Vanguard Utilities ETF",
+    "VIS": "Vanguard Industrials ETF", "VCR": "Vanguard Consumer Disc ETF",
+    "VDE": "Vanguard Energy ETF",
     # Other
     "DHI": "D.R. Horton", "PLTR": "Palantir", "UBER": "Uber",
     "SHOP": "Shopify", "GM": "General Motors", "F": "Ford Motor",
