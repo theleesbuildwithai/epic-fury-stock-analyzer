@@ -10420,7 +10420,7 @@ def admin_reset_portfolio_v17():
     Closes all open positions, sets cash to $141k, advances stats_epoch."""
     try:
         from predictions.models import (
-            get_trading_state as _gts, set_trading_state as _sts,
+            set_trading_state as _sts,
             get_open_trades as _got, close_paper_trade as _cpt,
             set_cash as _sc, get_db as _gdb, save_portfolio_snapshot as _snap,
         )
