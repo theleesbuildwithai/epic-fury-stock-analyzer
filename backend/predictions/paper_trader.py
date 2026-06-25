@@ -4098,24 +4098,17 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # while the pick (corrected by multi-source) had $170 → 50% divergence → blocked.
         # Fix: batch-fetch from the same non-yfinance source used to generate picks.
         _sanity_live_prices = {}
-        # Seed from _PRICE_DATA_LASTGOOD first — 8-tier-fetched, zero new API calls,
-        # most rate-limit-resistant. multi_source_quote_batch will overwrite with
-        # fresher data where available, but lastgood ensures we always have baseline.
-        try:
-            from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _pld_seed
-            _sanity_syms_seed = [p["symbol"] for p in all_picks[:available_slots] if p.get("symbol")]
-            for _seed_sym in _sanity_syms_seed:
-                _seed_entry = _pld_seed.get(_seed_sym)
-                if _seed_entry and isinstance(_seed_entry, dict) and "df" in _seed_entry:
-                    try:
-                        _seed_col = _seed_entry["df"]["Close"].dropna()
-                        if len(_seed_col) > 0:
-                            _sanity_live_prices[_seed_sym] = float(_seed_col.iloc[-1])
-                    except Exception:
-                        pass
-            logger.info(f"Price sanity LASTGOOD seed: {len(_sanity_live_prices)}/{len(_sanity_syms_seed)} from 8-tier cache")
-        except Exception as _seed_e:
-            logger.debug(f"LASTGOOD seed failed (non-fatal): {_seed_e}")
+        # v143 2026-06-25: DO NOT seed _sanity_live_prices from _PRICE_DATA_LASTGOOD.
+        # Root cause of SCHW $334 phantom-gain incident: LASTGOOD had a stale price
+        # ($334.47 vs real $89.44). Seeding it into _sanity_live_prices made the
+        # sanity check compare pick price ($334) against "live" ($334) → 0% divergence
+        # → trade opened at $334 → closed at real $89 → phantom +73% gain per cycle.
+        # The LASTGOOD TTL (14d) and ratio gate (40%) both failed to catch this
+        # because the in-memory dict persists for the deploy lifetime and the gate
+        # only blocks drops below 40% of the EXISTING cached value (circular logic).
+        # Fix: use ONLY fresh multi_source_quote_batch prices for sanity + entry.
+        # If multi_source has no price for a symbol, the per-pick yfinance fallback
+        # below handles it — and if that also fails, the pick is skipped (price=None).
         try:
             from analytics.multi_source_adapter import multi_source_quote_batch as _msqb_sanity
             _sanity_syms = [p["symbol"] for p in all_picks[:available_slots] if p.get("symbol")]
@@ -4123,10 +4116,10 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             for _ss, _sd in _sanity_batch.items():
                 _sp2 = _sd.get("price") if isinstance(_sd, dict) else _sd
                 if _sp2 and float(_sp2) > 0:
-                    _sanity_live_prices[_ss] = float(_sp2)  # overwrite lastgood with fresher price
+                    _sanity_live_prices[_ss] = float(_sp2)
             logger.info(f"Price sanity pre-fetch: {len(_sanity_live_prices)}/{len(_sanity_syms)} prices from multi_source")
         except Exception as _sanity_e:
-            logger.debug(f"Price sanity pre-fetch failed (will use lastgood/get_stock_info fallback): {_sanity_e}")
+            logger.debug(f"Price sanity pre-fetch failed (will use get_stock_info fallback): {_sanity_e}")
 
         # 2026-06-16: build set of LONG-pick tickers to block contradictory puts.
         # A put on a ticker that's also a long pick bets against our own long signal.
