@@ -3758,8 +3758,13 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             _long_min_conf = min_conf           # v142: was max(min_conf, 70); score gate handles quality
             _short_min_conf = max(min_conf, 65) # Keep shorts at higher conviction bar
         elif _regime_for_gate == "BEAR":
-            _long_min_conf = max(min_conf, 70)   # Longs in bear = very high bar
-            _short_min_conf = max(min_conf, 70)  # v141: raised 58→70, match universal floor
+            # v142 2026-06-25: same raw-confidence issue as SIDEWAYS — BULL floor (72%)
+            # only applies in BULL regime. In BEAR, picks have natural confidence 59-67%.
+            # The hard 70% gate was killing all longs AND all shorts. BEAR quality
+            # filtering is handled by the defensive-sector check + conf>=65 gate
+            # inside the BEAR block below. Use min_conf directly for gates here.
+            _long_min_conf = min_conf            # v142: was max(min_conf, 70)
+            _short_min_conf = min_conf           # v142: was max(min_conf, 70)
         else:  # BULL
             _long_min_conf = max(min_conf, 70)   # v139: raised 45→70. Confidence formula
             # now outputs 73-92% for valid picks. Below 70 = stale cache or options premium,
