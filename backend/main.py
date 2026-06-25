@@ -5913,6 +5913,32 @@ def quant_picks(force_refresh: bool = False):
             result["cache_status"] = "stale"
             result["cache_age_seconds"] = round(_cache_age_s, 0)
             result["_endpoint_version"] = "v14-stale-serve"
+            # v142 2026-06-25: if stale cache has <10 qualifying longs, try DB backup
+            # and prefer whichever has more picks. Fixes stale cache serving 2 picks
+            # (DB backup with most conf<70) while DB backup has 35-40 fresh BULL picks.
+            _stale_l_count = len(_clean_longs)
+            if _stale_l_count < 10:
+                try:
+                    from predictions.models import get_trading_state as _sq_gts
+                    _sq_raw = _sq_gts("quant_picks_db_backup", "")
+                    if _sq_raw:
+                        import json as _sq_json
+                        _sq_db = _sq_json.loads(_sq_raw)
+                        _sq_longs = [p for p in (_sq_db.get("long_picks") or [])
+                                     if (p.get("confidence") or 0) >= 70
+                                     and float(p.get("composite_score") or 0) >= 0
+                                     and float(p.get("price") or 0) >= 10]
+                        if len(_sq_longs) > _stale_l_count:
+                            result["long_picks"] = _sq_longs
+                            result["picks"] = _sq_longs + _clean_shorts
+                            result["cache_status"] = "stale_db_augmented"
+                            result["_db_long_count"] = len(_sq_longs)
+                            logger.warning(
+                                f"quant-picks stale: augmented {_stale_l_count}→{len(_sq_longs)} "
+                                f"longs from DB backup"
+                            )
+                except Exception as _sq_e:
+                    logger.debug(f"quant-picks stale DB augment failed: {_sq_e}")
             logger.info(f"quant-picks: serving stale cache ({round(_cache_age_s/60,1)}min old) while regen runs")
             try:
                 return JSONResponse(content=_safe_serialize(result))
