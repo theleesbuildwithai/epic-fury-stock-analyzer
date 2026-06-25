@@ -5291,8 +5291,12 @@ def _generate_quant_picks_impl() -> dict:
             return True
         return not r.get("long_picks") and not r.get("short_picks")
 
-    if _picks_are_empty(result):
-        # Live picks failed — try yesterday's snapshot
+    if _picks_are_empty(result) or not result.get("long_picks"):
+        # Live picks failed OR returned 0 longs (e.g. SIDEWAYS regime filtering) —
+        # try disk/S3 backup so a 0-long result never overwrites a good S3 snapshot.
+        # 2026-06-25: SIDEWAYS scans produce 0 longs (all fail >=70% filter) but may
+        # have shorts. Without this check those 0-long results overwrite the 35-long
+        # BULL backup, destroying the cache for all future cycles.
         try:
             if _os_pc.path.exists(_picks_cache_path):
                 # Read with explicit context manager — never holds file lock
@@ -5364,7 +5368,7 @@ def _generate_quant_picks_impl() -> dict:
         # start where yfinance is blocked and Finnhub hasn't completed yet).
         # Protects the S3 backup from being overwritten by a 0-pick scan result.
         # Updates _quant_cache so STB and paper portfolio serve real picks.
-        if _picks_are_empty(result):
+        if _picks_are_empty(result) or not result.get("long_picks"):
             try:
                 from predictions.enhancements import restore_picks_from_s3
                 _s3_em = restore_picks_from_s3(max_age_hours=24)
@@ -5381,8 +5385,10 @@ def _generate_quant_picks_impl() -> dict:
                     )
             except Exception as _s3em_e:
                 logger.debug(f"Picks S3 emergency restore skipped: {_s3em_e}")
-    else:
-        # Live picks succeeded — save snapshot for the next outage.
+    elif result.get("long_picks"):
+        # Live picks succeeded WITH longs — save snapshot for the next outage.
+        # Guard: only save when long_picks is non-empty so a 0-long SIDEWAYS scan
+        # cannot overwrite the S3/DB backup with an empty dataset.
         # ATOMIC WRITE: write to .tmp first, then rename. Prevents serving a
         # half-written corrupt cache if the container is killed mid-write.
         try:

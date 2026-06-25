@@ -2283,19 +2283,24 @@ def _smart_trade_monitor():
         # 1. Generate fresh quant picks (analyzes 200+ stocks)
         picks = generate_quant_picks()
 
-        # DB backup fallback: if live scan returned 0 picks, use last known good picks
-        # 2026-06-15: prevents missed trade cycles when yfinance rate-limits on scan
-        if not picks.get("long_picks") and not picks.get("short_picks"):
+        # DB backup fallback: if live scan returned 0 longs, use last known good picks.
+        # 2026-06-25 v142: trigger on 0-longs (not just all-empty) — SIDEWAYS scans
+        # produce 0 longs + 2 shorts, which previously bypassed this fallback and
+        # sent 0-long picks to the paper trader, resulting in 0 trades every cycle.
+        if not picks.get("long_picks"):
             try:
                 from predictions.models import get_trading_state as _stm_gts
                 import json as _stm_json
                 _stm_raw = _stm_gts("quant_picks_db_backup", "")
                 if _stm_raw:
                     _stm_db = _stm_json.loads(_stm_raw)
-                    if _stm_db.get("long_picks") or _stm_db.get("short_picks"):
+                    if _stm_db.get("long_picks"):
                         picks = {**picks, "long_picks": _stm_db.get("long_picks", []),
                                  "short_picks": _stm_db.get("short_picks", [])}
-                        logger.warning("MONITOR: using DB backup picks (live scan returned 0)")
+                        logger.warning(
+                            f"MONITOR: using DB backup picks ({len(picks['long_picks'])}L) "
+                            f"— live scan returned 0 longs"
+                        )
             except Exception:
                 pass
 
@@ -2375,18 +2380,22 @@ def _run_auto_trade_cycle():
     try:
         logger.warning(f"MANUAL TRADE CYCLE #{auto_trade_stats['total_cycles']} starting")
         picks = generate_quant_picks()
-        # DB backup fallback: if live scan returned 0 picks, use last known good picks
-        if not picks.get("long_picks") and not picks.get("short_picks"):
+        # DB backup fallback: if live scan returned 0 longs, use last known good picks.
+        # v142 2026-06-25: trigger on 0-longs (not just all-empty) — same fix as monitor
+        if not picks.get("long_picks"):
             try:
                 from predictions.models import get_trading_state as _atc_gts
                 import json as _atc_json
                 _atc_raw = _atc_gts("quant_picks_db_backup", "")
                 if _atc_raw:
                     _atc_db = _atc_json.loads(_atc_raw)
-                    if _atc_db.get("long_picks") or _atc_db.get("short_picks"):
+                    if _atc_db.get("long_picks"):
                         picks = {**picks, "long_picks": _atc_db.get("long_picks", []),
                                  "short_picks": _atc_db.get("short_picks", [])}
-                        logger.warning("TRADE CYCLE: using DB backup picks (live scan returned 0)")
+                        logger.warning(
+                            f"TRADE CYCLE: using DB backup picks ({len(picks['long_picks'])}L) "
+                            f"— live scan returned 0 longs"
+                        )
             except Exception:
                 pass
         result = execute_trades_from_signals(picks)
@@ -5935,11 +5944,21 @@ def quant_picks(force_refresh: bool = False):
                                        if (p.get("confidence") or 0) >= 70
                                        and float(p.get("composite_score") or 0) >= 0
                                        and float(p.get("price") or 0) >= 10]
+                _s3_l_count = len(_snap.get("long_picks") or [])
+                _s3_s_count = len(_snap.get("short_picks") or [])
+                # v142 2026-06-25: if S3 has <10 qualifying longs (stale or corrupt),
+                # fall through to DB backup which may have fresher 35-long data.
+                # Prevents serving 5 bad-price picks (MARA@$231 etc) when DB has 35 good ones.
+                if _s3_l_count >= 10:
+                    logger.warning(
+                        f"quant-picks: serving real S3 ({_s3_l_count}L "
+                        f"{_s3_s_count}S) — cache cold, scan running"
+                    )
+                    return JSONResponse(content=_safe_serialize(_snap))
                 logger.warning(
-                    f"quant-picks: serving real S3 ({len(_snap.get('long_picks') or [])}L "
-                    f"{len(_snap.get('short_picks') or [])}S) — cache cold, scan running"
+                    f"quant-picks: S3 has only {_s3_l_count} qualifying longs — "
+                    f"falling through to DB backup"
                 )
-                return JSONResponse(content=_safe_serialize(_snap))
         except Exception as _se:
             logger.warning(f"S3 real restore failed: {_se}")
 

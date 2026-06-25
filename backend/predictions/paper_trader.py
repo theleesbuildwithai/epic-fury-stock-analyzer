@@ -3749,8 +3749,14 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
         # BULL: trend support — base gate is sufficient
         _regime_for_gate = regime  # regime already set above
         if _regime_for_gate == "SIDEWAYS":
-            _long_min_conf = max(min_conf, 70)   # v141: raised 62→70, match universal floor
-            _short_min_conf = max(min_conf, 70)  # v141: raised 60→70, match universal floor
+            # v142 2026-06-25: SIDEWAYS picks have natural confidence 59-67% from the quant
+            # engine — the 72% BULL floor only applies in BULL regime. The hard 70% floor
+            # was preventing ALL SIDEWAYS picks from entering long_candidates, leaving the
+            # portfolio with 0 trades even in a 96% BULL-probability market. The score gate
+            # (>=1.2 at line 3914) is the primary quality filter in SIDEWAYS; confidence
+            # gate uses the dynamic min_conf (58 in live mode) so autotune still applies.
+            _long_min_conf = min_conf           # v142: was max(min_conf, 70); score gate handles quality
+            _short_min_conf = max(min_conf, 65) # Keep shorts at higher conviction bar
         elif _regime_for_gate == "BEAR":
             _long_min_conf = max(min_conf, 70)   # Longs in bear = very high bar
             _short_min_conf = max(min_conf, 70)  # v141: raised 58→70, match universal floor
