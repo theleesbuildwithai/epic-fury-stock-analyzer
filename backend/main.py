@@ -8014,16 +8014,88 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
 
         formatted_longs = [_format_fund(p, i + 1) for i, p in enumerate(raw_longs[:40])]
 
-        # Last-mile price guard: drop any pick that has no valid entry price.
-        # Protects the frontend from ever seeing corrupted/zero/None prices
-        # regardless of what upstream cache or yfinance batch returned.
+        # ── Layer 4: Last-mile zero/None guard ────────────────────────────────
+        # Drop any pick with missing or zero entry_price — catches anything
+        # that slipped past all upstream filters.
         _before = len(formatted_longs)
         formatted_longs = [p for p in formatted_longs if p.get("entry_price") and p["entry_price"] > 0]
         if len(formatted_longs) < _before:
             logger.warning(
-                f"STB LAST-MILE GUARD: dropped {_before - len(formatted_longs)} picks "
+                f"STB LAYER4 LAST-MILE: dropped {_before - len(formatted_longs)} picks "
                 f"with missing/zero entry_price before sending to frontend"
             )
+
+        # ── Layer 8: Absolute price bounds at serve time ───────────────────────
+        # Second pass of the bounds check at the moment of serving — catches
+        # any corrupted price that was saved to cache after a bad update.
+        # No equity in this universe should be <$1 or >$15,000.
+        _before8 = len(formatted_longs)
+        formatted_longs = [
+            p for p in formatted_longs
+            if 1.0 <= float(p.get("entry_price", 0) or 0) <= 15000.0
+        ]
+        if len(formatted_longs) < _before8:
+            logger.warning(
+                f"STB LAYER8 BOUNDS: dropped {_before8 - len(formatted_longs)} picks "
+                f"with entry_price outside $1–$15,000 at serve time"
+            )
+
+        # ── Layer 9: LASTGOOD cross-validation at serve time ──────────────────
+        # For each pick, check its price against _PRICE_DATA_LASTGOOD.
+        # If divergence > 25%, correct with the LASTGOOD price rather than
+        # dropping — ensures we always serve the freshest available price.
+        try:
+            from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _stb_lg
+            import pandas as _pd_lg
+            _corrected = 0
+            for _fp in formatted_longs:
+                _sym = _fp.get("ticker", "")
+                _ep = float(_fp.get("entry_price") or 0)
+                if not _sym or _ep <= 0:
+                    continue
+                _lg_entry = _stb_lg.get(_sym)
+                if not _lg_entry:
+                    continue
+                try:
+                    _lg_df = _lg_entry.get("df") if isinstance(_lg_entry, dict) else _lg_entry
+                    _lg_px = None
+                    if _lg_df is not None and not _lg_df.empty:
+                        if isinstance(getattr(_lg_df, "columns", None), _pd_lg.MultiIndex):
+                            _c0 = _lg_df.columns.get_level_values(0).tolist()
+                            if "Close" in _c0:
+                                _lg_px = float(_lg_df["Close"].stack().dropna().iloc[-1])
+                        elif "Close" in _lg_df.columns:
+                            _lg_px = float(_lg_df["Close"].dropna().iloc[-1])
+                    if _lg_px is None and isinstance(_lg_entry, dict):
+                        _sp = _lg_entry.get("spot_price")
+                        if _sp and float(_sp) > 0:
+                            _lg_px = float(_sp)
+                    if _lg_px and _lg_px > 0:
+                        _div = abs(_ep - _lg_px) / _lg_px
+                        if _div > 0.25:
+                            logger.warning(
+                                f"STB LAYER9 LASTGOOD-FIX {_sym}: "
+                                f"cached ${_ep:.2f} vs lastgood ${_lg_px:.2f} "
+                                f"({_div*100:.0f}% divergence) — correcting to lastgood"
+                            )
+                            _fp["entry_price"] = round(_lg_px, 2)
+                            # Recalculate stop/target around corrected price
+                            _mom = abs(float(_fp.get("momentum_pct") or 25.0))
+                            _av = max(20.0, min(60.0, _mom * 0.6 + 15.0))
+                            import math as _math_lg
+                            _dv = _av / _math_lg.sqrt(252) * _lg_px / 100.0
+                            _sd = max(_lg_px * 0.08, min(_lg_px * 0.12, _dv * 15.0))
+                            _td = max(_sd * 3.0, min(_lg_px * 0.40, _sd * 4.0))
+                            _fp["stop_loss"] = round(_lg_px - _sd, 2)
+                            _fp["target_price"] = round(_lg_px + _td, 2)
+                            _corrected += 1
+                except Exception:
+                    pass
+            if _corrected:
+                logger.warning(f"STB LAYER9 LASTGOOD-FIX: corrected {_corrected} pick prices at serve time")
+        except Exception as _lg_err:
+            logger.debug(f"STB LAYER9 LASTGOOD cross-val skipped: {_lg_err}")
+
         # Re-sequence ranks after any drops
         for _i, _p in enumerate(formatted_longs):
             _p["rank"] = _i + 1

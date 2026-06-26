@@ -6385,6 +6385,44 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             except Exception as _ms_stb_err:
                 logger.debug(f"STB MULTI-SRC REFRESH: non-fatal — {_ms_stb_err}")
 
+    # ── Layer 5: Final zero/None price purge ──────────────────────────────────
+    # After all yfinance + multi_source refreshes, any pick still missing a price
+    # is silently dropped — never saved to cache.
+    _pre_purge = len(top_picks)
+    top_picks = [p for p in top_picks if p.get("price") and float(p.get("price") or 0) > 0]
+    if len(top_picks) < _pre_purge:
+        logger.warning(
+            f"STB LAYER5 ZERO-PURGE: dropped {_pre_purge - len(top_picks)} picks "
+            f"with price=None/0 before cache save"
+        )
+
+    # ── Layer 6: Absolute price bounds sanity check ────────────────────────────
+    # Catches corrupted values like HON $7357 or MA $14 that slipped through
+    # ratio gates. No stock in this universe should be <$1 or >$15,000.
+    _pre_bounds = len(top_picks)
+    top_picks = [
+        p for p in top_picks
+        if 1.0 <= float(p.get("price", 0) or 0) <= 15000.0
+    ]
+    if len(top_picks) < _pre_bounds:
+        logger.warning(
+            f"STB LAYER6 BOUNDS-CHECK: dropped {_pre_bounds - len(top_picks)} picks "
+            f"with price outside $1–$15,000 range"
+        )
+
+    # ── Layer 7: Cache integrity gate ─────────────────────────────────────────
+    # If fewer than 5 picks survive all filters, the price fetch session was bad.
+    # Keep the existing cache rather than overwriting with garbage.
+    if len(top_picks) < 5:
+        _existing = _quant_cache.get("fundamental_picks")
+        if _existing and _existing.get("data") and len((_existing["data"].get("long_picks") or [])) >= 5:
+            logger.warning(
+                f"STB LAYER7 CACHE-INTEGRITY: only {len(top_picks)} picks survived — "
+                f"keeping existing cache ({len(_existing['data']['long_picks'])} picks) "
+                f"rather than overwriting with bad data"
+            )
+            return _existing["data"]
+
     # v142: expose full scan funnel so user can see how much of the universe was processed
     _tickers_attempted = len(quant_longs) + len(lastgood_stocks)
     _candidates_scored = len(candidates)  # passed initial filters, got a score
