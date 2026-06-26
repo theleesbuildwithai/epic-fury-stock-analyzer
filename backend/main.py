@@ -7965,12 +7965,25 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 mom = abs(float(p.get("momentum_12m_pct", 25.0) or 25.0))
                 annual_vol_est = max(20.0, min(60.0, mom * 0.6 + 15.0))  # rough estimate
                 d_vol = annual_vol_est / _math_stb.sqrt(252) * px / 100.0
-                # Stop: 4-week ATR equivalent, clamped 8-12%
+                # Stop: 4-week ATR equivalent, hard-clamped 8-12% — never tighter, never wider
                 stop_dist = max(px * 0.08, min(px * 0.12, d_vol * 15.0))
+                # Absolute safety: stop_dist must be positive and within 5-15% of price
+                stop_dist = max(px * 0.05, min(px * 0.15, stop_dist))
                 # Target: 20-40% for multi-week fundamental holds (3:1 minimum R:R)
                 tgt_dist = max(stop_dist * 3.0, min(px * 0.40, stop_dist * 4.0))
+                # Absolute safety: target_dist must be at least 2x stop and at most 60%
+                tgt_dist = max(stop_dist * 2.0, min(px * 0.60, tgt_dist))
+                # Final sanity: both must be positive numbers
+                if stop_dist <= 0 or tgt_dist <= 0:
+                    return px * 0.10, px * 0.30  # fallback: 10% stop, 30% target
                 return round(stop_dist, 2), round(tgt_dist, 2)
             except Exception:
+                try:
+                    px = float(p.get("price", 0) or 0)
+                    if px > 0:
+                        return round(px * 0.10, 2), round(px * 0.30, 2)  # safe fallback
+                except Exception:
+                    pass
                 return None, None
 
         def _format_fund(p, rank: int) -> dict:
@@ -8095,6 +8108,96 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 logger.warning(f"STB LAYER9 LASTGOOD-FIX: corrected {_corrected} pick prices at serve time")
         except Exception as _lg_err:
             logger.debug(f"STB LAYER9 LASTGOOD cross-val skipped: {_lg_err}")
+
+        # ── Layers 10-13: Entry / Stop / Target integrity validation ──────────
+        # Validates and auto-fixes all four trade levels on every pick before
+        # the response leaves the server. No wrong level can ever reach the UI.
+        _fixed_levels = 0
+        _dropped_levels = 0
+        _survivors = []
+        for _fp in formatted_longs:
+            _ep  = float(_fp.get("entry_price") or 0)
+            _sl  = _fp.get("stop_loss")
+            _tgt = _fp.get("target_price")
+            _sym = _fp.get("ticker", "?")
+
+            # Layer 10: all three levels must exist and be positive
+            _sl_ok  = _sl  is not None and float(_sl  or 0) > 0
+            _tgt_ok = _tgt is not None and float(_tgt or 0) > 0
+            _ep_ok  = _ep > 0
+
+            if not _ep_ok:
+                _dropped_levels += 1
+                logger.warning(f"STB LAYER10 DROP {_sym}: entry_price={_ep} invalid")
+                continue  # can't fix without a valid entry — drop
+
+            # Layer 11: stop must be BELOW entry, target must be ABOVE entry
+            _sl_bad  = not _sl_ok  or float(_sl)  >= _ep   # stop at/above entry = wrong
+            _tgt_bad = not _tgt_ok or float(_tgt) <= _ep   # target at/below entry = wrong
+
+            # Layer 12: stop distance bounds — 5% to 20% below entry
+            if _sl_ok and not _sl_bad:
+                _sl_pct = (_ep - float(_sl)) / _ep
+                if _sl_pct < 0.05 or _sl_pct > 0.20:
+                    _sl_bad = True  # too tight (<5%) or too wide (>20%)
+
+            # Layer 13: target distance bounds — 10% to 60% above entry
+            if _tgt_ok and not _tgt_bad:
+                _tgt_pct = (float(_tgt) - _ep) / _ep
+                if _tgt_pct < 0.10 or _tgt_pct > 0.60:
+                    _tgt_bad = True  # too close (<10%) or unrealistically far (>60%)
+
+            if _sl_bad or _tgt_bad:
+                # Auto-fix: recalculate from entry price using conservative defaults
+                _mom = abs(float(_fp.get("momentum_pct") or 25.0))
+                _av  = max(20.0, min(60.0, _mom * 0.6 + 15.0))
+                _dv  = _av / _math_stb.sqrt(252) * _ep / 100.0
+                _sd  = max(_ep * 0.08, min(_ep * 0.12, _dv * 15.0))
+                _td  = max(_sd * 3.0,  min(_ep * 0.40, _sd * 4.0))
+                _new_sl  = round(_ep - _sd, 2)
+                _new_tgt = round(_ep + _td, 2)
+                logger.warning(
+                    f"STB LAYER10-13 AUTO-FIX {_sym}: "
+                    f"entry=${_ep:.2f} | "
+                    f"stop {'BAD' if _sl_bad else 'ok'} ${_sl}→${_new_sl} | "
+                    f"target {'BAD' if _tgt_bad else 'ok'} ${_tgt}→${_new_tgt}"
+                )
+                if _sl_bad:
+                    _fp["stop_loss"]        = _new_sl
+                    _fp["stop_distance_pct"] = round(_sd / _ep * 100, 1)
+                if _tgt_bad:
+                    _fp["target_price"]       = _new_tgt
+                    _fp["target_distance_pct"] = round(_td / _ep * 100, 1)
+                _fp["reward_risk_ratio"] = round(_td / _sd, 2)
+                _fixed_levels += 1
+
+            # Final R:R guard: must be ≥ 2.0 after any fixes
+            _final_sl  = float(_fp.get("stop_loss")    or 0)
+            _final_tgt = float(_fp.get("target_price") or 0)
+            if _final_sl > 0 and _final_tgt > _ep:
+                _rr = (_final_tgt - _ep) / (_ep - _final_sl)
+                if _rr < 2.0:
+                    # Stretch target to enforce minimum 2.5:1 R:R
+                    _corrected_tgt = round(_ep + (_ep - _final_sl) * 2.5, 2)
+                    logger.warning(
+                        f"STB RR-FIX {_sym}: R:R={_rr:.2f} < 2.0 — "
+                        f"stretching target ${_final_tgt}→${_corrected_tgt}"
+                    )
+                    _fp["target_price"]       = _corrected_tgt
+                    _fp["target_distance_pct"] = round((_corrected_tgt - _ep) / _ep * 100, 1)
+                    _fp["reward_risk_ratio"]   = 2.5
+                    _fixed_levels += 1
+                else:
+                    _fp["reward_risk_ratio"] = round(_rr, 2)
+
+            _survivors.append(_fp)
+
+        if _fixed_levels or _dropped_levels:
+            logger.warning(
+                f"STB LEVELS AUDIT: {_fixed_levels} auto-fixed, "
+                f"{_dropped_levels} dropped — {len(_survivors)} clean picks serving"
+            )
+        formatted_longs = _survivors
 
         # Re-sequence ranks after any drops
         for _i, _p in enumerate(formatted_longs):
