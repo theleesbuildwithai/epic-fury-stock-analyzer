@@ -374,14 +374,14 @@ except Exception as e:
 # from current market price (options excluded — premium vs stock price diverges
 # by design). This is a one-shot guard; does NOT affect the trade cycle logic.
 try:
-    from predictions.models import get_open_trades as _prs_get, close_paper_trade as _prs_close
+    from predictions.models import get_open_trades as _prs_get, get_db as _prs_get_db, adjust_cash as _prs_adj_cash
     from analytics.multi_source_adapter import multi_source_quote_batch as _prs_msqb
     _prs_open = [t for t in (_prs_get() or [])
                  if (t.get("instrument_type") or "equity") not in ("call", "put", "option")]
     if _prs_open:
         _prs_syms = list({t["ticker"].upper() for t in _prs_open})
         _prs_prices = {}
-        # Tier 1: batch fetch via multi_source (fast, may fail on cold boot)
+        # Tier 1: multi_source batch (fast, may fail on cold boot)
         try:
             _prs_batch = _prs_msqb(_prs_syms)
             for _ps, _pd in _prs_batch.items():
@@ -390,9 +390,7 @@ try:
                     _prs_prices[_ps.upper()] = float(_pp)
         except Exception:
             pass
-        # Tier 2: yfinance per-ticker fallback for any symbol multi_source missed.
-        # Critical: multi_source often fails on cold boot (rate limits, DNS warmup).
-        # Without fallback, ALL positions skip the scrub → corrupted positions persist.
+        # Tier 2: yfinance batch for symbols multi_source missed
         _prs_missing = [s for s in _prs_syms if s not in _prs_prices]
         if _prs_missing:
             try:
@@ -403,16 +401,42 @@ try:
                 )
                 for _prs_sym in _prs_missing:
                     try:
-                        if len(_prs_missing) == 1:
-                            _prs_col = _prs_yf_data["Close"].dropna()
-                        else:
-                            _prs_col = _prs_yf_data["Close"][_prs_sym].dropna()
+                        _prs_col = (_prs_yf_data["Close"] if len(_prs_missing) == 1
+                                    else _prs_yf_data["Close"][_prs_sym]).dropna()
                         if len(_prs_col) > 0:
                             _prs_prices[_prs_sym] = float(_prs_col.iloc[-1])
                     except Exception:
                         pass
             except Exception:
                 pass
+        # Tier 3: yfinance single-ticker for anything still missing
+        for _prs_sym in [s for s in _prs_syms if s not in _prs_prices]:
+            try:
+                import yfinance as _prs_yf3
+                _tk = _prs_yf3.Ticker(_prs_sym)
+                _hist = _tk.history(period="1d")
+                if not _hist.empty:
+                    _prs_prices[_prs_sym] = float(_hist["Close"].iloc[-1])
+            except Exception:
+                pass
+
+        def _prs_scrub_trade(trade_id, ticker, entry, live):
+            """Zero-PnL scrub — status=closed_flat_startup_scrub, pnl=0, no cash impact."""
+            try:
+                _conn = _prs_get_db()
+                _conn.execute(
+                    """UPDATE paper_trades SET
+                         exit_price=?, exit_date=datetime('now'), status='closed_flat_startup_scrub',
+                         pnl_dollars=0, pnl_pct=0
+                       WHERE id=? AND status='open'""",
+                    (entry, trade_id),  # exit at entry = 0 PnL
+                )
+                _conn.commit()
+                _conn.close()
+                return True
+            except Exception:
+                return False
+
         _prs_scrubbed = []
         for _pt in _prs_open:
             _pticker = _pt["ticker"].upper()
@@ -422,13 +446,10 @@ try:
                 continue
             _pdiv = abs(_pentry - _plive) / _plive
             if _pdiv > 0.30:
-                try:
-                    _prs_close(_pt["id"], _plive)
+                if _prs_scrub_trade(_pt["id"], _pticker, _pentry, _plive):
                     _prs_scrubbed.append(f"{_pticker}(entry={_pentry},live={_plive:.2f},div={_pdiv*100:.0f}%)")
-                except Exception:
-                    pass
         if _prs_scrubbed:
-            logger.warning(f"POST-RESTORE PRICE SCRUB: closed {len(_prs_scrubbed)} bad-price positions: {_prs_scrubbed}")
+            logger.warning(f"POST-RESTORE PRICE SCRUB: zeroed {len(_prs_scrubbed)} bad-price positions: {_prs_scrubbed}")
         else:
             logger.info(f"POST-RESTORE PRICE SCRUB: all {len(_prs_open)} open positions have sane entry prices")
 except Exception as _prs_e:
