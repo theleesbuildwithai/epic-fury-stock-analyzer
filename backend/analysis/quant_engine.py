@@ -6386,17 +6386,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         continue
                     _np2 = round(float(_np2), 2)
                     _old2 = float(_pick.get("price", 0) or 0)
-                    # Multi-source divergence gate: only overwrite if existing price
-                    # is 0 (missing) OR the new price is within 40% of existing.
-                    # 40% (wider than batch gate) because multi_source is more
-                    # reliable and can legitimately catch large stale-price corrections.
-                    if _old2 > 0 and abs(_np2 / _old2 - 1) > 0.40:
-                        logger.warning(
-                            f"STB MULTI-SRC REJECT {_s}: ${_old2:.2f}→${_np2:.2f} "
-                            f"({abs(_np2/_old2-1)*100:.0f}% divergence > 40%) "
-                            f"— keeping existing price"
-                        )
-                        continue
+                    # No upper divergence cap for multi_source — it aggregates
+                    # multiple real-time sources and is authoritative even for
+                    # large corruptions (e.g., LVS cached $971 vs live $47).
+                    # Bounds check ($1–$15k in Layer 6) is the only guard needed.
                     if _old2 > 0 and abs(_np2 / _old2 - 1) > 0.05:
                         logger.warning(
                             f"STB MULTI-SRC REFRESH {_s}: ${_old2:.2f}→${_np2:.2f} "
