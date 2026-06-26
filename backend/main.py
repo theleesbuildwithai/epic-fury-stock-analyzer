@@ -8014,6 +8014,20 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
 
         formatted_longs = [_format_fund(p, i + 1) for i, p in enumerate(raw_longs[:40])]
 
+        # Last-mile price guard: drop any pick that has no valid entry price.
+        # Protects the frontend from ever seeing corrupted/zero/None prices
+        # regardless of what upstream cache or yfinance batch returned.
+        _before = len(formatted_longs)
+        formatted_longs = [p for p in formatted_longs if p.get("entry_price") and p["entry_price"] > 0]
+        if len(formatted_longs) < _before:
+            logger.warning(
+                f"STB LAST-MILE GUARD: dropped {_before - len(formatted_longs)} picks "
+                f"with missing/zero entry_price before sending to frontend"
+            )
+        # Re-sequence ranks after any drops
+        for _i, _p in enumerate(formatted_longs):
+            _p["rank"] = _i + 1
+
         return {
             "ok": True,
             "generated_at": data.get("generated_at") or "unknown",
