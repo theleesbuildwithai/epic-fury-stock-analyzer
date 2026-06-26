@@ -381,6 +381,7 @@ try:
     if _prs_open:
         _prs_syms = list({t["ticker"].upper() for t in _prs_open})
         _prs_prices = {}
+        # Tier 1: batch fetch via multi_source (fast, may fail on cold boot)
         try:
             _prs_batch = _prs_msqb(_prs_syms)
             for _ps, _pd in _prs_batch.items():
@@ -389,6 +390,29 @@ try:
                     _prs_prices[_ps.upper()] = float(_pp)
         except Exception:
             pass
+        # Tier 2: yfinance per-ticker fallback for any symbol multi_source missed.
+        # Critical: multi_source often fails on cold boot (rate limits, DNS warmup).
+        # Without fallback, ALL positions skip the scrub → corrupted positions persist.
+        _prs_missing = [s for s in _prs_syms if s not in _prs_prices]
+        if _prs_missing:
+            try:
+                import yfinance as _prs_yf
+                _prs_yf_data = _prs_yf.download(
+                    " ".join(_prs_missing), period="1d", auto_adjust=True,
+                    progress=False, threads=True, timeout=15,
+                )
+                for _prs_sym in _prs_missing:
+                    try:
+                        if len(_prs_missing) == 1:
+                            _prs_col = _prs_yf_data["Close"].dropna()
+                        else:
+                            _prs_col = _prs_yf_data["Close"][_prs_sym].dropna()
+                        if len(_prs_col) > 0:
+                            _prs_prices[_prs_sym] = float(_prs_col.iloc[-1])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         _prs_scrubbed = []
         for _pt in _prs_open:
             _pticker = _pt["ticker"].upper()
@@ -397,7 +421,7 @@ try:
             if not _plive or _pentry <= 0:
                 continue
             _pdiv = abs(_pentry - _plive) / _plive
-            if _pdiv > 0.30:  # v143: lowered from 0.60 — AAPL $430 vs real $275 = 56% was slipping through
+            if _pdiv > 0.30:
                 try:
                     _prs_close(_pt["id"], _plive)
                     _prs_scrubbed.append(f"{_pticker}(entry={_pentry},live={_plive:.2f},div={_pdiv*100:.0f}%)")
