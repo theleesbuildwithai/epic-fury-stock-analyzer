@@ -4176,23 +4176,15 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
                         _live_price = _live.get("current_price") or _live.get("price")
                     except Exception:
                         pass
-                if not _live_price:
-                    # Fallback 3: _PRICE_DATA_LASTGOOD — already fetched by the
-                    # 8-tier scanner, zero new API calls. Most rate-limit-resistant
-                    # source available. This is why 8 tiers exist — use them here too.
-                    try:
-                        from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _pld_pt
-                        _pld_entry = _pld_pt.get(symbol)
-                        if _pld_entry and isinstance(_pld_entry, dict) and "df" in _pld_entry:
-                            _pld_col = _pld_entry["df"]["Close"].dropna()
-                            if len(_pld_col) > 0:
-                                _live_price = float(_pld_col.iloc[-1])
-                                logger.info(f"Price sanity: using LASTGOOD cache for {symbol} → ${_live_price:.2f}")
-                    except Exception:
-                        pass
+                # v143 2026-06-25: Fallback 3 (LASTGOOD) REMOVED.
+                # Previously fell back to _PRICE_DATA_LASTGOOD if multi_source+yfinance
+                # failed. LASTGOOD can hold arbitrarily stale prices (SCHW $334 vs real $89)
+                # because the 40% ratio gate blocked the correct lower price from updating it.
+                # When LASTGOOD matches the pick's stale price (same source), divergence = 0%
+                # → sanity passes → trade opens at wrong price. Skip instead of use LASTGOOD.
                 # v137: REQUIRE live price from at least one source — if we
-                # can't verify entry price (multi_source + yfinance + lastgood
-                # all failed), skip trade. Better to miss than corrupt.
+                # can't verify entry price (multi_source + yfinance both failed),
+                # skip trade. Better to miss than corrupt.
                 if not _live_price:
                     results["skipped"].append({
                         "symbol": symbol,

@@ -4436,11 +4436,14 @@ def _generate_quant_picks_impl() -> dict:
                             _new_close = float(_new_closes.iloc[-1])
                             if _prev_median > 0 and _new_close > 0:
                                 ratio = _new_close / _prev_median
-                                # Bidirectional guard: reject price if it dropped >60%
-                                # OR spiked >150% vs previous median — both indicate
-                                # corrupted data (wrong ticker's prices, stale cache,
-                                # option premium confusion, MultiIndex mix-up, etc.)
-                                if ratio < 0.40 or ratio > 2.50:
+                                # Bidirectional guard: reject price if it dropped >85%
+                                # OR spiked >400% vs previous median — both indicate
+                                # corrupted data (option premium confusion, MultiIndex
+                                # mix-up, etc.). v143: raised drop floor from 0.40→0.15
+                                # because the 60% gate was blocking legitimate large
+                                # price moves (SCHW $334→$89 = 73% drop was real, but
+                                # got blocked, locking LASTGOOD at stale $334 forever).
+                                if ratio < 0.15 or ratio > 4.00:
                                     logger.warning(
                                         f"LASTGOOD CORRUPT GUARD {t}: new=${_new_close:.2f} "
                                         f"vs prev_median=${_prev_median:.2f} ratio={ratio:.2f} "
