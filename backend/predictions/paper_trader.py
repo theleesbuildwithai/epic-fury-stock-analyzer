@@ -3919,24 +3919,26 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
             # Gate: conf>=55% AND score>=1.2 (reduced from 60%/1.5 and 63%/1.8)
             # Rationale: SIDEWAYS doesn't mean no good setups — 63% gate was
             # producing ZERO longs and starving the portfolio of capital deployment.
-            # 55% with score>=1.2 filters noise while keeping the top decile of longs.
+            # 55% with score>=1.0 filters noise while keeping the top quartile of longs.
+            # Lowered from 1.2→1.0 to pass ~7-8 picks (MS, GM, MSCI, CB, WEC, ADM, UNG)
+            # instead of only 3, maximizing capital deployment in sideways markets.
             _vix = float((quant_picks.get("macro") or {}).get("vix") or 20)
             _sw_min_conf = 55
-            _sw_min_score = 1.2
+            _sw_min_score = 1.0
             _sw_longs = [p for p in long_candidates
                          if p.get("confidence", 0) >= _sw_min_conf
                          and p.get("composite_score", 0) >= _sw_min_score]
             # MINIMUM PICKS GUARANTEE: if gate is still too tight, progressively
-            # relax to ensure at least 3 longs pass — never leave the portfolio
-            # with zero options. Quality floor: conf>=45%, score>=0.8.
-            if len(_sw_longs) < 3 and len(long_candidates) > 0:
+            # relax to ensure at least 5 longs pass — never leave the portfolio
+            # starved. Quality floor: conf>=45%, score>=0.8.
+            if len(_sw_longs) < 5 and len(long_candidates) > 0:
                 _sw_longs = [p for p in long_candidates
                              if p.get("confidence", 0) >= 45
                              and p.get("composite_score", 0) >= 0.8]
                 logger.warning(
-                    "SIDEWAYS LONG GATE: primary gate produced %d longs — "
+                    "SIDEWAYS LONG GATE: primary gate produced %d longs (<5) — "
                     "relaxed to conf>=45%% score>=0.8 → %d longs",
-                    0, len(_sw_longs)
+                    len(_sw_longs), len(_sw_longs)
                 )
             if len(_sw_longs) < len(long_candidates):
                 logger.warning(
