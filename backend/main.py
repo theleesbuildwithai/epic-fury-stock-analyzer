@@ -397,7 +397,7 @@ try:
             if not _plive or _pentry <= 0:
                 continue
             _pdiv = abs(_pentry - _plive) / _plive
-            if _pdiv > 0.60:
+            if _pdiv > 0.30:  # v143: lowered from 0.60 — AAPL $430 vs real $275 = 56% was slipping through
                 try:
                     _prs_close(_pt["id"], _plive)
                     _prs_scrubbed.append(f"{_pticker}(entry={_pentry},live={_plive:.2f},div={_pdiv*100:.0f}%)")
@@ -10583,6 +10583,14 @@ def admin_reset_portfolio_v17():
         _snap(_CASH, _CASH, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
         # Mark the startup v17 block as done so it won't re-fire on next deploy
         _sts("fresh_start_v17_done", "1")
+        # v143 2026-06-25: immediately backup clean state to S3 so next deploy
+        # restores $141k with 0 positions — not a stale backup with bad trades.
+        try:
+            from predictions.db_persistence import backup_db_to_s3 as _bk_s3
+            _bk_s3()
+            logger.warning("ADMIN RESET v17: clean state backed up to S3.")
+        except Exception as _bk_e:
+            logger.warning(f"ADMIN RESET v17: S3 backup failed (non-fatal): {_bk_e}")
         logger.warning(f"ADMIN RESET v17: closed {_closed} positions, cash=$141k, stats reset.")
         return {
             "ok": True,
