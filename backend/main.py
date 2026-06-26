@@ -366,6 +366,50 @@ try:
 except Exception as e:
     logger.warning(f"S3 restore skipped: {e}")
 
+# v143 2026-06-25: Post-restore price sanity scrub.
+# Root cause: S3 backup contained open positions with stale entry prices
+# (e.g. SCHW $334 vs real $89). restore_db_from_s3() blindly reloads them
+# every deploy, creating phantom P&L. Fix: after restore, fetch live prices
+# for all open equity positions and auto-close any where entry diverges >60%
+# from current market price (options excluded — premium vs stock price diverges
+# by design). This is a one-shot guard; does NOT affect the trade cycle logic.
+try:
+    from predictions.models import get_open_trades as _prs_get, close_paper_trade as _prs_close
+    from analytics.multi_source_adapter import multi_source_quote_batch as _prs_msqb
+    _prs_open = [t for t in (_prs_get() or [])
+                 if (t.get("instrument_type") or "equity") not in ("call", "put", "option")]
+    if _prs_open:
+        _prs_syms = list({t["ticker"].upper() for t in _prs_open})
+        _prs_prices = {}
+        try:
+            _prs_batch = _prs_msqb(_prs_syms)
+            for _ps, _pd in _prs_batch.items():
+                _pp = _pd.get("price") if isinstance(_pd, dict) else _pd
+                if _pp and float(_pp) > 0:
+                    _prs_prices[_ps.upper()] = float(_pp)
+        except Exception:
+            pass
+        _prs_scrubbed = []
+        for _pt in _prs_open:
+            _pticker = _pt["ticker"].upper()
+            _pentry = float(_pt.get("entry_price") or 0)
+            _plive = _prs_prices.get(_pticker)
+            if not _plive or _pentry <= 0:
+                continue
+            _pdiv = abs(_pentry - _plive) / _plive
+            if _pdiv > 0.60:
+                try:
+                    _prs_close(_pt["id"], _plive)
+                    _prs_scrubbed.append(f"{_pticker}(entry={_pentry},live={_plive:.2f},div={_pdiv*100:.0f}%)")
+                except Exception:
+                    pass
+        if _prs_scrubbed:
+            logger.warning(f"POST-RESTORE PRICE SCRUB: closed {len(_prs_scrubbed)} bad-price positions: {_prs_scrubbed}")
+        else:
+            logger.info(f"POST-RESTORE PRICE SCRUB: all {len(_prs_open)} open positions have sane entry prices")
+except Exception as _prs_e:
+    logger.debug(f"Post-restore price scrub skipped: {_prs_e}")
+
 # Restore historical calibration from S3
 try:
     from analysis.historical_calibration import restore_calibration_from_s3 as restore_cal
