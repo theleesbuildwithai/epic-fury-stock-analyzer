@@ -2131,6 +2131,24 @@ _geo_risk_state = {"level": "LOW", "score": 0, "last_update": None, "events": []
 # Daily profit limit state (2.5% daily gain = sell all and pause)
 _daily_paused = {"paused": False, "pause_date": None, "reason": None}
 
+# Manual trading halt (set by /api/admin/halt-trading, cleared by /api/admin/resume-trading)
+# Persists until explicitly resumed — NOT date-bound like _daily_paused.
+_manual_halt = {"halted": False, "reason": None, "halted_at": None}
+
+# Load manual halt state from DB on startup
+try:
+    from predictions.models import get_trading_state as _gts_mh
+    _mh_val = _gts_mh("manual_halt", "0")
+    _mh_reason = _gts_mh("manual_halt_reason", "")
+    _mh_at = _gts_mh("manual_halt_at", "")
+    if _mh_val == "1":
+        _manual_halt["halted"] = True
+        _manual_halt["reason"] = _mh_reason or "Manual halt"
+        _manual_halt["halted_at"] = _mh_at
+        logger.warning(f"MANUAL HALT RESTORED from DB: {_mh_reason} (halted at {_mh_at})")
+except Exception:
+    pass
+
 # Load daily pause state from DB (survives container restarts)
 try:
     from predictions.models import get_trading_state, set_trading_state as _set_state
@@ -2198,6 +2216,10 @@ def _should_trade_now() -> dict:
     # Don't trade on weekends
     if weekday >= 5:
         return {"should_trade": False, "reasons": ["Weekend — market closed"]}
+
+    # Manual halt — persists until explicitly resumed by /api/admin/resume-trading
+    if _manual_halt.get("halted"):
+        return {"should_trade": False, "reasons": [f"MANUAL HALT — {_manual_halt.get('reason', 'halted by admin')}"]}
 
     # Don't trade if daily profit limit was hit (2.5%+ gain today)
     if _daily_paused.get("paused") and _daily_paused.get("pause_date") == now_et.strftime("%Y-%m-%d"):
@@ -10022,6 +10044,66 @@ def clear_daily_pause_endpoint(request: Request):
     except Exception as e:
         admin_audit(request, "CLEAR_DAILY_PAUSE", False, f"Error: {e}")
         logger.error(f"clear_daily_pause error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/halt-trading")
+def admin_halt_trading(request: Request):
+    """Halt all autonomous trading immediately. Persists until /api/admin/resume-trading is called.
+
+    Unlike the daily profit pause (which resets at midnight), this halt survives
+    day rollovers and container restarts until explicitly cleared.
+    """
+    check_rate_limit(request.client.host)
+    global _manual_halt
+    try:
+        now_str = dt.now().isoformat()
+        reason = "Manual halt by admin"
+        _manual_halt = {"halted": True, "reason": reason, "halted_at": now_str}
+        # Persist to DB so it survives container restarts
+        try:
+            from predictions.models import set_trading_state as _sts_halt
+            _sts_halt("manual_halt", "1")
+            _sts_halt("manual_halt_reason", reason)
+            _sts_halt("manual_halt_at", now_str)
+        except Exception as _db_err:
+            logger.warning(f"halt-trading: DB persist failed (memory set): {_db_err}")
+        logger.warning(f"TRADING HALTED by admin at {now_str}")
+        return {
+            "ok": True,
+            "halted": True,
+            "reason": reason,
+            "halted_at": now_str,
+            "message": "All autonomous trading halted. Call /api/admin/resume-trading to resume.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/resume-trading")
+def admin_resume_trading(request: Request):
+    """Resume autonomous trading after a manual halt."""
+    check_rate_limit(request.client.host)
+    global _manual_halt
+    try:
+        was_halted = _manual_halt.get("halted", False)
+        _manual_halt = {"halted": False, "reason": None, "halted_at": None}
+        # Clear from DB
+        try:
+            from predictions.models import set_trading_state as _sts_resume
+            _sts_resume("manual_halt", "0")
+            _sts_resume("manual_halt_reason", "")
+            _sts_resume("manual_halt_at", "")
+        except Exception as _db_err:
+            logger.warning(f"resume-trading: DB clear failed (memory cleared): {_db_err}")
+        logger.warning(f"TRADING RESUMED by admin (was_halted={was_halted})")
+        return {
+            "ok": True,
+            "halted": False,
+            "was_halted": was_halted,
+            "message": "Trading resumed. Next cycle will fire per schedule.",
+        }
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

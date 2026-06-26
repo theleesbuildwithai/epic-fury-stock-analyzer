@@ -6291,6 +6291,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # cached/LASTGOOD price with the live close. Runs once per 6h cache build.
     # Guarantees correct prices even when LASTGOOD held contaminated values.
     _live_stb_syms = [p.get("ticker", "") for p in top_picks if p.get("ticker")]
+    _fresh_px: dict = {}  # v144: always defined so multi_source fallback can check it
     if _live_stb_syms:
         try:
             import yfinance as _stb_yf
@@ -6350,6 +6351,39 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 )
         except Exception as _stb_px_err:
             logger.debug(f"STB PRICE REFRESH: non-fatal — {_stb_px_err}")
+
+        # v144: multi_source fallback for any tickers the batch download missed.
+        # Catches corrupted cached prices (HON $7357, MA $14, JNJ $1127, etc.)
+        # that yfinance batch silently skipped.
+        _missing = [p.get("ticker", "") for p in top_picks
+                    if p.get("ticker") and p.get("ticker") not in _fresh_px]
+        if _missing:
+            try:
+                from analytics.multi_source_adapter import multi_source_quote_batch as _msqb_stb
+                _ms_prices = _msqb_stb(_missing)
+                _ms_updated = 0
+                for _pick in top_picks:
+                    _s = _pick.get("ticker", "")
+                    if _s not in _ms_prices:
+                        continue
+                    _qd = _ms_prices[_s]
+                    _np2 = _qd.get("price") if isinstance(_qd, dict) else _qd
+                    if not _np2 or float(_np2) <= 0:
+                        continue
+                    _np2 = round(float(_np2), 2)
+                    _old2 = float(_pick.get("price", 0) or 0)
+                    if _old2 > 0 and abs(_np2 / _old2 - 1) > 0.05:
+                        logger.warning(
+                            f"STB MULTI-SRC REFRESH {_s}: ${_old2:.2f}→${_np2:.2f} "
+                            f"({(_np2/_old2-1)*100:+.1f}%) — CORRECTING STALE PRICE"
+                        )
+                    _pick["price"] = _np2
+                    _ms_updated += 1
+                logger.info(
+                    f"STB MULTI-SRC REFRESH: {_ms_updated}/{len(_missing)} missing prices filled"
+                )
+            except Exception as _ms_stb_err:
+                logger.debug(f"STB MULTI-SRC REFRESH: non-fatal — {_ms_stb_err}")
 
     # v142: expose full scan funnel so user can see how much of the universe was processed
     _tickers_attempted = len(quant_longs) + len(lastgood_stocks)
