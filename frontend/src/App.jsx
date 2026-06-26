@@ -7,7 +7,8 @@ import Watchlist from './pages/Watchlist'
 import ExtraResources from './pages/ExtraResources'
 import News from './pages/News'
 import DailySummary from './pages/DailySummary'
-import QuantDashboard from './pages/QuantDashboard'
+// QUANT HF PAGE — hidden; restore by uncommenting import and route below
+// import QuantDashboard from './pages/QuantDashboard'
 import IBKRDashboard from './pages/IBKRDashboard'
 import BacktestDashboard from './pages/BacktestDashboard'
 import SymbolsToBuy from './pages/SymbolsToBuy'
@@ -28,7 +29,9 @@ export default function App() {
           <Route path="/extra-resources" element={<ExtraResources />} />
           <Route path="/news" element={<News />} />
           <Route path="/daily-summary" element={<DailySummary />} />
+          {/* QUANT HF ROUTE — hidden; restore by uncommenting and re-enabling import above
           <Route path="/quant" element={<QuantDashboard />} />
+          */}
           <Route path="/ibkr" element={<IBKRDashboard />} />
           <Route path="/backtest" element={<BacktestDashboard />} />
           <Route path="/symbols-to-buy" element={<SymbolsToBuy />} />

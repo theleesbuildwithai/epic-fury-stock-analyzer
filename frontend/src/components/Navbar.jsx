@@ -56,6 +56,7 @@ export default function Navbar() {
             >
               News
             </Link>
+            {/* QUANT HF NAV LINK — hidden; restore by uncommenting
             <Link
               to="/quant"
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
@@ -66,6 +67,7 @@ export default function Navbar() {
             >
               Quant HF
             </Link>
+            */}
             <Link
               to="/ibkr"
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
