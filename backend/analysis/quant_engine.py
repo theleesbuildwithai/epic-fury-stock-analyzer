@@ -6331,12 +6331,26 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     except Exception:
                         continue
                 _updated = 0
+                _rejected = 0
                 for _pick in top_picks:
                     _s = _pick.get("ticker", "")
                     if _s not in _fresh_px:
                         continue
                     _old = float(_pick.get("price", 0) or 0)
                     _new = _fresh_px[_s]
+                    # Divergence gate: if existing price is valid and the batch
+                    # price diverges >25%, the batch likely scrambled this ticker
+                    # (MultiIndex mix-up). Reject it and remove from _fresh_px so
+                    # the multi_source fallback gets a chance to correct it.
+                    if _old > 0 and abs(_new / _old - 1) > 0.25:
+                        logger.warning(
+                            f"STB BATCH REJECT {_s}: ${_old:.2f}→${_new:.2f} "
+                            f"({abs(_new/_old-1)*100:.0f}% divergence > 25%) "
+                            f"— keeping existing, flagging for multi_source"
+                        )
+                        del _fresh_px[_s]  # exclude so multi_source fallback runs
+                        _rejected += 1
+                        continue
                     if _old != _new:
                         if _old > 0 and abs(_new / _old - 1) > 0.05:
                             logger.warning(
@@ -6346,8 +6360,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         _pick["price"] = _new
                         _updated += 1
                 logger.info(
-                    f"STB PRICE REFRESH: {_updated}/{len(top_picks)} prices "
-                    f"updated from live yfinance ({len(_fresh_px)} fetched)"
+                    f"STB PRICE REFRESH: {_updated}/{len(top_picks)} updated, "
+                    f"{_rejected} rejected (divergence gate) from yfinance batch"
                 )
         except Exception as _stb_px_err:
             logger.debug(f"STB PRICE REFRESH: non-fatal — {_stb_px_err}")
@@ -6372,6 +6386,17 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         continue
                     _np2 = round(float(_np2), 2)
                     _old2 = float(_pick.get("price", 0) or 0)
+                    # Multi-source divergence gate: only overwrite if existing price
+                    # is 0 (missing) OR the new price is within 40% of existing.
+                    # 40% (wider than batch gate) because multi_source is more
+                    # reliable and can legitimately catch large stale-price corrections.
+                    if _old2 > 0 and abs(_np2 / _old2 - 1) > 0.40:
+                        logger.warning(
+                            f"STB MULTI-SRC REJECT {_s}: ${_old2:.2f}→${_np2:.2f} "
+                            f"({abs(_np2/_old2-1)*100:.0f}% divergence > 40%) "
+                            f"— keeping existing price"
+                        )
+                        continue
                     if _old2 > 0 and abs(_np2 / _old2 - 1) > 0.05:
                         logger.warning(
                             f"STB MULTI-SRC REFRESH {_s}: ${_old2:.2f}→${_np2:.2f} "
