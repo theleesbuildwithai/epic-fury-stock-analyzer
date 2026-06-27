@@ -431,14 +431,54 @@ def regime_conditional_analysis(start_date: str = None,
         # fallback to _internals for backward compatibility
         eq_curve = bt.get("_equity_curve") or (bt.get("_internals") or {}).get("equity_curve") or []
         sp_series = bt.get("_sp500_series") or (bt.get("_internals") or {}).get("sp500_series") or []
-        if len(eq_curve) < 60 or len(sp_series) < 60:
+        if len(eq_curve) < 60:
             return {"ok": False, "reason": "insufficient_data_for_regime_analysis"}
+
+        # If sp_series from backtest is too short for MA200 (universe date intersection
+        # shrinks it to ~63 pts), download SPY independently with 3-year window.
+        # This gives 200+ pts needed for MA50/MA200 without being constrained by
+        # the equity-curve backtest window.
+        if len(sp_series) < 200:
+            import yfinance as _yf_rg
+            import threading as _rg_thr
+            _rg_end = end_date or datetime.today().strftime("%Y-%m-%d")
+            _rg_start = (datetime.strptime(_rg_end, "%Y-%m-%d") - timedelta(days=1100)).strftime("%Y-%m-%d")
+            _spy_rg = [None]
+
+            def _fetch_rg(r=_spy_rg, s=_rg_start, e=_rg_end):
+                for sym in ("SPY", "^GSPC", "IVV", "VOO"):
+                    try:
+                        df = _yf_rg.download([sym], start=s, end=e,
+                                              auto_adjust=True, progress=False)
+                        if df is None or df.empty:
+                            continue
+                        import pandas as _pd_rg
+                        col = (df[(sym, "Close")] if isinstance(df.columns, _pd_rg.MultiIndex)
+                               else df["Close"])
+                        col = col.dropna()
+                        if len(col) >= 200:
+                            r[0] = col
+                            return
+                    except Exception:
+                        continue
+
+            _t_rg = _rg_thr.Thread(target=_fetch_rg, daemon=True)
+            _t_rg.start()
+            _t_rg.join(timeout=60)
+            if _spy_rg[0] is not None and len(_spy_rg[0]) >= 200:
+                sp_series = [
+                    {"date": str(d)[:10], "close": float(v)}
+                    for d, v in _spy_rg[0].items()
+                    if v == v  # filter NaN
+                ]
+                logger.info(f"regime: independent SPY download — {len(sp_series)} pts")
+            else:
+                logger.warning("regime: independent SPY download failed or < 200 pts")
+                return {"ok": False, "reason": "spy_download_failed_for_regime"}
 
         # Index SPY by date for quick lookup
         sp_by_date = {p["date"]: p["close"] for p in sp_series}
         sp_dates = sorted(sp_by_date.keys())
-        if len(sp_dates) < 200:
-            return {"ok": False, "reason": "need_at_least_200_days_for_ma200"}
 
         # Pre-compute SPY 50d, 200d MA, and 20d realized vol per date
         regime_by_date = {}
