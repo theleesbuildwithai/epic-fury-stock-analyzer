@@ -434,10 +434,10 @@ def regime_conditional_analysis(start_date: str = None,
         if len(eq_curve) < 60:
             return {"ok": False, "reason": "insufficient_data_for_regime_analysis"}
 
-        # If sp_series from backtest is too short for MA200 (universe date intersection
-        # shrinks it to ~63 pts), download SPY independently with 3-year window.
-        # This gives 200+ pts needed for MA50/MA200 without being constrained by
-        # the equity-curve backtest window.
+        # If sp_series is too short for MA200 (~62 pts for 90d backtest), try
+        # to download more SPY history.  If download fails, gracefully degrade:
+        # classify using price vs MA50 instead of MA50 vs MA200 — still a valid
+        # regime signal, just shorter-window.
         if len(sp_series) < 200:
             import yfinance as _yf_rg
             import threading as _rg_thr
@@ -469,7 +469,7 @@ def regime_conditional_analysis(start_date: str = None,
 
             _t_rg = _rg_thr.Thread(target=_fetch_rg, daemon=True)
             _t_rg.start()
-            _t_rg.join(timeout=90)
+            _t_rg.join(timeout=30)  # 30s enough for success; fast-fail on rate-limit
             if _spy_rg[0] is not None and len(_spy_rg[0]) >= 200:
                 sp_series = [
                     {"date": str(d)[:10], "close": float(v)}
@@ -478,23 +478,47 @@ def regime_conditional_analysis(start_date: str = None,
                 ]
                 logger.info(f"regime: independent SPY download — {len(sp_series)} pts")
             else:
-                logger.warning("regime: independent SPY download failed or < 200 pts")
-                return {"ok": False, "reason": "spy_download_failed_for_regime"}
+                # Degrade gracefully: use the short sp_series with price vs MA50 mode.
+                # _has_ma200=False triggers price-vs-MA50 classification below.
+                logger.warning(f"regime: download failed — degrading to price-vs-MA50 "
+                               f"with {len(sp_series)} pts")
 
         # Index SPY by date for quick lookup
         sp_by_date = {p["date"]: p["close"] for p in sp_series}
         sp_dates = sorted(sp_by_date.keys())
 
-        # Pre-compute SPY 50d, 200d MA, and 20d realized vol per date
+        _n_sp = len(sp_dates)
+        _has_ma200 = (_n_sp >= 200)
+        # Start loop at 200 when we have full MA200 data; else 20 (degraded mode uses
+        # price vs short MA, needs only 20 pts of history to start classifying days).
+        _loop_start = 200 if _has_ma200 else 20
+
+        if _n_sp < 20:
+            return {"ok": False, "reason": "insufficient_spy_data_for_regime_analysis",
+                    "n_spy_pts": _n_sp}
+
+        # Pre-compute SPY MA, vol per date.
+        # When _has_ma200=False: pass (price, price, ma_50, vol) to _classify_regime
+        # so it evaluates price vs MA50 (bull = price 2% above MA50, etc.).
         regime_by_date = {}
-        for i in range(200, len(sp_dates)):
+        for i in range(_loop_start, _n_sp):
             d = sp_dates[i]
             try:
-                window_50 = [sp_by_date[sp_dates[j]] for j in range(i - 50, i)]
-                window_200 = [sp_by_date[sp_dates[j]] for j in range(i - 200, i)]
-                window_20 = [sp_by_date[sp_dates[j]] for j in range(i - 20, i)]
+                _lo50 = max(0, i - 50)
+                window_50 = [sp_by_date[sp_dates[j]] for j in range(_lo50, i)]
+                _lo20 = max(0, i - 20)
+                window_20 = [sp_by_date[sp_dates[j]] for j in range(_lo20, i)]
+                if not window_50:
+                    continue
                 ma_50 = sum(window_50) / len(window_50)
-                ma_200 = sum(window_200) / len(window_200)
+                if _has_ma200:
+                    window_200 = [sp_by_date[sp_dates[j]] for j in range(i - 200, i)]
+                    ma_200 = sum(window_200) / len(window_200)
+                else:
+                    # Price-vs-MA50 mode: treat current price as "short MA"
+                    # so _classify_regime compares price to MA50.
+                    ma_200 = ma_50
+                    ma_50 = sp_by_date[d]  # reuse ma_50 slot for price
                 # Daily log returns for vol
                 rets = []
                 for j in range(1, len(window_20)):
@@ -558,11 +582,13 @@ def regime_conditional_analysis(start_date: str = None,
                                  key=lambda x: x[1]["annualized_sharpe"],
                                  reverse=True)
 
+        _trend_method = ("MA50 vs MA200 (2% buffer)" if _has_ma200
+                         else "price vs MA50 (degraded — MA200 data unavailable)")
         return {
             "ok": True,
             "config": {"top_n": top_n, "hold_days": hold_days},
             "regime_classifier": {
-                "trend": "50d MA vs 200d MA (bull/bear/sideways with 2% buffer)",
+                "trend": _trend_method,
                 "vol": "20d annualized realized vol on SPY (low<13%, high>25%)",
             },
             "actual_backtest": {
