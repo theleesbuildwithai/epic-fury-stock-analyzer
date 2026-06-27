@@ -609,6 +609,48 @@ def run_backtest(start_date: str = None,
         if sp_series is not None and len(sp_series) >= 2:
             sp_return = (float(sp_series.iloc[-1]) / float(sp_series.iloc[0]) - 1) * 100
 
+        # Safe serialization helpers (used for both top-level and _internals)
+        import math as _math
+
+        def _sf(v):
+            """Safe float — returns 0.0 for NaN/inf/None."""
+            try:
+                f = float(v)
+                return 0.0 if (_math.isnan(f) or _math.isinf(f)) else f
+            except Exception:
+                return 0.0
+
+        def _sd(d):
+            """Safe date string — handles Timestamp, date, str."""
+            try:
+                return d.strftime("%Y-%m-%d")
+            except Exception:
+                return str(d)[:10]
+
+        # Serialize chart data now — always, unconditionally.
+        # Storing at top-level means cache hits, stale fallbacks, and all
+        # code paths can always find this data.  The _internals block below
+        # mirrors them for backtest_pro.py backward compatibility.
+        try:
+            _eq_list = [{"date": _sd(d), "equity": _sf(e)} for d, e in equity_curve]
+        except Exception as _eqe:
+            logger.warning(f"BACKTEST: equity_curve serialization fail: {_eqe}")
+            _eq_list = []
+        try:
+            _sp_list = (
+                [{"date": _sd(idx), "close": _sf(v)}
+                 for idx, v in sp_series.items() if v is not None]
+                if sp_series is not None else []
+            )
+        except Exception as _spe:
+            logger.warning(f"BACKTEST: sp500_series serialization fail: {_spe}")
+            _sp_list = []
+
+        logger.info(
+            f"BACKTEST CHART DATA: equity_curve={len(_eq_list)} "
+            f"sp500={len(_sp_list)} trades={len(closed_trades)}"
+        )
+
         result = {
             "ok": True,
             "config": {
@@ -639,57 +681,21 @@ def run_backtest(start_date: str = None,
                 "worst_trade": worst,
                 "per_ticker": per_ticker,
             },
+            # Chart data stored at top-level — always accessible regardless
+            # of include_internals flag, cache state, or exception paths.
+            "_equity_curve": _eq_list,
+            "_sp500_series": _sp_list,
+            "_trades": closed_trades,
             "computed_at": datetime.utcnow().isoformat(),
         }
 
-        # Optionally include internals (equity curve + full trade list +
-        # SPY series) for downstream analyzers like backtest_pro.py.
-        # Skipped by default to keep API responses light.
+        # Mirror into _internals for backtest_pro.py compatibility
         if include_internals:
-            try:
-                import math as _math
-                def _sf(v):
-                    """Safe float — returns 0.0 for NaN/inf/None."""
-                    try:
-                        f = float(v)
-                        return 0.0 if (_math.isnan(f) or _math.isinf(f)) else f
-                    except Exception:
-                        return 0.0
-
-                def _sd(d):
-                    """Safe date string — handles Timestamp, date, str."""
-                    try:
-                        return d.strftime("%Y-%m-%d")
-                    except Exception:
-                        return str(d)[:10]
-
-                _eq_list = [
-                    {"date": _sd(d), "equity": _sf(e)}
-                    for d, e in equity_curve
-                ]
-                _sp_list = []
-                if sp_series is not None:
-                    try:
-                        _sp_list = [
-                            {"date": _sd(idx), "close": _sf(v)}
-                            for idx, v in sp_series.items()
-                            if v is not None
-                        ]
-                    except Exception as _se:
-                        logger.warning(f"BACKTEST: sp500_series serialization fail: {_se}")
-                result["_internals"] = {
-                    "equity_curve": _eq_list,
-                    "trades": closed_trades,
-                    "sp500_series": _sp_list,
-                }
-                logger.info(
-                    f"BACKTEST INTERNALS OK: equity_curve={len(_eq_list)} "
-                    f"sp500={len(_sp_list)} trades={len(closed_trades)}"
-                )
-            except Exception as _ie:
-                logger.warning(f"BACKTEST: include_internals fail: {_ie}")
-                result["_internals"] = {"equity_curve": [], "trades": [],
-                                        "sp500_series": []}
+            result["_internals"] = {
+                "equity_curve": _eq_list,
+                "trades": closed_trades,
+                "sp500_series": _sp_list,
+            }
 
         # Cache (legacy single-slot + new per-param)
         try:

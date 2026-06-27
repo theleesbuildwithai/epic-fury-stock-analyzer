@@ -10075,9 +10075,12 @@ def backtest_detail(request: Request, days: int = 90, top_n: int = 10,
                 "avg_loss_pct": results.get("avg_loss_pct"),
                 "final_equity": results.get("final_equity"),
             },
-            "equity_curve": (r.get("_internals") or {}).get("equity_curve", []),
-            "sp500_series": (r.get("_internals") or {}).get("sp500_series", []),
-            "trades_sample": ((r.get("_internals") or {}).get("trades") or [])[:50],
+            "equity_curve": (r.get("_equity_curve")
+                             or (r.get("_internals") or {}).get("equity_curve", [])),
+            "sp500_series": (r.get("_sp500_series")
+                             or (r.get("_internals") or {}).get("sp500_series", [])),
+            "trades_sample": (r.get("_trades") or
+                              (r.get("_internals") or {}).get("trades") or [])[:50],
             "best_trade": results.get("best_trade"),
             "worst_trade": results.get("worst_trade"),
             "per_ticker": per_ticker_list[:30],
