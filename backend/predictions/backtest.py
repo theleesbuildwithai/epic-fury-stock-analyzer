@@ -333,10 +333,15 @@ def run_backtest(start_date: str = None,
             if cached and cached.get("data"):
                 age = time.time() - cached.get("ts", 0)
                 if age < _RESULT_CACHE_TTL:
-                    out = dict(cached["data"])
-                    out["_cache_hit"] = True
-                    out["_cache_age_seconds"] = round(age, 1)
-                    return out
+                    _cdata = cached["data"]
+                    # If caller needs internals but cache was built without them, bypass cache
+                    if include_internals and "_internals" not in _cdata:
+                        logger.debug("backtest cache: bypassing — internals requested but not cached")
+                    else:
+                        out = dict(_cdata)
+                        out["_cache_hit"] = True
+                        out["_cache_age_seconds"] = round(age, 1)
+                        return out
         except Exception as _cce:
             logger.debug(f"backtest cache-first check soft-fail: {_cce}")
 

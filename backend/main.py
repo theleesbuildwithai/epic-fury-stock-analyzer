@@ -4090,7 +4090,8 @@ def _prewarm_backtest_bg():
                 try:
                     r = run_backtest(start_date=start, end_date=end, top_n=10,
                                      stop_pct=0.04, take_pct=0.10, hold_days=5,
-                                     cost_bps=5.0, slippage_bps=5.0)
+                                     cost_bps=5.0, slippage_bps=5.0,
+                                     include_internals=True)  # cache WITH internals so detail endpoint hits correctly
                     if r.get("ok"):
                         logger.info(f"BACKTEST PRE-WARM: {days}d done (attempt {attempt})")
                         return True
