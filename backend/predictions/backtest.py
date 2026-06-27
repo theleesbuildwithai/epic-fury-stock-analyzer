@@ -160,12 +160,16 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
                     if isinstance(df.columns, pd.MultiIndex):
                         if sym in df.columns.get_level_values(0):
                             s = df[(sym, "Close")].dropna()
-                            if len(s) >= 5:   # low threshold — strategy warmup handles insufficient history
+                            # Use lower threshold for single-ticker calls (e.g. SPY on
+                            # short windows) but require 30 for universe tickers so that
+                            # partial downloads don't shrink the date intersection.
+                            _min = 5 if len(syms) == 1 else 30
+                            if len(s) >= _min:
                                 out[sym] = s
                                 got.add(sym)
                     elif len(syms) == 1:
                         s = df["Close"].dropna()
-                        if len(s) >= 5:
+                        if len(s) >= 5:   # single ticker (SPY etc) — accept short windows
                             out[sym] = s
                             got.add(sym)
                 except Exception:
