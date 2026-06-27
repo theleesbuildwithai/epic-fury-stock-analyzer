@@ -396,16 +396,49 @@ def run_backtest(start_date: str = None,
             sp_series = _preloaded_spy
             logger.debug(f"BACKTEST: using preloaded prices ({len(prices)} tickers)")
         else:
-            # Download SPY benchmark FIRST so it gets a fresh yfinance slot before
-            # the 100-ticker universe download exhausts the rate limit.
-            sp = _safe_yf_download(["SPY"], start_date, end_date)
-            sp_series = sp.get("SPY")
-            logger.info(f"BACKTEST: SPY download {'OK' if sp_series is not None else 'FAILED'} "
-                        f"({len(sp_series) if sp_series is not None else 0} pts)")
+            # Bundle SPY into the universe bulk download so it shares the same
+            # yfinance session (bulk TIER1/TIER2) instead of a separate individual
+            # call that can time out on the 10s thread deadline.
+            tickers_plus_spy = list(tickers) + ["SPY"]
+            all_dl = _safe_yf_download(tickers_plus_spy, start_date, end_date)
+            sp_series = all_dl.pop("SPY", None)
+            prices = all_dl
 
-        # Download all historical data (only when no preloaded prices)
-        if _preloaded_prices is None:
-            prices = _safe_yf_download(tickers, start_date, end_date)
+            # MULTI-SOURCE SPY FALLBACK — if SPY missed the bulk download,
+            # try progressively: individual yfinance → ^GSPC → IVV → VOO.
+            # Each attempt uses a longer timeout than the previous.
+            if sp_series is None:
+                import yfinance as _yf_spy
+                import threading as _spy_thr
+                for _spy_sym in ("SPY", "^GSPC", "IVV", "VOO"):
+                    try:
+                        _spy_r = [None]
+                        _spy_t = _spy_thr.Thread(
+                            target=lambda r=_spy_r, sym=_spy_sym: r.__setitem__(
+                                0, _yf_spy.download([sym], start=start_date,
+                                                     end=end_date,
+                                                     auto_adjust=True,
+                                                     progress=False)),
+                            daemon=True)
+                        _spy_t.start(); _spy_t.join(timeout=30)
+                        _df = _spy_r[0]
+                        if _df is not None and not _df.empty:
+                            import pandas as _pd_spy
+                            if isinstance(_df.columns, _pd_spy.MultiIndex):
+                                _s = _df[(_spy_sym, "Close")].dropna()
+                            else:
+                                _s = _df["Close"].dropna()
+                            if len(_s) >= 5:
+                                sp_series = _s
+                                logger.info(f"BACKTEST SPY fallback OK via {_spy_sym} ({len(_s)} pts)")
+                                break
+                    except Exception as _sfe:
+                        logger.debug(f"SPY fallback {_spy_sym} fail: {_sfe}")
+                        continue
+
+            logger.info(f"BACKTEST: universe={len(prices)} tickers, "
+                        f"SPY={'OK' if sp_series is not None else 'FAILED'} "
+                        f"({len(sp_series) if sp_series is not None else 0} pts)")
         if not prices:
             # STALE-CACHE FALLBACK: serve last good result for same params
             try:
