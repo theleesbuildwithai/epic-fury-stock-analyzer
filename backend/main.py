@@ -4076,6 +4076,7 @@ _prewarm_benchmark_bg()
 
 
 # --- Pre-warm backtest cache for common periods (30/90/180 days) ---
+
 # HARDENED 2026-05-17: runs at startup AND every 3 hours forever so the
 # cache never goes stale.  Each period gets up to 3 retry attempts with
 # 30s backoff if yfinance flakes.  Per-period failure is isolated so one
@@ -4137,6 +4138,39 @@ def _prewarm_backtest_bg():
             pass
 
 _prewarm_backtest_bg()
+
+
+# --- Pre-warm walk-forward cache at startup ---
+# Walk-forward with pre-loaded prices takes ~60-90s. Running it once in the
+# background means the endpoint always returns instantly from cache.
+def _prewarm_walk_forward_bg():
+    try:
+        import threading as _wf_thr, time as _wf_t
+        def _wf_runner():
+            # Wait for regular backtest pre-warm to finish first
+            _wf_t.sleep(300)  # 5 min after startup
+            while True:
+                try:
+                    from predictions.backtest_pro import walk_forward_validation
+                    r = walk_forward_validation(train_months=4, test_months=1,
+                                                top_n=10, hold_days=5)
+                    if r.get("ok"):
+                        _build_wf_response(r)
+                        _wf_cache["data"] = r
+                        _wf_cache["ts"] = _wf_t.time()
+                        logger.info(f"WF pre-warm done: {len(r.get('windows', []))} windows cached")
+                    else:
+                        logger.warning(f"WF pre-warm ok=False: {r.get('reason')}")
+                except Exception as _wfe:
+                    logger.warning(f"WF pre-warm soft-fail: {_wfe}")
+                _wf_t.sleep(14000)  # refresh every ~4h (before 4h TTL expires)
+        t = _wf_thr.Thread(target=_wf_runner, daemon=True, name="wf-prewarm")
+        t.start()
+        logger.info("Walk-forward pre-warm thread started")
+    except Exception as _e:
+        logger.warning(f"WF pre-warm setup fail: {_e}")
+
+_prewarm_walk_forward_bg()
 
 
 # ============================================================
@@ -11106,19 +11140,43 @@ def admin_force_picks_regen_sync(request: Request):
 #  Walk-forward + Monte Carlo + regime-conditional + stress tests
 # ============================================================
 
+# Walk-forward result cache — 4hr TTL (computation is heavy, result is stable)
+_wf_cache = {"data": None, "ts": 0}
+_WF_CACHE_TTL = 14400  # 4 hours
+
+def _build_wf_response(r):
+    """Flatten walk-forward result to the shape the frontend expects."""
+    s = r.get("summary", {})
+    avg_train = s.get("avg_train_sharpe", 0) or 0
+    avg_test = s.get("avg_test_sharpe", 0) or 0
+    overfit_ratio = round(avg_test / avg_train, 3) if avg_train and avg_train != 0 else 0
+    r["avg_in_sample_sharpe"] = avg_train
+    r["avg_oos_sharpe"] = avg_test
+    r["overfit_ratio"] = overfit_ratio
+    r["n_windows"] = len(r.get("windows") or [])
+    return r
+
+
 @app.get("/api/backtest-pro/walk-forward")
 def backtest_pro_walk_forward(request: Request, train_months: int = 4,
                                 test_months: int = 1, top_n: int = 10,
                                 hold_days: int = 5):
     """Walk-forward train/test validation — overfitting detector.
     Safe bounds: train_months in [3, 12], test_months in [1, 6].
-    Defaults guarantee enough trading days to not fail."""
+    Cached 4 hours; pre-warmed at startup so first request is instant."""
     check_rate_limit(request.client.host)
     train_months = max(3, min(int(train_months), 12))
     test_months = max(1, min(int(test_months), 6))
     top_n = max(1, min(int(top_n), 30))
     hold_days = max(1, min(int(hold_days), 30))
     try:
+        # Serve from cache if fresh
+        _wf_age = time.time() - _wf_cache.get("ts", 0)
+        if _wf_cache.get("data") and _wf_age < _WF_CACHE_TTL:
+            cached = dict(_wf_cache["data"])
+            cached["_cache_hit"] = True
+            cached["_cache_age_seconds"] = round(_wf_age, 1)
+            return cached
         from predictions.backtest_pro import walk_forward_validation
         r = walk_forward_validation(
             train_months=train_months,
@@ -11127,19 +11185,24 @@ def backtest_pro_walk_forward(request: Request, train_months: int = 4,
             hold_days=hold_days,
         )
         if not r.get("ok"):
+            # Serve stale cache on failure rather than returning error
+            if _wf_cache.get("data"):
+                stale = dict(_wf_cache["data"])
+                stale["_stale"] = True
+                stale["_stale_reason"] = r.get("reason", "compute_failed")
+                return stale
             return r
-        s = r.get("summary", {})
-        avg_train = s.get("avg_train_sharpe", 0) or 0
-        avg_test = s.get("avg_test_sharpe", 0) or 0
-        overfit_ratio = round(avg_test / avg_train, 3) if avg_train and avg_train != 0 else 0
-        # Flatten summary fields to top-level for the frontend render
-        r["avg_in_sample_sharpe"] = avg_train
-        r["avg_oos_sharpe"] = avg_test
-        r["overfit_ratio"] = overfit_ratio
-        r["n_windows"] = len(r.get("windows") or [])
+        _build_wf_response(r)
+        _wf_cache["data"] = r
+        _wf_cache["ts"] = time.time()
         return r
     except Exception as e:
         logger.error(f"Backtest-pro walk-forward error: {e}")
+        if _wf_cache.get("data"):
+            stale = dict(_wf_cache["data"])
+            stale["_stale"] = True
+            stale["_stale_reason"] = str(e)[:100]
+            return stale
         return {"ok": False, "reason": str(e)[:200]}
 
 

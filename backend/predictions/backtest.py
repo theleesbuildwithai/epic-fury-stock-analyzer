@@ -255,6 +255,32 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
     return out
 
 
+# Default 100-stock universe exported so backtest_pro.py can pre-load all
+# prices once for the full walk-forward range (avoids 36× yfinance calls).
+_DEFAULT_UNIVERSE = [
+    # Mega-cap tech
+    "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
+    "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
+    # Financials
+    "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
+    "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
+    # Healthcare
+    "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
+    "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
+    # Energy
+    "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
+    # Consumer
+    "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
+    "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
+    # Industrials
+    "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
+    # Communication / Media
+    "T","VZ","TMUS","CMCSA","CHTR",
+    # Utilities + Materials
+    "NEE","SO","DUK","LIN","APD","FCX",
+]
+
+
 def _compute_simple_signal(closes, lookback: int = 20) -> float:
     """Lightweight momentum + trend signal. Same direction as the live
     composite_score but much cheaper to compute on every day of every
@@ -297,7 +323,9 @@ def run_backtest(start_date: str = None,
                  position_pct: float = DEFAULT_POSITION_PCT,
                  include_internals: bool = False,
                  cost_bps: float = 0.0,
-                 slippage_bps: float = 0.0) -> dict:
+                 slippage_bps: float = 0.0,
+                 _preloaded_prices: dict = None,
+                 _preloaded_spy=None) -> dict:
     """Replay a momentum-based long-only strategy over historical data.
 
     Args:
@@ -354,38 +382,26 @@ def run_backtest(start_date: str = None,
         # time, not whether today's specific picks happened to be good historically.
         # STB picks are for live trading; the backtest tests the strategy logic.
         if not tickers:
-            tickers = [
-                # Mega-cap tech
-                "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
-                "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
-                # Financials
-                "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
-                "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
-                # Healthcare
-                "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
-                "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
-                # Energy
-                "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
-                # Consumer
-                "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
-                "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
-                # Industrials
-                "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
-                # Communication / Media
-                "T","VZ","TMUS","CMCSA","CHTR",
-                # Utilities + Materials
-                "NEE","SO","DUK","LIN","APD","FCX",
-            ]
+            tickers = list(_DEFAULT_UNIVERSE)
 
-        # Download SPY benchmark FIRST so it gets a fresh yfinance slot before
-        # the 100-ticker universe download exhausts the rate limit.
-        sp = _safe_yf_download(["SPY"], start_date, end_date)
-        sp_series = sp.get("SPY")
-        logger.info(f"BACKTEST: SPY download {'OK' if sp_series is not None else 'FAILED'} "
-                    f"({len(sp_series) if sp_series is not None else 0} pts)")
+        # Support pre-loaded prices (used by walk_forward_validation to avoid
+        # re-downloading the same data 36 times for each train/test window).
+        # If caller passes _preloaded_prices, skip all yfinance downloads.
+        if _preloaded_prices is not None:
+            prices = dict(_preloaded_prices)
+            sp_series = _preloaded_spy
+            logger.debug(f"BACKTEST: using preloaded prices ({len(prices)} tickers)")
+        else:
+            # Download SPY benchmark FIRST so it gets a fresh yfinance slot before
+            # the 100-ticker universe download exhausts the rate limit.
+            sp = _safe_yf_download(["SPY"], start_date, end_date)
+            sp_series = sp.get("SPY")
+            logger.info(f"BACKTEST: SPY download {'OK' if sp_series is not None else 'FAILED'} "
+                        f"({len(sp_series) if sp_series is not None else 0} pts)")
 
-        # Download all historical data
-        prices = _safe_yf_download(tickers, start_date, end_date)
+        # Download all historical data (only when no preloaded prices)
+        if _preloaded_prices is None:
+            prices = _safe_yf_download(tickers, start_date, end_date)
         if not prices:
             # STALE-CACHE FALLBACK: serve last good result for same params
             try:

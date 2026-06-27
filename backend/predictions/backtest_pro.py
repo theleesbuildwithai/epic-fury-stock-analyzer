@@ -65,7 +65,7 @@ def walk_forward_validation(start_date: str = None,
     still completes if one window has insufficient data.
     """
     try:
-        from predictions.backtest import run_backtest
+        from predictions.backtest import run_backtest, _safe_yf_download, _DEFAULT_UNIVERSE
         from datetime import datetime as _dt, timedelta as _td
 
         if not end_date:
@@ -93,19 +93,62 @@ def walk_forward_validation(start_date: str = None,
             return {"ok": False, "reason": "insufficient_history_for_walk_forward",
                     "needed_days": int((train_months + test_months) * 30)}
 
+        # PRE-LOAD all prices for the full walk-forward range in ONE download.
+        # Without this, each window calls run_backtest which downloads 100 tickers
+        # independently — for 18 windows that's 36 yfinance calls (~18 minutes).
+        # Pre-loading reduces this to 2 calls (universe + SPY), total ~30 seconds.
+        def _slice_prices(all_p, s_str, e_str):
+            """Slice a {sym: Series} dict to a date range using tz-safe string compare."""
+            out = {}
+            for sym, ser in all_p.items():
+                try:
+                    idx = ser.index.strftime("%Y-%m-%d")
+                    mask = (idx >= s_str) & (idx <= e_str)
+                    sliced = ser[mask]
+                    if len(sliced) >= 5:
+                        out[sym] = sliced
+                except Exception:
+                    continue
+            return out
+
+        _wf_spy_full = None
+        _wf_prices_full = {}
+        try:
+            _wf_spy_raw = _safe_yf_download(["SPY"], start_date, end_date)
+            _wf_spy_full = _wf_spy_raw.get("SPY")
+            _wf_prices_full = _safe_yf_download(list(_DEFAULT_UNIVERSE), start_date, end_date)
+            logger.info(f"WF pre-load: {len(_wf_prices_full)} tickers, SPY={'OK' if _wf_spy_full is not None else 'FAILED'}")
+        except Exception as _ple:
+            logger.warning(f"WF pre-load soft-fail (will fall back to per-window download): {_ple}")
+
         results = []
         for i, (ts, te, vs, ve) in enumerate(windows):
             try:
+                ts_str = ts.strftime("%Y-%m-%d")
+                te_str = te.strftime("%Y-%m-%d")
+                vs_str = vs.strftime("%Y-%m-%d")
+                ve_str = ve.strftime("%Y-%m-%d")
+
+                # Slice preloaded prices to this window, or fall back to live download
+                if _wf_prices_full:
+                    train_prices = _slice_prices(_wf_prices_full, ts_str, te_str)
+                    train_spy = _slice_prices({"SPY": _wf_spy_full}, ts_str, te_str).get("SPY") if _wf_spy_full is not None else None
+                    test_prices = _slice_prices(_wf_prices_full, vs_str, ve_str)
+                    test_spy = _slice_prices({"SPY": _wf_spy_full}, vs_str, ve_str).get("SPY") if _wf_spy_full is not None else None
+                else:
+                    train_prices = test_prices = None
+                    train_spy = test_spy = None
+
                 # Train window
-                train_bt = run_backtest(start_date=ts.strftime("%Y-%m-%d"),
-                                         end_date=te.strftime("%Y-%m-%d"),
-                                         top_n=int(top_n),
-                                         hold_days=int(hold_days))
+                train_bt = run_backtest(start_date=ts_str, end_date=te_str,
+                                         top_n=int(top_n), hold_days=int(hold_days),
+                                         _preloaded_prices=train_prices or None,
+                                         _preloaded_spy=train_spy)
                 # Test window
-                test_bt = run_backtest(start_date=vs.strftime("%Y-%m-%d"),
-                                        end_date=ve.strftime("%Y-%m-%d"),
-                                        top_n=int(top_n),
-                                        hold_days=int(hold_days))
+                test_bt = run_backtest(start_date=vs_str, end_date=ve_str,
+                                        top_n=int(top_n), hold_days=int(hold_days),
+                                        _preloaded_prices=test_prices or None,
+                                        _preloaded_spy=test_spy)
                 if not train_bt.get("ok") or not test_bt.get("ok"):
                     continue
                 tr_r = train_bt.get("results", {})
@@ -229,7 +272,8 @@ def monte_carlo_bootstrap(n_simulations: int = 1000,
         if not bt.get("ok"):
             return {"ok": False, "phase": "backtest", "reason": bt.get("reason")}
 
-        trades = (bt.get("_internals") or {}).get("trades") or []
+        # Read trades from top-level key first (_trades always set), fallback to _internals
+        trades = bt.get("_trades") or (bt.get("_internals") or {}).get("trades") or []
         if len(trades) < 10:
             return {"ok": False, "reason": f"too_few_trades_for_bootstrap ({len(trades)})"}
 
@@ -383,8 +427,10 @@ def regime_conditional_analysis(start_date: str = None,
         if not bt.get("ok"):
             return {"ok": False, "phase": "backtest", "reason": bt.get("reason")}
 
-        eq_curve = (bt.get("_internals") or {}).get("equity_curve") or []
-        sp_series = (bt.get("_internals") or {}).get("sp500_series") or []
+        # Read from top-level keys first (_equity_curve / _sp500_series always set),
+        # fallback to _internals for backward compatibility
+        eq_curve = bt.get("_equity_curve") or (bt.get("_internals") or {}).get("equity_curve") or []
+        sp_series = bt.get("_sp500_series") or (bt.get("_internals") or {}).get("sp500_series") or []
         if len(eq_curve) < 60 or len(sp_series) < 60:
             return {"ok": False, "reason": "insufficient_data_for_regime_analysis"}
 
