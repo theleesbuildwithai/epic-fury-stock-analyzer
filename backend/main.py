@@ -11208,10 +11208,11 @@ def backtest_pro_walk_forward(request: Request, train_months: int = 4,
 
 @app.get("/api/backtest-pro/monte-carlo")
 def backtest_pro_monte_carlo(request: Request, n_simulations: int = 500,
-                              days: int = 180, top_n: int = 10,
+                              days: int = 90, top_n: int = 10,
                               hold_days: int = 5):
     """Bootstrap-resample trades to give CIs on return + Sharpe + max DD.
-    Safe bounds: n_simulations [50, 5000], days [60, 730]."""
+    Safe bounds: n_simulations [50, 5000], days [60, 730].
+    Default 90d — aligns with pre-warmed backtest cache for fast response."""
     check_rate_limit(request.client.host)
     n_simulations = max(50, min(int(n_simulations), 5000))
     days = max(60, min(int(days), 730))
@@ -11247,12 +11248,14 @@ def backtest_pro_monte_carlo(request: Request, n_simulations: int = 500,
 
 
 @app.get("/api/backtest-pro/regimes")
-def backtest_pro_regimes(request: Request, days: int = 540,
+def backtest_pro_regimes(request: Request, days: int = 90,
                           top_n: int = 10, hold_days: int = 5):
     """Per-regime (bull/bear/sideways x low/mid/high vol) Sharpe + win rate.
-    Safe bounds: days [300, 1095] (needs 200d history for SPY MAs)."""
+    Default 90d — SPY MA200 is fetched independently (3yr window) so
+    the backtest window can be short and still hit the pre-warmed cache.
+    Safe bounds: days [60, 1095]."""
     check_rate_limit(request.client.host)
-    days = max(300, min(int(days), 1095))
+    days = max(60, min(int(days), 1095))
     top_n = max(1, min(int(top_n), 30))
     hold_days = max(1, min(int(hold_days), 30))
     try:

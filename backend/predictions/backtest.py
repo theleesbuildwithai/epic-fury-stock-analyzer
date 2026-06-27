@@ -716,11 +716,33 @@ def run_backtest(start_date: str = None,
             logger.warning(f"BACKTEST: equity_curve serialization fail: {_eqe}")
             _eq_list = []
         try:
-            _sp_list = (
-                [{"date": _sd(idx), "close": _sf(v)}
-                 for idx, v in sp_series.items() if v is not None]
-                if sp_series is not None else []
-            )
+            if sp_series is None:
+                _sp_list = []
+            else:
+                # If sp_series is a DataFrame (e.g. from a multi-column yfinance
+                # result), squeeze to a 1D Series before iterating.
+                import pandas as _pd_sp_ser
+                if isinstance(sp_series, _pd_sp_ser.DataFrame):
+                    _sp_cols = [c for c in sp_series.columns
+                                if str(c).lower() in ("close", "adj close", "adjclose")]
+                    sp_series = sp_series[_sp_cols[0]] if _sp_cols else sp_series.iloc[:, 0]
+                # Use zip(index, values) — avoids any .items() edge cases on
+                # unusual Series types returned by some yfinance versions.
+                try:
+                    _pairs = list(zip(sp_series.index, sp_series.values))
+                except Exception:
+                    _pairs = list(sp_series.items()) if hasattr(sp_series, "items") else []
+                _sp_list = [
+                    {"date": _sd(idx), "close": _sf(v)}
+                    for idx, v in _pairs
+                    if v == v and v is not None  # v == v filters NaN
+                ]
+                if not _sp_list:
+                    logger.warning(
+                        f"BACKTEST: sp_series type={type(sp_series).__name__} "
+                        f"len={len(sp_series) if hasattr(sp_series,'__len__') else '?'} "
+                        f"produced empty _sp_list"
+                    )
         except Exception as _spe:
             logger.warning(f"BACKTEST: sp500_series serialization fail: {_spe}")
             _sp_list = []
