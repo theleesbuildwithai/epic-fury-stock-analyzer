@@ -366,10 +366,16 @@ def run_backtest(start_date: str = None,
                 age = time.time() - cached.get("ts", 0)
                 if age < _RESULT_CACHE_TTL:
                     _cdata = cached["data"]
-                    # If caller needs internals but cache was built without them, bypass cache
+                    # Bypass conditions — never serve a poisoned cache entry
+                    _bypass = False
                     if include_internals and "_internals" not in _cdata:
-                        logger.debug("backtest cache: bypassing — internals requested but not cached")
-                    else:
+                        logger.debug("backtest cache: bypass — internals not cached")
+                        _bypass = True
+                    elif not _cdata.get("_sp500_series"):
+                        # sp500_series empty means SPY failed last time — retry
+                        logger.debug("backtest cache: bypass — sp500_series empty, retrying SPY")
+                        _bypass = True
+                    if not _bypass:
                         out = dict(_cdata)
                         out["_cache_hit"] = True
                         out["_cache_age_seconds"] = round(age, 1)
