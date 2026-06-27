@@ -442,44 +442,34 @@ def regime_conditional_analysis(start_date: str = None,
             import yfinance as _yf_rg
             import threading as _rg_thr
             _rg_end = end_date or datetime.today().strftime("%Y-%m-%d")
-            _rg_start = (datetime.strptime(_rg_end, "%Y-%m-%d") - timedelta(days=1100)).strftime("%Y-%m-%d")
+            # 400 calendar days gives ~275 trading days — enough for MA200
+            _rg_start = (datetime.strptime(_rg_end, "%Y-%m-%d") - timedelta(days=400)).strftime("%Y-%m-%d")
             _spy_rg = [None]
 
             def _fetch_rg(r=_spy_rg, s=_rg_start, e=_rg_end):
+                # Use Ticker().history() — returns flat DataFrame with "Close" column,
+                # no MultiIndex headaches regardless of yfinance version.
                 for sym in ("SPY", "^GSPC", "IVV", "VOO"):
                     try:
-                        df = _yf_rg.download([sym], start=s, end=e,
-                                              auto_adjust=True, progress=False,
-                                              group_by="ticker")
-                        if df is None or df.empty:
+                        _tkr = _yf_rg.Ticker(sym)
+                        _hist = _tkr.history(start=s, end=e, auto_adjust=True)
+                        if _hist is None or _hist.empty:
+                            logger.warning(f"regime: {sym} history empty")
                             continue
-                        import pandas as _pd_rg
-                        if isinstance(df.columns, _pd_rg.MultiIndex):
-                            # Support both (ticker, price) and (price, ticker) orderings
-                            if (sym, "Close") in df.columns:
-                                col = df[(sym, "Close")]
-                            elif ("Close", sym) in df.columns:
-                                col = df[("Close", sym)]
-                            else:
-                                # Last resort: find any Close-like column
-                                _cls = [c for c in df.columns
-                                        if str(c[-1]).lower() == "close"
-                                        or str(c[0]).lower() == "close"]
-                                if not _cls:
-                                    continue
-                                col = df[_cls[0]]
-                        else:
-                            col = df["Close"] if "Close" in df.columns else df.iloc[:, 0]
-                        col = col.dropna()
+                        col = (_hist["Close"] if "Close" in _hist.columns
+                               else _hist.iloc[:, 0]).dropna()
                         if len(col) >= 200:
                             r[0] = col
+                            logger.info(f"regime: {sym} OK — {len(col)} pts")
                             return
-                    except Exception:
+                        logger.warning(f"regime: {sym} only {len(col)} pts, need 200")
+                    except Exception as _ex:
+                        logger.warning(f"regime: {sym} download failed: {_ex}")
                         continue
 
             _t_rg = _rg_thr.Thread(target=_fetch_rg, daemon=True)
             _t_rg.start()
-            _t_rg.join(timeout=60)
+            _t_rg.join(timeout=90)
             if _spy_rg[0] is not None and len(_spy_rg[0]) >= 200:
                 sp_series = [
                     {"date": str(d)[:10], "close": float(v)}
