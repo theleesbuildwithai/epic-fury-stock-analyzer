@@ -6286,91 +6286,16 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             f"(duplicate prices={[round(x,2) for x in _dup_prices]})"
         )
 
-    # ── Live price refresh ─────────────────────────────────────────────────
-    # Batch-fetch fresh yfinance prices for all STB picks and overwrite any
-    # cached/LASTGOOD price with the live close. Runs once per 6h cache build.
-    # Guarantees correct prices even when LASTGOOD held contaminated values.
+    # ── Live price refresh via multi_source (authoritative, no batch scramble) ─
+    # multi_source aggregates multiple real-time sources per ticker individually.
+    # Replaces the yfinance batch download which was causing MultiIndex mix-ups
+    # (GOOGL $337→$226, CMCSA $23→$299, COST $952→$37, etc.).
+    # Runs for ALL STB picks — not just misses — so every price is validated
+    # against live data before being saved to the 6h cache.
     _live_stb_syms = [p.get("ticker", "") for p in top_picks if p.get("ticker")]
-    _fresh_px: dict = {}  # v144: always defined so multi_source fallback can check it
+    _fresh_px: dict = {}
     if _live_stb_syms:
-        try:
-            import yfinance as _stb_yf
-            import threading as _stb_thr
-            import pandas as _pd_stb
-            _stb_r = [None]
-            _stb_t = _stb_thr.Thread(
-                target=lambda r=_stb_r, s=_live_stb_syms: r.__setitem__(
-                    0, _stb_yf.download(
-                        " ".join(s), period="2d", progress=False,
-                        auto_adjust=True, group_by="ticker"
-                    )
-                ),
-                daemon=True,
-            )
-            _stb_t.start()
-            _stb_t.join(timeout=20)
-            _stb_df = _stb_r[0]
-            if _stb_df is not None and not _stb_df.empty:
-                _fresh_px: dict = {}
-                for _s in _live_stb_syms:
-                    try:
-                        if isinstance(getattr(_stb_df, "columns", None), _pd_stb.MultiIndex):
-                            _l1 = _stb_df.columns.get_level_values(1).tolist()
-                            _l0 = _stb_df.columns.get_level_values(0).tolist()
-                            if _s in _l1:
-                                _cl = _stb_df.xs(_s, axis=1, level=1)["Close"].dropna()
-                            elif _s in _l0:
-                                _cl = _stb_df[_s]["Close"].dropna()
-                            else:
-                                continue
-                        else:
-                            _cl = _stb_df["Close"].dropna()
-                        _p = float(_cl.iloc[-1])
-                        if math.isfinite(_p) and _p > 0:
-                            _fresh_px[_s] = round(_p, 2)
-                    except Exception:
-                        continue
-                _updated = 0
-                _rejected = 0
-                for _pick in top_picks:
-                    _s = _pick.get("ticker", "")
-                    if _s not in _fresh_px:
-                        continue
-                    _old = float(_pick.get("price", 0) or 0)
-                    _new = _fresh_px[_s]
-                    # Divergence gate: if existing price is valid and the batch
-                    # price diverges >25%, the batch likely scrambled this ticker
-                    # (MultiIndex mix-up). Reject it and remove from _fresh_px so
-                    # the multi_source fallback gets a chance to correct it.
-                    if _old > 0 and abs(_new / _old - 1) > 0.25:
-                        logger.warning(
-                            f"STB BATCH REJECT {_s}: ${_old:.2f}→${_new:.2f} "
-                            f"({abs(_new/_old-1)*100:.0f}% divergence > 25%) "
-                            f"— keeping existing, flagging for multi_source"
-                        )
-                        del _fresh_px[_s]  # exclude so multi_source fallback runs
-                        _rejected += 1
-                        continue
-                    if _old != _new:
-                        if _old > 0 and abs(_new / _old - 1) > 0.05:
-                            logger.warning(
-                                f"STB PRICE REFRESH {_s}: ${_old:.2f}→${_new:.2f} "
-                                f"({(_new/_old-1)*100:+.1f}%)"
-                            )
-                        _pick["price"] = _new
-                        _updated += 1
-                logger.info(
-                    f"STB PRICE REFRESH: {_updated}/{len(top_picks)} updated, "
-                    f"{_rejected} rejected (divergence gate) from yfinance batch"
-                )
-        except Exception as _stb_px_err:
-            logger.debug(f"STB PRICE REFRESH: non-fatal — {_stb_px_err}")
-
-        # v144: multi_source fallback for any tickers the batch download missed.
-        # Catches corrupted cached prices (HON $7357, MA $14, JNJ $1127, etc.)
-        # that yfinance batch silently skipped.
-        _missing = [p.get("ticker", "") for p in top_picks
-                    if p.get("ticker") and p.get("ticker") not in _fresh_px]
+        _missing = _live_stb_syms  # run multi_source for every ticker
         if _missing:
             try:
                 from analytics.multi_source_adapter import multi_source_quote_batch as _msqb_stb
@@ -6386,26 +6311,27 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         continue
                     _np2 = round(float(_np2), 2)
                     _old2 = float(_pick.get("price", 0) or 0)
-                    # No upper divergence cap for multi_source — it aggregates
-                    # multiple real-time sources and is authoritative even for
-                    # large corruptions (e.g., LVS cached $971 vs live $47).
-                    # Bounds check ($1–$15k in Layer 6) is the only guard needed.
+                    # multi_source is authoritative — always accept valid prices.
+                    # No divergence cap: it must be able to fix large corruptions
+                    # (e.g., LVS $971→$47, COST $37→$952). Bounds check in
+                    # Layer 6 ($1–$15k) is the only guard.
                     if _old2 > 0 and abs(_np2 / _old2 - 1) > 0.05:
                         logger.warning(
                             f"STB MULTI-SRC REFRESH {_s}: ${_old2:.2f}→${_np2:.2f} "
                             f"({(_np2/_old2-1)*100:+.1f}%) — CORRECTING STALE PRICE"
                         )
                     _pick["price"] = _np2
+                    _fresh_px[_s] = _np2
                     _ms_updated += 1
                 logger.info(
-                    f"STB MULTI-SRC REFRESH: {_ms_updated}/{len(_missing)} missing prices filled"
+                    f"STB MULTI-SRC REFRESH: {_ms_updated}/{len(_live_stb_syms)} prices refreshed"
                 )
             except Exception as _ms_stb_err:
                 logger.debug(f"STB MULTI-SRC REFRESH: non-fatal — {_ms_stb_err}")
 
     # ── Layer 5: Final zero/None price purge ──────────────────────────────────
-    # After all yfinance + multi_source refreshes, any pick still missing a price
-    # is silently dropped — never saved to cache.
+    # After multi_source refresh, any pick still missing a price is silently
+    # dropped — never saved to cache.
     _pre_purge = len(top_picks)
     top_picks = [p for p in top_picks if p.get("price") and float(p.get("price") or 0) > 0]
     if len(top_picks) < _pre_purge:
