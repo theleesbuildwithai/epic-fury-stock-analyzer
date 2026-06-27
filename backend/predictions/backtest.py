@@ -41,6 +41,32 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+
+# ── STB ticker loader ────────────────────────────────────────────────────────
+# Reads the live STB picks cache built by quant_engine.py and returns the
+# current list of tickers.  Falls back to the default 100-stock universe if
+# the cache is missing, empty, or has <5 tickers.
+_STB_CACHE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "analysis", ".picks_disk_cache.json"
+)
+
+def _get_stb_tickers(min_picks: int = 5) -> list:
+    """Return tickers from the live STB picks cache, or [] if unavailable."""
+    try:
+        path = os.path.normpath(_STB_CACHE_PATH)
+        if not os.path.exists(path):
+            return []
+        with open(path, "r") as _f:
+            raw = json.load(_f)
+        picks = raw.get("top_picks") or []
+        tickers = [p["ticker"] for p in picks if p.get("ticker")]
+        if len(tickers) < min_picks:
+            return []
+        return list(dict.fromkeys(tickers))  # deduplicate, preserve order
+    except Exception as _e:
+        logger.debug(f"_get_stb_tickers soft-fail: {_e}")
+        return []
+
 # Default backtest config
 DEFAULT_TOP_N = 10              # number of longs to hold each day
 DEFAULT_HOLD_DAYS = 5           # avg holding period
@@ -151,43 +177,52 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
         if period:
             kwargs["period"] = period
 
-        # TIER 1: bulk fetch (fastest path)
-        try:
-            _bt1_r = [None]
-            _bt1_t = _bt_thr.Thread(
-                target=lambda r=_bt1_r, tk=list(tickers), kw=dict(kwargs): r.__setitem__(
-                    0, yf.download(tk, **kw)),
-                daemon=True)
-            _bt1_t.start(); _bt1_t.join(timeout=30)
-            _extract(_bt1_r[0], tickers)
-        except Exception as e:
-            logger.debug(f"_safe_yf_download bulk tier failed: {e}")
+        # For small universes (≤40 tickers, i.e. STB picks), skip bulk batch
+        # and go straight to individual downloads.  yfinance MultiIndex batch
+        # can silently assign wrong ticker's data to the wrong column — safe
+        # individual downloads eliminate that risk entirely for small sets.
+        _use_individual_only = len(tickers) <= 40
 
-        # If we got >= 50% of requested tickers, accept and return
-        if len(out) >= len(tickers) * 0.5:
-            return out
-
-        # TIER 2: chunked retry (yfinance handles 20-ticker batches more reliably)
-        missing = [t for t in tickers if t not in out]
-        CHUNK_SIZE = 20
-        for i in range(0, len(missing), CHUNK_SIZE):
-            chunk = missing[i:i + CHUNK_SIZE]
+        if not _use_individual_only:
+            # TIER 1: bulk fetch (fastest path for large universes)
             try:
-                _bt2_r = [None]
-                _bt2_t = _bt_thr.Thread(
-                    target=lambda r=_bt2_r, c=chunk, kw=dict(kwargs): r.__setitem__(
-                        0, yf.download(c, **kw)),
+                _bt1_r = [None]
+                _bt1_t = _bt_thr.Thread(
+                    target=lambda r=_bt1_r, tk=list(tickers), kw=dict(kwargs): r.__setitem__(
+                        0, yf.download(tk, **kw)),
                     daemon=True)
-                _bt2_t.start(); _bt2_t.join(timeout=20)
-                _extract(_bt2_r[0], chunk)
-                _time.sleep(0.5)  # gentle on rate limits
+                _bt1_t.start(); _bt1_t.join(timeout=30)
+                _extract(_bt1_r[0], tickers)
             except Exception as e:
-                logger.debug(f"_safe_yf_download chunk fail [{i}]: {e}")
-                continue
+                logger.debug(f"_safe_yf_download bulk tier failed: {e}")
 
-        # TIER 3: individual retry for stragglers (rate-limit safest)
+            # If we got >= 50% of requested tickers, accept and return
+            if len(out) >= len(tickers) * 0.5:
+                return out
+
+            # TIER 2: chunked retry (yfinance handles 20-ticker batches more reliably)
+            missing = [t for t in tickers if t not in out]
+            CHUNK_SIZE = 20
+            for i in range(0, len(missing), CHUNK_SIZE):
+                chunk = missing[i:i + CHUNK_SIZE]
+                try:
+                    _bt2_r = [None]
+                    _bt2_t = _bt_thr.Thread(
+                        target=lambda r=_bt2_r, c=chunk, kw=dict(kwargs): r.__setitem__(
+                            0, yf.download(c, **kw)),
+                        daemon=True)
+                    _bt2_t.start(); _bt2_t.join(timeout=20)
+                    _extract(_bt2_r[0], chunk)
+                    _time.sleep(0.5)  # gentle on rate limits
+                except Exception as e:
+                    logger.debug(f"_safe_yf_download chunk fail [{i}]: {e}")
+                    continue
+
+        # TIER 3: individual downloads — always runs for STB universe,
+        # or as a fallback for stragglers in large-universe mode.
         still_missing = [t for t in tickers if t not in out]
-        if still_missing and len(still_missing) <= 30:
+        _ind_limit = len(tickers) if _use_individual_only else 30
+        if still_missing and len(still_missing) <= _ind_limit:
             for sym in still_missing:
                 try:
                     _bt3_r = [None]
@@ -197,7 +232,7 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
                         daemon=True)
                     _bt3_t.start(); _bt3_t.join(timeout=10)
                     _extract(_bt3_r[0], [sym])
-                    _time.sleep(1.0)
+                    _time.sleep(0.3 if _use_individual_only else 1.0)
                 except Exception:
                     continue
 
@@ -305,33 +340,38 @@ def run_backtest(start_date: str = None,
         except Exception as _cce:
             logger.debug(f"backtest cache-first check soft-fail: {_cce}")
 
-        # Default universe — 100 high-liquidity US stocks across all sectors
-        # Broader universe = better learning from historical patterns, not just
-        # the 30 names we've previously traded. This is what makes the
-        # auto-fixer's insights statistically meaningful.
+        # Universe: STB picks first (the tickers the system actually trades),
+        # falling back to a broad 100-stock list when the cache is cold/empty.
+        # Using STB tickers keeps backtest results directly relevant to live
+        # strategy performance rather than simulating a generic universe.
         if not tickers:
-            tickers = [
-                # Mega-cap tech
-                "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
-                "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
-                # Financials
-                "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
-                "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
-                # Healthcare
-                "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
-                "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
-                # Energy
-                "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
-                # Consumer
-                "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
-                "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
-                # Industrials
-                "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
-                # Communication / Media
-                "T","VZ","TMUS","CMCSA","CHTR",
-                # Utilities + Materials
-                "NEE","SO","DUK","LIN","APD","FCX",
-            ]
+            tickers = _get_stb_tickers()
+            if tickers:
+                logger.info(f"BACKTEST: using {len(tickers)} STB tickers as universe: {tickers}")
+            else:
+                logger.info("BACKTEST: STB cache unavailable — using default 100-stock universe")
+                tickers = [
+                    # Mega-cap tech
+                    "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
+                    "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
+                    # Financials
+                    "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
+                    "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
+                    # Healthcare
+                    "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
+                    "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
+                    # Energy
+                    "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
+                    # Consumer
+                    "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
+                    "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
+                    # Industrials
+                    "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
+                    # Communication / Media
+                    "T","VZ","TMUS","CMCSA","CHTR",
+                    # Utilities + Materials
+                    "NEE","SO","DUK","LIN","APD","FCX",
+                ]
 
         # Download all historical data
         prices = _safe_yf_download(tickers, start_date, end_date)
