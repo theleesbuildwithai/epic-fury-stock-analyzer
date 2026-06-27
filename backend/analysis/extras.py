@@ -1022,7 +1022,7 @@ PICK_CANDIDATES = [
     "PFE", "ABBV", "MRK", "LLY", "BMY",
     "XOM", "CVX", "COP", "SLB",
     "BA", "CAT", "HON", "GE",
-    "DIS", "CMCSA", "NFLX", "SBUX", "MCD", "NKE",
+    "DIS", "CMCSA", "SBUX", "MCD", "NKE",
     "WMT", "COST", "TGT",
     "GS", "MS", "BAC", "WFC", "C",
     "NEE", "DUK", "SO",
@@ -1040,7 +1040,8 @@ def get_daily_picks():
     def fetch():
         picks = []
 
-        # Download all candidates at once (1 API call)
+        # Step 1: Try bulk download (fast path — single API call)
+        all_data = {}
         _throttle()
         try:
             import threading as _pk_thr
@@ -1051,21 +1052,58 @@ def get_daily_picks():
                 daemon=True)
             _pk_t.start(); _pk_t.join(timeout=20)
             df = _pk_r[0]
+            if df is not None and not df.empty:
+                lv0 = list(df.columns.get_level_values(0))
+                for sym in PICK_CANDIDATES:
+                    if sym in lv0:
+                        try:
+                            col = df[sym]["Close"].dropna()
+                            if len(col) >= 30:
+                                all_data[sym] = col.values.astype(float)
+                        except Exception:
+                            pass
         except Exception:
-            return {"picks": [], "generated_at": datetime.now().isoformat(), "error": "Could not fetch data"}
+            pass
 
-        if df is None or df.empty:
-            return {"picks": [], "generated_at": datetime.now().isoformat(), "error": "No data available"}
+        # Step 2: Individual Ticker.history() fallback for any missing tickers.
+        # More reliable from AWS IPs than bulk download for single-ticker calls.
+        missing = [s for s in dict.fromkeys(PICK_CANDIDATES) if s not in all_data]
+        if missing:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for symbol in PICK_CANDIDATES:
+            def _dl_one(sym):
+                try:
+                    h = yf.Ticker(sym).history(period="3mo", auto_adjust=True)
+                    if h is not None and not h.empty:
+                        col = (h["Close"] if "Close" in h.columns else h.iloc[:, 0]).dropna()
+                        if len(col) >= 30:
+                            return sym, col.values.astype(float)
+                except Exception:
+                    pass
+                return sym, None
+
             try:
-                ticker_df = df[symbol] if symbol in df.columns.get_level_values(0) else None
-                if ticker_df is None or ticker_df.empty or len(ticker_df) < 30:
-                    continue
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    futs = {pool.submit(_dl_one, sym): sym for sym in missing}
+                    for fut in as_completed(futs, timeout=45):
+                        try:
+                            sym, data = fut.result()
+                            if data is not None:
+                                all_data[sym] = data
+                        except Exception:
+                            pass
+            except Exception:
+                pass  # use whatever data was collected before timeout
 
-                closes = ticker_df["Close"].dropna().values.astype(float)
-                if len(closes) < 30:
-                    continue
+        if not all_data:
+            return {"picks": [], "generated_at": datetime.now().isoformat(),
+                    "error": "Could not fetch market data"}
+
+        for symbol in dict.fromkeys(PICK_CANDIDATES):  # deduplicated, order-preserved
+            closes = all_data.get(symbol)
+            if closes is None or len(closes) < 30:
+                continue
+            try:
 
                 current = closes[-1]
                 series = pd.Series(closes)

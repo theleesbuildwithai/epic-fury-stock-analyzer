@@ -410,15 +410,17 @@ def _df_to_records(df) -> list:
 def get_benchmark_data(period: str = "1y") -> dict:
     """
     Get historical data for the 3 major indices so we can compare performance.
-    ^GSPC = S&P 500, ^IXIC = Nasdaq, ^DJI = Dow Jones
+    Uses ETF proxies (SPY/QQQ/DIA) instead of index symbols (^GSPC/^IXIC/^DJI)
+    because yfinance returns wrong/missing prices for index symbols from AWS IPs.
+    ETFs are liquid, accurate proxies and download reliably.
     """
     benchmarks = {
-        "sp500": "^GSPC",
-        "nasdaq": "^IXIC",
-        "dow_jones": "^DJI",
+        "sp500":     ("SPY", "S&P 500 (via SPY)"),
+        "nasdaq":    ("QQQ", "Nasdaq 100 (via QQQ)"),
+        "dow_jones": ("DIA", "Dow Jones (via DIA)"),
     }
     result = {}
-    for name, symbol in benchmarks.items():
+    for name, (symbol, label) in benchmarks.items():
         data = get_historical_data(symbol, period)
         if data:
             start_price = data[0]["close"]
@@ -426,6 +428,7 @@ def get_benchmark_data(period: str = "1y") -> dict:
             total_return = round(((end_price - start_price) / start_price) * 100, 2)
             result[name] = {
                 "symbol": symbol,
+                "label": label,
                 "start_price": start_price,
                 "end_price": end_price,
                 "total_return_pct": total_return,
