@@ -340,38 +340,37 @@ def run_backtest(start_date: str = None,
         except Exception as _cce:
             logger.debug(f"backtest cache-first check soft-fail: {_cce}")
 
-        # Universe: STB picks first (the tickers the system actually trades),
-        # falling back to a broad 100-stock list when the cache is cold/empty.
-        # Using STB tickers keeps backtest results directly relevant to live
-        # strategy performance rather than simulating a generic universe.
+        # Universe: broad 100-stock list across all sectors.
+        # IMPORTANT: Do NOT use today's live STB picks as the backtest universe.
+        # STB picks are chosen based on CURRENT signals — using them to test the
+        # past 90-365 days creates look-ahead bias in the wrong direction (today's
+        # strong picks were often weak 90 days ago, making the backtest show false
+        # losses). A stable broad universe tests whether the STRATEGY works across
+        # time, not whether today's specific picks happened to be good historically.
+        # STB picks are for live trading; the backtest tests the strategy logic.
         if not tickers:
-            tickers = _get_stb_tickers()
-            if tickers:
-                logger.info(f"BACKTEST: using {len(tickers)} STB tickers as universe: {tickers}")
-            else:
-                logger.info("BACKTEST: STB cache unavailable — using default 100-stock universe")
-                tickers = [
-                    # Mega-cap tech
-                    "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
-                    "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
-                    # Financials
-                    "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
-                    "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
-                    # Healthcare
-                    "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
-                    "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
-                    # Energy
-                    "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
-                    # Consumer
-                    "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
-                    "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
-                    # Industrials
-                    "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
-                    # Communication / Media
-                    "T","VZ","TMUS","CMCSA","CHTR",
-                    # Utilities + Materials
-                    "NEE","SO","DUK","LIN","APD","FCX",
-                ]
+            tickers = [
+                # Mega-cap tech
+                "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","AVGO","ORCL","CRM",
+                "AMD","NFLX","ADBE","INTC","QCOM","CSCO","IBM","TXN","PYPL","SHOP",
+                # Financials
+                "JPM","BAC","GS","MS","WFC","C","V","MA","BLK","SCHW",
+                "AXP","COF","USB","PNC","TFC","BX","KKR","SPGI","ICE","CME",
+                # Healthcare
+                "JNJ","UNH","PFE","LLY","ABBV","TMO","DHR","BMY","ABT","MRK",
+                "AMGN","CVS","ELV","ISRG","GILD","REGN","VRTX","HUM",
+                # Energy
+                "XOM","CVX","COP","SLB","EOG","PSX","MPC","OXY","HAL","VLO",
+                # Consumer
+                "HD","WMT","COST","KO","PEP","DIS","NKE","MCD","SBUX","TGT",
+                "LOW","TJX","BKNG","CMG","DG","ROST","YUM","ABNB",
+                # Industrials
+                "BA","CAT","GE","HON","UNP","UPS","RTX","DE","LMT","NOC",
+                # Communication / Media
+                "T","VZ","TMUS","CMCSA","CHTR",
+                # Utilities + Materials
+                "NEE","SO","DUK","LIN","APD","FCX",
+            ]
 
         # Download all historical data
         prices = _safe_yf_download(tickers, start_date, end_date)
