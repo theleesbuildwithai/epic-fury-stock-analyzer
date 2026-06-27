@@ -160,12 +160,12 @@ def _safe_yf_download(tickers: list, start: str, end: str, period: str = None) -
                     if isinstance(df.columns, pd.MultiIndex):
                         if sym in df.columns.get_level_values(0):
                             s = df[(sym, "Close")].dropna()
-                            if len(s) >= 30:
+                            if len(s) >= 5:   # low threshold — strategy warmup handles insufficient history
                                 out[sym] = s
                                 got.add(sym)
                     elif len(syms) == 1:
                         s = df["Close"].dropna()
-                        if len(s) >= 30:
+                        if len(s) >= 5:
                             out[sym] = s
                             got.add(sym)
                 except Exception:
@@ -402,19 +402,20 @@ def run_backtest(start_date: str = None,
                 pass
             return {"ok": False, "reason": "no_price_data_returned"}
 
-        # Build aligned date index — clamp to [start_date, end_date] first
-        # so that yfinance returning extra history (e.g. returning a full
-        # year for a 30-day request) doesn't inflate the simulation period.
+        # Clamp all price series to [start_date, end_date] so yfinance
+        # returning extra history (e.g. a full year for a 30-day request)
+        # doesn't inflate the simulation period.
+        # Use string comparison on strftime("%Y-%m-%d") to avoid tz-naive
+        # vs tz-aware TypeError that silently kills the clamp.
         try:
             import pandas as _pd_dt
-            _start_ts = _pd_dt.Timestamp(start_date)
-            _end_ts   = _pd_dt.Timestamp(end_date)
-            prices = {
-                sym: s[(s.index >= _start_ts) & (s.index <= _end_ts)]
-                for sym, s in prices.items()
-            }
+            def _clamp(s, s_date, e_date):
+                idx_strs = s.index.strftime("%Y-%m-%d")
+                mask = (idx_strs >= s_date) & (idx_strs <= e_date)
+                return s[mask]
+            prices = {sym: _clamp(s, start_date, end_date) for sym, s in prices.items()}
             if sp_series is not None:
-                sp_series = sp_series[(sp_series.index >= _start_ts) & (sp_series.index <= _end_ts)]
+                sp_series = _clamp(sp_series, start_date, end_date)
         except Exception as _clampe:
             logger.debug(f"price clamp soft-fail: {_clampe}")
 
