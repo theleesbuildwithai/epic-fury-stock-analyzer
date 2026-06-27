@@ -449,12 +449,27 @@ def regime_conditional_analysis(start_date: str = None,
                 for sym in ("SPY", "^GSPC", "IVV", "VOO"):
                     try:
                         df = _yf_rg.download([sym], start=s, end=e,
-                                              auto_adjust=True, progress=False)
+                                              auto_adjust=True, progress=False,
+                                              group_by="ticker")
                         if df is None or df.empty:
                             continue
                         import pandas as _pd_rg
-                        col = (df[(sym, "Close")] if isinstance(df.columns, _pd_rg.MultiIndex)
-                               else df["Close"])
+                        if isinstance(df.columns, _pd_rg.MultiIndex):
+                            # Support both (ticker, price) and (price, ticker) orderings
+                            if (sym, "Close") in df.columns:
+                                col = df[(sym, "Close")]
+                            elif ("Close", sym) in df.columns:
+                                col = df[("Close", sym)]
+                            else:
+                                # Last resort: find any Close-like column
+                                _cls = [c for c in df.columns
+                                        if str(c[-1]).lower() == "close"
+                                        or str(c[0]).lower() == "close"]
+                                if not _cls:
+                                    continue
+                                col = df[_cls[0]]
+                        else:
+                            col = df["Close"] if "Close" in df.columns else df.iloc[:, 0]
                         col = col.dropna()
                         if len(col) >= 200:
                             r[0] = col

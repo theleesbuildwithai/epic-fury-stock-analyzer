@@ -431,9 +431,19 @@ def run_backtest(start_date: str = None,
                         if _df is not None and not _df.empty:
                             import pandas as _pd_spy
                             if isinstance(_df.columns, _pd_spy.MultiIndex):
-                                _s = _df[(_spy_sym, "Close")].dropna()
+                                # Handle both (ticker, price) and (price, ticker) orderings
+                                if (_spy_sym, "Close") in _df.columns:
+                                    _s = _df[(_spy_sym, "Close")].dropna()
+                                elif ("Close", _spy_sym) in _df.columns:
+                                    _s = _df[("Close", _spy_sym)].dropna()
+                                else:
+                                    _cls = [c for c in _df.columns
+                                            if str(c[-1]).lower() == "close"
+                                            or str(c[0]).lower() == "close"]
+                                    _s = _df[_cls[0]].dropna() if _cls else _pd_spy.Series(dtype=float)
                             else:
-                                _s = _df["Close"].dropna()
+                                _s = (_df["Close"] if "Close" in _df.columns
+                                      else _df.iloc[:, 0]).dropna()
                             if len(_s) >= 5:
                                 sp_series = _s
                                 logger.info(f"BACKTEST SPY fallback OK via {_spy_sym} ({len(_s)} pts)")
