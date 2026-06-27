@@ -377,6 +377,13 @@ def run_backtest(start_date: str = None,
                 "NEE","SO","DUK","LIN","APD","FCX",
             ]
 
+        # Download SPY benchmark FIRST so it gets a fresh yfinance slot before
+        # the 100-ticker universe download exhausts the rate limit.
+        sp = _safe_yf_download(["SPY"], start_date, end_date)
+        sp_series = sp.get("SPY")
+        logger.info(f"BACKTEST: SPY download {'OK' if sp_series is not None else 'FAILED'} "
+                    f"({len(sp_series) if sp_series is not None else 0} pts)")
+
         # Download all historical data
         prices = _safe_yf_download(tickers, start_date, end_date)
         if not prices:
@@ -395,11 +402,22 @@ def run_backtest(start_date: str = None,
                 pass
             return {"ok": False, "reason": "no_price_data_returned"}
 
-        # SP500 benchmark
-        sp = _safe_yf_download(["SPY"], start_date, end_date)
-        sp_series = sp.get("SPY")
+        # Build aligned date index — clamp to [start_date, end_date] first
+        # so that yfinance returning extra history (e.g. returning a full
+        # year for a 30-day request) doesn't inflate the simulation period.
+        try:
+            import pandas as _pd_dt
+            _start_ts = _pd_dt.Timestamp(start_date)
+            _end_ts   = _pd_dt.Timestamp(end_date)
+            prices = {
+                sym: s[(s.index >= _start_ts) & (s.index <= _end_ts)]
+                for sym, s in prices.items()
+            }
+            if sp_series is not None:
+                sp_series = sp_series[(sp_series.index >= _start_ts) & (sp_series.index <= _end_ts)]
+        except Exception as _clampe:
+            logger.debug(f"price clamp soft-fail: {_clampe}")
 
-        # Build aligned date index (intersection of all tickers + SPY)
         all_dates = None
         for sym, s in prices.items():
             dates_set = set(s.index)
@@ -407,7 +425,8 @@ def run_backtest(start_date: str = None,
         if not all_dates:
             return {"ok": False, "reason": "no_common_trading_dates"}
         date_list = sorted(all_dates)
-        if len(date_list) < 60:
+        min_dates = 20  # 30-day window ≈ 22 trading days; allow slightly fewer
+        if len(date_list) < min_dates:
             return {"ok": False, "reason": f"too_few_dates ({len(date_list)})"}
 
         # Re-align all price series to the shared date_list so that
