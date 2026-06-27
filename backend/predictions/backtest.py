@@ -405,6 +405,17 @@ def run_backtest(start_date: str = None,
         if len(date_list) < 60:
             return {"ok": False, "reason": f"too_few_dates ({len(date_list)})"}
 
+        # Re-align all price series to the shared date_list so that
+        # prices[sym].iloc[i] always corresponds to date_list[i].
+        # Without this, tickers with extra leading/trailing dates cause
+        # iloc[i] to access the wrong date, producing wrong prices.
+        try:
+            import pandas as _pd_align
+            _dl_index = _pd_align.DatetimeIndex(date_list)
+            prices = {sym: s.reindex(_dl_index) for sym, s in prices.items()}
+        except Exception as _ae:
+            logger.debug(f"price reindex soft-fail (continuing with original): {_ae}")
+
         # Walk forward day by day
         cash = float(initial_capital)
         positions = {}  # ticker -> {entry_price, shares, entry_date, entry_idx}
@@ -416,8 +427,9 @@ def run_backtest(start_date: str = None,
 
         for i, d in enumerate(date_list):
             # Need at least 25 days of history for signal
+            _d_str = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
             if i < 25:
-                equity_curve.append((d.strftime("%Y-%m-%d"), cash))
+                equity_curve.append((_d_str, cash))
                 continue
 
             # Mark-to-market: total equity = cash + sum(open positions)
@@ -427,7 +439,7 @@ def run_backtest(start_date: str = None,
                 position_value += p["shares"] * cur_price
 
             total_equity = cash + position_value
-            equity_curve.append((d.strftime("%Y-%m-%d"), total_equity))
+            equity_curve.append((_d_str, total_equity))
 
             # Exit checks
             for sym, p in list(positions.items()):
@@ -630,19 +642,47 @@ def run_backtest(start_date: str = None,
         # Skipped by default to keep API responses light.
         if include_internals:
             try:
+                import math as _math
+                def _sf(v):
+                    """Safe float — returns 0.0 for NaN/inf/None."""
+                    try:
+                        f = float(v)
+                        return 0.0 if (_math.isnan(f) or _math.isinf(f)) else f
+                    except Exception:
+                        return 0.0
+
+                def _sd(d):
+                    """Safe date string — handles Timestamp, date, str."""
+                    try:
+                        return d.strftime("%Y-%m-%d")
+                    except Exception:
+                        return str(d)[:10]
+
+                _eq_list = [
+                    {"date": _sd(d), "equity": _sf(e)}
+                    for d, e in equity_curve
+                ]
+                _sp_list = []
+                if sp_series is not None:
+                    try:
+                        _sp_list = [
+                            {"date": _sd(idx), "close": _sf(v)}
+                            for idx, v in sp_series.items()
+                            if v is not None
+                        ]
+                    except Exception as _se:
+                        logger.warning(f"BACKTEST: sp500_series serialization fail: {_se}")
                 result["_internals"] = {
-                    "equity_curve": [
-                        {"date": d, "equity": float(e)} for d, e in equity_curve
-                    ],
-                    "trades": closed_trades,  # already serializable dicts
-                    "sp500_series": (
-                        [{"date": idx.strftime("%Y-%m-%d"), "close": float(v)}
-                         for idx, v in sp_series.items()]
-                        if sp_series is not None else []
-                    ),
+                    "equity_curve": _eq_list,
+                    "trades": closed_trades,
+                    "sp500_series": _sp_list,
                 }
+                logger.info(
+                    f"BACKTEST INTERNALS OK: equity_curve={len(_eq_list)} "
+                    f"sp500={len(_sp_list)} trades={len(closed_trades)}"
+                )
             except Exception as _ie:
-                logger.debug(f"include_internals serialization soft-fail: {_ie}")
+                logger.warning(f"BACKTEST: include_internals fail: {_ie}")
                 result["_internals"] = {"equity_curve": [], "trades": [],
                                         "sp500_series": []}
 
