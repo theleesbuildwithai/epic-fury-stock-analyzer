@@ -11116,12 +11116,24 @@ def backtest_pro_walk_forward(request: Request, train_months: int = 4,
     hold_days = max(1, min(int(hold_days), 30))
     try:
         from predictions.backtest_pro import walk_forward_validation
-        return walk_forward_validation(
+        r = walk_forward_validation(
             train_months=train_months,
             test_months=test_months,
             top_n=top_n,
             hold_days=hold_days,
         )
+        if not r.get("ok"):
+            return r
+        s = r.get("summary", {})
+        avg_train = s.get("avg_train_sharpe", 0) or 0
+        avg_test = s.get("avg_test_sharpe", 0) or 0
+        overfit_ratio = round(avg_test / avg_train, 3) if avg_train and avg_train != 0 else 0
+        # Flatten summary fields to top-level for the frontend render
+        r["avg_in_sample_sharpe"] = avg_train
+        r["avg_oos_sharpe"] = avg_test
+        r["overfit_ratio"] = overfit_ratio
+        r["n_windows"] = len(r.get("windows") or [])
+        return r
     except Exception as e:
         logger.error(f"Backtest-pro walk-forward error: {e}")
         return {"ok": False, "reason": str(e)[:200]}
@@ -11143,11 +11155,25 @@ def backtest_pro_monte_carlo(request: Request, n_simulations: int = 500,
         from datetime import datetime as _dt, timedelta as _td
         end = _dt.utcnow().date().isoformat()
         start = (_dt.utcnow() - _td(days=days)).date().isoformat()
-        return monte_carlo_bootstrap(
+        r = monte_carlo_bootstrap(
             n_simulations=n_simulations,
             start_date=start, end_date=end,
             top_n=top_n, hold_days=hold_days,
         )
+        if not r.get("ok"):
+            return r
+        bd = r.get("bootstrap_distribution", {})
+        rp = bd.get("return_pct", {})
+        # Flatten return_distribution to top level with shape the frontend expects:
+        # { mean, median, p5, p95 }
+        actual_ret = (r.get("actual_backtest") or {}).get("total_return_pct")
+        r["return_distribution"] = {
+            "mean": actual_ret,      # observed backtest return as "mean"
+            "median": rp.get("median"),
+            "p5": rp.get("p5"),
+            "p95": rp.get("p95"),
+        }
+        return r
     except Exception as e:
         logger.error(f"Backtest-pro monte-carlo error: {e}")
         return {"ok": False, "reason": str(e)[:200]}
@@ -11167,10 +11193,25 @@ def backtest_pro_regimes(request: Request, days: int = 540,
         from datetime import datetime as _dt, timedelta as _td
         end = _dt.utcnow().date().isoformat()
         start = (_dt.utcnow() - _td(days=days)).date().isoformat()
-        return regime_conditional_analysis(
+        r = regime_conditional_analysis(
             start_date=start, end_date=end,
             top_n=top_n, hold_days=hold_days,
         )
+        if not r.get("ok"):
+            return r
+        by_regime = r.get("by_regime", {})
+        # Reshape to regime_stats with fields the frontend expects:
+        # { trades, win_rate_pct, sharpe }
+        r["regime_stats"] = {
+            regime: {
+                "trades": stats.get("days", 0),          # days → trades (trading days)
+                "win_rate_pct": stats.get("win_rate_pct"),
+                "sharpe": stats.get("annualized_sharpe"), # annualized_sharpe → sharpe
+                "cum_return_pct": stats.get("cum_return_pct"),
+            }
+            for regime, stats in by_regime.items()
+        }
+        return r
     except Exception as e:
         logger.error(f"Backtest-pro regimes error: {e}")
         return {"ok": False, "reason": str(e)[:200]}
