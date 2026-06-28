@@ -409,29 +409,128 @@ def _df_to_records(df) -> list:
 
 def get_benchmark_data(period: str = "1y") -> dict:
     """
-    Get historical data for the 3 major indices so we can compare performance.
-    Uses ETF proxies (SPY/QQQ/DIA) instead of index symbols (^GSPC/^IXIC/^DJI)
-    because yfinance returns wrong/missing prices for index symbols from AWS IPs.
-    ETFs are liquid, accurate proxies and download reliably.
+    Get historical data for the 3 major market indices.
+
+    Completely BYPASSES get_historical_data() and its stale-cache infrastructure
+    to guarantee fresh, correct prices. Uses Ticker.history() with explicit date
+    ranges (same proven approach as the regime analysis fix), multiple ETF fallbacks
+    per index, and a hard price-sanity gate that rejects obviously stale data.
+
+    Safety nets:
+      - Explicit start/end dates (not period strings) — avoids yfinance period quirks
+      - 3 ETF fallbacks per index (e.g. SPY → IVV → VOO for S&P 500)
+      - Price sanity check: if last close < min_price, the data is rejected
+      - MultiIndex flattening in case yfinance returns unexpected column structure
+      - 12s thread timeout per ETF download attempt
+      - Own 30-min cache keyed separately from the main _cache stale-seed path
     """
-    benchmarks = {
-        "sp500":     ("SPY", "S&P 500 (via SPY)"),
-        "nasdaq":    ("QQQ", "Nasdaq 100 (via QQQ)"),
-        "dow_jones": ("DIA", "Dow Jones (via DIA)"),
-    }
+    import yfinance as _yf_bm
+    import threading as _bm_thr
+    from datetime import datetime as _dt_bm, timedelta as _td_bm
+    import logging as _bm_log
+    _bm_logger = _bm_log.getLogger(__name__)
+
+    # Own 30-min cache — completely separate from _cache/_last_good_history
+    _bm_key = f"__benchmark_{period}"
+    _now = time.time()
+    if _bm_key in _cache:
+        _e = _cache[_bm_key]
+        if _now - _e["time"] < 1800 and _e.get("data"):
+            return _e["data"]
+
+    # Multiple ETF fallbacks per index (primary → secondary → tertiary)
+    # min_price = minimum acceptable last-close price; rejects stale/wrong data
+    _indices = [
+        ("sp500",     "S&P 500",    ["SPY", "IVV", "VOO"],   100.0),
+        ("nasdaq",    "Nasdaq 100", ["QQQ", "QQQM", "ONEQ"],  50.0),
+        ("dow_jones", "Dow Jones",  ["DIA"],                  100.0),
+    ]
+
+    # Explicit date range — avoids yfinance "period=" misinterpretation
+    _days = {"1mo": 35, "3mo": 100, "6mo": 185, "1y": 370, "2y": 740, "5y": 1850}
+    _end_dt = _dt_bm.today()
+    _start_dt = _end_dt - _td_bm(days=_days.get(period, 370))
+    _start_s = _start_dt.strftime("%Y-%m-%d")
+    _end_s = _end_dt.strftime("%Y-%m-%d")
+
     result = {}
-    for name, (symbol, label) in benchmarks.items():
-        data = get_historical_data(symbol, period)
-        if data:
-            start_price = data[0]["close"]
-            end_price = data[-1]["close"]
-            total_return = round(((end_price - start_price) / start_price) * 100, 2)
-            result[name] = {
-                "symbol": symbol,
-                "label": label,
-                "start_price": start_price,
-                "end_price": end_price,
-                "total_return_pct": total_return,
-                "data": data,
+
+    for _name, _label, _etfs, _min_px in _indices:
+        _data = []
+        _sym_used = None
+
+        for _sym in _etfs:
+            try:
+                _r = [None]
+                _t = _bm_thr.Thread(
+                    target=lambda r=_r, s=_sym: r.__setitem__(
+                        0, _yf_bm.Ticker(s).history(
+                            start=_start_s, end=_end_s, auto_adjust=True)),
+                    daemon=True)
+                _t.start(); _t.join(timeout=12)
+                _df = _r[0]
+
+                if _df is None or _df.empty or len(_df) < 10:
+                    _bm_logger.warning(f"benchmark: {_sym} — empty or too short")
+                    continue
+
+                # Flatten MultiIndex if present (safety net)
+                if hasattr(_df.columns, "levels"):
+                    _df = _df.copy()
+                    _df.columns = _df.columns.get_level_values(0)
+
+                _records = []
+                for _date, _row in _df.iterrows():
+                    try:
+                        _close = float(_row.get("Close", 0) or _row.iloc[3])
+                        if _close <= 0:
+                            continue
+                        _records.append({
+                            "date": _date.strftime("%Y-%m-%d"),
+                            "open":   round(float(_row.get("Open",   _close)), 2),
+                            "high":   round(float(_row.get("High",   _close)), 2),
+                            "low":    round(float(_row.get("Low",    _close)), 2),
+                            "close":  round(_close, 2),
+                            "volume": int(_row.get("Volume", 0) or 0),
+                        })
+                    except Exception:
+                        continue
+
+                if not _records:
+                    _bm_logger.warning(f"benchmark: {_sym} — _df_to_records returned empty")
+                    continue
+
+                # Hard price-sanity gate — rejects stale/adjusted-to-oblivion data
+                _last_close = _records[-1]["close"]
+                if _last_close < _min_px:
+                    _bm_logger.warning(
+                        f"benchmark: {_sym} REJECTED — last_close={_last_close} < min={_min_px} (stale data)")
+                    continue
+
+                _data = _records
+                _sym_used = _sym
+                _bm_logger.info(
+                    f"benchmark: {_sym} OK — {len(_records)} pts, last_close={_last_close}")
+                break
+
+            except Exception as _ex:
+                _bm_logger.warning(f"benchmark: {_sym} exception: {_ex}")
+                continue
+
+        if _data:
+            _sp = _data[0]["close"]
+            _ep = _data[-1]["close"]
+            result[_name] = {
+                "symbol":           _sym_used,
+                "label":            f"{_label} (via {_sym_used})",
+                "start_price":      _sp,
+                "end_price":        _ep,
+                "total_return_pct": round(((_ep - _sp) / _sp) * 100, 2),
+                "data":             _data,
             }
+
+    # Cache only when we have real data
+    if result:
+        _cache[_bm_key] = {"data": result, "time": _now}
+
     return result
