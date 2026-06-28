@@ -4085,29 +4085,37 @@ _prewarm_benchmark_bg()
 def _prewarm_backtest_bg():
     try:
         import threading, time as _t_pw
-        def _one_period(run_backtest, start, end, days, max_attempts=3):
-            """Pre-warm one period with retries.  Returns True if cached."""
+        def _one_period(run_backtest, start, end, days, max_attempts=4):
+            """Pre-warm one period with retries.  Returns True if cached with
+            a high-quality result (>=50 tickers).  Discards and retries if
+            yfinance was cold at startup and returned only a handful of tickers."""
+            _MIN_TICKERS = 50  # below this = cold-start junk, must retry
             for attempt in range(1, max_attempts + 1):
                 try:
                     r = run_backtest(start_date=start, end_date=end, top_n=10,
                                      stop_pct=0.04, take_pct=0.10, hold_days=5,
                                      cost_bps=5.0, slippage_bps=5.0,
-                                     include_internals=True)  # cache WITH internals so detail endpoint hits correctly
-                    if r.get("ok"):
-                        logger.info(f"BACKTEST PRE-WARM: {days}d done (attempt {attempt})")
+                                     include_internals=True)
+                    n_tickers = (r.get("config") or {}).get("tickers_count") or 0
+                    if r.get("ok") and n_tickers >= _MIN_TICKERS:
+                        logger.info(f"BACKTEST PRE-WARM: {days}d done ({n_tickers} tickers, attempt {attempt})")
                         return True
-                    logger.warning(f"BACKTEST PRE-WARM {days}d attempt {attempt} returned ok=False: {r.get('reason')}")
+                    if r.get("ok") and n_tickers < _MIN_TICKERS:
+                        logger.warning(f"BACKTEST PRE-WARM {days}d attempt {attempt}: only {n_tickers} tickers "
+                                       f"(yfinance cold — will retry in 60s)")
+                    else:
+                        logger.warning(f"BACKTEST PRE-WARM {days}d attempt {attempt} returned ok=False: {r.get('reason')}")
                 except Exception as _be:
                     logger.warning(f"BACKTEST PRE-WARM {days}d attempt {attempt} exception: {_be}")
                 if attempt < max_attempts:
-                    _t_pw.sleep(30)   # backoff before retry
+                    _t_pw.sleep(60)   # longer backoff so yfinance fully warms up
             return False
 
         def _runner():
             from predictions.backtest import run_backtest
             from datetime import datetime as _dt_pw, timedelta as _td_pw
-            # Initial delay so other startup tasks finish first
-            _t_pw.sleep(60)
+            # Initial delay so other startup tasks finish and yfinance warms up
+            _t_pw.sleep(90)
             while True:
                 try:
                     end = _dt_pw.utcnow().date().isoformat()

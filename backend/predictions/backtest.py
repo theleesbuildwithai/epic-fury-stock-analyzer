@@ -375,6 +375,12 @@ def run_backtest(start_date: str = None,
                         # sp500_series empty means SPY failed last time — retry
                         logger.debug("backtest cache: bypass — sp500_series empty, retrying SPY")
                         _bypass = True
+                    elif (_cdata.get("config", {}).get("tickers_count") or 0) < 50:
+                        # Too few tickers — pre-warm ran while yfinance was cold;
+                        # discard and re-run so we get the full universe.
+                        logger.info("backtest cache: bypass — low ticker count "
+                                    f"({_cdata.get('config',{}).get('tickers_count')}), re-fetching")
+                        _bypass = True
                     if not _bypass:
                         out = dict(_cdata)
                         out["_cache_hit"] = True
