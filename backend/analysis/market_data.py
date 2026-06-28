@@ -262,145 +262,169 @@ def get_historical_data(ticker: str, period: str = "1y") -> list:
     period options: 1mo, 3mo, 6mo, 1y, 2y, 5y
     Returns a list of dicts with date, open, high, low, close, volume.
 
-    SAFETY NETS (added after AMAT 404 incident):
-      1. Retry the requested period up to 2 times with backoff
-      2. Fall back to shorter periods (6mo -> 3mo -> 1mo) if the
-         requested period still fails — gives the user SOMETHING to
-         analyze rather than a 404
-      3. Stale-cache fallback: if every fresh attempt fails, return
-         the last successful pull for this ticker (any period).  This
-         is logged and the caller can detect staleness via the cache
-         _stale flag if needed.
+    MULTI-SOURCE BULLETPROOF PIPELINE (2026-06-28 rewrite):
+      T1. Ticker.history() — most reliable from AWS IPs; same approach
+          used for the verified benchmark/regime fixes.
+      T2. yf.download() — different API endpoint, fallback.
+      T3. multi_source_adapter.get_historical_any_source() — Tiingo/AV/FMP.
+      T4. Stale _last_good_history seed — last resort, no 404s.
+
+    LIVE PRICE SANITY GATE: after each tier, the last close is checked
+    against a live multi_source quote. If divergence >50% the data is
+    stale/contaminated and discarded so the next tier runs. This kills
+    the historical_seed_v1 bug (e.g. AAPL seed at $73 while live=$283).
     """
 
-    # First-call seed: load any prior _last_good_history snapshot from
-    # trading_state so the stale-fallback in Tier 3 has data immediately
-    # after a deploy.  No-op after the first call.
     _load_seed_from_persistent()
 
     cache_key = f"history_{ticker}_{period}"
     now = time.time()
-    # ONLY trust the in-memory cache when it holds non-empty data.
-    # Caching the empty list would lock the user out for 10 minutes if
-    # yfinance is briefly down — and silently skip the Tier-3 stale
-    # fallback below.  This was the bug that made AMAT 404 persist.
     if cache_key in _cache:
         entry = _cache[cache_key]
         if (now - entry["time"]) < _cache_ttl and entry.get("data"):
             return entry["data"]
 
-    # Tier 1: try the requested period with one retry
-    data = []
     import threading as _hist_thr
-    for attempt in range(2):
-        _throttle()
+    import logging as _hd_log
+    _hd_logger = _hd_log.getLogger(__name__)
+
+    # Fetch live price once for sanity-gating all tiers
+    _live_px = None
+    try:
+        from analytics.multi_source_adapter import multi_source_quote_batch as _mq
+        _mq_res = _mq([ticker])
+        _mq_d = _mq_res.get(ticker) or _mq_res.get(ticker.upper())
+        if _mq_d:
+            _v = float(_mq_d.get("price") or 0)
+            if _v > 0:
+                _live_px = _v
+    except Exception:
+        pass
+
+    def _sanity_ok(records):
+        """Return True if last close is within 50% of live price."""
+        if not records or _live_px is None:
+            return True  # can't validate — accept
         try:
-            _h1_r = [None]
-            _h1_t = _hist_thr.Thread(
-                target=lambda r=_h1_r, t=ticker, p=period: r.__setitem__(
-                    0, yf.download(t, period=p, progress=False)),
-                daemon=True)
-            _h1_t.start(); _h1_t.join(timeout=12)
-            df = _h1_r[0]
-            if df is not None and not df.empty:
-                data = _df_to_records(df)
-                if data:
-                    break
+            last_close = float(records[-1]["close"])
+            if last_close <= 0:
+                return False
+            div = abs(last_close - _live_px) / _live_px
+            if div > 0.50:
+                _hd_logger.warning(
+                    f"HISTORY SANITY FAIL {ticker}: last_close=${last_close:.2f} "
+                    f"vs live=${_live_px:.2f} ({div*100:.0f}% > 50%) — discarding"
+                )
+                return False
         except Exception:
             pass
-        if attempt == 0:
-            time.sleep(1.5)
+        return True
 
-    # Tier 2: shorter fallback periods (6mo, 3mo, 1mo) — long windows
-    # are bigger payloads and fail more often under Yahoo load.
+    data = []
+
+    # T1: Ticker.history() — most reliable from AWS IPs
+    for _p in (period, "6mo", "3mo", "1mo"):
+        if data:
+            break
+        _throttle()
+        try:
+            _t1_r = [None]
+            _t1_t = _hist_thr.Thread(
+                target=lambda r=_t1_r, t=ticker, p=_p: r.__setitem__(
+                    0, yf.Ticker(t).history(period=p, auto_adjust=True)),
+                daemon=True)
+            _t1_t.start(); _t1_t.join(timeout=12)
+            df = _t1_r[0]
+            if df is not None and not df.empty:
+                candidate = _df_to_records(df)
+                if candidate and _sanity_ok(candidate):
+                    data = candidate
+        except Exception:
+            pass
+
+    # T2: yf.download() — different endpoint, fallback
     if not data:
-        for fp in ("6mo", "3mo", "1mo"):
-            if fp == period:
-                continue
+        for _p in (period, "6mo", "3mo", "1mo"):
+            if data:
+                break
             _throttle()
             try:
-                _h2_r = [None]
-                _h2_t = _hist_thr.Thread(
-                    target=lambda r=_h2_r, t=ticker, p=fp: r.__setitem__(
-                        0, yf.download(t, period=p, progress=False)),
+                _t2_r = [None]
+                _t2_t = _hist_thr.Thread(
+                    target=lambda r=_t2_r, t=ticker, p=_p: r.__setitem__(
+                        0, yf.download(t, period=p, progress=False, auto_adjust=True)),
                     daemon=True)
-                _h2_t.start(); _h2_t.join(timeout=10)
-                df = _h2_r[0]
+                _t2_t.start(); _t2_t.join(timeout=12)
+                df = _t2_r[0]
                 if df is not None and not df.empty:
-                    data = _df_to_records(df)
-                    if data:
-                        break
+                    candidate = _df_to_records(df)
+                    if candidate and _sanity_ok(candidate):
+                        data = candidate
             except Exception:
-                continue
+                pass
 
-    # Tier 2.5: yfinance.Ticker(...).history() uses a DIFFERENT API
-    # endpoint than yf.download() — when yf.download fails on a
-    # specific ticker (e.g. AMAT consistently 404'd while AAPL/HPE
-    # worked), Ticker.history often still succeeds.  This was the
-    # ticker-specific failure mode that caused the AMAT analyze 404.
-    if not data:
-        for fp in (period, "6mo", "3mo", "1mo"):
-            _throttle()
-            try:
-                _h25_r = [None]
-                _h25_t = _hist_thr.Thread(
-                    target=lambda r=_h25_r, t=ticker, p=fp: r.__setitem__(
-                        0, yf.Ticker(t).history(period=p, auto_adjust=True)),
-                    daemon=True)
-                _h25_t.start(); _h25_t.join(timeout=8)
-                df = _h25_r[0]
-                if df is not None and not df.empty:
-                    data = _df_to_records(df)
-                    if data:
-                        break
-            except Exception:
-                continue
-
-    # Tier 2.7: multi-source historical (Tiingo/AlphaVantage/FMP — key-gated)
+    # T3: multi_source historical (Tiingo/AlphaVantage/FMP)
     if not data:
         try:
             from analytics.multi_source_adapter import get_historical_any_source
-            import pandas as _ms_pd
             df_ms = get_historical_any_source(ticker, period)
             if df_ms is not None and not df_ms.empty:
-                data = _df_to_records(df_ms)
+                candidate = _df_to_records(df_ms)
+                if candidate and _sanity_ok(candidate):
+                    data = candidate
         except Exception:
             pass
 
-    # Tier 3: serve last-known good data for ANY period of this ticker.
-    # No 404 when yfinance is temporarily down.  Returns a COPY so a
-    # downstream mutation can't corrupt the fallback store.
+    # T4: stale seed — no 404s, but sanity-gated to prevent contamination
     if not data:
         for key, entry in _last_good_history.items():
             if key[0] == ticker and entry.get("data"):
-                data = list(entry["data"])
+                candidate = list(entry["data"])
+                if _sanity_ok(candidate):
+                    data = candidate
+                    _hd_logger.warning(
+                        f"HISTORY T4 STALE {ticker}: serving seed data "
+                        f"(sanity passed, live=${_live_px})"
+                    )
+                else:
+                    _hd_logger.warning(
+                        f"HISTORY T4 SEED REJECTED {ticker}: price mismatch "
+                        f"vs live ${_live_px} — returning empty"
+                    )
                 break
 
     if data:
-        # Persist to both stores so the next call (a) hits in-memory
-        # cache fast and (b) has stale fallback available later.
         _cache[cache_key] = {"data": data, "time": now}
         _last_good_history[(ticker, period)] = {"data": data, "ts": now}
-        # Cross-deploy seed: throttled snapshot to trading_state.
-        # This is what lets Tier 3 serve data immediately after a
-        # cold deploy (the AAPL/HPE/NVDA "Stock not found" gap).
         _save_seed_to_persistent()
     return data
 
 
 def _df_to_records(df) -> list:
     """Convert a yfinance DataFrame into the dict-list format the rest
-    of the codebase expects. Safe against single-row frames."""
+    of the codebase expects. Handles both flat and MultiIndex DataFrames
+    (newer yfinance versions return MultiIndex even for single tickers)."""
+    import pandas as _pd_rec
+    # Flatten MultiIndex columns: (Close, AAPL) -> Close
+    if hasattr(df.columns, "levels"):
+        try:
+            df = df.copy()
+            df.columns = df.columns.get_level_values(0)
+        except Exception:
+            pass
     records = []
     for date, row in df.iterrows():
         try:
+            close = float(row["Close"])
+            if not (close > 0):
+                continue
             records.append({
                 "date": date.strftime("%Y-%m-%d"),
-                "open": round(float(row["Open"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "close": round(float(row["Close"]), 2),
-                "volume": int(row["Volume"]),
+                "open": round(float(row.get("Open", close)), 2),
+                "high": round(float(row.get("High", close)), 2),
+                "low": round(float(row.get("Low", close)), 2),
+                "close": round(close, 2),
+                "volume": int(float(row.get("Volume", 0) or 0)),
             })
         except (ValueError, TypeError, KeyError):
             continue  # skip malformed rows but keep the rest
