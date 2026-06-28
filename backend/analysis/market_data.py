@@ -439,11 +439,13 @@ def get_benchmark_data(period: str = "1y") -> dict:
             return _e["data"]
 
     # Multiple ETF fallbacks per index (primary → secondary → tertiary)
-    # min_price = minimum acceptable last-close price; rejects stale/wrong data
+    # min_price = minimum acceptable last-close price; rejects stale/wrong data.
+    # Set conservatively above any realistic bear-market low but well above the
+    # stale-seed prices we've observed (SPY $33, QQQ $115, DIA $155 from 2009-2018).
     _indices = [
-        ("sp500",     "S&P 500",    ["SPY", "IVV", "VOO"],   100.0),
-        ("nasdaq",    "Nasdaq 100", ["QQQ", "QQQM", "ONEQ"],  50.0),
-        ("dow_jones", "Dow Jones",  ["DIA"],                  100.0),
+        ("sp500",     "S&P 500",    ["SPY", "IVV", "VOO"],   250.0),
+        ("nasdaq",    "Nasdaq 100", ["QQQ", "QQQM", "ONEQ"], 250.0),
+        ("dow_jones", "Dow Jones",  ["DIA"],                  200.0),
     ]
 
     # Explicit date range — avoids yfinance "period=" misinterpretation
