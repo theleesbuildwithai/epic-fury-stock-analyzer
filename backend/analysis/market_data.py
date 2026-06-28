@@ -457,7 +457,20 @@ def get_benchmark_data(period: str = "1y") -> dict:
 
     result = {}
 
-    for _name, _label, _etfs, _min_px in _indices:
+    def _sf(val, default=0.0):
+        """NaN-safe float conversion. NaN != NaN is the only reliable NaN test."""
+        try:
+            v = float(val)
+            return v if v == v else default  # v != v is True only for NaN
+        except Exception:
+            return default
+
+    for _idx, (_name, _label, _etfs, _min_px) in enumerate(_indices):
+        # 1s spacing between index downloads — prevents rapid-fire requests from
+        # triggering Yahoo Finance rate limits on cold cache (deploy / cache expiry).
+        if _idx > 0:
+            time.sleep(1)
+
         _data = []
         _sym_used = None
 
@@ -484,22 +497,29 @@ def get_benchmark_data(period: str = "1y") -> dict:
                 _records = []
                 for _date, _row in _df.iterrows():
                     try:
-                        _close = float(_row.get("Close", 0) or _row.iloc[3])
-                        if _close <= 0:
+                        # NaN-safe close: `not (v > 0)` catches NaN because
+                        # NaN > 0 == False in Python, so `not False` == True → skip.
+                        # Avoids the silent-NaN bug where `NaN <= 0` is also False
+                        # and lets NaN prices through.
+                        try:
+                            _close = float(_row["Close"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if not (_close > 0):  # rejects NaN, zero, negative
                             continue
                         _records.append({
-                            "date": _date.strftime("%Y-%m-%d"),
-                            "open":   round(float(_row.get("Open",   _close)), 2),
-                            "high":   round(float(_row.get("High",   _close)), 2),
-                            "low":    round(float(_row.get("Low",    _close)), 2),
+                            "date":   _date.strftime("%Y-%m-%d"),
+                            "open":   round(_sf(_row.get("Open"),   _close), 2),
+                            "high":   round(_sf(_row.get("High"),   _close), 2),
+                            "low":    round(_sf(_row.get("Low"),    _close), 2),
                             "close":  round(_close, 2),
-                            "volume": int(_row.get("Volume", 0) or 0),
+                            "volume": int(_sf(_row.get("Volume"), 0)),
                         })
                     except Exception:
                         continue
 
                 if not _records:
-                    _bm_logger.warning(f"benchmark: {_sym} — _df_to_records returned empty")
+                    _bm_logger.warning(f"benchmark: {_sym} — no valid records after NaN filter")
                     continue
 
                 # Hard price-sanity gate — rejects stale/adjusted-to-oblivion data
