@@ -5978,11 +5978,14 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     quant_longs = list(quant_data.get("long_picks") or [])
 
     # ── Live price validation for quant picks ───────────────────────────────
-    # S3-cached quant picks can have stale/corrupted prices (e.g., ROK $15
-    # vs live $458). Cross-check against _PRICE_DATA_LASTGOOD which is
-    # populated by the ongoing quant scan with fresh yfinance data.
-    # Drop any pick whose cached price diverges >50% from the live close.
+    # S3-cached quant picks can have stale/corrupted prices (e.g., META $139
+    # vs live $550, GOOGL $69 vs live $337). Two-stage validation:
+    #   Stage 1: _PRICE_DATA_LASTGOOD (populated ~10 min after cold deploy)
+    #   Stage 2: multi_source_quote_batch for any symbol LASTGOOD missed
+    # Together these ensure correct prices on both warm and cold starts.
     _validated_longs = []
+    _no_lastgood_syms = []  # collect symbols where LASTGOOD has no data yet
+
     for _qp in quant_longs:
         _sym = _qp.get("ticker") or _qp.get("symbol") or ""
         _cached_px = float(_qp.get("price") or 0)
@@ -6018,12 +6021,61 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     _qp["price"] = round(_live_px, 2)
             except Exception:
                 pass
+        else:
+            # LASTGOOD not yet populated for this symbol — queue for live refresh
+            if _sym and _cached_px > 0:
+                _no_lastgood_syms.append(_sym)
         _validated_longs.append(_qp)
+
     if len(_validated_longs) < len(quant_longs):
         logger.warning(
             f"STB PRICE FILTER: dropped {len(quant_longs) - len(_validated_longs)} picks "
             f"with corrupted cached prices"
         )
+
+    # ── Stage 2: multi_source live price refresh for cold-start picks ────────
+    # On cold deploy, LASTGOOD is empty so many picks escape Stage 1 unvalidated
+    # with stale S3 prices. Fetch live quotes now and correct any divergence.
+    if _no_lastgood_syms:
+        try:
+            from analytics.multi_source_adapter import multi_source_quote_batch as _msqb
+            _live_quotes = _msqb(_no_lastgood_syms)
+            _ms_corrected = 0
+            _ms_dropped = 0
+            for _vqp in list(_validated_longs):
+                _vsym = _vqp.get("ticker") or _vqp.get("symbol") or ""
+                if _vsym not in _no_lastgood_syms:
+                    continue
+                _lq = _live_quotes.get(_vsym) or _live_quotes.get(_vsym.upper())
+                if not _lq:
+                    continue
+                _live_px = float(_lq.get("price") or 0)
+                _cached_px = float(_vqp.get("price") or 0)
+                if _live_px <= 0 or _cached_px <= 0:
+                    continue
+                _div = abs(_cached_px - _live_px) / _live_px
+                if _div > 0.50:
+                    logger.warning(
+                        f"STB MULTI-SRC DROP {_vsym}: cached ${_cached_px:.2f} vs live "
+                        f"${_live_px:.2f} ({_div*100:.0f}% divergence > 50%)"
+                    )
+                    _validated_longs.remove(_vqp)
+                    _ms_dropped += 1
+                elif _div > 0.10:
+                    logger.info(
+                        f"STB MULTI-SRC FIX {_vsym}: ${_cached_px:.2f} → ${_live_px:.2f} "
+                        f"({_div*100:.0f}% divergence corrected)"
+                    )
+                    _vqp["price"] = round(_live_px, 2)
+                    _ms_corrected += 1
+            if _ms_corrected or _ms_dropped:
+                logger.warning(
+                    f"STB MULTI-SRC REFRESH: corrected={_ms_corrected} dropped={_ms_dropped} "
+                    f"of {len(_no_lastgood_syms)} unvalidated picks"
+                )
+        except Exception as _ms_err:
+            logger.warning(f"STB multi_source price refresh failed (non-fatal): {_ms_err}")
+
     quant_longs = _validated_longs
 
     # ── Source 2: _PRICE_DATA_LASTGOOD for STB universe ─────────────────────
