@@ -130,25 +130,72 @@ def walk_forward_validation(start_date: str = None,
                 ve_str = ve.strftime("%Y-%m-%d")
 
                 # Slice preloaded prices to this window, or fall back to live download
+                # For the test window, extend start by 90d so indicator warmup
+                # (RSI-14, MACD-26, Bollinger-20) completes before the test period.
+                # A 1-month test window (~21 trading days) would otherwise produce
+                # 0 trades because the backtest skips the first 25 days for warmup.
+                _warmup_td = _td(days=90)
+                warmup_start = vs - _warmup_td
+                warmup_start_str = warmup_start.strftime("%Y-%m-%d")
+
                 if _wf_prices_full:
                     train_prices = _slice_prices(_wf_prices_full, ts_str, te_str)
                     train_spy = _slice_prices({"SPY": _wf_spy_full}, ts_str, te_str).get("SPY") if _wf_spy_full is not None else None
-                    test_prices = _slice_prices(_wf_prices_full, vs_str, ve_str)
-                    test_spy = _slice_prices({"SPY": _wf_spy_full}, vs_str, ve_str).get("SPY") if _wf_spy_full is not None else None
+                    # Test: slice from warmup_start so indicators warm up before vs_str
+                    test_prices_ext = _slice_prices(_wf_prices_full, warmup_start_str, ve_str)
+                    test_spy_ext = _slice_prices({"SPY": _wf_spy_full}, warmup_start_str, ve_str).get("SPY") if _wf_spy_full is not None else None
                 else:
-                    train_prices = test_prices = None
-                    train_spy = test_spy = None
+                    train_prices = None
+                    train_spy = None
+                    test_prices_ext = None
+                    test_spy_ext = None
 
                 # Train window
                 train_bt = run_backtest(start_date=ts_str, end_date=te_str,
                                          top_n=int(top_n), hold_days=int(hold_days),
                                          _preloaded_prices=train_prices or None,
                                          _preloaded_spy=train_spy)
-                # Test window
-                test_bt = run_backtest(start_date=vs_str, end_date=ve_str,
-                                        top_n=int(top_n), hold_days=int(hold_days),
-                                        _preloaded_prices=test_prices or None,
-                                        _preloaded_spy=test_spy)
+
+                # Test window — run over extended range (warmup + test), then
+                # filter trades to only those that entered in the actual test window.
+                test_bt_full = run_backtest(start_date=warmup_start_str, end_date=ve_str,
+                                             top_n=int(top_n), hold_days=int(hold_days),
+                                             _preloaded_prices=test_prices_ext or None,
+                                             _preloaded_spy=test_spy_ext)
+
+                # Build synthetic test_bt scoped to the actual test window [vs_str, ve_str]
+                if test_bt_full.get("ok"):
+                    _all_trades = test_bt_full.get("_trades") or []
+                    _tw_trades = [t for t in _all_trades if t.get("entry_date", "") >= vs_str]
+                    _n_tt = len(_tw_trades)
+                    if _n_tt > 0:
+                        import statistics as _wf_stats
+                        _pnls = [float(t.get("pnl_pct", 0)) for t in _tw_trades]
+                        _wins = [p for p in _pnls if p > 0]
+                        _avg_pnl = sum(_pnls) / _n_tt
+                        _wr = len(_wins) / _n_tt * 100
+                        _sr = 0.0
+                        if _n_tt >= 2:
+                            try:
+                                _std = _wf_stats.stdev(_pnls)
+                                if _std > 0:
+                                    _sr = (_avg_pnl / _std) * (252 ** 0.5 / max(1, hold_days) ** 0.5)
+                            except Exception:
+                                pass
+                        test_bt = {
+                            "ok": True,
+                            "results": {
+                                "sharpe_ratio": round(_sr, 3),
+                                "total_return_pct": round(_avg_pnl, 2),
+                                "win_rate_pct": round(_wr, 1),
+                                "total_trades": _n_tt,
+                            }
+                        }
+                    else:
+                        # Extended run also produced 0 trades — use raw result
+                        test_bt = test_bt_full
+                else:
+                    test_bt = test_bt_full
                 if not train_bt.get("ok") or not test_bt.get("ok"):
                     continue
                 tr_r = train_bt.get("results", {})
@@ -274,7 +321,7 @@ def monte_carlo_bootstrap(n_simulations: int = 1000,
 
         # Read trades from top-level key first (_trades always set), fallback to _internals
         trades = bt.get("_trades") or (bt.get("_internals") or {}).get("trades") or []
-        if len(trades) < 10:
+        if len(trades) < 5:
             return {"ok": False, "reason": f"too_few_trades_for_bootstrap ({len(trades)})"}
 
         # Trade-level pnl in fractional form (e.g. 0.025 = 2.5%)
