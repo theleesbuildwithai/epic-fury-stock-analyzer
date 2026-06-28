@@ -8096,116 +8096,63 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 f"with entry_price outside $1–$15,000 at serve time"
             )
 
-        # ── Layer 9: LASTGOOD cross-validation at serve time ──────────────────
-        # For each pick, check its price against _PRICE_DATA_LASTGOOD.
-        # If divergence > 25%, correct with the LASTGOOD price rather than
-        # dropping — ensures we always serve the freshest available price.
-        # Layer 9b: multi_source_quote_batch fallback for any ticker where
-        # LASTGOOD has no data (cold deploy before quant scan completes).
+        # ── Layer 9: multi_source live price validation at serve time ─────────
+        # Run multi_source for ALL picks every time — never trust LASTGOOD alone
+        # because LASTGOOD can be poisoned by stale yfinance data on cold deploy
+        # (e.g., UNH $113 in LASTGOOD while live price is $427).
+        # Rules:  >50% divergence → drop | >5% divergence → correct price + levels
         try:
-            from analysis.quant_engine import _PRICE_DATA_LASTGOOD as _stb_lg
-            import pandas as _pd_lg
             import math as _math_lg
-            _corrected = 0
-            _no_lg_syms = []
-            for _fp in formatted_longs:
-                _sym = _fp.get("ticker", "")
-                _ep = float(_fp.get("entry_price") or 0)
-                if not _sym or _ep <= 0:
-                    continue
-                _lg_entry = _stb_lg.get(_sym)
-                if not _lg_entry:
-                    _no_lg_syms.append(_sym)
-                    continue
-                try:
-                    _lg_df = _lg_entry.get("df") if isinstance(_lg_entry, dict) else _lg_entry
-                    _lg_px = None
-                    if _lg_df is not None and not _lg_df.empty:
-                        if isinstance(getattr(_lg_df, "columns", None), _pd_lg.MultiIndex):
-                            _c0 = _lg_df.columns.get_level_values(0).tolist()
-                            if "Close" in _c0:
-                                _lg_px = float(_lg_df["Close"].stack().dropna().iloc[-1])
-                        elif "Close" in _lg_df.columns:
-                            _lg_px = float(_lg_df["Close"].dropna().iloc[-1])
-                    if _lg_px is None and isinstance(_lg_entry, dict):
-                        _sp = _lg_entry.get("spot_price")
-                        if _sp and float(_sp) > 0:
-                            _lg_px = float(_sp)
-                    if _lg_px and _lg_px > 0:
-                        _div = abs(_ep - _lg_px) / _lg_px
-                        if _div > 0.25:
-                            logger.warning(
-                                f"STB LAYER9 LASTGOOD-FIX {_sym}: "
-                                f"cached ${_ep:.2f} vs lastgood ${_lg_px:.2f} "
-                                f"({_div*100:.0f}% divergence) — correcting to lastgood"
-                            )
-                            _fp["entry_price"] = round(_lg_px, 2)
-                            _mom = abs(float(_fp.get("momentum_pct") or 25.0))
-                            _av = max(20.0, min(60.0, _mom * 0.6 + 15.0))
-                            _dv = _av / _math_lg.sqrt(252) * _lg_px / 100.0
-                            _sd = max(_lg_px * 0.08, min(_lg_px * 0.12, _dv * 15.0))
-                            _td = max(_sd * 3.0, min(_lg_px * 0.40, _sd * 4.0))
-                            _fp["stop_loss"] = round(_lg_px - _sd, 2)
-                            _fp["target_price"] = round(_lg_px + _td, 2)
-                            _corrected += 1
-                except Exception:
-                    pass
-            if _corrected:
-                logger.warning(f"STB LAYER9 LASTGOOD-FIX: corrected {_corrected} pick prices at serve time")
-
-            # Layer 9b: multi_source fallback for tickers with no LASTGOOD entry
-            if _no_lg_syms:
-                try:
-                    from analytics.multi_source_adapter import multi_source_quote_batch as _l9b_msqb
-                    _l9b_quotes = _l9b_msqb(_no_lg_syms)
-                    _l9b_fixed = 0
-                    _l9b_drop = []
-                    for _fp in formatted_longs:
-                        _sym = _fp.get("ticker", "")
-                        if _sym not in _no_lg_syms:
-                            continue
-                        _lq = _l9b_quotes.get(_sym) or _l9b_quotes.get(_sym.upper())
-                        if not _lq:
-                            continue
-                        _live_px = float(_lq.get("price") or 0)
-                        _ep = float(_fp.get("entry_price") or 0)
-                        if _live_px <= 0 or _ep <= 0:
-                            continue
-                        _div = abs(_ep - _live_px) / _live_px
-                        if _div > 0.50:
-                            logger.warning(
-                                f"STB LAYER9B DROP {_sym}: cached ${_ep:.2f} vs live "
-                                f"${_live_px:.2f} ({_div*100:.0f}% > 50% — stale)"
-                            )
-                            _l9b_drop.append(_fp)
-                        elif _div > 0.10:
-                            logger.info(
-                                f"STB LAYER9B FIX {_sym}: ${_ep:.2f} → ${_live_px:.2f} "
-                                f"({_div*100:.0f}% corrected via multi_source)"
-                            )
-                            _fp["entry_price"] = round(_live_px, 2)
-                            _mom = abs(float(_fp.get("momentum_pct") or 25.0))
-                            _av = max(20.0, min(60.0, _mom * 0.6 + 15.0))
-                            _dv = _av / _math_lg.sqrt(252) * _live_px / 100.0
-                            _sd = max(_live_px * 0.08, min(_live_px * 0.12, _dv * 15.0))
-                            _td = max(_sd * 3.0, min(_live_px * 0.40, _sd * 4.0))
-                            _fp["stop_loss"] = round(_live_px - _sd, 2)
-                            _fp["target_price"] = round(_live_px + _td, 2)
-                            _l9b_fixed += 1
-                    for _dp in _l9b_drop:
-                        try:
-                            formatted_longs.remove(_dp)
-                        except ValueError:
-                            pass
-                    if _l9b_fixed or _l9b_drop:
+            from analytics.multi_source_adapter import multi_source_quote_batch as _l9_msqb
+            _l9_syms = [p.get("ticker", "") for p in formatted_longs if p.get("ticker")]
+            if _l9_syms:
+                _l9_quotes = _l9_msqb(_l9_syms)
+                _l9_fixed = 0
+                _l9_drop = []
+                for _fp in formatted_longs:
+                    _sym = _fp.get("ticker", "")
+                    if not _sym:
+                        continue
+                    _lq = _l9_quotes.get(_sym) or _l9_quotes.get(_sym.upper())
+                    if not _lq:
+                        continue
+                    _live_px = float(_lq.get("price") or 0)
+                    _ep = float(_fp.get("entry_price") or 0)
+                    if _live_px <= 0 or _ep <= 0:
+                        continue
+                    _div = abs(_ep - _live_px) / _live_px
+                    if _div > 0.50:
                         logger.warning(
-                            f"STB LAYER9B: fixed={_l9b_fixed} dropped={len(_l9b_drop)} "
-                            f"via multi_source cold-start refresh"
+                            f"STB LAYER9 DROP {_sym}: cached ${_ep:.2f} vs live "
+                            f"${_live_px:.2f} ({_div*100:.0f}% divergence > 50%)"
                         )
-                except Exception as _l9b_err:
-                    logger.warning(f"STB LAYER9B multi_source fallback failed (non-fatal): {_l9b_err}")
-        except Exception as _lg_err:
-            logger.debug(f"STB LAYER9 LASTGOOD cross-val skipped: {_lg_err}")
+                        _l9_drop.append(_fp)
+                    elif _div > 0.05:
+                        logger.info(
+                            f"STB LAYER9 FIX {_sym}: ${_ep:.2f} → ${_live_px:.2f} "
+                            f"({_div*100:.1f}% corrected via multi_source)"
+                        )
+                        _fp["entry_price"] = round(_live_px, 2)
+                        _mom = abs(float(_fp.get("momentum_pct") or 25.0))
+                        _av = max(20.0, min(60.0, _mom * 0.6 + 15.0))
+                        _dv = _av / _math_lg.sqrt(252) * _live_px / 100.0
+                        _sd = max(_live_px * 0.08, min(_live_px * 0.12, _dv * 15.0))
+                        _td = max(_sd * 3.0, min(_live_px * 0.40, _sd * 4.0))
+                        _fp["stop_loss"] = round(_live_px - _sd, 2)
+                        _fp["target_price"] = round(_live_px + _td, 2)
+                        _l9_fixed += 1
+                for _dp in _l9_drop:
+                    try:
+                        formatted_longs.remove(_dp)
+                    except ValueError:
+                        pass
+                if _l9_fixed or _l9_drop:
+                    logger.warning(
+                        f"STB LAYER9 multi_source: fixed={_l9_fixed} dropped={len(_l9_drop)} "
+                        f"of {len(_l9_syms)} picks at serve time"
+                    )
+        except Exception as _l9_err:
+            logger.warning(f"STB LAYER9 multi_source skipped (non-fatal): {_l9_err}")
 
         # ── Layers 10-13: Entry / Stop / Target integrity validation ──────────
         # Validates and auto-fixes all four trade levels on every pick before

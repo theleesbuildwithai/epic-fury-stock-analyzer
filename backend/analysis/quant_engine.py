@@ -6379,7 +6379,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     f"STB MULTI-SRC REFRESH: {_ms_updated}/{len(_live_stb_syms)} prices refreshed"
                 )
             except Exception as _ms_stb_err:
-                logger.debug(f"STB MULTI-SRC REFRESH: non-fatal — {_ms_stb_err}")
+                logger.warning(f"STB MULTI-SRC REFRESH failed — prices may be stale: {_ms_stb_err}")
 
     # ── Layer 5: Final zero/None price purge ──────────────────────────────────
     # After multi_source refresh, any pick still missing a price is silently
