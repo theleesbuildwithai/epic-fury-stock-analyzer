@@ -494,6 +494,36 @@ def run_backtest(start_date: str = None,
         except Exception as _clampe:
             logger.debug(f"price clamp soft-fail: {_clampe}")
 
+        # Normalize all price series to tz-naive before intersection.
+        # Newer yfinance returns tz-aware DatetimeIndex for some tickers and
+        # tz-naive for others. Mixed-tz set intersection is always empty →
+        # no_common_trading_dates. Fix: strip tz from every series first.
+        for _sym in list(prices.keys()):
+            try:
+                _s = prices[_sym]
+                if hasattr(_s.index, "tz") and _s.index.tz is not None:
+                    prices[_sym] = _s.tz_localize(None)
+            except Exception:
+                try:
+                    prices[_sym] = _s.tz_convert(None)
+                except Exception:
+                    pass
+        if sp_series is not None:
+            try:
+                if hasattr(sp_series.index, "tz") and sp_series.index.tz is not None:
+                    sp_series = sp_series.tz_localize(None)
+            except Exception:
+                try:
+                    sp_series = sp_series.tz_convert(None)
+                except Exception:
+                    pass
+
+        # Drop any ticker that ended up with zero rows after clamping.
+        # An empty series would make the date intersection empty immediately.
+        prices = {sym: s for sym, s in prices.items() if len(s) >= 5}
+        if not prices:
+            return {"ok": False, "reason": "no_price_data_after_clamp"}
+
         all_dates = None
         for sym, s in prices.items():
             dates_set = set(s.index)
