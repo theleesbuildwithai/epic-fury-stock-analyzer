@@ -6120,6 +6120,60 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # ── Score all candidates ──────────────────────────────────────────────────
     candidates = []
 
+    # ── Hedge fund overlay: Bridgewater Pure Alpha macro regime ───────────────
+    # Four-box model: Growth×Inflation regime → tilt toward sector winners.
+    # RISK_ON  → favor cyclicals (Tech, Industrials, Financials, Consumer Disc)
+    # RISK_OFF → favor defensives (Healthcare, Staples, Utilities, Real Estate)
+    _hf_regime = "NEUTRAL"
+    try:
+        _cas = get_cross_asset_signals()
+        _hf_regime = ((_cas or {}).get("risk_appetite") or "NEUTRAL").upper()
+    except Exception:
+        pass
+
+    _RISK_ON_SECTORS  = {"Technology", "Industrials", "Financial Services", "Consumer Cyclical"}
+    _RISK_OFF_SECTORS = {"Healthcare", "Consumer Defensive", "Utilities", "Real Estate"}
+
+    def _regime_bonus(sector: str) -> float:
+        """Bridgewater regime alignment bonus: +12 aligned, -5 misaligned, 0 neutral."""
+        if _hf_regime == "RISK_ON":
+            if sector in _RISK_ON_SECTORS:  return 12.0
+            if sector in _RISK_OFF_SECTORS: return -5.0
+        elif _hf_regime == "RISK_OFF":
+            if sector in _RISK_OFF_SECTORS: return 12.0
+            if sector in _RISK_ON_SECTORS:  return -5.0
+        return 0.0
+
+    def _quality_bonus(fd: dict) -> float:
+        """AQR quality score from fundamentals. Capped at -15 to +20.
+        Components: revenue growth, ROE, P/E, Debt/Equity."""
+        if not fd:
+            return 0.0
+        score = 0.0
+        rev_g = fd.get("revenue_growth")
+        if rev_g is not None:
+            if   rev_g > 0.15: score += 10.0
+            elif rev_g > 0.05: score +=  6.0
+            elif rev_g > 0.0:  score +=  3.0
+            else:              score -=  5.0
+        roe = fd.get("roe")
+        if roe is not None:
+            if   roe > 0.20: score += 10.0
+            elif roe > 0.12: score +=  6.0
+            elif roe > 0.0:  score +=  2.0
+            else:            score -=  5.0
+        pe = fd.get("pe")
+        if pe is not None and pe != 0:
+            if   0 < pe <= 25: score += 4.0
+            elif pe <= 40:     score += 2.0
+            elif pe < 0:       score -= 8.0
+        de = fd.get("debt_equity")
+        if de is not None:
+            if   de < 0.5: score += 4.0
+            elif de < 1.5: score += 2.0
+            elif de > 3.0: score -= 5.0
+        return max(-15.0, min(20.0, score))
+
     def _score_from_history(sym, closes, sector):
         """Score a stock using its price history array."""
         if len(closes) < 126:
@@ -6141,6 +6195,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         rets = _np.diff(closes[-62:]) / closes[-62:-1]
         valid_rets = rets[_np.isfinite(rets)]
         vol_60d = float(_np.std(valid_rets)) * _fm.sqrt(252) * 100 if len(valid_rets) > 1 else 30.0
+        # AQR Defensive: disqualify hyper-volatile stocks from long-term holds
+        if vol_60d > 80.0:
+            return None
         mom_score = max(15.0, min(50.0, 25.0 + mom_12m * 0.5))
         trend_score = 10.0
         if n >= 200:
@@ -6178,11 +6235,13 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         except Exception:
             pass
 
-        total_score = mom_score + trend_score + stab_score + mom_3m_score + rsi_score
+        # Bridgewater regime alignment bonus
+        regime_score = _regime_bonus(sector)
+        total_score = mom_score + trend_score + stab_score + mom_3m_score + rsi_score + regime_score
         # v142: STB has its own confidence range 75-95% (distinct from quant HF 71-92%)
-        # Base raised 65→73, multiplier 27→22, max 115 unchanged
-        # Perfect score (115) → 95%, mediocre (60) → 85%, floor → 75%
-        confidence = round(73.0 + (total_score / 115.0) * 22.0)
+        # Base raised 65→73, multiplier 27→22, max score 127 (115+12 regime bonus)
+        # Perfect score → 95%, mediocre → 85%, floor → 75%
+        confidence = round(73.0 + (total_score / 127.0) * 22.0)
         reasons = []
         if mom_3m > 15:
             reasons.append(f"3m acceleration +{mom_3m:.0f}% — strong recent momentum")
@@ -6245,14 +6304,21 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             confidence = float(p.get("confidence") or 60)
             sector = p.get("sector") or SECTOR_MAP.get(ticker, "Unknown")
 
+            # AQR Defensive: disqualify hyper-volatile stocks from long-term holds
+            if vol_60d > 80.0:
+                continue
+
             # Re-score with STB long-term lens — independent of quant confidence
             mom_score = max(15.0, min(50.0, 25.0 + momentum * 0.5))
             qual_score = max(10.0, min(30.0, composite * 10.0))
             stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
-            total_score = mom_score + qual_score + stab_score
-            # v142: STB own confidence formula — max 100, range 75-95%
-            # Higher quality signal (composite score) pushes toward 95%
-            stb_conf = round(73.0 + (total_score / 100.0) * 22.0)
+            # Hedge fund overlay: AQR quality + Bridgewater regime
+            _fd_q = _stb_fundamentals.get(ticker) or {}
+            quality_score = _quality_bonus(_fd_q)
+            regime_score = _regime_bonus(sector)
+            total_score = mom_score + qual_score + stab_score + quality_score + regime_score
+            # v142: STB own confidence formula — max score 150 (100+20q+12r+18), range 75-95%
+            stb_conf = round(73.0 + (total_score / 150.0) * 22.0)
             stb_conf = max(75, min(95, stb_conf))
 
             reasons = list(p.get("reasons") or [])
@@ -6302,6 +6368,16 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 pick["earnings_growth_pct"] = _fd.get("earnings_growth")
                 pick["profit_margin_pct"] = _fd.get("profit_margins")
                 pick["debt_equity"] = _fd.get("debt_equity")
+                # AQR quality bonus applied on top of price-history score
+                _qb = _quality_bonus(_fd)
+                if _qb != 0.0:
+                    pick["fundamental_score"] = round(
+                        max(0.0, pick["fundamental_score"] + _qb), 1
+                    )
+                    # Recompute confidence with extended score range (127+20=147)
+                    pick["confidence"] = min(95, round(
+                        73.0 + (pick["fundamental_score"] / 147.0) * 22.0
+                    ))
                 candidates.append(pick)
         except Exception as _e:
             logger.debug(f"FUNDAMENTAL PICKS lastgood score error {sym}: {_e}")
@@ -6310,15 +6386,50 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     candidates.sort(key=lambda x: (-x.get("confidence", 0), -x.get("fundamental_score", 0)))
 
     # Max 5 per sector, top 40 picks
+    # Pure Alpha correlation filter: skip picks with >0.85 corr to already-accepted picks.
+    # Only applies when price history is available via lastgood_stocks.
     sector_counts: dict = {}
     top_picks = []
+    _accepted_rets: list = []  # daily return arrays of accepted picks
+
     for c in candidates:
         sec = c.get("sector", "Unknown")
-        if sector_counts.get(sec, 0) < 5:
-            top_picks.append(c)
-            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        if sector_counts.get(sec, 0) >= 5:
+            continue
         if len(top_picks) >= 40:
             break
+
+        # Pure Alpha: correlation check against already-accepted picks
+        _sym_c = c.get("ticker", "")
+        _closes_c = lastgood_stocks.get(_sym_c)
+        _rets_c = None
+        if _closes_c is not None:
+            _nc = min(252, len(_closes_c))
+            _rc = _closes_c[-_nc:]
+            _diff = _np.diff(_rc) / _rc[:-1]
+            _diff = _diff[_np.isfinite(_diff)]
+            if len(_diff) >= 30:
+                _rets_c = _diff
+        if _rets_c is not None and _accepted_rets:
+            _too_corr = False
+            for _ar in _accepted_rets:
+                _n_min = min(len(_rets_c), len(_ar))
+                if _n_min < 30:
+                    continue
+                try:
+                    _corr = float(_np.corrcoef(_rets_c[-_n_min:], _ar[-_n_min:])[0, 1])
+                    if _np.isfinite(_corr) and _corr > 0.85:
+                        _too_corr = True
+                        break
+                except Exception:
+                    pass
+            if _too_corr:
+                continue
+
+        top_picks.append(c)
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        if _rets_c is not None:
+            _accepted_rets.append(_rets_c)
 
     # v135: enforce 70% confidence minimum — nothing below 70 shows in STB
     top_picks = [p for p in top_picks if p.get("confidence", 0) >= 70]
