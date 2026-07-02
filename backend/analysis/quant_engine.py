@@ -6146,32 +6146,37 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
     def _quality_bonus(fd: dict) -> float:
         """AQR quality score from fundamentals. Capped at -15 to +20.
-        Components: revenue growth, ROE, P/E, Debt/Equity."""
+        Components: revenue growth (%), ROE (%), P/E (ratio), Debt/Equity (%).
+        NOTE: revenue_growth and roe are stored as percentages (e.g., 15.0 = 15%).
+              debt_equity is stored as percentage (e.g., 150 = 1.5× D/E) per yfinance convention.
+              pe is stored as raw ratio (e.g., 25.0 = 25×)."""
         if not fd:
             return 0.0
         score = 0.0
         rev_g = fd.get("revenue_growth")
         if rev_g is not None:
-            if   rev_g > 0.15: score += 10.0
-            elif rev_g > 0.05: score +=  6.0
-            elif rev_g > 0.0:  score +=  3.0
-            else:              score -=  5.0
+            if   rev_g > 15.0: score += 10.0  # >15% growth → high quality
+            elif rev_g >  5.0: score +=  6.0  # >5% → decent growth
+            elif rev_g >  0.0: score +=  3.0  # positive → acceptable
+            else:              score -=  5.0  # shrinking revenue → penalty
         roe = fd.get("roe")
         if roe is not None:
-            if   roe > 0.20: score += 10.0
-            elif roe > 0.12: score +=  6.0
-            elif roe > 0.0:  score +=  2.0
-            else:            score -=  5.0
+            if   roe > 20.0: score += 10.0   # >20% ROE → excellent capital efficiency
+            elif roe > 12.0: score +=  6.0   # >12% → good
+            elif roe >  0.0: score +=  2.0   # positive → acceptable
+            else:            score -=  5.0   # negative ROE → penalty
         pe = fd.get("pe")
         if pe is not None and pe != 0:
-            if   0 < pe <= 25: score += 4.0
-            elif pe <= 40:     score += 2.0
-            elif pe < 0:       score -= 8.0
+            if   0 < pe <= 25: score += 4.0   # reasonable valuation
+            elif 0 < pe <= 40: score += 2.0   # growth premium — acceptable
+            elif pe < 0:       score -= 8.0   # negative earnings → penalty (must be after positive checks)
+            # pe > 40: no bonus, no penalty (high-growth stocks still qualify)
         de = fd.get("debt_equity")
         if de is not None:
-            if   de < 0.5: score += 4.0
-            elif de < 1.5: score += 2.0
-            elif de > 3.0: score -= 5.0
+            # yfinance debtToEquity is a percentage: 50 = 0.5× D/E, 150 = 1.5× D/E
+            if   de < 50:  score += 4.0   # very low leverage
+            elif de < 150: score += 2.0   # moderate leverage
+            elif de > 300: score -= 5.0   # highly leveraged → penalty
         return max(-15.0, min(20.0, score))
 
     def _score_from_history(sym, closes, sector):
