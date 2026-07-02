@@ -6264,6 +6264,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             reasons.append(f"Low vol ({vol_60d:.0f}% ann) — stable hold")
         if not reasons:
             reasons.append("Passes uptrend + trend-quality screen")
+        # Surface hedge fund overlay signals in reasons
+        if regime_score > 0:
+            _rl = "RISK-ON" if _hf_regime == "RISK_ON" else "RISK-OFF"
+            reasons.append(f"Macro {_rl} regime — sector tailwind")
         return {
             "ticker": sym, "symbol": sym,
             "company_name": _COMPANY_NAMES.get(sym, sym),
@@ -6333,6 +6337,18 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 reasons = [f"Positive 12m trend (+{momentum:.0f}%)"] + reasons
             if vol_60d < 20:
                 reasons.append(f"Low vol ({vol_60d:.0f}% ann)")
+            # Surface hedge fund overlay signals in reasons
+            if regime_score > 0:
+                _rl = "RISK-ON" if _hf_regime == "RISK_ON" else "RISK-OFF"
+                reasons.append(f"Macro {_rl} regime — sector tailwind")
+            if quality_score >= 6.0:
+                _qp_roe = (_stb_fundamentals.get(ticker) or {}).get("roe")
+                _qp_rev = (_stb_fundamentals.get(ticker) or {}).get("revenue_growth")
+                _qp_parts = []
+                if _qp_roe is not None and _qp_roe > 12: _qp_parts.append(f"ROE {_qp_roe:.0f}%")
+                if _qp_rev is not None and _qp_rev > 5:  _qp_parts.append(f"rev +{_qp_rev:.0f}%")
+                if _qp_parts:
+                    reasons.append(f"Quality: {', '.join(_qp_parts)}")
 
             candidates.append({
                 "ticker": ticker, "symbol": ticker,
@@ -6383,6 +6399,17 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     pick["confidence"] = min(95, round(
                         73.0 + (pick["fundamental_score"] / 147.0) * 22.0
                     ))
+                # Surface quality signal in reasons when significant
+                if _qb >= 6.0:
+                    _lg_roe = _fd.get("roe")
+                    _lg_rev = _fd.get("revenue_growth")
+                    _lg_parts = []
+                    if _lg_roe is not None and _lg_roe > 12: _lg_parts.append(f"ROE {_lg_roe:.0f}%")
+                    if _lg_rev is not None and _lg_rev > 5:  _lg_parts.append(f"rev +{_lg_rev:.0f}%")
+                    if _lg_parts:
+                        _lg_reasons = list(pick.get("reasons") or [])
+                        _lg_reasons.append(f"Quality: {', '.join(_lg_parts)}")
+                        pick["reasons"] = _lg_reasons[:5]
                 candidates.append(pick)
         except Exception as _e:
             logger.debug(f"FUNDAMENTAL PICKS lastgood score error {sym}: {_e}")
