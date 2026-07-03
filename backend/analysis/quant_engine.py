@@ -104,30 +104,41 @@ def _prefetch_fundamentals(symbols: list) -> dict:
                 daemon=True)
             _pf_t.start(); _pf_t.join(timeout=5)
             info = _pf_r[0]
-            pe = info.get("trailingPE")
-            fwd_pe = info.get("forwardPE")
-            pb = info.get("priceToBook")
-            peg = info.get("pegRatio")
+            # yfinance NaN/inf sanitizer — guards against float('nan') returned for missing fields.
+            # np is imported at module level. Returns None for NaN/inf/None, else returns v unchanged.
+            def _fin(v):
+                if v is None:
+                    return None
+                try:
+                    return v if np.isfinite(float(v)) else None
+                except Exception:
+                    return None
+
+            pe     = _fin(info.get("trailingPE"))
+            fwd_pe = _fin(info.get("forwardPE"))
+            pb     = _fin(info.get("priceToBook"))
+            peg    = _fin(info.get("pegRatio"))
 
             # Growth metrics (yfinance returns as decimals, e.g. 0.22 = 22%)
-            rev_growth_raw = info.get("revenueGrowth")
-            earn_growth_raw = info.get("earningsGrowth")
-            roe_raw = info.get("returnOnEquity")
-            profit_margin_raw = info.get("profitMargins")
-            debt_equity_raw = info.get("debtToEquity")
+            _rg  = _fin(info.get("revenueGrowth"))
+            _eg  = _fin(info.get("earningsGrowth"))
+            _roe = _fin(info.get("returnOnEquity"))
+            _pm  = _fin(info.get("profitMargins"))
+            _de  = _fin(info.get("debtToEquity"))
 
-            revenue_growth = round(rev_growth_raw * 100, 1) if rev_growth_raw is not None else None
-            earnings_growth = round(earn_growth_raw * 100, 1) if earn_growth_raw is not None else None
-            roe = round(roe_raw * 100, 1) if roe_raw is not None else None
-            profit_margins = round(profit_margin_raw * 100, 1) if profit_margin_raw is not None else None
-            debt_equity = round(debt_equity_raw, 2) if debt_equity_raw is not None else None
+            revenue_growth  = round(_rg  * 100, 1) if _rg  is not None else None
+            earnings_growth = round(_eg  * 100, 1) if _eg  is not None else None
+            roe             = round(_roe * 100, 1) if _roe is not None else None
+            profit_margins  = round(_pm  * 100, 1) if _pm  is not None else None
+            debt_equity     = round(_de, 2)        if _de  is not None else None
 
             earnings_yield = (1.0 / pe) * 100 if pe and pe > 0 else None  # higher = cheaper
             book_to_price = (1.0 / pb) * 100 if pb and pb > 0 else None  # higher = cheaper
 
             # Also capture current price from ticker.info so generate_fundamental_picks
             # can use it as a fallback when the bulk yfinance download fails.
-            _cp = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+            # _fin used here too — yfinance can return NaN for price fields on stale tickers.
+            _cp = _fin(info.get("currentPrice")) or _fin(info.get("regularMarketPrice")) or _fin(info.get("previousClose"))
             value_data = {
                 "pe": pe,
                 "fwd_pe": fwd_pe,
@@ -6153,26 +6164,33 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         if not fd:
             return 0.0
         score = 0.0
+        # Defense-in-depth NaN/inf guard — primary sanitization is in _prefetch_fundamentals.
+        # This catches any stale cache entries that predate the NaN fix.
+        # yfinance NaN comparisons all return False, so without this guard NaN fields
+        # fall to the else/penalty branch and wrongly score -5 for "shrinking revenue/ROE".
+        def _ok(v):
+            try: return v is not None and _fm.isfinite(float(v))
+            except Exception: return False
         rev_g = fd.get("revenue_growth")
-        if rev_g is not None:
+        if _ok(rev_g):
             if   rev_g > 15.0: score += 10.0  # >15% growth → high quality
             elif rev_g >  5.0: score +=  6.0  # >5% → decent growth
             elif rev_g >  0.0: score +=  3.0  # positive → acceptable
             else:              score -=  5.0  # shrinking revenue → penalty
         roe = fd.get("roe")
-        if roe is not None:
+        if _ok(roe):
             if   roe > 20.0: score += 10.0   # >20% ROE → excellent capital efficiency
             elif roe > 12.0: score +=  6.0   # >12% → good
             elif roe >  0.0: score +=  2.0   # positive → acceptable
             else:            score -=  5.0   # negative ROE → penalty
         pe = fd.get("pe")
-        if pe is not None and pe != 0:
+        if _ok(pe) and pe != 0:
             if   0 < pe <= 25: score += 4.0   # reasonable valuation
             elif 0 < pe <= 40: score += 2.0   # growth premium — acceptable
             elif pe < 0:       score -= 8.0   # negative earnings → penalty (must be after positive checks)
             # pe > 40: no bonus, no penalty (high-growth stocks still qualify)
         de = fd.get("debt_equity")
-        if de is not None:
+        if _ok(de):
             # yfinance debtToEquity is a percentage: 50 = 0.5× D/E, 150 = 1.5× D/E
             if   de < 50:  score += 4.0   # very low leverage
             elif de < 150: score += 2.0   # moderate leverage
@@ -6305,12 +6323,22 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             price = float(p.get("price") or 0)
             if price < 10.0:
                 continue
-            momentum = float(p.get("momentum_pct") or 0)
+            # NaN-safe extraction: float('nan') is truthy so `or default` does NOT fire for NaN.
+            # Must check isfinite explicitly to prevent NaN from bypassing the vol cap below.
+            _mom_raw = p.get("momentum_pct")
+            momentum = float(_mom_raw) if _mom_raw is not None else 0.0
+            if not _fm.isfinite(momentum): momentum = 0.0        # NaN/inf → neutral, no disqualify
             if momentum < -15.0:
                 continue
-            vol_60d = float(p.get("volatility_60d") or 30)
-            composite = float(p.get("composite_score") or 0)
-            confidence = float(p.get("confidence") or 60)
+            _v60_raw = p.get("volatility_60d")
+            vol_60d = float(_v60_raw) if _v60_raw is not None else 30.0
+            if not _fm.isfinite(vol_60d): vol_60d = 30.0         # NaN/inf → moderate vol, no cap bypass
+            _comp_raw = p.get("composite_score")
+            composite = float(_comp_raw) if _comp_raw is not None else 0.0
+            if not _fm.isfinite(composite): composite = 0.0
+            _conf_raw = p.get("confidence")
+            confidence = float(_conf_raw) if _conf_raw is not None else 60.0
+            if not _fm.isfinite(confidence): confidence = 60.0
             sector = p.get("sector") or SECTOR_MAP.get(ticker, "Unknown")
 
             # AQR Defensive: disqualify hyper-volatile stocks from long-term holds
