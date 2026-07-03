@@ -8265,6 +8265,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             "candidates_scored": data.get("candidates_scored", 0),
             "picks_selected": data.get("picks_selected", len(formatted_longs)),
             "universe_scanned": data.get("tickers_attempted", data.get("universe_scanned", 0)),
+            "hf_regime": data.get("hf_regime", "NEUTRAL"),  # Bridgewater: RISK_ON / RISK_OFF / NEUTRAL
             "guidance": (
                 "Fundamental quality picks — hold 6-12 weeks. "
                 "These companies have strong earnings growth, high ROE, and reasonable valuations. "

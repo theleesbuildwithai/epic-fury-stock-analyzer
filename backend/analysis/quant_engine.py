@@ -6579,6 +6579,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         "picks_selected": _picks_selected,          # passed 70% confidence gate
         "universe_scanned": _tickers_attempted,     # backward compat alias
         "regime": {"regime": "BULL"},
+        "hf_regime": _hf_regime,                    # Bridgewater regime: RISK_ON / RISK_OFF / NEUTRAL
     }
 
     _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
