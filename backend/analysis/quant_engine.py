@@ -6168,6 +6168,67 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         f"{len(lastgood_stocks)} lastgood supplement stocks"
     )
 
+    # ── Cold-start detection ──────────────────────────────────────────────────
+    # LASTGOOD is populated by the quant scan (~10 min after cold deploy).
+    # If both sources are sparse it means we are in the cold-start window.
+    # Two actions:
+    #   1. Direct yfinance download for _STB_UNIVERSE so scoring can proceed
+    #      immediately with real data instead of serving 6 picks for 6 hours.
+    #   2. Kick off a background quant scan so the NEXT re-scan has full data.
+    # The cache TTL is shortened to 5 min on cold start so re-scan fires soon.
+    _is_cold_start = (len(quant_longs) + len(lastgood_stocks)) < 15
+    if _is_cold_start:
+        logger.warning(
+            f"STB COLD-START: quant_longs={len(quant_longs)} lastgood={len(lastgood_stocks)} — "            f"running direct STB universe download and triggering fresh quant scan"
+        )
+        # Direct yfinance batch download for _STB_UNIVERSE price history.
+        # Runs synchronously here (blocking, ~15s) so this regen returns real picks.
+        # try/except wraps everything — if yfinance is rate-limited, falls through silently.
+        try:
+            _dl_syms = [
+                s for s in _STB_UNIVERSE
+                if not any((p.get("ticker") or p.get("symbol")) == s for p in quant_longs)
+                and s not in lastgood_stocks
+            ]
+            if _dl_syms:
+                logger.warning(f"STB COLD-START: downloading {len(_dl_syms)} STB symbols via yfinance")
+                _stb_dl = yf.download(
+                    " ".join(_dl_syms),
+                    period="1y", auto_adjust=True,
+                    threads=True, progress=False
+                )
+                if _stb_dl is not None and not _stb_dl.empty:
+                    _cl = None
+                    if hasattr(_stb_dl.columns, "levels"):          # MultiIndex
+                        _l0 = _stb_dl.columns.get_level_values(0).tolist()
+                        if "Close" in _l0:
+                            _cl = _stb_dl["Close"]
+                    elif "Close" in _stb_dl.columns:                 # flat
+                        _cl = _stb_dl[["Close"]]
+                    if _cl is not None:
+                        _added = 0
+                        for _cs in _cl.columns:
+                            _col = _cl[_cs].dropna()
+                            if hasattr(_col, "values"):
+                                _col = _col.values
+                            if len(_col) >= 126:
+                                lastgood_stocks[str(_cs)] = _col
+                                _added += 1
+                        logger.warning(f"STB COLD-START: added {_added} symbols from direct download")
+        except Exception as _cold_dl_err:
+            logger.warning(f"STB COLD-START direct download failed (non-fatal): {_cold_dl_err}")
+
+        # Kick off a fresh quant scan in the background — the NEXT STB re-scan
+        # (in 5 min) will have LASTGOOD populated and full quant picks to draw from.
+        if not _SCAN_RUNNING:
+            import threading as _cold_thr
+            def _cold_quant():
+                try:
+                    generate_quant_picks()
+                except Exception as _cqe:
+                    logger.warning(f"STB cold-start quant scan failed: {_cqe}")
+            _cold_thr.Thread(target=_cold_quant, daemon=True, name="stb-cold-quant-warm").start()
+
     # ── Score all candidates ──────────────────────────────────────────────────
     candidates = []
 
@@ -6773,7 +6834,14 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         "hf_regime": _hf_regime,                    # Bridgewater regime: RISK_ON / RISK_OFF / NEUTRAL
     }
 
-    _quant_cache["fundamental_picks"] = {"data": result, "time": now_ts}
+    # Cold-start: use 5-min TTL so the background quant scan can complete
+    # and the next re-scan serves a full universe of picks.
+    _cache_write_time = (
+        now_ts - (_FUNDAMENTAL_PICKS_CACHE_TTL - 300) if _is_cold_start else now_ts
+    )
+    _quant_cache["fundamental_picks"] = {"data": result, "time": _cache_write_time}
+    if _is_cold_start:
+        logger.warning("STB COLD-START: cache written with 5-min TTL — will re-scan when quant warms up")
     logger.warning(
         f"FUNDAMENTAL PICKS: {_picks_selected} picks | funnel: "
         f"{_universe_total} universe → {_tickers_attempted} attempted "
