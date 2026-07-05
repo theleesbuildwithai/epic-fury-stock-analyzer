@@ -154,6 +154,14 @@ def _prefetch_fundamentals(symbols: list) -> dict:
                             break
                     except Exception:
                         pass
+            # Scalar fallback: some yfinance versions return a single Timestamp, not a list
+            if _earn_ts is None and _ed_raw is not None and not isinstance(_ed_raw, (list, tuple)):
+                try:
+                    _t = int(_ed_raw) if not hasattr(_ed_raw, "timestamp") else int(_ed_raw.timestamp())
+                    if _t > now:
+                        _earn_ts = _t
+                except Exception:
+                    pass
             if _earn_ts is None:
                 for _ekey in ("earningsTimestampStart", "earningsTimestamp"):
                     _ev = info.get(_ekey)
@@ -6388,8 +6396,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             # 6-12 week fundamental hold — the position would be closed into earnings.
             _ned_q = _fd_q.get("next_earnings_days")
             if _ned_q is not None and 0 <= _ned_q < 14:
-                logger.debug(
-                    f"STB EARNINGS-DROP {ticker}: earnings in {_ned_q}d — "                    f"binary risk event, excluded from STB hold"
+                logger.info(
+                    f"STB EARNINGS-DROP {ticker}: earnings in {_ned_q}d — "
+                    f"binary risk event, excluded from STB hold"
                 )
                 continue
 
@@ -6419,9 +6428,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 if _qp_rev is not None and _qp_rev > 5:  _qp_parts.append(f"rev +{_qp_rev:.0f}%")
                 if _qp_parts:
                     reasons.append(f"Quality: {', '.join(_qp_parts)}")
-            # 14-30 day earnings window: flag as risk but do not disqualify
+            # 14-30 day earnings window: flag as risk but do not disqualify.
+            # Prepend so the warning is always visible even when reasons[:5] trims.
             if _ned_q is not None and 14 <= _ned_q <= 30:
-                reasons.append(f"Earnings in ~{_ned_q}d — monitor for binary risk")
+                reasons = [f"Earnings in ~{_ned_q}d — monitor for binary risk"] + reasons
 
             candidates.append({
                 "ticker": ticker, "symbol": ticker,
@@ -6458,8 +6468,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 # Earnings guard: same 14-day rule as quant longs loop
                 _ned_lg = _fd.get("next_earnings_days")
                 if _ned_lg is not None and 0 <= _ned_lg < 14:
-                    logger.debug(
-                        f"STB EARNINGS-DROP {sym}: earnings in {_ned_lg}d — "                        f"binary risk event, excluded from STB hold"
+                    logger.info(
+                        f"STB EARNINGS-DROP {sym}: earnings in {_ned_lg}d — "
+                        f"binary risk event, excluded from STB hold"
                     )
                     continue
 
@@ -6492,10 +6503,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         _lg_reasons = list(pick.get("reasons") or [])
                         _lg_reasons.append(f"Quality: {', '.join(_lg_parts)}")
                         pick["reasons"] = _lg_reasons[:5]
-                # 14-30 day earnings window: flag but do not disqualify
+                # 14-30 day earnings window: flag but do not disqualify.
+                # Prepend so the warning is always visible even when reasons[:5] trims.
                 if _ned_lg is not None and 14 <= _ned_lg <= 30:
-                    _er = list(pick.get("reasons") or [])
-                    _er.append(f"Earnings in ~{_ned_lg}d — monitor for binary risk")
+                    _er = [f"Earnings in ~{_ned_lg}d — monitor for binary risk"] + list(pick.get("reasons") or [])
                     pick["reasons"] = _er[:5]
                 candidates.append(pick)
         except Exception as _e:
