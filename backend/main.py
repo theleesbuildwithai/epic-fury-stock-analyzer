@@ -8318,6 +8318,112 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                     _fp["target_distance_pct"] = _true_td
                 _fp["reward_risk_ratio"] = _true_rr  # always recompute for accuracy
 
+        # ── Layer 18: Absolute stop/target dollar bounds ──────────────────────────
+        # Hard floor: stop >= $1.00 (no sub-penny stops from cheap stocks).
+        # Hard ceiling: target <= $20,000 (catches target arithmetic overflow).
+        # Violations are auto-fixed using the same formula as Layers 10-13 above.
+        _fixed18 = 0
+        for _fp in formatted_longs:
+            _ep18 = float(_fp.get("entry_price") or 0)
+            if _ep18 <= 0:
+                continue
+            _sl18  = float(_fp.get("stop_loss") or 0)
+            _tg18  = float(_fp.get("target_price") or 0)
+            _bad18 = _sl18 < 1.0 or _sl18 >= _ep18 or _tg18 <= _ep18 or _tg18 > 20000.0
+            if _bad18:
+                _mom18 = abs(float(_fp.get("momentum_pct") or 25.0))
+                _av18  = max(20.0, min(60.0, _mom18 * 0.6 + 15.0))
+                _dv18  = _av18 / _math_stb.sqrt(252) * _ep18 / 100.0
+                _sd18  = max(_ep18 * 0.08, min(_ep18 * 0.12, _dv18 * 15.0))
+                _td18  = max(_sd18 * 3.0, min(_ep18 * 0.40, _sd18 * 4.0))
+                _fp["stop_loss"]           = round(_ep18 - _sd18, 2)
+                _fp["target_price"]        = round(_ep18 + _td18, 2)
+                _fp["stop_distance_pct"]   = round(_sd18 / _ep18 * 100, 1)
+                _fp["target_distance_pct"] = round(_td18 / _ep18 * 100, 1)
+                _fp["reward_risk_ratio"]   = round(_td18 / _sd18, 2)
+                _fixed18 += 1
+                logger.warning(
+                    f"STB LAYER18 BOUNDS-FIX {_fp.get('ticker','?')}: "
+                    f"stop=${_sl18:.2f} target=${_tg18:.2f} outside absolute bounds — recalculated"
+                )
+        if _fixed18:
+            logger.warning(f"STB LAYER18: auto-fixed {_fixed18} picks with invalid stop/target dollar bounds")
+
+        # ── Layer 19: Reasons sanitization and deduplication ─────────────────────
+        # reasons must be a list of unique, non-empty strings, max 5.
+        # Catches upstream None entries, empty strings, and duplicate reasons.
+        _fallback_reason = "Fundamental quality + momentum pick"
+        for _fp in formatted_longs:
+            _raw_r = _fp.get("reasons") or []
+            if not isinstance(_raw_r, list):
+                _raw_r = [str(_raw_r)] if _raw_r else []
+            _seen_r: set = set()
+            _clean_r = []
+            for _r in _raw_r:
+                if not _r or not isinstance(_r, str):
+                    continue
+                _r = _r.strip()
+                if _r and _r not in _seen_r:
+                    _seen_r.add(_r)
+                    _clean_r.append(_r)
+                if len(_clean_r) >= 5:
+                    break
+            _fp["reasons"] = _clean_r if _clean_r else [_fallback_reason]
+
+        # ── Layer 20: Confidence band enforcement [75, 95] ───────────────────────
+        # STB confidence must be exactly in [75, 95].  Any value outside indicates
+        # a scoring path that bypassed the upstream clamp — correct silently.
+        for _fp in formatted_longs:
+            _cf = _fp.get("confidence")
+            if _cf is not None:
+                try:
+                    _cf_int = int(round(float(_cf)))
+                    _cf_clamped = max(75, min(95, _cf_int))
+                    if _cf_clamped != _cf_int:
+                        logger.warning(
+                            f"STB LAYER20 CONF-CLAMP {_fp.get('ticker','?')}: {_cf_int}→{_cf_clamped}"
+                        )
+                    _fp["confidence"] = _cf_clamped
+                except (TypeError, ValueError):
+                    _fp["confidence"] = 80
+
+        # ── Layer 21: Minimum survival count warning ──────────────────────────────
+        # If all filtering leaves <3 picks something went badly wrong this session.
+        # Log it loudly so it appears in App Runner logs — do not silently serve.
+        if len(formatted_longs) < 3:
+            logger.warning(
+                f"STB LAYER21 MIN-SURVIVAL: only {len(formatted_longs)} picks survived all 21 layers. "
+                f"Check App Runner logs for upstream drops (Layer 9 multi_source / Layer 5a MA / Layer 5b 52W)."
+            )
+
+        # ── Layer 22: Duplicate ticker guard at serve time ────────────────────────
+        # A ticker can appear twice if it was scored by both the quant path and
+        # the lastgood path, and the correlation filter skipped it (no price history
+        # for one entry).  Keep the higher-confidence copy.
+        _seen22: dict = {}
+        _deduped22 = []
+        for _fp in formatted_longs:
+            _t22 = _fp.get("ticker", "")
+            if not _t22:
+                _deduped22.append(_fp)
+                continue
+            if _t22 not in _seen22:
+                _seen22[_t22] = len(_deduped22)
+                _deduped22.append(_fp)
+            else:
+                _prev_idx = _seen22[_t22]
+                _prev_conf = _deduped22[_prev_idx].get("confidence", 0)
+                _this_conf = _fp.get("confidence", 0)
+                if _this_conf > _prev_conf:
+                    _deduped22[_prev_idx] = _fp
+                logger.warning(
+                    f"STB LAYER22 DUP-TICKER {_t22}: kept conf={max(_prev_conf,_this_conf)}, "
+                    f"dropped conf={min(_prev_conf,_this_conf)} duplicate"
+                )
+        if len(_deduped22) < len(formatted_longs):
+            logger.warning(f"STB LAYER22: removed {len(formatted_longs)-len(_deduped22)} duplicate ticker entries")
+        formatted_longs = _deduped22
+
         # Re-sequence ranks after any drops
         for _i, _p in enumerate(formatted_longs):
             _p["rank"] = _i + 1

@@ -6589,6 +6589,47 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             f"with price/20d-MA ratio outside [0.20×, 5.0×]"
         )
 
+    # ── Layer 5b: 52-week high/low range check ────────────────────────────────
+    # A price above 5× the 52-week high or below 20% of the 52-week low is
+    # physically impossible for any stock that already passed the AQR vol cap
+    # (hyper-volatile stocks are filtered before reaching here).
+    # Uses the same lastgood_stocks history arrays — no extra network calls.
+    _52w_drops = []
+    for _pick in top_picks:
+        _s   = _pick.get("ticker", "")
+        _px  = float(_pick.get("price", 0) or 0)
+        if _px <= 0:
+            continue
+        _hist = lastgood_stocks.get(_s)
+        if _hist is not None and len(_hist) >= 20:
+            try:
+                _arr52 = _hist[-252:] if len(_hist) >= 252 else _hist
+                _hi52  = float(_np.max(_arr52))
+                _lo52  = float(_np.min(_arr52))
+                if _hi52 > 0 and _lo52 > 0:
+                    if _px > _hi52 * 5.0:
+                        logger.warning(
+                            f"STB LAYER5b 52W-DROP {_s}: ${_px:.2f} > 5× "                            f"52w-high ${_hi52:.2f} — impossible price, corrupt"
+                        )
+                        _52w_drops.append(_pick)
+                    elif _px < _lo52 * 0.20:
+                        logger.warning(
+                            f"STB LAYER5b 52W-DROP {_s}: ${_px:.2f} < 20% of "                            f"52w-low ${_lo52:.2f} — impossible price, corrupt"
+                        )
+                        _52w_drops.append(_pick)
+            except Exception:
+                pass
+    for _dp in _52w_drops:
+        try:
+            top_picks.remove(_dp)
+        except ValueError:
+            pass
+    if _52w_drops:
+        logger.warning(
+            f"STB LAYER5b 52W-SANITY: dropped {len(_52w_drops)} picks "
+            f"with price outside 52-week range [×0.20, ×5.0]"
+        )
+
     # ── Layer 5: Final zero/None price purge ──────────────────────────────────
     # After multi_source refresh, any pick still missing a price is silently
     # dropped — never saved to cache.
