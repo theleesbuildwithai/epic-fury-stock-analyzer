@@ -139,6 +139,36 @@ def _prefetch_fundamentals(symbols: list) -> dict:
             # can use it as a fallback when the bulk yfinance download fails.
             # _fin used here too — yfinance can return NaN for price fields on stale tickers.
             _cp = _fin(info.get("currentPrice")) or _fin(info.get("regularMarketPrice")) or _fin(info.get("previousClose"))
+
+            # Next earnings date — extracted from info so no extra API call needed.
+            # Tries earningsDate list first (most reliable), falls back to timestamp fields.
+            # Stores integer day count to next earnings, or None if unavailable/past.
+            _earn_ts = None
+            _ed_raw = info.get("earningsDate")
+            if isinstance(_ed_raw, (list, tuple)) and _ed_raw:
+                for _et in _ed_raw:
+                    try:
+                        _t = int(_et) if not hasattr(_et, "timestamp") else int(_et.timestamp())
+                        if _t > now:          # future dates only
+                            _earn_ts = _t
+                            break
+                    except Exception:
+                        pass
+            if _earn_ts is None:
+                for _ekey in ("earningsTimestampStart", "earningsTimestamp"):
+                    _ev = info.get(_ekey)
+                    if _ev:
+                        try:
+                            _t = int(_ev)
+                            if _t > now:
+                                _earn_ts = _t
+                                break
+                        except Exception:
+                            pass
+            next_earnings_days = (
+                int(round((_earn_ts - now) / 86400.0)) if _earn_ts else None
+            )
+
             value_data = {
                 "pe": pe,
                 "fwd_pe": fwd_pe,
@@ -152,6 +182,7 @@ def _prefetch_fundamentals(symbols: list) -> dict:
                 "profit_margins": profit_margins,
                 "debt_equity": debt_equity,
                 "current_price": float(_cp) if _cp else None,
+                "next_earnings_days": next_earnings_days,  # int days to next earnings, or None
             }
             result[sym] = value_data
 
@@ -6351,6 +6382,17 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             stab_score = max(5.0, min(20.0, 28.0 - vol_60d * 0.35))
             # Hedge fund overlay: AQR quality + Bridgewater regime
             _fd_q = _stb_fundamentals.get(ticker) or {}
+
+            # Earnings guard: skip picks with earnings within 14 days.
+            # A binary event (beat/miss/guidance) in that window invalidates any
+            # 6-12 week fundamental hold — the position would be closed into earnings.
+            _ned_q = _fd_q.get("next_earnings_days")
+            if _ned_q is not None and 0 <= _ned_q < 14:
+                logger.debug(
+                    f"STB EARNINGS-DROP {ticker}: earnings in {_ned_q}d — "                    f"binary risk event, excluded from STB hold"
+                )
+                continue
+
             quality_score = _quality_bonus(_fd_q)
             regime_score = _regime_bonus(sector)
             total_score = mom_score + qual_score + stab_score + quality_score + regime_score
@@ -6377,6 +6419,9 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 if _qp_rev is not None and _qp_rev > 5:  _qp_parts.append(f"rev +{_qp_rev:.0f}%")
                 if _qp_parts:
                     reasons.append(f"Quality: {', '.join(_qp_parts)}")
+            # 14-30 day earnings window: flag as risk but do not disqualify
+            if _ned_q is not None and 14 <= _ned_q <= 30:
+                reasons.append(f"Earnings in ~{_ned_q}d — monitor for binary risk")
 
             candidates.append({
                 "ticker": ticker, "symbol": ticker,
@@ -6409,6 +6454,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             pick = _score_from_history(sym, closes, sector)
             if pick:
                 _fd = _stb_fundamentals.get(sym) or {}
+
+                # Earnings guard: same 14-day rule as quant longs loop
+                _ned_lg = _fd.get("next_earnings_days")
+                if _ned_lg is not None and 0 <= _ned_lg < 14:
+                    logger.debug(
+                        f"STB EARNINGS-DROP {sym}: earnings in {_ned_lg}d — "                        f"binary risk event, excluded from STB hold"
+                    )
+                    continue
+
                 pick["pe"] = _fd.get("pe")
                 pick["fwd_pe"] = _fd.get("fwd_pe")
                 pick["peg_ratio"] = _fd.get("peg_ratio")
@@ -6438,6 +6492,11 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         _lg_reasons = list(pick.get("reasons") or [])
                         _lg_reasons.append(f"Quality: {', '.join(_lg_parts)}")
                         pick["reasons"] = _lg_reasons[:5]
+                # 14-30 day earnings window: flag but do not disqualify
+                if _ned_lg is not None and 14 <= _ned_lg <= 30:
+                    _er = list(pick.get("reasons") or [])
+                    _er.append(f"Earnings in ~{_ned_lg}d — monitor for binary risk")
+                    pick["reasons"] = _er[:5]
                 candidates.append(pick)
         except Exception as _e:
             logger.debug(f"FUNDAMENTAL PICKS lastgood score error {sym}: {_e}")
