@@ -8244,6 +8244,80 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             )
         formatted_longs = _survivors
 
+        # ── Layer 14: NaN/inf scrub — no invalid float ever reaches the frontend ──
+        # float('nan') and float('inf') are not valid JSON values.
+        # This scrub runs after ALL fixes so any computation producing NaN is caught.
+        _nan_fields = [
+            "entry_price", "stop_loss", "target_price", "stop_distance_pct",
+            "target_distance_pct", "reward_risk_ratio", "confidence",
+            "fundamental_score", "composite_score", "pe", "fwd_pe", "peg_ratio",
+            "roe_pct", "revenue_growth_pct", "earnings_growth_pct",
+            "profit_margin_pct", "momentum_pct",
+        ]
+        for _fp in formatted_longs:
+            for _nf in _nan_fields:
+                _nv = _fp.get(_nf)
+                if _nv is not None:
+                    try:
+                        if not _math_stb.isfinite(float(_nv)):
+                            _fp[_nf] = None
+                    except (TypeError, ValueError):
+                        _fp[_nf] = None
+
+        # ── Layer 15: Serve-time duplicate entry_price guard ─────────────────────
+        # Two picks with the exact same entry_price at serve time = cross-ticker
+        # contamination that survived the cache-level dedup.  Drop both — we
+        # cannot determine which price belongs to which ticker.
+        from collections import Counter as _Counter15
+        _ep_counts15 = _Counter15(
+            p.get("entry_price", 0) for p in formatted_longs
+            if (p.get("entry_price") or 0) > 0
+        )
+        _dup_eps = {ep for ep, cnt in _ep_counts15.items() if cnt > 1}
+        if _dup_eps:
+            _before15 = len(formatted_longs)
+            formatted_longs = [
+                p for p in formatted_longs
+                if p.get("entry_price", 0) not in _dup_eps
+            ]
+            logger.warning(
+                f"STB LAYER15 SERVE-DEDUP: dropped {_before15 - len(formatted_longs)} picks "
+                f"with duplicate entry_price at serve time (prices={[round(x,2) for x in _dup_eps]})"
+            )
+
+        # ── Layer 16: Ticker format validation ───────────────────────────────────
+        # An empty, numeric, or malformed ticker = data corruption.
+        # Pattern: starts with A-Z, up to 5 more alphanumeric/special chars (BRK.B, etc.)
+        import re as _re16
+        _ticker_re16 = _re16.compile(r"^[A-Z][A-Z0-9.\-\^]{0,5}$")
+        _before16 = len(formatted_longs)
+        formatted_longs = [
+            p for p in formatted_longs
+            if p.get("ticker") and _ticker_re16.match(str(p["ticker"]))
+        ]
+        if len(formatted_longs) < _before16:
+            logger.warning(
+                f"STB LAYER16 TICKER-VALID: dropped {_before16 - len(formatted_longs)} picks "
+                f"with invalid ticker format"
+            )
+
+        # ── Layer 17: Stop/target percentage consistency recheck ─────────────────
+        # Displayed pct fields must match the actual price math.  Any rounding
+        # drift or copy-paste error from upstream is corrected silently here.
+        for _fp in formatted_longs:
+            _ep17 = float(_fp.get("entry_price") or 0)
+            _sl17 = float(_fp.get("stop_loss") or 0)
+            _tg17 = float(_fp.get("target_price") or 0)
+            if _ep17 > 0 and _sl17 > 0 and _sl17 < _ep17 and _tg17 > _ep17:
+                _true_sd = round((_ep17 - _sl17) / _ep17 * 100, 1)
+                _true_td = round((_tg17 - _ep17) / _ep17 * 100, 1)
+                _true_rr = round((_tg17 - _ep17) / (_ep17 - _sl17), 2)
+                if abs(float(_fp.get("stop_distance_pct") or 0) - _true_sd) > 0.15:
+                    _fp["stop_distance_pct"] = _true_sd
+                if abs(float(_fp.get("target_distance_pct") or 0) - _true_td) > 0.15:
+                    _fp["target_distance_pct"] = _true_td
+                _fp["reward_risk_ratio"] = _true_rr  # always recompute for accuracy
+
         # Re-sequence ranks after any drops
         for _i, _p in enumerate(formatted_longs):
             _p["rank"] = _i + 1

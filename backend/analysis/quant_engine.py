@@ -6552,6 +6552,43 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             except Exception as _ms_stb_err:
                 logger.warning(f"STB MULTI-SRC REFRESH failed — prices may be stale: {_ms_stb_err}")
 
+    # ── Layer 5a: Moving-average sanity gate ──────────────────────────────────
+    # multi_source can rarely return an extreme price (e.g., an index level
+    # instead of the share price).  Cross-check the refreshed price against the
+    # 20-day moving average from lastgood_stocks.  A ratio >5× or <0.20× is
+    # physically impossible for any stock that survived the momentum/trend
+    # filters above.  Skipped for symbols with <20 days of history (cold start).
+    _pre_ma = len(top_picks)
+    _ma_drops = []
+    for _pick in top_picks:
+        _s   = _pick.get("ticker", "")
+        _px  = float(_pick.get("price", 0) or 0)
+        if _px <= 0:
+            continue
+        _closes_ma = lastgood_stocks.get(_s)
+        if _closes_ma is not None and len(_closes_ma) >= 20:
+            try:
+                _ma20 = float(_np.mean(_closes_ma[-20:]))
+                if _ma20 > 0:
+                    _ratio_ma = _px / _ma20
+                    if _ratio_ma > 5.0 or _ratio_ma < 0.20:
+                        logger.warning(
+                            f"STB LAYER5a MA-DROP {_s}: price ${_px:.2f} vs "                            f"20d-MA ${_ma20:.2f} (ratio={_ratio_ma:.2f}) — extreme divergence"
+                        )
+                        _ma_drops.append(_pick)
+            except Exception:
+                pass
+    for _dp in _ma_drops:
+        try:
+            top_picks.remove(_dp)
+        except ValueError:
+            pass
+    if _ma_drops:
+        logger.warning(
+            f"STB LAYER5a MA-SANITY: dropped {len(_ma_drops)} picks "
+            f"with price/20d-MA ratio outside [0.20×, 5.0×]"
+        )
+
     # ── Layer 5: Final zero/None price purge ──────────────────────────────────
     # After multi_source refresh, any pick still missing a price is silently
     # dropped — never saved to cache.
