@@ -191,6 +191,7 @@ def _prefetch_fundamentals(symbols: list) -> dict:
                 "debt_equity": debt_equity,
                 "current_price": float(_cp) if _cp else None,
                 "next_earnings_days": next_earnings_days,  # int days to next earnings, or None
+                "next_earnings_ts": int(_earn_ts) if _earn_ts else None,  # raw Unix ts for live recompute
             }
             result[sym] = value_data
 
@@ -6394,7 +6395,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             # Earnings guard: skip picks with earnings within 14 days.
             # A binary event (beat/miss/guidance) in that window invalidates any
             # 6-12 week fundamental hold — the position would be closed into earnings.
-            _ned_q = _fd_q.get("next_earnings_days")
+            # CRITICAL: recompute days live from the raw timestamp — the cached
+            # next_earnings_days is up to 24h stale and would miss a stock that
+            # crossed the 14-day boundary since the last fundamentals fetch.
+            _earn_ts_q = _fd_q.get("next_earnings_ts")
+            if _earn_ts_q:
+                _ned_q_raw = (_earn_ts_q - time.time()) / 86400.0
+                _ned_q = int(round(_ned_q_raw)) if _ned_q_raw >= 0 else None  # None if already past
+            else:
+                _ned_q = _fd_q.get("next_earnings_days")  # fallback: stale cached count
             if _ned_q is not None and 0 <= _ned_q < 14:
                 logger.info(
                     f"STB EARNINGS-DROP {ticker}: earnings in {_ned_q}d — "
@@ -6465,8 +6474,14 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             if pick:
                 _fd = _stb_fundamentals.get(sym) or {}
 
-                # Earnings guard: same 14-day rule as quant longs loop
-                _ned_lg = _fd.get("next_earnings_days")
+                # Earnings guard: same 14-day rule as quant longs loop.
+                # Recompute live from raw timestamp — same staleness fix as quant path.
+                _earn_ts_lg = _fd.get("next_earnings_ts")
+                if _earn_ts_lg:
+                    _ned_lg_raw = (_earn_ts_lg - time.time()) / 86400.0
+                    _ned_lg = int(round(_ned_lg_raw)) if _ned_lg_raw >= 0 else None
+                else:
+                    _ned_lg = _fd.get("next_earnings_days")  # fallback: stale cached count
                 if _ned_lg is not None and 0 <= _ned_lg < 14:
                     logger.info(
                         f"STB EARNINGS-DROP {sym}: earnings in {_ned_lg}d — "
