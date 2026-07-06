@@ -6202,14 +6202,17 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         threads=True, progress=False
                     )
                 _stb_dl = None
+                _cold_exec = _cold_futures.ThreadPoolExecutor(max_workers=1)
+                _cold_f = _cold_exec.submit(_do_cold_dl)
                 try:
-                    with _cold_futures.ThreadPoolExecutor(max_workers=1) as _cx:
-                        _cf = _cx.submit(_do_cold_dl)
-                        _stb_dl = _cf.result(timeout=90)
+                    _stb_dl = _cold_f.result(timeout=90)
                 except _cold_futures.TimeoutError:
                     logger.warning("STB COLD-START: yf.download timed out after 90s -- skipping direct download, will retry on next refresh")
+                    _cold_f.cancel()
                 except Exception as _dl_err2:
                     logger.warning(f"STB COLD-START: yf.download error: {_dl_err2}")
+                finally:
+                    _cold_exec.shutdown(wait=False)  # never block — let thread die on its own
                 if _stb_dl is not None and not _stb_dl.empty:
                     _cl = None
                     if hasattr(_stb_dl.columns, "levels"):          # MultiIndex
