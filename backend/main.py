@@ -8499,6 +8499,146 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 "STB LAYER27 ZERO-PICK WARNING: all picks were filtered by serve-time "                "layers — returning empty list. Check Layer 9 multi_source status "                "and upstream price feeds in App Runner logs."
             )
 
+        # ── Layer 28: Numeric field type coercion (auto-fix, no drops) ──────────────
+        # Catches fields stored as strings from JSON round-trips or bad serializers
+        _L28_FIELDS = ("entry_price","stop_price","target_price","confidence",
+                       "stop_loss_pct","target_gain_pct","risk_reward_ratio",
+                       "momentum_pct","relative_strength","volume","avg_volume",
+                       "market_cap","pe_ratio","pb_ratio","beta","roe","revenue_growth")
+        for _fp in formatted_longs:
+            for _fn in _L28_FIELDS:
+                _fv = _fp.get(_fn)
+                if isinstance(_fv, str):
+                    try:
+                        _fp[_fn] = float(_fv)
+                        logger.info(f"STB LAYER28 TYPE-COERCE {_fp.get('ticker','?')}: {_fn} was string '{_fv}' -> float")
+                    except Exception:
+                        _fp[_fn] = None
+
+        # ── Layer 29: Volume floor warning (reason prepend + log, no drops) ──────────
+        # Illiquid picks (<50k avg daily vol) flagged so traders know spread risk
+        for _fp in formatted_longs:
+            _avol29 = _fp.get("avg_volume") or _fp.get("volume")
+            try:
+                _avol29f = float(_avol29) if _avol29 is not None else None
+            except Exception:
+                _avol29f = None
+            if _avol29f is not None and _avol29f < 50000:
+                logger.warning(
+                    f"STB LAYER29 LOW-VOL {_fp.get('ticker','?')}: "
+                    f"avg_volume={int(_avol29f):,} -- illiquid, spread risk elevated"
+                )
+                _fp.setdefault("reasons", [])
+                if not any("liquidity" in str(_r).lower() for _r in _fp["reasons"]):
+                    _fp["reasons"] = [f"Low liquidity ({int(_avol29f):,} avg vol) -- widen stops"] + _fp["reasons"]
+
+        # ── Layer 30: Beta sanity scrub (auto-fix, no drops) ─────────────────────────
+        # Beta > 6 or < -3 is corrupt yfinance data -- nullify, never drop the pick
+        for _fp in formatted_longs:
+            _bt30 = _fp.get("beta")
+            if _bt30 is not None:
+                try:
+                    _bt30f = float(_bt30)
+                    if _bt30f > 6.0 or _bt30f < -3.0:
+                        logger.info(
+                            f"STB LAYER30 BETA-SCRUB {_fp.get('ticker','?')}: "
+                            f"beta={_bt30f:.2f} out of range -- nullified"
+                        )
+                        _fp["beta"] = None
+                except Exception:
+                    _fp["beta"] = None
+
+        # ── Layer 31: Valuation corruption scrub (auto-fix, no drops) ────────────────
+        # PE > 5000 / < -2000, PB < 0 / > 500 -> garbage from yfinance; nullify
+        for _fp in formatted_longs:
+            _pe31 = _fp.get("pe_ratio")
+            if _pe31 is not None:
+                try:
+                    _pe31f = float(_pe31)
+                    if _pe31f > 5000 or _pe31f < -2000:
+                        logger.info(f"STB LAYER31 PE-SCRUB {_fp.get('ticker','?')}: pe_ratio={_pe31f:.1f} -- corrupt, nullified")
+                        _fp["pe_ratio"] = None
+                except Exception:
+                    _fp["pe_ratio"] = None
+            _pb31 = _fp.get("pb_ratio")
+            if _pb31 is not None:
+                try:
+                    _pb31f = float(_pb31)
+                    if _pb31f < 0 or _pb31f > 500:
+                        logger.info(f"STB LAYER31 PB-SCRUB {_fp.get('ticker','?')}: pb_ratio={_pb31f:.1f} -- corrupt, nullified")
+                        _fp["pb_ratio"] = None
+                except Exception:
+                    _fp["pb_ratio"] = None
+
+        # ── Layer 32: Confidence-reasons coherence (auto-fix, no drops) ──────────────
+        # Confidence > 88 with fewer than 2 reasons is unsupported -- clamp to 85
+        for _fp in formatted_longs:
+            try:
+                _cf32 = float(_fp.get("confidence", 80))
+                _rs32 = _fp.get("reasons") or []
+                if _cf32 > 88 and len(_rs32) < 2:
+                    logger.info(
+                        f"STB LAYER32 CONF-COHERENCE {_fp.get('ticker','?')}: "
+                        f"confidence={_cf32:.0f} with {len(_rs32)} reason(s) -- clamped to 85"
+                    )
+                    _fp["confidence"] = 85
+            except Exception:
+                pass
+
+        # ── Layer 33: Stop-loss minimum distance guard (auto-fix, no drops) ──────────
+        # Stop must be >= 0.5% below entry -- prevents zero-gap or inverted stops
+        for _fp in formatted_longs:
+            try:
+                _ep33 = float(_fp["entry_price"]); _sp33 = float(_fp["stop_price"])
+                if _sp33 > _ep33 * 0.995:
+                    logger.info(
+                        f"STB LAYER33 STOP-GAP {_fp.get('ticker','?')}: "
+                        f"stop ${_sp33:.2f} too close to entry ${_ep33:.2f} -- set to 5% below"
+                    )
+                    _fp["stop_price"] = round(_ep33 * 0.95, 2)
+                    _fp["stop_loss_pct"] = round((_fp["stop_price"] - _ep33) / _ep33 * 100, 1)
+            except Exception:
+                pass
+
+        # ── Layer 34: Target maximum distance guard (auto-fix, no drops) ─────────────
+        # Target > 150% gain (2.5x entry) is a fantasy number -- cap it
+        for _fp in formatted_longs:
+            try:
+                _ep34 = float(_fp["entry_price"]); _tp34 = float(_fp["target_price"])
+                _max_tp = _ep34 * 2.5
+                if _tp34 > _max_tp:
+                    logger.info(
+                        f"STB LAYER34 TARGET-CAP {_fp.get('ticker','?')}: "
+                        f"target ${_tp34:.2f} > 150% gain on ${_ep34:.2f} -- capped"
+                    )
+                    _fp["target_price"] = round(_max_tp, 2)
+                    _fp["target_gain_pct"] = round((_fp["target_price"] - _ep34) / _ep34 * 100, 1)
+            except Exception:
+                pass
+
+        # ── Layer 35: Direction field normalization (auto-fix, no drops) ─────────────
+        # Ensures direction is exactly "LONG" or "SHORT"; defaults to "LONG"
+        for _fp in formatted_longs:
+            _dir35 = str(_fp.get("direction") or "").strip().upper()
+            _fp["direction"] = _dir35 if _dir35 in ("LONG", "SHORT") else "LONG"
+
+        # ── Layer 36: hold_class vs confidence coherence (auto-fix, no drops) ────────
+        # STRONG requires confidence >= 80; mismatches downgraded to MODERATE
+        for _fp in formatted_longs:
+            try:
+                _hc36 = str(_fp.get("hold_class") or "").upper()
+                _cf36 = float(_fp.get("confidence", 80))
+                if _hc36 not in ("WEAK", "MODERATE", "STRONG"):
+                    _fp["hold_class"] = "MODERATE"
+                elif _hc36 == "STRONG" and _cf36 < 80:
+                    logger.info(
+                        f"STB LAYER36 HOLD-COHERENCE {_fp.get('ticker','?')}: "
+                        f"hold_class=STRONG but confidence={_cf36:.0f} -- downgraded to MODERATE"
+                    )
+                    _fp["hold_class"] = "MODERATE"
+            except Exception:
+                pass
+
         # Re-sequence ranks after any drops
         for _i, _p in enumerate(formatted_longs):
             _p["rank"] = _i + 1
