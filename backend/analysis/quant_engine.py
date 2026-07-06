@@ -6142,7 +6142,13 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         if not entry:
             continue
         try:
+            import numpy as _np_lg
             _df = entry.get("df") if isinstance(entry, dict) else entry
+            # Handle raw numpy array stored by cold-start batch download
+            if isinstance(_df, _np_lg.ndarray):
+                if len(_df) >= 126:
+                    lastgood_stocks[sym] = _df
+                continue
             if _df is None or _df.empty:
                 continue
             # Handle flat columns or MultiIndex
@@ -6245,6 +6251,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     _parsed = _parse_dl(_bdf)
                     for _sym, _arr in _parsed.items():
                         lastgood_stocks[_sym] = _arr
+                        # Persist to module-level cache so future regens keep this data
+                        try:
+                            import pandas as _pd_cs
+                            _PRICE_DATA_LASTGOOD[_sym] = {
+                                "df": _pd_cs.DataFrame({"Close": _arr}),
+                                "ts": int(now_ts),
+                            }
+                        except Exception:
+                            pass
                     _total_added += len(_parsed)
                     logger.warning(
                         f"STB COLD-START batch {_bi+1}/{len(_batches)}: "
