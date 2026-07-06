@@ -6192,11 +6192,24 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             ]
             if _dl_syms:
                 logger.warning(f"STB COLD-START: downloading {len(_dl_syms)} STB symbols via yfinance")
-                _stb_dl = yf.download(
-                    " ".join(_dl_syms),
-                    period="1y", auto_adjust=True,
-                    threads=True, progress=False
-                )
+                # Wrap in a 90-second timeout — yf.download can hang indefinitely
+                # on rate-limits or network stalls; the cold-start is best-effort only.
+                import concurrent.futures as _cold_futures
+                def _do_cold_dl():
+                    return yf.download(
+                        " ".join(_dl_syms),
+                        period="1y", auto_adjust=True,
+                        threads=True, progress=False
+                    )
+                _stb_dl = None
+                try:
+                    with _cold_futures.ThreadPoolExecutor(max_workers=1) as _cx:
+                        _cf = _cx.submit(_do_cold_dl)
+                        _stb_dl = _cf.result(timeout=90)
+                except _cold_futures.TimeoutError:
+                    logger.warning("STB COLD-START: yf.download timed out after 90s -- skipping direct download, will retry on next refresh")
+                except Exception as _dl_err2:
+                    logger.warning(f"STB COLD-START: yf.download error: {_dl_err2}")
                 if _stb_dl is not None and not _stb_dl.empty:
                     _cl = None
                     if hasattr(_stb_dl.columns, "levels"):          # MultiIndex
