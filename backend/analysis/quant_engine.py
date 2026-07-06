@@ -6182,55 +6182,74 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             f"STB COLD-START: quant_longs={len(quant_longs)} lastgood={len(lastgood_stocks)} — "            f"running direct STB universe download and triggering fresh quant scan"
         )
         # Direct yfinance batch download for _STB_UNIVERSE price history.
-        # Runs synchronously here (blocking, ~15s) so this regen returns real picks.
-        # try/except wraps everything — if yfinance is rate-limited, falls through silently.
+        # Batched into 30-symbol groups with 35s per batch -- partial success is fine.
+        # A single 166-symbol call is too brittle: one rate-limit event = zero data.
         try:
+            import concurrent.futures as _cold_futures
             _dl_syms = [
                 s for s in _STB_UNIVERSE
                 if not any((p.get("ticker") or p.get("symbol")) == s for p in quant_longs)
                 and s not in lastgood_stocks
             ]
             if _dl_syms:
-                logger.warning(f"STB COLD-START: downloading {len(_dl_syms)} STB symbols via yfinance")
-                # Wrap in a 90-second timeout — yf.download can hang indefinitely
-                # on rate-limits or network stalls; the cold-start is best-effort only.
-                import concurrent.futures as _cold_futures
-                def _do_cold_dl():
-                    return yf.download(
-                        " ".join(_dl_syms),
-                        period="1y", auto_adjust=True,
-                        threads=True, progress=False
+                _BATCH_SZ = 30
+                _BATCH_TO = 35
+                _batches = [_dl_syms[i:i+_BATCH_SZ] for i in range(0, len(_dl_syms), _BATCH_SZ)]
+                _total_added = 0
+                logger.warning(
+                    f"STB COLD-START: downloading {len(_dl_syms)} symbols "
+                    f"in {len(_batches)} batches of {_BATCH_SZ}"
+                )
+                def _parse_dl(_df):
+                    out = {}
+                    if _df is None or _df.empty:
+                        return out
+                    cl = None
+                    if hasattr(_df.columns, "levels"):
+                        l0 = _df.columns.get_level_values(0).tolist()
+                        if "Close" in l0:
+                            cl = _df["Close"]
+                    elif "Close" in _df.columns:
+                        cl = _df[["Close"]]
+                    if cl is None:
+                        return out
+                    for cs in cl.columns:
+                        col = cl[cs].dropna()
+                        if hasattr(col, "values"):
+                            col = col.values
+                        if len(col) >= 126:
+                            out[str(cs)] = col
+                    return out
+                for _bi, _batch in enumerate(_batches):
+                    def _do_batch(_syms=_batch):
+                        return yf.download(
+                            " ".join(_syms),
+                            period="1y", auto_adjust=True,
+                            threads=True, progress=False
+                        )
+                    _bexec = _cold_futures.ThreadPoolExecutor(max_workers=1)
+                    _bf = _bexec.submit(_do_batch)
+                    _bdf = None
+                    try:
+                        _bdf = _bf.result(timeout=_BATCH_TO)
+                    except _cold_futures.TimeoutError:
+                        logger.warning(
+                            f"STB COLD-START batch {_bi+1}/{len(_batches)}: "
+                            f"timed out after {_BATCH_TO}s -- skipping"
+                        )
+                        _bf.cancel()
+                    except Exception as _be:
+                        logger.warning(f"STB COLD-START batch {_bi+1}/{len(_batches)} error: {_be}")
+                    finally:
+                        _bexec.shutdown(wait=False)
+                    _parsed = _parse_dl(_bdf)
+                    for _sym, _arr in _parsed.items():
+                        lastgood_stocks[_sym] = _arr
+                    _total_added += len(_parsed)
+                    logger.warning(
+                        f"STB COLD-START batch {_bi+1}/{len(_batches)}: "
+                        f"+{len(_parsed)} symbols (running total={_total_added})"
                     )
-                _stb_dl = None
-                _cold_exec = _cold_futures.ThreadPoolExecutor(max_workers=1)
-                _cold_f = _cold_exec.submit(_do_cold_dl)
-                try:
-                    _stb_dl = _cold_f.result(timeout=90)
-                except _cold_futures.TimeoutError:
-                    logger.warning("STB COLD-START: yf.download timed out after 90s -- skipping direct download, will retry on next refresh")
-                    _cold_f.cancel()
-                except Exception as _dl_err2:
-                    logger.warning(f"STB COLD-START: yf.download error: {_dl_err2}")
-                finally:
-                    _cold_exec.shutdown(wait=False)  # never block — let thread die on its own
-                if _stb_dl is not None and not _stb_dl.empty:
-                    _cl = None
-                    if hasattr(_stb_dl.columns, "levels"):          # MultiIndex
-                        _l0 = _stb_dl.columns.get_level_values(0).tolist()
-                        if "Close" in _l0:
-                            _cl = _stb_dl["Close"]
-                    elif "Close" in _stb_dl.columns:                 # flat
-                        _cl = _stb_dl[["Close"]]
-                    if _cl is not None:
-                        _added = 0
-                        for _cs in _cl.columns:
-                            _col = _cl[_cs].dropna()
-                            if hasattr(_col, "values"):
-                                _col = _col.values
-                            if len(_col) >= 126:
-                                lastgood_stocks[str(_cs)] = _col
-                                _added += 1
-                        logger.warning(f"STB COLD-START: added {_added} symbols from direct download")
         except Exception as _cold_dl_err:
             logger.warning(f"STB COLD-START direct download failed (non-fatal): {_cold_dl_err}")
 
