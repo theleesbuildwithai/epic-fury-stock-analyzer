@@ -8424,6 +8424,81 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             logger.warning(f"STB LAYER22: removed {len(formatted_longs)-len(_deduped22)} duplicate ticker entries")
         formatted_longs = _deduped22
 
+        # ── Layer 23: Company name + sector field repair (auto-fix, no drops) ───────
+        # Frontend renders these fields directly. Blank or overlong values cause
+        # display artifacts. Auto-fix with safe defaults — never removes a pick.
+        for _fp in formatted_longs:
+            _cn = (_fp.get("company_name") or "").strip()
+            if not _cn or len(_cn) > 80:
+                _fp["company_name"] = _fp.get("ticker", "")
+            _sec = (_fp.get("sector") or "").strip()
+            if not _sec:
+                _fp["sector"] = "Unknown"
+
+        # ── Layer 24: Numeric precision normalization (auto-fix, no drops) ──────────
+        # Prevents floating-point drift reaching the frontend (e.g. .5900001).
+        # Prices → 2dp, percentages → 1dp, ratios → 2dp.
+        for _fp in formatted_longs:
+            for _pf in ("entry_price", "stop_loss", "target_price"):
+                _v = _fp.get(_pf)
+                if _v is not None:
+                    try: _fp[_pf] = round(float(_v), 2)
+                    except: pass
+            for _pf in ("stop_distance_pct", "target_distance_pct"):
+                _v = _fp.get(_pf)
+                if _v is not None:
+                    try: _fp[_pf] = round(float(_v), 1)
+                    except: pass
+            for _pf in ("reward_risk_ratio",):
+                _v = _fp.get(_pf)
+                if _v is not None:
+                    try: _fp[_pf] = round(float(_v), 2)
+                    except: pass
+
+        # ── Layer 25: Mandatory field defaults (auto-fix, no drops) ─────────────────
+        # Fields the frontend always expects. Fill any gap with a safe default.
+        # None of these touch the trade levels — purely display/metadata fields.
+        for _fp in formatted_longs:
+            if not _fp.get("recommended_hold"):
+                _fp["recommended_hold"] = "6-12 weeks · fundamentals-driven"
+            if _fp.get("no_day_trading") is not True:
+                _fp["no_day_trading"] = True
+            if _fp.get("live_tradeable") is not True:
+                _fp["live_tradeable"] = True
+            if not _fp.get("hold_class"):
+                _fp["hold_class"] = "position"
+            if not _fp.get("tier"):
+                _fp["tier"] = "fundamental"
+            if _fp.get("direction") not in ("LONG", "SHORT"):
+                _fp["direction"] = "LONG"
+
+        # ── Layer 26: momentum_pct bounds cap (auto-fix with log) ───────────────────
+        # momentum_pct outside [-100%, +500%] is physically impossible and could
+        # corrupt stop/target recalculations if this field were re-used downstream.
+        # Cap silently — never drops or changes trade levels.
+        for _fp in formatted_longs:
+            _mom26 = _fp.get("momentum_pct")
+            if _mom26 is not None:
+                try:
+                    _mf = float(_mom26)
+                    if not _math_stb.isfinite(_mf):
+                        _fp["momentum_pct"] = None
+                    elif _mf < -100.0 or _mf > 500.0:
+                        logger.warning(
+                            f"STB LAYER26 MOM-CAP {_fp.get('ticker','?')}: "                            f"momentum_pct={_mf:.0f}% out of range — capped"
+                        )
+                        _fp["momentum_pct"] = max(-100.0, min(500.0, _mf))
+                except: pass
+
+        # ── Layer 27: Zero-pick emergency warning ────────────────────────────────────
+        # If every pick was dropped by upstream layers, log loudly.
+        # Does NOT restore stale picks — serves the empty list so the UI shows
+        # "no picks" rather than wrong prices from a previous cache.
+        if len(formatted_longs) == 0:
+            logger.warning(
+                "STB LAYER27 ZERO-PICK WARNING: all picks were filtered by serve-time "                "layers — returning empty list. Check Layer 9 multi_source status "                "and upstream price feeds in App Runner logs."
+            )
+
         # Re-sequence ranks after any drops
         for _i, _p in enumerate(formatted_longs):
             _p["rank"] = _i + 1

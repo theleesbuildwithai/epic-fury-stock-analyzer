@@ -6776,6 +6776,29 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             f"with price outside 52-week range [×0.20, ×5.0]"
         )
 
+    # ── Layer 5c: Single-day price velocity monitor (log-only, no drops) ────────
+    # If a pick's refreshed price deviates >40% from the prior close in lastgood,
+    # it may be a data error or a genuine large move.  We LOG it for audit but
+    # never drop — multi_source already validated the price from multiple feeds.
+    # This is purely a monitoring safety net for App Runner log review.
+    for _pick in top_picks:
+        _s  = _pick.get("ticker", "")
+        _px = float(_pick.get("price", 0) or 0)
+        if _px <= 0:
+            continue
+        _hist_vc = lastgood_stocks.get(_s)
+        if _hist_vc is not None and len(_hist_vc) >= 2:
+            try:
+                _prev_close = float(_hist_vc[-2])  # second-to-last = prior day close
+                if _prev_close > 0:
+                    _vel = abs(_px / _prev_close - 1)
+                    if _vel > 0.40:
+                        logger.warning(
+                            f"STB LAYER5c VELOCITY {_s}: ${_prev_close:.2f} → ${_px:.2f} "                            f"({_vel*100:.0f}% single-day move) — flagged for review, price kept"
+                        )
+            except Exception:
+                pass
+
     # ── Layer 5: Final zero/None price purge ──────────────────────────────────
     # After multi_source refresh, any pick still missing a price is silently
     # dropped — never saved to cache.
