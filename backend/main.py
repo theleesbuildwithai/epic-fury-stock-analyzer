@@ -8140,6 +8140,9 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                         _td = max(_sd * 3.0, min(_live_px * 0.40, _sd * 4.0))
                         _fp["stop_loss"] = round(_live_px - _sd, 2)
                         _fp["target_price"] = round(_live_px + _td, 2)
+                        _fp["stop_distance_pct"] = round(_sd / _live_px * 100, 1)
+                        _fp["target_distance_pct"] = round(_td / _live_px * 100, 1)
+                        _fp["reward_risk_ratio"] = round(_td / _sd, 2)
                         _l9_fixed += 1
                 for _dp in _l9_drop:
                     try:
@@ -8624,20 +8627,19 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
             _dir35 = str(_fp.get("direction") or "").strip().upper()
             _fp["direction"] = _dir35 if _dir35 in ("LONG", "SHORT") else "LONG"
 
-        # ── Layer 36: hold_class vs confidence coherence (auto-fix, no drops) ────────
-        # STRONG requires confidence >= 80; mismatches downgraded to MODERATE
+        # ── Layer 36: hold_class coherence (auto-fix, no drops) ──────────────────────
+        # Valid hold classes used by exit_checker/drawdown-protection: position/swing/intraday.
+        # STB picks are 6-12 week holds → default to "position" if missing or invalid.
+        # NOTE: the old WEAK/MODERATE/STRONG domain was wrong and corrupted all picks.
         for _fp in formatted_longs:
             try:
-                _hc36 = str(_fp.get("hold_class") or "").upper()
-                _cf36 = float(_fp.get("confidence", 80))
-                if _hc36 not in ("WEAK", "MODERATE", "STRONG"):
-                    _fp["hold_class"] = "MODERATE"
-                elif _hc36 == "STRONG" and _cf36 < 80:
+                _hc36 = str(_fp.get("hold_class") or "").lower().strip()
+                if _hc36 not in ("position", "swing", "intraday"):
                     logger.info(
                         f"STB LAYER36 HOLD-COHERENCE {_fp.get('ticker','?')}: "
-                        f"hold_class=STRONG but confidence={_cf36:.0f} -- downgraded to MODERATE"
+                        f"invalid hold_class={_fp.get('hold_class')!r} → defaulting to 'position'"
                     )
-                    _fp["hold_class"] = "MODERATE"
+                    _fp["hold_class"] = "position"
             except Exception:
                 pass
 
