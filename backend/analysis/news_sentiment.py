@@ -96,29 +96,30 @@ TARIFF_KEYWORDS = [
 
 # Which sectors get hit by tariffs and how
 TARIFF_SECTOR_IMPACTS = {
+    # Sector names MUST match Yahoo Finance / SECTOR_MAP keys used in quant_engine.py
     "escalation": {  # New/higher tariffs announced
-        "Technology": -1.5,        # Supply chain disruption, chip tariffs
-        "Consumer Discretionary": -1.5,  # Import costs rise
-        "Industrials": -1.0,       # Manufacturing input costs
-        "Materials": -0.5,         # Steel/aluminum tariffs cut both ways
-        "Communication": -0.5,
-        "Energy": +0.5,            # Domestic energy benefits
-        "Consumer Staples": +0.5,  # Domestic producers benefit
-        "Healthcare": -1.0,        # Pharma tariffs (100% on imported drugs)
-        "Utilities": +0.3,         # Defensive/domestic
-        "Financials": -0.5,        # Trade uncertainty
+        "Technology": -1.5,           # Supply chain disruption, chip tariffs
+        "Consumer Cyclical": -1.5,    # Import costs rise (was: Consumer Discretionary)
+        "Industrials": -1.0,          # Manufacturing input costs
+        "Materials": -0.5,            # Steel/aluminum tariffs cut both ways
+        "Communication Services": -0.5,  # (was: Communication)
+        "Energy": +0.5,               # Domestic energy benefits
+        "Consumer Defensive": +0.5,   # Domestic producers benefit (was: Consumer Staples)
+        "Healthcare": -1.0,           # Pharma tariffs (100% on imported drugs)
+        "Utilities": +0.3,            # Defensive/domestic
+        "Financial Services": -0.5,   # Trade uncertainty (was: Financials)
         "Real Estate": 0,
         "ETF": 0,
     },
     "de_escalation": {  # Trade deal, tariff removal
         "Technology": +1.5,
-        "Consumer Discretionary": +1.0,
+        "Consumer Cyclical": +1.0,    # (was: Consumer Discretionary)
         "Industrials": +1.0,
         "Materials": +0.5,
-        "Communication": +0.5,
-        "Financials": +0.5,
+        "Communication Services": +0.5,  # (was: Communication)
+        "Financial Services": +0.5,   # (was: Financials)
         "Energy": 0,
-        "Consumer Staples": 0,
+        "Consumer Defensive": 0,      # (was: Consumer Staples)
         "Healthcare": 0,
         "Utilities": 0,
         "Real Estate": +0.3,
@@ -227,17 +228,20 @@ GEO_HOTSPOTS = [
 ]
 
 GEO_SECTOR_IMPACTS = {
+    # Sector names MUST match Yahoo Finance / SECTOR_MAP keys used in quant_engine.py:
+    # "Consumer Defensive" (not Staples), "Consumer Cyclical" (not Discretionary),
+    # "Financial Services" (not Financials), "Communication Services" (not Communication)
     "military": {
         "Industrials": +1.5, "Energy": +2.0, "Materials": +1.0,
-        "Utilities": +0.5, "Consumer Staples": +0.5, "Healthcare": +0.5,
-        "Technology": -1.0, "Consumer Discretionary": -1.5,
-        "Communication": -0.5, "Financials": -0.5, "Real Estate": -0.5, "ETF": 0,
+        "Utilities": +0.5, "Consumer Defensive": +0.5, "Healthcare": +0.5,
+        "Technology": -1.0, "Consumer Cyclical": -1.5,
+        "Communication Services": -0.5, "Financial Services": -0.5, "Real Estate": -0.5, "ETF": 0,
     },
     "tension": {
         "Industrials": +0.5, "Energy": +1.0, "Materials": +0.5,
-        "Utilities": +0.3, "Consumer Staples": +0.3, "Healthcare": +0.3,
-        "Technology": -0.5, "Consumer Discretionary": -0.5,
-        "Communication": -0.3, "Financials": -0.3, "Real Estate": -0.3, "ETF": 0,
+        "Utilities": +0.3, "Consumer Defensive": +0.3, "Healthcare": +0.3,
+        "Technology": -0.5, "Consumer Cyclical": -0.5,
+        "Communication Services": -0.3, "Financial Services": -0.3, "Real Estate": -0.3, "ETF": 0,
     },
 }
 

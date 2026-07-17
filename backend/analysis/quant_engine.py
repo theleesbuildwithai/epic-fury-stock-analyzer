@@ -6308,25 +6308,41 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     f"STB COLD-START: downloading {len(_dl_syms)} symbols "
                     f"in {len(_batches)} batches of {_BATCH_SZ}"
                 )
-                def _parse_dl(_df):
+                def _parse_dl(_df, _syms_hint=None):
+                    """Parse yfinance download into {ticker: closes_array}.
+                    Handles new MultiIndex (field,ticker), old MultiIndex (ticker,field),
+                    and flat single-ticker DataFrames."""
                     out = {}
                     if _df is None or _df.empty:
                         return out
-                    cl = None
                     if hasattr(_df.columns, "levels"):
-                        l0 = _df.columns.get_level_values(0).tolist()
-                        if "Close" in l0:
+                        _l0 = _df.columns.get_level_values(0).tolist()
+                        _l1 = _df.columns.get_level_values(1).tolist()
+                        if "Close" in _l0:
+                            # New yfinance (>=1.0): (field, ticker) — level 0 = field
                             cl = _df["Close"]
+                            for cs in cl.columns:
+                                col = cl[cs].dropna()
+                                arr = col.values if hasattr(col, "values") else col
+                                if len(arr) >= 126:
+                                    out[str(cs)] = arr
+                        elif "Close" in _l1:
+                            # Old yfinance (<1.0): (ticker, field) — level 1 = field
+                            for sym in dict.fromkeys(_l0):  # unique, order-preserved
+                                try:
+                                    col = _df[sym]["Close"].dropna()
+                                    arr = col.values if hasattr(col, "values") else col
+                                    if len(arr) >= 126:
+                                        out[str(sym)] = arr
+                                except Exception:
+                                    pass
                     elif "Close" in _df.columns:
-                        cl = _df[["Close"]]
-                    if cl is None:
-                        return out
-                    for cs in cl.columns:
-                        col = cl[cs].dropna()
-                        if hasattr(col, "values"):
-                            col = col.values
-                        if len(col) >= 126:
-                            out[str(cs)] = col
+                        # Flat DataFrame: single-ticker download (field names as columns).
+                        # Must use the hint to know which ticker this data belongs to.
+                        col = _df["Close"].dropna()
+                        arr = col.values if hasattr(col, "values") else col
+                        if len(arr) >= 126 and _syms_hint and len(_syms_hint) == 1:
+                            out[str(_syms_hint[0])] = arr
                     return out
                 for _bi, _batch in enumerate(_batches):
                     def _do_batch(_syms=_batch):
@@ -6350,7 +6366,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                         logger.warning(f"STB COLD-START batch {_bi+1}/{len(_batches)} error: {_be}")
                     finally:
                         _bexec.shutdown(wait=False)
-                    _parsed = _parse_dl(_bdf)
+                    _parsed = _parse_dl(_bdf, _batch)
                     for _sym, _arr in _parsed.items():
                         lastgood_stocks[_sym] = _arr
                         # Persist to module-level cache so future regens keep this data.
