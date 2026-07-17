@@ -635,11 +635,11 @@ def assess_tariff_risk():
     # Determine tariff direction
     if escalation_count > deescalation_count and escalation_count >= 2:
         tariff_direction = "ESCALATING"
-        sector_adj = TARIFF_SECTOR_IMPACTS["escalation"]
+        sector_adj = dict(TARIFF_SECTOR_IMPACTS["escalation"])  # defensive copy — never mutate the constant
         risk_score = min(10, 3 + escalation_count * 2)
     elif deescalation_count > escalation_count and deescalation_count >= 2:
         tariff_direction = "DE_ESCALATING"
-        sector_adj = TARIFF_SECTOR_IMPACTS["de_escalation"]
+        sector_adj = dict(TARIFF_SECTOR_IMPACTS["de_escalation"])  # defensive copy
         risk_score = 2
     elif len(tariff_headlines) > 0:
         tariff_direction = "ACTIVE"

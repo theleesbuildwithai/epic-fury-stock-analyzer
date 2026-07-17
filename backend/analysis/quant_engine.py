@@ -4544,8 +4544,18 @@ def _generate_quant_picks_impl() -> dict:
                 if not cached:
                     continue
                 ts = cached.get("ts")
-                if not ts or ts < stale_cutoff:
+                if not ts:
                     continue
+                try:
+                    # Normalize ts: handle both datetime and legacy Unix int/float
+                    _ts_dt = (
+                        datetime.utcfromtimestamp(float(ts))
+                        if isinstance(ts, (int, float)) else ts
+                    )
+                    if _ts_dt < stale_cutoff:
+                        continue
+                except Exception:
+                    pass  # unparseable ts → allow entry through
                 price_data[t] = cached["df"]
                 cache_used += 1
             if cache_used:
