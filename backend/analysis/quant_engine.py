@@ -907,8 +907,11 @@ _STB_ONLY_UNIVERSE = [
 ]
 
 # Merge international tickers into the main quant universe.
-# yfinance.download dedupes silently if any ticker is repeated, so safe.
-QUANT_UNIVERSE = QUANT_UNIVERSE + INTERNATIONAL_UNIVERSE + _STB_ONLY_UNIVERSE
+# Deduplicate with dict.fromkeys to preserve insertion order — removes the 9
+# tickers that appear in both the base list and INTERNATIONAL_UNIVERSE
+# (SHOP, NVO, AZN, GSK, SNY, TEVA, AON, GLBE, VNQ). Deduplication reduces
+# the effective batch-download work and makes _missing() counts accurate.
+QUANT_UNIVERSE = list(dict.fromkeys(QUANT_UNIVERSE + INTERNATIONAL_UNIVERSE + _STB_ONLY_UNIVERSE))
 
 # Sector mapping for macro overlay adjustments — auto-generated for all 200+ stocks
 SECTOR_MAP = {
@@ -4369,23 +4372,54 @@ def _generate_quant_picks_impl() -> dict:
             t5 = len(price_data)
             logger.info(f"UNIVERSE SCAN tier5: {t5}/{len(QUANT_UNIVERSE)}")
 
-        # === BUDGET EXTENSION: if batch tiers basically failed ===
-        # Evidence: /api/analyze/AAPL returns 64 bars — yfinance single-ticker
-        # downloads work from App Runner, but bulk batch downloads do not.
-        # The 120s batch budget is consumed by throttle delays (3s × batches)
-        # before individual tiers 6/7 can run. Give yfinance individual tiers
-        # 90s to grab whatever they can, then Finnhub tier8 resets to 900s fresh.
-        if len(price_data) < 200:
+        # === BUDGET EXTENSION: ensure tiers 6/7 have runway to reach 700+ ===
+        # Old logic: only extended when < 200 from batch tiers. Problem: if batches
+        # get 400-600, deadline still fires at 300s, cutting off tiers 6/7 before
+        # they can rescue the remaining 100-200 needed to hit 700+ coverage.
+        # New logic: extend whenever > 50 tickers are still missing, sized
+        # proportionally to the remaining count (1.5s/ticker, cap 600s).
+        _m_after_batches = [t for t in QUANT_UNIVERSE if t not in price_data]
+        _missing_count_post_batch = len(set(_m_after_batches))  # dedup
+        if _missing_count_post_batch > 50:
+            _t67_budget = min(600, max(300, int(_missing_count_post_batch * 1.5)))
+            _scan_deadline = _time_scan.time() + _t67_budget
+            logger.warning(
+                f"UNIVERSE SCAN: {_missing_count_post_batch} missing after batch tiers "
+                f"— extending budget {_t67_budget}s for individual yfinance tiers (6/7)"
+            )
+        elif len(price_data) < 200:
             _scan_deadline = _time_scan.time() + 300
             logger.warning(
                 f"UNIVERSE SCAN: only {len(price_data)} stocks from batch tiers "
                 f"— extending deadline 300 s for individual yfinance tiers (6/7)"
             )
 
-        # --- TIER 6: individual yf.download with 1 s inter-call sleep ---
-        # Gets 90s to fetch whatever yfinance can serve individually before
-        # budget fires and Finnhub tier8 takes over the rest of the universe.
-        m = _missing()
+        # Helper: check if ticker has a fresh LASTGOOD cache entry (< 14 days).
+        # Used in tiers 6/7 to skip tickers the cache-fallback will already cover —
+        # concentrating individual-fetch time on tickers with NO cached data.
+        from datetime import datetime as _dt_t67, timedelta as _td_t67
+        _t67_stale_cutoff = _dt_t67.utcnow() - _td_t67(days=14)
+        def _has_fresh_cache(sym):
+            _c = _PRICE_DATA_LASTGOOD.get(sym)
+            if not _c:
+                return False
+            _ts = _c.get("ts")
+            if not _ts:
+                return False
+            try:
+                _ts_dt = (
+                    datetime.utcfromtimestamp(float(_ts))
+                    if isinstance(_ts, (int, float)) else _ts
+                )
+                return _ts_dt >= _t67_stale_cutoff
+            except Exception:
+                return False
+
+        # --- TIER 6: individual yf.download with 0.5 s inter-call sleep ---
+        # Skips tickers with fresh LASTGOOD cache — the cache-fallback below
+        # already covers them. This concentrates tier 6 time on truly uncached
+        # tickers, dramatically reducing work on warm-cache scans.
+        m = [t for t in _missing() if not _has_fresh_cache(t)]
         if m:
             logger.info(f"UNIVERSE SCAN tier6: retrying {len(m)} individually via yf.download")
             for t in m:
@@ -4430,10 +4464,9 @@ def _generate_quant_picks_impl() -> dict:
 
         # --- TIER 7: ALTERNATIVE API — yf.Ticker(t).history() ---
         # Different code path inside yfinance — sometimes succeeds when
-        # download() fails. Also uses 1s sleep (not _throttle()) to fit in budget.
-        # Outer gate removed: no longer skipped when budget is exceeded on entry,
-        # since the extension above guarantees 900s for individual fallbacks.
-        m = _missing()
+        # download() fails. Also uses 0.5s sleep to fit in budget.
+        # Skips fresh-cache tickers same as tier 6.
+        m = [t for t in _missing() if not _has_fresh_cache(t)]
         if m:
             logger.info(f"UNIVERSE SCAN tier7: alternative API retry for {len(m)} tickers")
             for t in m:
