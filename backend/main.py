@@ -8501,8 +8501,8 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
 
         # ── Layer 28: Numeric field type coercion (auto-fix, no drops) ──────────────
         # Catches fields stored as strings from JSON round-trips or bad serializers
-        _L28_FIELDS = ("entry_price","stop_price","target_price","confidence",
-                       "stop_loss_pct","target_gain_pct","risk_reward_ratio",
+        _L28_FIELDS = ("entry_price","stop_loss","target_price","confidence",
+                       "stop_distance_pct","target_distance_pct","reward_risk_ratio",
                        "momentum_pct","relative_strength","volume","avg_volume",
                        "market_cap","pe_ratio","pb_ratio","beta","roe","revenue_growth")
         for _fp in formatted_longs:
@@ -8589,14 +8589,15 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         # Stop must be >= 0.5% below entry -- prevents zero-gap or inverted stops
         for _fp in formatted_longs:
             try:
-                _ep33 = float(_fp["entry_price"]); _sp33 = float(_fp["stop_price"])
-                if _sp33 > _ep33 * 0.995:
+                _ep33 = float(_fp["entry_price"])
+                _sp33 = float(_fp.get("stop_loss") or 0)
+                if _sp33 <= 0 or _sp33 > _ep33 * 0.995:
                     logger.info(
                         f"STB LAYER33 STOP-GAP {_fp.get('ticker','?')}: "
-                        f"stop ${_sp33:.2f} too close to entry ${_ep33:.2f} -- set to 5% below"
+                        f"stop ${_sp33:.2f} too close/above entry ${_ep33:.2f} -- set to 5% below"
                     )
-                    _fp["stop_price"] = round(_ep33 * 0.95, 2)
-                    _fp["stop_loss_pct"] = round((_fp["stop_price"] - _ep33) / _ep33 * 100, 1)
+                    _fp["stop_loss"] = round(_ep33 * 0.95, 2)
+                    _fp["stop_distance_pct"] = round(abs(_ep33 - _fp["stop_loss"]) / _ep33 * 100, 1)
             except Exception:
                 pass
 
@@ -8604,7 +8605,8 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
         # Target > 150% gain (2.5x entry) is a fantasy number -- cap it
         for _fp in formatted_longs:
             try:
-                _ep34 = float(_fp["entry_price"]); _tp34 = float(_fp["target_price"])
+                _ep34 = float(_fp["entry_price"])
+                _tp34 = float(_fp.get("target_price") or 0)
                 _max_tp = _ep34 * 2.5
                 if _tp34 > _max_tp:
                     logger.info(
@@ -8612,7 +8614,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                         f"target ${_tp34:.2f} > 150% gain on ${_ep34:.2f} -- capped"
                     )
                     _fp["target_price"] = round(_max_tp, 2)
-                    _fp["target_gain_pct"] = round((_fp["target_price"] - _ep34) / _ep34 * 100, 1)
+                    _fp["target_distance_pct"] = round((_fp["target_price"] - _ep34) / _ep34 * 100, 1)
             except Exception:
                 pass
 

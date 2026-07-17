@@ -400,10 +400,18 @@ def get_cross_asset_signals() -> dict:
         for sym in tickers:
             try:
                 if isinstance(df.columns, pd.MultiIndex):
-                    if sym in df.columns.get_level_values(0):
+                    _lv0 = df.columns.get_level_values(0)
+                    _lv1 = df.columns.get_level_values(1)
+                    if sym in _lv0:
+                        # Old yfinance (<1.0): MultiIndex (ticker, field) — level 0 = ticker
                         c = df[sym]["Close"].dropna().values.astype(float)
-                        if len(c) >= 10:
-                            assets[sym] = c
+                    elif sym in _lv1:
+                        # New yfinance (>=1.0): MultiIndex (field, ticker) — level 0 = field
+                        c = df.xs(sym, axis=1, level=1)["Close"].dropna().values.astype(float)
+                    else:
+                        continue
+                    if len(c) >= 10:
+                        assets[sym] = c
                 elif len(tickers) == 1:
                     c = _safe_close(df).values.astype(float)
                     if len(c) >= 10:
@@ -6225,7 +6233,6 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             try:
                 if isinstance(_lg_ts, (int, float)):
                     # Unix timestamp from cold-start batch download
-                    from datetime import timezone as _tz_stb
                     _lg_dt = _dt_stb.utcfromtimestamp(float(_lg_ts))
                 else:
                     _lg_dt = _lg_ts  # already a datetime
