@@ -382,14 +382,15 @@ def get_cross_asset_signals() -> dict:
 
     try:
         _throttle()
-        tickers = ["UUP", "BTC-USD", "CPER", "TLT"]
+        # Added ^VIX and SPY for multi-signal Bridgewater regime detection
+        tickers = ["UUP", "BTC-USD", "CPER", "TLT", "^VIX", "SPY"]
         import threading as _cas_thr
         _cas_r = [None]
         _cas_t = _cas_thr.Thread(
             target=lambda r=_cas_r: r.__setitem__(
-                0, yf.download(tickers, period="1mo", progress=False)
+                0, yf.download(tickers, period="1y", progress=False)
             ), daemon=True)
-        _cas_t.start(); _cas_t.join(timeout=10)
+        _cas_t.start(); _cas_t.join(timeout=15)
         df = _cas_r[0]
 
         if df is None or df.empty:
@@ -438,17 +439,66 @@ def get_cross_asset_signals() -> dict:
             sector_adj["Materials"] = sector_adj.get("Materials", 0) - 0.7
             sector_adj["Industrials"] = sector_adj.get("Industrials", 0) - 0.3
 
-        # BITCOIN (BTC-USD): risk appetite proxy (24/7 market)
+        # ── Multi-signal Bridgewater regime detection (3 signals, majority vote) ──
+        # Signal 1: BITCOIN (BTC-USD) — 24/7 risk appetite proxy
         btc = result["signals"].get("BTC-USD", {})
         btc_5d = btc.get("momentum_5d", 0)
-        if btc_5d > 5.0:  # Strong risk-on
+        _regime_votes = []
+        if btc_5d > 5.0:
+            _regime_votes.append("RISK_ON")
             sector_adj["Technology"] = sector_adj.get("Technology", 0) + 0.6
             sector_adj["Consumer Discretionary"] = sector_adj.get("Consumer Discretionary", 0) + 0.5
-            result["risk_appetite"] = "RISK_ON"
-        elif btc_5d < -5.0:  # Risk-off
+        elif btc_5d < -5.0:
+            _regime_votes.append("RISK_OFF")
             sector_adj["Utilities"] = sector_adj.get("Utilities", 0) + 0.5
             sector_adj["Consumer Staples"] = sector_adj.get("Consumer Staples", 0) + 0.4
+
+        # Signal 2: VIX — volatility / fear index
+        # VIX > 25 = elevated fear = risk-off; VIX < 18 = complacency = risk-on
+        _vix_closes = assets.get("^VIX")
+        if _vix_closes is not None and len(_vix_closes) >= 1:
+            _vix_now = float(_vix_closes[-1])
+            result["signals"]["^VIX"]["vix_level"] = round(_vix_now, 1)
+            if _vix_now > 25:
+                _regime_votes.append("RISK_OFF")
+                sector_adj["Utilities"] = sector_adj.get("Utilities", 0) + 0.4
+                sector_adj["Healthcare"] = sector_adj.get("Healthcare", 0) + 0.3
+                sector_adj["Consumer Defensive"] = sector_adj.get("Consumer Defensive", 0) + 0.3
+            elif _vix_now < 18:
+                _regime_votes.append("RISK_ON")
+                sector_adj["Technology"] = sector_adj.get("Technology", 0) + 0.3
+                sector_adj["Industrials"] = sector_adj.get("Industrials", 0) + 0.2
+
+        # Signal 3: SPY vs 200-day MA — trend filter
+        # SPY above 200d MA = bull market = risk-on; below = risk-off
+        _spy_closes = assets.get("SPY")
+        if _spy_closes is not None and len(_spy_closes) >= 200:
+            _spy_now = float(_spy_closes[-1])
+            _spy_200ma = float(_spy_closes[-200:].mean())
+            result["signals"]["SPY"]["price_vs_200ma_pct"] = round((_spy_now / _spy_200ma - 1) * 100, 1)
+            if _spy_now > _spy_200ma * 1.02:  # SPY > 200d MA + 2% buffer = trend confirmed
+                _regime_votes.append("RISK_ON")
+            elif _spy_now < _spy_200ma * 0.98:  # SPY < 200d MA - 2% buffer = downtrend
+                _regime_votes.append("RISK_OFF")
+                sector_adj["Healthcare"] = sector_adj.get("Healthcare", 0) + 0.4
+                sector_adj["Consumer Defensive"] = sector_adj.get("Consumer Defensive", 0) + 0.3
+
+        # Majority vote: 2+ of 3 signals must agree to declare RISK_ON or RISK_OFF
+        _ron = _regime_votes.count("RISK_ON")
+        _roff = _regime_votes.count("RISK_OFF")
+        if _ron >= 2:
+            result["risk_appetite"] = "RISK_ON"
+            logger.info(f"Bridgewater regime: RISK_ON ({_ron} votes) BTC={btc_5d:.1f}% "
+                        f"VIX={result['signals'].get('^VIX', {}).get('vix_level', '?')} "
+                        f"SPY_vs_200ma={result['signals'].get('SPY', {}).get('price_vs_200ma_pct', '?')}%")
+        elif _roff >= 2:
             result["risk_appetite"] = "RISK_OFF"
+            logger.info(f"Bridgewater regime: RISK_OFF ({_roff} votes) BTC={btc_5d:.1f}% "
+                        f"VIX={result['signals'].get('^VIX', {}).get('vix_level', '?')} "
+                        f"SPY_vs_200ma={result['signals'].get('SPY', {}).get('price_vs_200ma_pct', '?')}%")
+        else:
+            result["risk_appetite"] = "NEUTRAL"
+            logger.info(f"Bridgewater regime: NEUTRAL (no majority) votes={_regime_votes}")
 
         # COPPER (CPER): global growth proxy
         cper = result["signals"].get("CPER", {})
@@ -6182,7 +6232,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     #      immediately with real data instead of serving 6 picks for 6 hours.
     #   2. Kick off a background quant scan so the NEXT re-scan has full data.
     # The cache TTL is shortened to 5 min on cold start so re-scan fires soon.
-    _is_cold_start = (len(quant_longs) + len(lastgood_stocks)) < 15
+    # Threshold is 100 (not 15) — we need the quant scan to fully populate
+    # _PRICE_DATA_LASTGOOD (500+ symbols) before we write a 6h cache.
+    # Also keep short TTL while quant scan is still running (_SCAN_RUNNING).
+    _is_cold_start = (len(quant_longs) + len(lastgood_stocks)) < 100 or _SCAN_RUNNING
     if _is_cold_start:
         logger.warning(
             f"STB COLD-START: quant_longs={len(quant_longs)} lastgood={len(lastgood_stocks)} — "            f"running direct STB universe download and triggering fresh quant scan"
@@ -6306,6 +6359,29 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             if sector in _RISK_ON_SECTORS:  return -5.0
         return 0.0
 
+    # Geopolitical sector adjustment map — populated once per STB regen.
+    # Non-blocking: any failure leaves _geo_sector_adj empty (zero bonus for all sectors).
+    _geo_sector_adj: dict = {}
+    _geo_level = "LOW"
+    try:
+        _geo_data = assess_geopolitical_risk()
+        _geo_level = (_geo_data.get("risk_level") or "LOW").upper()
+        if _geo_level in ("ELEVATED", "CRITICAL"):
+            _raw_adj = _geo_data.get("sector_adjustments") or {}
+            # Scale to STB score space: quant uses ±2 scale, STB uses ±8 max from geo
+            for _gs, _gv in _raw_adj.items():
+                try:
+                    _geo_sector_adj[_gs] = max(-8.0, min(8.0, float(_gv) * 4.0))
+                except Exception:
+                    pass
+            logger.info(f"STB GEO: {_geo_level} risk — sector adj {_geo_sector_adj}")
+    except Exception as _geo_err:
+        logger.debug(f"STB geo signal fetch failed (non-fatal): {_geo_err}")
+
+    def _geo_bonus(sector: str) -> float:
+        """Geopolitical sector alignment bonus. Returns 0 if geo risk is LOW."""
+        return _geo_sector_adj.get(sector, 0.0)
+
     def _quality_bonus(fd: dict) -> float:
         """AQR quality score from fundamentals. Capped at -15 to +20.
         Components: revenue growth (%), ROE (%), P/E (ratio), Debt/Equity (%).
@@ -6409,13 +6485,13 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         except Exception:
             pass
 
-        # Bridgewater regime alignment bonus
+        # Bridgewater regime alignment bonus + geopolitical sector adjustment
         regime_score = _regime_bonus(sector)
-        total_score = mom_score + trend_score + stab_score + mom_3m_score + rsi_score + regime_score
+        geo_score = _geo_bonus(sector)
+        total_score = mom_score + trend_score + stab_score + mom_3m_score + rsi_score + regime_score + geo_score
         # v142: STB has its own confidence range 75-95% (distinct from quant HF 71-92%)
-        # Base raised 65→73, multiplier 27→22, max score 127 (115+12 regime bonus)
-        # Perfect score → 95%, mediocre → 85%, floor → 75%
-        confidence = round(73.0 + (total_score / 127.0) * 22.0)
+        # Max score ~135 (127 + 8 geo). Denominator updated to reflect expanded range.
+        confidence = round(73.0 + (total_score / 135.0) * 22.0)
         reasons = []
         if mom_3m > 15:
             reasons.append(f"3m acceleration +{mom_3m:.0f}% — strong recent momentum")
@@ -6437,6 +6513,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         if regime_score > 0:
             _rl = "RISK-ON" if _hf_regime == "RISK_ON" else "RISK-OFF"
             reasons.append(f"Macro {_rl} regime — sector tailwind")
+        if geo_score > 0 and _geo_level in ("ELEVATED", "CRITICAL"):
+            reasons.append(f"Geo {_geo_level} — sector defense/energy tailwind")
         return {
             "ticker": sym, "symbol": sym,
             "company_name": _COMPANY_NAMES.get(sym, sym),
@@ -6524,9 +6602,10 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
             quality_score = _quality_bonus(_fd_q)
             regime_score = _regime_bonus(sector)
-            total_score = mom_score + qual_score + stab_score + quality_score + regime_score
-            # v142: STB own confidence formula — max score 150 (100+20q+12r+18), range 75-95%
-            stb_conf = round(73.0 + (total_score / 150.0) * 22.0)
+            geo_score = _geo_bonus(sector)
+            total_score = mom_score + qual_score + stab_score + quality_score + regime_score + geo_score
+            # v142: STB own confidence formula — max score 158 (150+8 geo), range 75-95%
+            stb_conf = round(73.0 + (total_score / 158.0) * 22.0)
             stb_conf = max(75, min(95, stb_conf))
 
             reasons = list(p.get("reasons") or [])
@@ -6540,6 +6619,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             if regime_score > 0:
                 _rl = "RISK-ON" if _hf_regime == "RISK_ON" else "RISK-OFF"
                 reasons.append(f"Macro {_rl} regime — sector tailwind")
+            if geo_score > 0 and _geo_level in ("ELEVATED", "CRITICAL"):
+                reasons.append(f"Geo {_geo_level} — sector defense/energy tailwind")
             if quality_score >= 6.0:
                 _qp_roe = (_stb_fundamentals.get(ticker) or {}).get("roe")
                 _qp_rev = (_stb_fundamentals.get(ticker) or {}).get("revenue_growth")
