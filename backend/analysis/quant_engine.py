@@ -455,11 +455,11 @@ def get_cross_asset_signals() -> dict:
         if btc_5d > 5.0:
             _regime_votes.append("RISK_ON")
             sector_adj["Technology"] = sector_adj.get("Technology", 0) + 0.6
-            sector_adj["Consumer Discretionary"] = sector_adj.get("Consumer Discretionary", 0) + 0.5
+            sector_adj["Consumer Cyclical"] = sector_adj.get("Consumer Cyclical", 0) + 0.5
         elif btc_5d < -5.0:
             _regime_votes.append("RISK_OFF")
             sector_adj["Utilities"] = sector_adj.get("Utilities", 0) + 0.5
-            sector_adj["Consumer Staples"] = sector_adj.get("Consumer Staples", 0) + 0.4
+            sector_adj["Consumer Defensive"] = sector_adj.get("Consumer Defensive", 0) + 0.4
 
         # Signal 2: VIX — volatility / fear index
         # VIX > 25 = elevated fear = risk-off; VIX < 18 = complacency = risk-on
@@ -525,11 +525,11 @@ def get_cross_asset_signals() -> dict:
         if tlt_5d < -1.5:  # Yields rising (TLT falling)
             sector_adj["Utilities"] = sector_adj.get("Utilities", 0) - 0.8
             sector_adj["Real Estate"] = sector_adj.get("Real Estate", 0) - 0.9
-            sector_adj["Financials"] = sector_adj.get("Financials", 0) + 0.6
+            sector_adj["Financial Services"] = sector_adj.get("Financial Services", 0) + 0.6
         elif tlt_5d > 1.5:  # Yields falling (TLT rising)
             sector_adj["Utilities"] = sector_adj.get("Utilities", 0) + 0.5
             sector_adj["Real Estate"] = sector_adj.get("Real Estate", 0) + 0.6
-            sector_adj["Financials"] = sector_adj.get("Financials", 0) - 0.3
+            sector_adj["Financial Services"] = sector_adj.get("Financial Services", 0) - 0.3
 
         # Clamp adjustments to [-2, +2]
         result["sector_adjustments"] = {k: round(max(-2, min(2, v)), 1) for k, v in sector_adj.items()}
@@ -928,34 +928,34 @@ SECTOR_MAP = {
     "OKTA": "Technology", "BILL": "Technology", "SMCI": "Technology",
     "ARM": "Technology", "UBER": "Technology", "DASH": "Technology",
     # Communication (15)
-    "GOOGL": "Communication", "META": "Communication", "NFLX": "Communication",
-    "DIS": "Communication", "CMCSA": "Communication", "TMUS": "Communication",
-    "VZ": "Communication", "T": "Communication", "CHTR": "Communication",
-    "EA": "Communication", "TTWO": "Communication", "RBLX": "Communication",
-    "SNAP": "Communication", "PINS": "Communication", "ROKU": "Communication",
+    "GOOGL": "Communication Services", "META": "Communication Services", "NFLX": "Communication Services",
+    "DIS": "Communication Services", "CMCSA": "Communication Services", "TMUS": "Communication Services",
+    "VZ": "Communication Services", "T": "Communication Services", "CHTR": "Communication Services",
+    "EA": "Communication Services", "TTWO": "Communication Services", "RBLX": "Communication Services",
+    "SNAP": "Communication Services", "PINS": "Communication Services", "ROKU": "Communication Services",
     # Consumer Discretionary (30)
-    "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
-    "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
-    "NKE": "Consumer Discretionary", "SBUX": "Consumer Discretionary",
-    "TJX": "Consumer Discretionary", "LOW": "Consumer Discretionary",
-    "BKNG": "Consumer Discretionary", "CMG": "Consumer Discretionary",
-    "ROST": "Consumer Discretionary", "DHI": "Consumer Discretionary",
-    "LEN": "Consumer Discretionary", "ORLY": "Consumer Discretionary",
-    "AZO": "Consumer Discretionary", "POOL": "Consumer Discretionary",
-    "DECK": "Consumer Discretionary", "ULTA": "Consumer Discretionary",
-    "ETSY": "Consumer Discretionary", "ABNB": "Consumer Discretionary",
-    "FIVE": "Consumer Discretionary", "RH": "Consumer Discretionary",
-    "W": "Consumer Discretionary", "CROX": "Consumer Discretionary",
-    "LEVI": "Consumer Discretionary", "GPS": "Consumer Discretionary",
-    "RIVN": "Consumer Discretionary", "LCID": "Consumer Discretionary",
-    "GM": "Consumer Discretionary", "F": "Consumer Discretionary",
+    "AMZN": "Consumer Cyclical", "TSLA": "Consumer Cyclical",
+    "HD": "Consumer Cyclical", "MCD": "Consumer Cyclical",
+    "NKE": "Consumer Cyclical", "SBUX": "Consumer Cyclical",
+    "TJX": "Consumer Cyclical", "LOW": "Consumer Cyclical",
+    "BKNG": "Consumer Cyclical", "CMG": "Consumer Cyclical",
+    "ROST": "Consumer Cyclical", "DHI": "Consumer Cyclical",
+    "LEN": "Consumer Cyclical", "ORLY": "Consumer Cyclical",
+    "AZO": "Consumer Cyclical", "POOL": "Consumer Cyclical",
+    "DECK": "Consumer Cyclical", "ULTA": "Consumer Cyclical",
+    "ETSY": "Consumer Cyclical", "ABNB": "Consumer Cyclical",
+    "FIVE": "Consumer Cyclical", "RH": "Consumer Cyclical",
+    "W": "Consumer Cyclical", "CROX": "Consumer Cyclical",
+    "LEVI": "Consumer Cyclical", "GPS": "Consumer Cyclical",
+    "RIVN": "Consumer Cyclical", "LCID": "Consumer Cyclical",
+    "GM": "Consumer Cyclical", "F": "Consumer Cyclical",
     # Consumer Staples (18)
-    "WMT": "Consumer Staples", "PG": "Consumer Staples", "COST": "Consumer Staples",
-    "KO": "Consumer Staples", "PEP": "Consumer Staples", "PM": "Consumer Staples",
-    "MO": "Consumer Staples", "CL": "Consumer Staples", "KMB": "Consumer Staples",
-    "MDLZ": "Consumer Staples", "GIS": "Consumer Staples", "HSY": "Consumer Staples",
-    "SJM": "Consumer Staples", "STZ": "Consumer Staples", "EL": "Consumer Staples",
-    "KR": "Consumer Staples", "TSN": "Consumer Staples", "ADM": "Consumer Staples",
+    "WMT": "Consumer Defensive", "PG": "Consumer Defensive", "COST": "Consumer Defensive",
+    "KO": "Consumer Defensive", "PEP": "Consumer Defensive", "PM": "Consumer Defensive",
+    "MO": "Consumer Defensive", "CL": "Consumer Defensive", "KMB": "Consumer Defensive",
+    "MDLZ": "Consumer Defensive", "GIS": "Consumer Defensive", "HSY": "Consumer Defensive",
+    "SJM": "Consumer Defensive", "STZ": "Consumer Defensive", "EL": "Consumer Defensive",
+    "KR": "Consumer Defensive", "TSN": "Consumer Defensive", "ADM": "Consumer Defensive",
     # Healthcare (35)
     "UNH": "Healthcare", "LLY": "Healthcare", "JNJ": "Healthcare",
     "ABBV": "Healthcare", "MRK": "Healthcare", "PFE": "Healthcare",
@@ -970,15 +970,15 @@ SECTOR_MAP = {
     "BIIB": "Healthcare", "CI": "Healthcare", "CVS": "Healthcare",
     "HUM": "Healthcare", "TEVA": "Healthcare",
     # Financials (25)
-    "JPM": "Financials", "V": "Financials", "MA": "Financials",
-    "BAC": "Financials", "GS": "Financials", "MS": "Financials",
-    "WFC": "Financials", "C": "Financials", "BLK": "Financials",
-    "SCHW": "Financials", "AXP": "Financials", "CB": "Financials",
-    "MMC": "Financials", "ICE": "Financials", "CME": "Financials",
-    "MCO": "Financials", "MSCI": "Financials", "FIS": "Financials",
-    "COIN": "Financials", "HOOD": "Financials", "ALLY": "Financials",
-    "SOFI": "Financials", "MARA": "Financials", "RIOT": "Financials",
-    "KRE": "Financials",
+    "JPM": "Financial Services", "V": "Financial Services", "MA": "Financial Services",
+    "BAC": "Financial Services", "GS": "Financial Services", "MS": "Financial Services",
+    "WFC": "Financial Services", "C": "Financial Services", "BLK": "Financial Services",
+    "SCHW": "Financial Services", "AXP": "Financial Services", "CB": "Financial Services",
+    "MMC": "Financial Services", "ICE": "Financial Services", "CME": "Financial Services",
+    "MCO": "Financial Services", "MSCI": "Financial Services", "FIS": "Financial Services",
+    "COIN": "Financial Services", "HOOD": "Financial Services", "ALLY": "Financial Services",
+    "SOFI": "Financial Services", "MARA": "Financial Services", "RIOT": "Financial Services",
+    "KRE": "Financial Services",
     # Industrials (28)
     "BA": "Industrials", "CAT": "Industrials", "HON": "Industrials",
     "GE": "Industrials", "UNP": "Industrials", "RTX": "Industrials",
@@ -1037,30 +1037,30 @@ SECTOR_MAP = {
     "EPAM": "Technology", "IT": "Technology", "LDOS": "Technology",
     "DXC": "Technology", "VRSN": "Technology",
     # Expanded Communication
-    "LYV": "Communication", "WBD": "Communication", "PARA": "Communication",
-    "FOX": "Communication", "FOXA": "Communication", "NWS": "Communication",
-    "NWSA": "Communication", "IPG": "Communication", "OMC": "Communication",
+    "LYV": "Communication Services", "WBD": "Communication Services", "PARA": "Communication Services",
+    "FOX": "Communication Services", "FOXA": "Communication Services", "NWS": "Communication Services",
+    "NWSA": "Communication Services", "IPG": "Communication Services", "OMC": "Communication Services",
     # Expanded Consumer Discretionary
-    "YUM": "Consumer Discretionary", "DPZ": "Consumer Discretionary",
-    "WYNN": "Consumer Discretionary", "LVS": "Consumer Discretionary",
-    "MGM": "Consumer Discretionary", "CZR": "Consumer Discretionary",
-    "HLT": "Consumer Discretionary", "MAR": "Consumer Discretionary",
-    "RCL": "Consumer Discretionary", "CCL": "Consumer Discretionary",
-    "NCLH": "Consumer Discretionary", "BBY": "Consumer Discretionary",
-    "KMX": "Consumer Discretionary", "GRMN": "Consumer Discretionary",
-    "HAS": "Consumer Discretionary", "MAT": "Consumer Discretionary",
-    "LULU": "Consumer Discretionary", "BBWI": "Consumer Discretionary",
-    "TPR": "Consumer Discretionary", "CPRI": "Consumer Discretionary",
-    "PVH": "Consumer Discretionary", "RL": "Consumer Discretionary",
-    "VFC": "Consumer Discretionary", "APTV": "Consumer Discretionary",
-    "BWA": "Consumer Discretionary", "LEA": "Consumer Discretionary",
+    "YUM": "Consumer Cyclical", "DPZ": "Consumer Cyclical",
+    "WYNN": "Consumer Cyclical", "LVS": "Consumer Cyclical",
+    "MGM": "Consumer Cyclical", "CZR": "Consumer Cyclical",
+    "HLT": "Consumer Cyclical", "MAR": "Consumer Cyclical",
+    "RCL": "Consumer Cyclical", "CCL": "Consumer Cyclical",
+    "NCLH": "Consumer Cyclical", "BBY": "Consumer Cyclical",
+    "KMX": "Consumer Cyclical", "GRMN": "Consumer Cyclical",
+    "HAS": "Consumer Cyclical", "MAT": "Consumer Cyclical",
+    "LULU": "Consumer Cyclical", "BBWI": "Consumer Cyclical",
+    "TPR": "Consumer Cyclical", "CPRI": "Consumer Cyclical",
+    "PVH": "Consumer Cyclical", "RL": "Consumer Cyclical",
+    "VFC": "Consumer Cyclical", "APTV": "Consumer Cyclical",
+    "BWA": "Consumer Cyclical", "LEA": "Consumer Cyclical",
     # Expanded Consumer Staples
-    "MNST": "Consumer Staples", "TAP": "Consumer Staples",
-    "BG": "Consumer Staples", "CPB": "Consumer Staples",
-    "HRL": "Consumer Staples", "MKC": "Consumer Staples",
-    "CAG": "Consumer Staples", "K": "Consumer Staples",
-    "LW": "Consumer Staples", "CHD": "Consumer Staples",
-    "CLX": "Consumer Staples", "WBA": "Consumer Staples",
+    "MNST": "Consumer Defensive", "TAP": "Consumer Defensive",
+    "BG": "Consumer Defensive", "CPB": "Consumer Defensive",
+    "HRL": "Consumer Defensive", "MKC": "Consumer Defensive",
+    "CAG": "Consumer Defensive", "K": "Consumer Defensive",
+    "LW": "Consumer Defensive", "CHD": "Consumer Defensive",
+    "CLX": "Consumer Defensive", "WBA": "Consumer Defensive",
     # Expanded Healthcare
     "A": "Healthcare", "TECH": "Healthcare", "WAT": "Healthcare",
     "MTD": "Healthcare", "PKI": "Healthcare", "TFX": "Healthcare",
@@ -1071,17 +1071,17 @@ SECTOR_MAP = {
     "CNC": "Healthcare", "MOH": "Healthcare", "DGX": "Healthcare",
     "LH": "Healthcare",
     # Expanded Financials
-    "TFC": "Financials", "USB": "Financials", "PNC": "Financials",
-    "MTB": "Financials", "FITB": "Financials", "HBAN": "Financials",
-    "KEY": "Financials", "CFG": "Financials", "RF": "Financials",
-    "ZION": "Financials", "NTRS": "Financials", "STT": "Financials",
-    "BK": "Financials", "TROW": "Financials", "IVZ": "Financials",
-    "BEN": "Financials", "NDAQ": "Financials", "CBOE": "Financials",
-    "AIG": "Financials", "MET": "Financials", "PRU": "Financials",
-    "ALL": "Financials", "TRV": "Financials", "AON": "Financials",
-    "WRB": "Financials", "GL": "Financials", "CINF": "Financials",
-    "L": "Financials", "RE": "Financials", "RJF": "Financials",
-    "LPLA": "Financials", "MKTX": "Financials",
+    "TFC": "Financial Services", "USB": "Financial Services", "PNC": "Financial Services",
+    "MTB": "Financial Services", "FITB": "Financial Services", "HBAN": "Financial Services",
+    "KEY": "Financial Services", "CFG": "Financial Services", "RF": "Financial Services",
+    "ZION": "Financial Services", "NTRS": "Financial Services", "STT": "Financial Services",
+    "BK": "Financial Services", "TROW": "Financial Services", "IVZ": "Financial Services",
+    "BEN": "Financial Services", "NDAQ": "Financial Services", "CBOE": "Financial Services",
+    "AIG": "Financial Services", "MET": "Financial Services", "PRU": "Financial Services",
+    "ALL": "Financial Services", "TRV": "Financial Services", "AON": "Financial Services",
+    "WRB": "Financial Services", "GL": "Financial Services", "CINF": "Financial Services",
+    "L": "Financial Services", "RE": "Financial Services", "RJF": "Financial Services",
+    "LPLA": "Financial Services", "MKTX": "Financial Services",
     # Expanded Industrials
     "CARR": "Industrials", "OTIS": "Industrials", "SWK": "Industrials",
     "IR": "Industrials", "DOV": "Industrials", "AME": "Industrials",
@@ -1137,7 +1137,7 @@ SECTOR_MAP = {
     "ROIV": "Healthcare", "RVMD": "Healthcare", "TEVA": "Healthcare",
     "BIIB": "Healthcare", "ALNY": "Healthcare", "VRTX": "Healthcare",
     "EXAS": "Healthcare", "MRNA": "Healthcare", "SRPT": "Healthcare",
-    "RCI": "Communication", "BCE": "Communication", "TU": "Communication",
+    "RCI": "Communication Services", "BCE": "Communication Services", "TU": "Communication Services",
     "SEDG": "Technology", "ENPH": "Technology", "RUN": "Technology",
     "AES": "Utilities", "BEPC": "Utilities", "BEP": "Utilities",
     "NFG": "Utilities", "AVA": "Utilities",
@@ -1209,15 +1209,9 @@ def _get_sector_with_fallback(symbol: str) -> str:
         s = info.get("sector") or info.get("category") or ""
         s = str(s).strip()
         if s and s != "Unknown":
-            # Normalise yfinance sectors to our canonical names
-            norm_map = {
-                "Communication Services": "Communication",
-                "Consumer Cyclical": "Consumer Discretionary",
-                "Consumer Defensive": "Consumer Staples",
-                "Financial Services": "Financials",
-            }
-            normalised = norm_map.get(s, s)
-            _sector_fallback_cache[sym] = normalised
+            # yfinance already returns Yahoo Finance canonical names — use as-is.
+            # (e.g. "Financial Services", "Consumer Cyclical", "Communication Services")
+            _sector_fallback_cache[sym] = s
             # Persist (best-effort, batch-friendly: serialise whole dict)
             try:
                 from predictions.models import set_trading_state
@@ -1226,7 +1220,7 @@ def _get_sector_with_fallback(symbol: str) -> str:
                                   _json_sf2.dumps(_sector_fallback_cache))
             except Exception:
                 pass
-            return normalised
+            return s
     except Exception:
         pass
 
@@ -1863,7 +1857,7 @@ def get_macro_overlay() -> dict:
             fin_adj += 1.5
         elif tnx_trend == "falling":
             fin_adj -= 1
-        adjustments["Financials"] = round(fin_adj, 1)
+        adjustments["Financial Services"] = round(fin_adj, 1)
 
         # Energy: directly tied to oil prices
         energy_adj = 0
@@ -1887,7 +1881,7 @@ def get_macro_overlay() -> dict:
             cd_adj -= 0.5
         if oil_trend == "rising":
             cd_adj -= 0.5  # consumers pay more for gas
-        adjustments["Consumer Discretionary"] = round(cd_adj, 1)
+        adjustments["Consumer Cyclical"] = round(cd_adj, 1)
 
         # Consumer Staples: defensive
         cs_adj = 0
@@ -1895,7 +1889,7 @@ def get_macro_overlay() -> dict:
             cs_adj += 1
         if tnx_trend == "rising":
             cs_adj -= 0.5  # yield competition
-        adjustments["Consumer Staples"] = round(cs_adj, 1)
+        adjustments["Consumer Defensive"] = round(cs_adj, 1)
 
         # Industrials: sensitive to economic cycle & oil costs
         ind_adj = 0
@@ -1937,7 +1931,7 @@ def get_macro_overlay() -> dict:
             comm_adj -= 0.5
         elif tnx_trend == "falling":
             comm_adj += 0.5
-        adjustments["Communication"] = round(comm_adj, 1)
+        adjustments["Communication Services"] = round(comm_adj, 1)
 
         # Commodities: inversely correlated with dollar, correlated with inflation/fear
         commodities_adj = 0
@@ -1978,9 +1972,9 @@ def get_macro_overlay() -> dict:
                         }
                         if spread < 0:
                             # Inverted yield curve: penalize cyclicals, boost defensives + safe havens
-                            for sector in ["Technology", "Consumer Discretionary", "Financials", "Industrials"]:
+                            for sector in ["Technology", "Consumer Cyclical", "Financial Services", "Industrials"]:
                                 adjustments[sector] = round(adjustments.get(sector, 0) - 0.5, 1)
-                            for sector in ["Healthcare", "Consumer Staples", "Utilities", "Commodities"]:
+                            for sector in ["Healthcare", "Consumer Defensive", "Utilities", "Commodities"]:
                                 adjustments[sector] = round(adjustments.get(sector, 0) + 0.5, 1)
                 except Exception:
                     pass
@@ -2018,12 +2012,12 @@ def get_macro_overlay() -> dict:
                     }
                     # Backwardation = panic: penalize all risk assets
                     if term_ratio > 1.10:
-                        for sector in ["Technology", "Consumer Discretionary", "Communication"]:
+                        for sector in ["Technology", "Consumer Cyclical", "Communication Services"]:
                             adjustments[sector] = round(adjustments.get(sector, 0) - 1.0, 1)
-                        for sector in ["Utilities", "Consumer Staples", "Healthcare"]:
+                        for sector in ["Utilities", "Consumer Defensive", "Healthcare"]:
                             adjustments[sector] = round(adjustments.get(sector, 0) + 0.5, 1)
                     elif term_ratio > 1.05:
-                        for sector in ["Technology", "Consumer Discretionary"]:
+                        for sector in ["Technology", "Consumer Cyclical"]:
                             adjustments[sector] = round(adjustments.get(sector, 0) - 0.5, 1)
                 except Exception:
                     pass
@@ -2173,9 +2167,9 @@ def get_macro_overlay() -> dict:
                 macro["ceasefire_overlay"] = False
                 macro["ceasefire_ending_overlay"] = True
             elif geo_direction == "deescalation":
-                adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) + 0.8, 1)
-                adjustments["Communication"] = round(adjustments.get("Communication", 0) + 0.5, 1)
-                adjustments["Financials"] = round(adjustments.get("Financials", 0) + 0.5, 1)
+                adjustments["Consumer Cyclical"] = round(adjustments.get("Consumer Cyclical", 0) + 0.8, 1)
+                adjustments["Communication Services"] = round(adjustments.get("Communication Services", 0) + 0.5, 1)
+                adjustments["Financial Services"] = round(adjustments.get("Financial Services", 0) + 0.5, 1)
                 macro["ceasefire_overlay"] = True
                 macro["ceasefire_ending_overlay"] = False
             else:
@@ -2189,7 +2183,7 @@ def get_macro_overlay() -> dict:
         elif geo_level in ("LOW", "MINIMAL", "UNKNOWN") and not known_event_active:
             # No geo events, low risk — mild peace dividend (smaller than before)
             adjustments["Technology"] = round(adjustments.get("Technology", 0) + 0.8, 1)
-            adjustments["Consumer Discretionary"] = round(adjustments.get("Consumer Discretionary", 0) + 0.5, 1)
+            adjustments["Consumer Cyclical"] = round(adjustments.get("Consumer Cyclical", 0) + 0.5, 1)
             adjustments["Energy"] = round(adjustments.get("Energy", 0) - 0.5, 1)
             macro["sector_adjustments"] = adjustments
             macro["ceasefire_overlay"] = True
@@ -2450,16 +2444,16 @@ def scan_overnight_intelligence() -> dict:
     if gap > 0.5:
         # Gap up: favor growth, reduce defensives
         sector_adj["Technology"] = 0.5
-        sector_adj["Consumer Discretionary"] = 0.3
+        sector_adj["Consumer Cyclical"] = 0.3
         sector_adj["Utilities"] = -0.3
-        sector_adj["Consumer Staples"] = -0.2
+        sector_adj["Consumer Defensive"] = -0.2
     elif gap < -0.5:
         # Gap down: favor defensives, reduce growth
         sector_adj["Technology"] = -0.5
-        sector_adj["Consumer Discretionary"] = -0.5
+        sector_adj["Consumer Cyclical"] = -0.5
         sector_adj["Healthcare"] = 0.3
         sector_adj["Utilities"] = 0.3
-        sector_adj["Consumer Staples"] = 0.3
+        sector_adj["Consumer Defensive"] = 0.3
     intel["sector_adjustments"] = sector_adj
 
     intel["bullish_signals"] = bullish_signals
@@ -3832,7 +3826,7 @@ def calculate_multi_factor_scores(price_data: dict, regime: dict = None,
         ema50 = stock["ema_50"]
         price_vs_ema50 = (stock["price"] - ema50) / ema50 * 100
 
-        _defensive = {"Consumer Staples", "Healthcare", "Utilities"}
+        _defensive = {"Consumer Defensive", "Healthcare", "Utilities"}
         _is_defensive = stock.get("sector") in _defensive
 
         if current_regime == "BEAR":
@@ -5093,7 +5087,7 @@ def _generate_quant_picks_impl() -> dict:
             # Default protection for low-geo-risk environment
             if not TACO_PROTECTED_LONG_SECTORS and not TACO_PENALIZED_SECTORS:
                 if macro and macro.get("ceasefire_overlay"):
-                    TACO_PROTECTED_LONG_SECTORS = {"Technology", "Healthcare", "Financials", "Consumer Discretionary"}
+                    TACO_PROTECTED_LONG_SECTORS = {"Technology", "Healthcare", "Financial Services", "Consumer Cyclical"}
                     TACO_PENALIZED_SECTORS = {"Energy"}
             boosted_sectors |= TACO_PROTECTED_LONG_SECTORS
             penalized_sectors |= TACO_PENALIZED_SECTORS
