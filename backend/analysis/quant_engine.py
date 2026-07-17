@@ -878,9 +878,29 @@ INTERNATIONAL_UNIVERSE = [
 ]
 
 
+# ── STB-critical stocks missing from QUANT_UNIVERSE ──────────────────────────
+# These stocks appear in _STB_UNIVERSE but were not in the original QUANT_UNIVERSE
+# or INTERNATIONAL_UNIVERSE. Without this list they would never be downloaded into
+# _PRICE_DATA_LASTGOOD by the quant scan, and STB could only score them via the
+# cold-start batch download (which is fine but not persistent across redeploys).
+# All are large-cap, high-quality stocks that belong in a fundamental scan universe.
+_STB_ONLY_UNIVERSE = [
+    "ADI",    # Analog Devices — semis, $SOXX-adjacent
+    "BRK-B",  # Berkshire Hathaway — mega-cap diversified financial
+    "CPRT",   # Copart — high-ROE industrials
+    "DHR",    # Danaher — high-quality life sciences
+    "ELV",    # Elevance Health (Anthem) — healthcare managed care
+    "ETN",    # Eaton — high-quality industrials / electrification
+    "INTU",   # Intuit — compounding software
+    "MU",     # Micron — memory semis, cyclical but important
+    "SPGI",   # S&P Global — quality financials/data
+    "TGT",    # Target — consumer staples / discretionary
+    "UPS",    # UPS — logistics, dividend payer
+]
+
 # Merge international tickers into the main quant universe.
 # yfinance.download dedupes silently if any ticker is repeated, so safe.
-QUANT_UNIVERSE = QUANT_UNIVERSE + INTERNATIONAL_UNIVERSE
+QUANT_UNIVERSE = QUANT_UNIVERSE + INTERNATIONAL_UNIVERSE + _STB_ONLY_UNIVERSE
 
 # Sector mapping for macro overlay adjustments — auto-generated for all 200+ stocks
 SECTOR_MAP = {
@@ -1113,6 +1133,11 @@ SECTOR_MAP = {
     "SEDG": "Technology", "ENPH": "Technology", "RUN": "Technology",
     "AES": "Utilities", "BEPC": "Utilities", "BEP": "Utilities",
     "NFG": "Utilities", "AVA": "Utilities",
+    # STB-critical stocks added to QUANT_UNIVERSE (_STB_ONLY_UNIVERSE)
+    "ADI": "Technology", "BRK-B": "Financial Services", "CPRT": "Industrials",
+    "DHR": "Healthcare", "ELV": "Healthcare", "ETN": "Industrials",
+    "INTU": "Technology", "MU": "Technology", "SPGI": "Financial Services",
+    "TGT": "Consumer Defensive", "UPS": "Industrials",
 }
 
 
@@ -6184,6 +6209,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # coverage beyond the quant picks top-N, specifically for large-cap stocks
     # that the quant engine may not have ranked in the top-N long picks.
     lastgood_stocks = {}  # {ticker: closes_array}
+    from datetime import datetime as _dt_stb, timedelta as _td_stb
+    _lg_stale_cutoff = _dt_stb.utcnow() - _td_stb(days=3)  # reject data older than 3 days
     for sym in _STB_UNIVERSE:
         # Skip if already in quant longs (avoid duplicates)
         if any((p.get("ticker") or p.get("symbol")) == sym for p in quant_longs):
@@ -6191,6 +6218,21 @@ def generate_fundamental_picks(force: bool = False) -> dict:
         entry = _PRICE_DATA_LASTGOOD.get(sym)
         if not entry:
             continue
+        # Staleness guard: reject entries older than 3 days.
+        # Accepts both datetime objects (quant scan) and Unix int timestamps (cold-start batch).
+        _lg_ts = entry.get("ts") if isinstance(entry, dict) else None
+        if _lg_ts is not None:
+            try:
+                if isinstance(_lg_ts, (int, float)):
+                    # Unix timestamp from cold-start batch download
+                    from datetime import timezone as _tz_stb
+                    _lg_dt = _dt_stb.utcfromtimestamp(float(_lg_ts))
+                else:
+                    _lg_dt = _lg_ts  # already a datetime
+                if _lg_dt < _lg_stale_cutoff:
+                    continue  # skip stale entry
+            except Exception:
+                pass  # can't parse ts — allow the entry through
         try:
             import numpy as _np_lg
             _df = entry.get("df") if isinstance(entry, dict) else entry
@@ -6304,12 +6346,15 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                     _parsed = _parse_dl(_bdf)
                     for _sym, _arr in _parsed.items():
                         lastgood_stocks[_sym] = _arr
-                        # Persist to module-level cache so future regens keep this data
+                        # Persist to module-level cache so future regens keep this data.
+                        # IMPORTANT: ts must be a datetime (not Unix int) — the quant scan's
+                        # staleness check at line ~4514 compares ts against datetime.utcnow().
                         try:
+                            from datetime import datetime as _dt_cs
                             import pandas as _pd_cs
                             _PRICE_DATA_LASTGOOD[_sym] = {
                                 "df": _pd_cs.DataFrame({"Close": _arr}),
-                                "ts": int(now_ts),
+                                "ts": _dt_cs.utcnow(),
                             }
                         except Exception:
                             pass
@@ -6770,6 +6815,33 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
     # v135: enforce 70% confidence minimum — nothing below 70 shows in STB
     top_picks = [p for p in top_picks if p.get("confidence", 0) >= 70]
+
+    # ── Minimum picks floor — relax sector cap if result is thin ─────────
+    # If the sector cap + correlation filter pruned us below 15 picks,
+    # make a second pass over remaining candidates with the sector cap raised
+    # to 8 (not unlimited — sector concentration is still a risk). This is a
+    # pure safety net: it only fires when the first pass is unusually sparse
+    # (thin market, many earnings blackouts, extreme regime filtering).
+    _STB_PICKS_FLOOR = 15
+    if len(top_picks) < _STB_PICKS_FLOOR:
+        _remaining = [c for c in candidates
+                      if c.get("confidence", 0) >= 70
+                      and c not in top_picks]
+        if _remaining:
+            logger.warning(
+                f"STB PICKS FLOOR: only {len(top_picks)} picks after first pass — "
+                f"running relaxed second pass (sector cap 5→8) over {len(_remaining)} candidates"
+            )
+            _sector_counts_2 = dict(sector_counts)  # carry forward first-pass counts
+            for c2 in _remaining:
+                if len(top_picks) >= 40:
+                    break
+                sec2 = c2.get("sector", "Unknown")
+                if _sector_counts_2.get(sec2, 0) >= 8:
+                    continue
+                top_picks.append(c2)
+                _sector_counts_2[sec2] = _sector_counts_2.get(sec2, 0) + 1
+            logger.warning(f"STB PICKS FLOOR: second pass added picks → total={len(top_picks)}")
 
     # ── Price deduplication guard ──────────────────────────────────────────
     # Two picks with the same price to the cent = one has contaminated data
