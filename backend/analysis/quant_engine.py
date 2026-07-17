@@ -68,9 +68,76 @@ _fundamentals_cache = {}
 _PRICE_DATA_LASTGOOD: dict = {}  # per-ticker last-good price cache (14-day TTL), populated by generate_quant_picks()
 _FUNDAMENTALS_CACHE_TTL = 86400  # 24 hours
 
+# ── S3 persistence for _PRICE_DATA_LASTGOOD ──────────────────────────────────
+# Loading this cache on startup gives immediate warm coverage after a redeploy
+# instead of starting cold and needing several scan cycles to rebuild.
+# Key: price-cache/lastgood_v1.pkl  (v1 = current pandas/pickle format)
+# TTL guard: entries older than 14 days are still respected on load —
+# they'll be replaced by fresh data on the first successful scan cycle.
+_LASTGOOD_S3_KEY = "price-cache/lastgood_v1.pkl"
+
+def _load_lastgood_from_s3() -> None:
+    """Try to restore _PRICE_DATA_LASTGOOD from S3 on module load.
+    Silent on any error — S3 unavailability must never break the scan."""
+    global _PRICE_DATA_LASTGOOD
+    try:
+        import boto3, pickle, io, os
+        _bucket = os.environ.get("DB_BACKUP_BUCKET", "epic-fury-portfolio-db")
+        s3 = boto3.client("s3", region_name="us-east-1")
+        obj = s3.get_object(Bucket=_bucket, Key=_LASTGOOD_S3_KEY)
+        data = pickle.loads(obj["Body"].read())
+        if isinstance(data, dict) and data:
+            # Sanity-check: only accept if values look like {df: DataFrame, ts: ...}
+            _sample = next(iter(data.values()), None)
+            if isinstance(_sample, dict) and "df" in _sample:
+                _PRICE_DATA_LASTGOOD.update(data)
+                logger.info(
+                    f"LASTGOOD S3 LOAD: restored {len(data)} tickers from "
+                    f"s3://{_bucket}/{_LASTGOOD_S3_KEY}"
+                )
+    except Exception as _e:
+        logger.debug(f"LASTGOOD S3 LOAD: skipped ({_e})")
+
+
+def _save_lastgood_to_s3() -> None:
+    """Persist _PRICE_DATA_LASTGOOD to S3 after a successful scan.
+    Called in a daemon thread so it never blocks the scan result."""
+    try:
+        import boto3, pickle, io, os
+        _bucket = os.environ.get("DB_BACKUP_BUCKET", "epic-fury-portfolio-db")
+        s3 = boto3.client("s3", region_name="us-east-1")
+        payload = pickle.dumps(_PRICE_DATA_LASTGOOD, protocol=4)
+        s3.put_object(
+            Bucket=_bucket,
+            Key=_LASTGOOD_S3_KEY,
+            Body=payload,
+            ContentType="application/octet-stream",
+        )
+        logger.info(
+            f"LASTGOOD S3 SAVE: persisted {len(_PRICE_DATA_LASTGOOD)} tickers "
+            f"({len(payload)//1024} KB) to s3://{_bucket}/{_LASTGOOD_S3_KEY}"
+        )
+    except Exception as _e:
+        logger.debug(f"LASTGOOD S3 SAVE: failed ({_e})")
+
+
+# Load cache from S3 immediately at module import (before first scan).
+# Runs synchronously but is fast (~200ms for 9MB from S3 in us-east-1).
+_load_lastgood_from_s3()
+
 # Beta cache — stores beta vs SPY for each stock (24h TTL, same as fundamentals)
 _beta_cache = {}
 _BETA_CACHE_TTL = 86400  # 24 hours
+
+# ── Dead-ticker auto-exclusion from batch tiers ───────────────────────────────
+# Tracks how many consecutive scans each ticker has failed to fetch data.
+# Tickers failing 5+ consecutive scans are skipped in tiers 1-5 (still tried
+# individually in tier 7 as a sanity check, and reset if they succeed).
+# This saves batch slots for confirmed-available tickers and reduces wasted
+# time on delisted/unavailable ADRs. Naturally self-heals: if a ticker
+# re-lists or becomes available, one successful fetch resets its counter.
+_ticker_fail_streak: dict = {}  # {ticker: int}  — consecutive scan fail count
+_DEAD_TICKER_THRESHOLD = 5       # skip in batch tiers after this many consecutive failures
 
 
 def _prefetch_fundamentals(symbols: list) -> dict:
@@ -4219,21 +4286,33 @@ def _generate_quant_picks_impl() -> dict:
         # initialized lazily). This is the "memory" that prevents a single
         # rate-limited scan from collapsing our usable universe.
         global _PRICE_DATA_LASTGOOD  # declared at module level, populated here
+        global _ticker_fail_streak   # dead-ticker streak counter (also module-level)
+
+        # Build effective batch universe: exclude tickers with 5+ consecutive
+        # fetch failures (they'll still be retried once in tier 7 in case they
+        # recovered; their streak resets to 0 on the first successful fetch).
+        _dead_tickers = {t for t, n in _ticker_fail_streak.items() if n >= _DEAD_TICKER_THRESHOLD}
+        if _dead_tickers:
+            logger.info(f"BATCH TIERS: skipping {len(_dead_tickers)} dead tickers (≥{_DEAD_TICKER_THRESHOLD} consecutive failures): {sorted(_dead_tickers)[:10]}{'...' if len(_dead_tickers)>10 else ''}")
+        _batch_universe = [t for t in QUANT_UNIVERSE if t not in _dead_tickers]
 
         N_BATCHES = 10  # 2026-06-15 REVERTED: 20 batches caused too many orphaned yfinance threads → rate-limiting → 0 stocks. 10 batches × 73 stocks with fewer round trips works reliably.
-        batch_size = (len(QUANT_UNIVERSE) + N_BATCHES - 1) // N_BATCHES
-        batches = [QUANT_UNIVERSE[i:i+batch_size] for i in range(0, len(QUANT_UNIVERSE), batch_size)]
+        batch_size = (len(_batch_universe) + N_BATCHES - 1) // N_BATCHES
+        batches = [_batch_universe[i:i+batch_size] for i in range(0, len(_batch_universe), batch_size)]
 
         price_data = {}
         import time as _time_scan
 
         # HARD TIME BUDGET — the scan MUST complete in time for the next
-        # trade cycle to fire on schedule.
-        # 2026-06-10 fix: reduced from 1500s to 120s. On high-volatility days
-        # (CPI, FOMC) yfinance batch downloads can hang indefinitely, causing
-        # the entire picks engine to stall for 25 min. 120s total is enough
-        # for a clean fetch and lets us fall back to cache quickly on bad days.
-        _scan_deadline = _time_scan.time() + 300  # 2026-06-15: 300s = 5min — 10 batches × 45s timeout = 450s max; deadline cuts at ~6 batches (6×45=270) → ~438 stocks. Background thread only, no HTTP timeout.
+        # trade cycle to fire on schedule. Runs in a background daemon thread
+        # so it never blocks API responses regardless of how long it takes.
+        # 2026-07-17: raised from 300s to 480s.
+        #   Rationale: 10 tier-1 batches × 45s max timeout = 450s worst case.
+        #   At 300s the deadline was firing at batch ~6 on slow days (yfinance
+        #   throttling), skipping 4 batches (~300 tickers) before tiers 2-7
+        #   could run. 480s guarantees all 10 batches complete even at max
+        #   timeout, giving tiers 2-7 a full missing-ticker list to work from.
+        _scan_deadline = _time_scan.time() + 480
         def _over_budget():
             return _time_scan.time() > _scan_deadline
 
@@ -4311,8 +4390,10 @@ def _generate_quant_picks_impl() -> dict:
         logger.info(f"UNIVERSE SCAN tier1: {t1}/{len(QUANT_UNIVERSE)} ({t1*100//max(1,len(QUANT_UNIVERSE))}%)")
 
         # --- TIER 2: missing in chunks of 50 ---
+        # _missing() excludes dead tickers from batch tiers 2-5 (same as tier 1).
+        # Dead tickers are retried once in tier 7 (individual Ticker.history).
         def _missing():
-            return [t for t in QUANT_UNIVERSE if t not in price_data]
+            return [t for t in _batch_universe if t not in price_data]
         m = _missing()
         if m:
             for i in range(0, len(m), 50):
@@ -4466,7 +4547,11 @@ def _generate_quant_picks_impl() -> dict:
         # Different code path inside yfinance — sometimes succeeds when
         # download() fails. Also uses 0.5s sleep to fit in budget.
         # Skips fresh-cache tickers same as tier 6.
-        m = [t for t in _missing() if not _has_fresh_cache(t)]
+        # Includes dead tickers — their one-per-scan individual retry chance.
+        # If tier 7 succeeds for a dead ticker, _ticker_fail_streak resets below.
+        _t7_missing = [t for t in _missing() if not _has_fresh_cache(t)]
+        _t7_dead_retry = [t for t in _dead_tickers if t not in price_data and not _has_fresh_cache(t)]
+        m = _t7_missing + [t for t in _t7_dead_retry if t not in _t7_missing]
         if m:
             logger.info(f"UNIVERSE SCAN tier7: alternative API retry for {len(m)} tickers")
             for t in m:
@@ -4661,11 +4746,96 @@ def _generate_quant_picks_impl() -> dict:
         if _norm_removed:
             logger.warning(f"POST-FETCH NORM: removed {_norm_removed} unfixable MultiIndex frames")
 
+        # ── Update dead-ticker fail streaks ───────────────────────────────────
+        # Increment streak for tickers still missing after all 8 tiers + cache.
+        # Reset to 0 for any ticker that was successfully fetched this scan.
+        # Tickers hitting the threshold will be skipped in batch tiers next scan.
+        try:
+            for _t in QUANT_UNIVERSE:
+                if _t in price_data:
+                    # Success → clear streak
+                    if _ticker_fail_streak.get(_t, 0) > 0:
+                        logger.debug(f"FAIL STREAK RESET: {_t} recovered after {_ticker_fail_streak[_t]} misses")
+                    _ticker_fail_streak[_t] = 0
+                else:
+                    # Still missing → increment streak
+                    _ticker_fail_streak[_t] = _ticker_fail_streak.get(_t, 0) + 1
+            _newly_dead = [t for t, n in _ticker_fail_streak.items() if n == _DEAD_TICKER_THRESHOLD]
+            if _newly_dead:
+                logger.warning(f"DEAD TICKERS (newly flagged for batch exclusion): {sorted(_newly_dead)}")
+        except Exception:
+            pass  # never let streak logic crash the scan
+
         final_coverage = len(price_data) * 100 // max(1, len(QUANT_UNIVERSE))
         logger.info(f"UNIVERSE SCAN FINAL: {len(price_data)}/{len(QUANT_UNIVERSE)} ({final_coverage}%) after 7-tier retry + cache fallback")
         # Alarm: if final coverage is below 70%, log loudly so it gets noticed
         if final_coverage < 70:
             logger.warning(f"UNIVERSE SCAN LOW COVERAGE: only {final_coverage}% — yfinance may be throttling or down. Trading decisions running on a degraded sample.")
+
+        # ── S3 SAVE: persist updated LASTGOOD cache for next cold start ───────
+        # Save in a daemon thread so it never adds latency to the scan result.
+        # Only save when coverage ≥ 80% — don't overwrite a good cache with a
+        # degraded one (e.g., if yfinance is down and only 400 tickers fetched).
+        if final_coverage >= 80:
+            import threading as _s3_thr
+            _s3_thr.Thread(
+                target=_save_lastgood_to_s3,
+                daemon=True,
+                name="lastgood-s3-save",
+            ).start()
+
+        # ── BACKGROUND DRIP-FEED WARMER ───────────────────────────────────────
+        # For tickers still missing after all 8 tiers + cache fallback,
+        # launch a daemon thread that slowly fetches them one-by-one (1.5s apart)
+        # and loads results into _PRICE_DATA_LASTGOOD. These won't help the
+        # CURRENT scan but will be available from cache for the NEXT scan cycle,
+        # ratcheting coverage higher with every pass.
+        # Safety: skips tickers already in LASTGOOD with fresh data, caps at
+        # 20 min total, and never runs concurrent with a live scan.
+        _drip_missing = [t for t in QUANT_UNIVERSE if t not in price_data and t not in _PRICE_DATA_LASTGOOD]
+        if _drip_missing:
+            import threading as _drip_thr
+            def _drip_warmer(_syms=_drip_missing):
+                import time as _dt
+                _dt.sleep(5)  # brief pause after scan before starting drip
+                _deadline = _dt.time() + 1200  # 20-min cap
+                _added = 0
+                for _sym in _syms:
+                    if _dt.time() > _deadline:
+                        break
+                    if _sym in _PRICE_DATA_LASTGOOD:
+                        continue  # already cached by another path
+                    _dt.sleep(1.5)  # polite: 40 req/min max
+                    try:
+                        _df = yf.download(_sym, period="1y", progress=False)
+                        if _df is None or _df.empty or len(_df) < 60:
+                            continue
+                        if isinstance(_df.columns, pd.MultiIndex):
+                            if _sym in _df.columns.get_level_values(1):
+                                _df = _df.xs(_sym, axis=1, level=1)
+                            elif _sym in _df.columns.get_level_values(0):
+                                _df = _df[_sym]
+                            else:
+                                _df.columns = _df.columns.get_level_values(0)
+                        _df = _df.dropna(how="all")
+                        if "Close" in _df.columns:
+                            while len(_df) > 0 and pd.isna(_df["Close"].iloc[-1]):
+                                _df = _df.iloc[:-1]
+                        if len(_df) >= 60:
+                            from datetime import datetime as _dt_drip
+                            _PRICE_DATA_LASTGOOD[_sym] = {"df": _df, "ts": _dt_drip.utcnow()}
+                            _added += 1
+                    except Exception:
+                        continue
+                if _added:
+                    logger.info(f"DRIP WARMER: added {_added} tickers to LASTGOOD cache for next scan cycle")
+                    _save_lastgood_to_s3()  # persist the newly warmed entries
+            _drip_thr.Thread(
+                target=_drip_warmer,
+                daemon=True,
+                name="drip-cache-warmer",
+            ).start()
+            logger.info(f"DRIP WARMER: launched background fetch for {len(_drip_missing)} uncached tickers")
 
         if not price_data:
             return {
