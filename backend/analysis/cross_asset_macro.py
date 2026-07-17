@@ -407,33 +407,33 @@ def _sector_tilts(vix_ts, curve, credit, dollar, commodities) -> dict:
     # --- Yield curve effects ---
     cs = curve.get("state", "unknown")
     if cs == "deeply_inverted":
-        add("Financials", -1.0)
+        add("Financial Services", -1.0)
         add("Real Estate", -0.8)
         add("Utilities", +0.4)
-        add("Consumer Staples", +0.5)
+        add("Consumer Defensive", +0.5)
     elif cs == "inverted":
-        add("Financials", -0.5)
+        add("Financial Services", -0.5)
         add("Utilities", +0.2)
     elif cs == "steep":
-        add("Financials", +1.0)   # banks love a steep curve
+        add("Financial Services", +1.0)   # banks love a steep curve
         add("Real Estate", -0.4)
     elif cs == "normal":
-        add("Financials", +0.4)
+        add("Financial Services", +0.4)
 
     # --- Credit stress ---
     crs = credit.get("state", "unknown")
     if crs == "stress_high":
-        add("Financials", -0.8)
-        add("Consumer Discretionary", -0.6)
+        add("Financial Services", -0.8)
+        add("Consumer Cyclical", -0.6)
         add("Energy", -0.4)
         add("Utilities", +0.5)
-        add("Consumer Staples", +0.4)
+        add("Consumer Defensive", +0.4)
     elif crs == "stress_moderate":
-        add("Consumer Discretionary", -0.3)
+        add("Consumer Cyclical", -0.3)
         add("Utilities", +0.2)
     elif crs == "easing_strong":
-        add("Financials", +0.8)
-        add("Consumer Discretionary", +0.6)
+        add("Financial Services", +0.8)
+        add("Consumer Cyclical", +0.6)
         add("Real Estate", +0.5)
 
     # --- VIX term structure ---
@@ -445,7 +445,7 @@ def _sector_tilts(vix_ts, curve, credit, dollar, commodities) -> dict:
     elif vts == "contango_strong":
         # Calm — momentum regime. Cyclicals work.
         add("Industrials", +0.4)
-        add("Consumer Discretionary", +0.4)
+        add("Consumer Cyclical", +0.4)
 
     # --- Dollar ---
     ds = dollar.get("state", "unknown")
@@ -481,16 +481,16 @@ def _sector_tilts(vix_ts, curve, credit, dollar, commodities) -> dict:
     if uso > 3.0:
         add("Energy", +0.8)
         add("Industrials", -0.2)
-        add("Consumer Discretionary", -0.2)  # gas-price drag
+        add("Consumer Cyclical", -0.2)  # gas-price drag
     elif uso < -3.0:
         add("Energy", -0.6)
-        add("Consumer Discretionary", +0.3)
+        add("Consumer Cyclical", +0.3)
 
     gld = per.get("GLD", {}).get("momentum_5d", 0.0)
     if gld > 2.0:
         add("Materials", +0.4)               # gold miners
         # Gold rallying often = fear → small staples tilt
-        add("Consumer Staples", +0.2)
+        add("Consumer Defensive", +0.2)
 
     # --- Clamp to [-2, +2] ---
     return {k: round(max(-2.0, min(2.0, v)), 2) for k, v in tilts.items()}

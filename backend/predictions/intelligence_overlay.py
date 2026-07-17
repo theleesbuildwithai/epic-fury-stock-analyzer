@@ -62,11 +62,11 @@ SIZE_FACTOR_MAX = 1.00
 
 # Sector sector ETF -> internal sector name mapping for regime-playbook lookup
 _SECTOR_TO_ETF = {
-    "Technology": "XLK", "Financials": "XLF", "Energy": "XLE",
-    "Healthcare": "XLV", "Consumer Staples": "XLP",
-    "Consumer Discretionary": "XLY", "Industrials": "XLI",
+    "Technology": "XLK", "Financial Services": "XLF", "Energy": "XLE",
+    "Healthcare": "XLV", "Consumer Defensive": "XLP",
+    "Consumer Cyclical": "XLY", "Industrials": "XLI",
     "Utilities": "XLU", "Materials": "XLB", "Real Estate": "XLRE",
-    "Communication": "XLC", "Communications": "XLC",
+    "Communication Services": "XLC", "Communications": "XLC",
     "Communication Services": "XLC",
 }
 
@@ -277,9 +277,9 @@ def _delta_cross_asset(sector: str, direction: str) -> float:
         limit = COMPONENT_LIMITS["cross_asset"]
 
         # Risk-off → defensives win; risk-on → growth wins
-        defensive_sectors = {"Utilities", "Consumer Staples", "Healthcare"}
-        growth_sectors = {"Technology", "Communication", "Communications",
-                          "Communication Services", "Consumer Discretionary"}
+        defensive_sectors = {"Utilities", "Consumer Defensive", "Healthcare"}
+        growth_sectors = {"Technology", "Communication Services", "Communications",
+                          "Communication Services", "Consumer Cyclical"}
 
         if tilt == "avoid_tech_long_duration_assets" and sector in growth_sectors:
             return -limit if direction == "long" else +limit/2

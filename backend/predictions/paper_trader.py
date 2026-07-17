@@ -618,7 +618,7 @@ TACO_REVERSAL_EVENT_TYPES = {
 }
 
 TACO_PROTECTED_SECTORS = {
-    "Technology", "Healthcare", "Financials", "Consumer Discretionary"
+    "Technology", "Healthcare", "Financial Services", "Consumer Cyclical"
 }
 
 
@@ -3865,7 +3865,7 @@ def execute_trades_from_signals(quant_picks: dict) -> dict:
 
         # Defensive sectors — safe for long positions even in bear markets
         # These are stable, dividend-paying, recession-resistant sectors
-        DEFENSIVE_SECTORS = {"Consumer Staples", "Healthcare", "Utilities", "ETF"}
+        DEFENSIVE_SECTORS = {"Consumer Defensive", "Healthcare", "Utilities", "ETF"}
 
         if regime == "BEAR":
             # BEAR: Take ALL qualifying shorts, plus safe defensive longs

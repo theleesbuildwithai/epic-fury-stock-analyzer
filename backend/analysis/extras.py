@@ -581,16 +581,16 @@ def get_banner_data():
 
 SECTOR_ETFS = [
     ("XLK", "Technology"),
-    ("XLF", "Financials"),
+    ("XLF", "Financial Services"),
     ("XLV", "Healthcare"),
     ("XLE", "Energy"),
     ("XLY", "Consumer Disc."),
-    ("XLP", "Consumer Staples"),
+    ("XLP", "Consumer Defensive"),
     ("XLI", "Industrials"),
     ("XLB", "Materials"),
     ("XLRE", "Real Estate"),
     ("XLU", "Utilities"),
-    ("XLC", "Communication"),
+    ("XLC", "Communication Services"),
 ]
 
 # Per-sector "last known good" cache. Survives transient fetch failures so

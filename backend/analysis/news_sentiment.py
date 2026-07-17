@@ -498,17 +498,18 @@ def get_market_news():
 #  Sector-Specific Sentiment
 # ============================================================
 SECTOR_KEYWORDS = {
+    # Keys use Yahoo Finance canonical sector names to match SECTOR_MAP in quant_engine.py
     "Technology": ["tech", "software", "ai ", "artificial intelligence", "semiconductor", "chip", "cloud", "saas", "apple", "microsoft", "google", "nvidia", "meta"],
     "Healthcare": ["healthcare", "pharma", "biotech", "drug", "fda", "vaccine", "hospital", "medical"],
-    "Financials": ["bank", "financial", "credit", "lending", "mortgage", "insurance", "jpmorgan", "goldman"],
+    "Financial Services": ["bank", "financial", "credit", "lending", "mortgage", "insurance", "jpmorgan", "goldman"],
     "Energy": ["oil", "gas", "energy", "crude", "opec", "drilling", "pipeline", "renewable", "solar"],
-    "Consumer Discretionary": ["retail", "amazon", "tesla", "consumer", "spending", "luxury", "travel", "airline"],
-    "Consumer Staples": ["grocery", "food", "beverage", "walmart", "costco", "procter", "coca-cola"],
+    "Consumer Cyclical": ["retail", "amazon", "tesla", "consumer", "spending", "luxury", "travel", "airline"],
+    "Consumer Defensive": ["grocery", "food", "beverage", "walmart", "costco", "procter", "coca-cola"],
     "Industrials": ["manufacturing", "defense", "aerospace", "construction", "industrial", "boeing", "lockheed"],
     "Materials": ["mining", "steel", "aluminum", "gold", "copper", "lithium", "commodity"],
     "Real Estate": ["real estate", "housing", "mortgage", "reit", "property", "home sales"],
     "Utilities": ["utility", "electric", "power grid", "natural gas", "water"],
-    "Communication": ["media", "streaming", "telecom", "social media", "advertising", "netflix", "disney"],
+    "Communication Services": ["media", "streaming", "telecom", "social media", "advertising", "netflix", "disney"],
 }
 
 

@@ -31,11 +31,11 @@ logger = logging.getLogger(__name__)
 # 11 SPDR sector ETFs — full coverage of the S&P
 SECTOR_ETFS = {
     "XLK": "Technology",
-    "XLF": "Financials",
+    "XLF": "Financial Services",
     "XLE": "Energy",
     "XLV": "Healthcare",
-    "XLP": "Consumer Staples",
-    "XLY": "Consumer Discretionary",
+    "XLP": "Consumer Defensive",
+    "XLY": "Consumer Cyclical",
     "XLI": "Industrials",
     "XLU": "Utilities",
     "XLB": "Materials",

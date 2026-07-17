@@ -450,8 +450,8 @@ def assess_portfolio_risk(open_trades: list, price_data: dict = None) -> dict:
     # --- Beta Estimation (actual calculated betas) ---
     # Uses real covariance-based beta vs SPY when price_data is available.
     # Falls back to sector-based estimates only when price_data is missing.
-    HIGH_BETA_SECTORS = {"Technology", "Consumer Discretionary", "Communication Services", "Financials"}
-    LOW_BETA_SECTORS = {"Consumer Staples", "Healthcare", "Utilities", "Real Estate"}
+    HIGH_BETA_SECTORS = {"Technology", "Consumer Cyclical", "Communication Services", "Financial Services"}
+    LOW_BETA_SECTORS = {"Consumer Defensive", "Healthcare", "Utilities", "Real Estate"}
 
     # Pre-compute SPY returns once for all beta calculations
     _spy_ret = None
@@ -1606,10 +1606,10 @@ def detect_sector_rotation(price_data: dict) -> dict:
         return cached["data"]
 
     sector_etfs = {
-        "Technology": "XLK", "Healthcare": "XLV", "Financials": "XLF",
-        "Energy": "XLE", "Consumer Discretionary": "XLY", "Consumer Staples": "XLP",
+        "Technology": "XLK", "Healthcare": "XLV", "Financial Services": "XLF",
+        "Energy": "XLE", "Consumer Cyclical": "XLY", "Consumer Defensive": "XLP",
         "Industrials": "XLI", "Materials": "XLB", "Utilities": "XLU",
-        "Real Estate": "XLRE", "Communication": "XLC",
+        "Real Estate": "XLRE", "Communication Services": "XLC",
     }
 
     rotations = {}
@@ -2110,7 +2110,7 @@ def get_drawdown_recovery_mode(portfolio_value: float, peak_value: float, recent
         return {
             "mode": "EMERGENCY", "drawdown_pct": round(dd, 2), "size_multiplier": 0.25,
             "message": f"Emergency ({dd:+.1f}%): 75% size reduction — mean reversion only",
-            "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities"],
+            "allowed_sectors": ["Healthcare", "Consumer Defensive", "Utilities"],
             "strategy_shift": "mean_reversion",  # Only take mean reversion setups
             "min_confidence": 75,
             "max_hold_days": 5,
@@ -2121,7 +2121,7 @@ def get_drawdown_recovery_mode(portfolio_value: float, peak_value: float, recent
         return {
             "mode": "DEFENSIVE", "drawdown_pct": round(dd, 2), "size_multiplier": 0.5,
             "message": f"Defensive ({dd:+.1f}%): 50% size, high-conviction only",
-            "allowed_sectors": ["Healthcare", "Consumer Staples", "Utilities", "Financials"],
+            "allowed_sectors": ["Healthcare", "Consumer Defensive", "Utilities", "Financial Services"],
             "strategy_shift": "defensive",  # Favor value + mean reversion
             "min_confidence": 70,
             "max_hold_days": 10,

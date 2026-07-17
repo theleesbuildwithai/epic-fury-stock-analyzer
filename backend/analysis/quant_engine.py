@@ -1179,7 +1179,7 @@ def _get_sector_with_fallback(symbol: str) -> str:
         try:
             from predictions.models import get_trading_state
             import json as _json_sf
-            raw = get_trading_state("sector_fallback_v1", "") or ""
+            raw = get_trading_state("sector_fallback_v2", "") or ""
             if raw:
                 try:
                     loaded = _json_sf.loads(raw)
@@ -1216,7 +1216,7 @@ def _get_sector_with_fallback(symbol: str) -> str:
             try:
                 from predictions.models import set_trading_state
                 import json as _json_sf2
-                set_trading_state("sector_fallback_v1",
+                set_trading_state("sector_fallback_v2",
                                   _json_sf2.dumps(_sector_fallback_cache))
             except Exception:
                 pass
@@ -6409,8 +6409,8 @@ def generate_fundamental_picks(force: bool = False) -> dict:
 
     # ── Hedge fund overlay: Bridgewater Pure Alpha macro regime ───────────────
     # Four-box model: Growth×Inflation regime → tilt toward sector winners.
-    # RISK_ON  → favor cyclicals (Tech, Industrials, Financials, Consumer Disc)
-    # RISK_OFF → favor defensives (Healthcare, Staples, Utilities, Real Estate)
+    # RISK_ON  → favor cyclicals (Technology, Industrials, Financial Services, Consumer Cyclical)
+    # RISK_OFF → favor defensives (Healthcare, Consumer Defensive, Utilities, Real Estate)
     _hf_regime = "NEUTRAL"
     try:
         _cas = get_cross_asset_signals()
