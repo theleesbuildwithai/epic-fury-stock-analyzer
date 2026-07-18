@@ -451,9 +451,9 @@ function TradeCard({ title, trade, positive }) {
     <div className="bg-black border border-neutral-700 card-accent-top rounded-lg p-4">
       <div className="text-neutral-400 text-sm mb-2">{title}</div>
       <div className="text-2xl font-bold text-white mb-1">{trade.ticker}</div>
-      <div className={`text-3xl font-bold ${color} mb-2`}>{trade.pnl_pct?.toFixed(2)}%</div>
+      <div className={`text-3xl font-bold ${color} mb-2`}>{trade.pnl_pct?.toFixed(2) ?? '—'}%</div>
       <div className="text-sm text-neutral-400 space-y-1">
-        <div>Entry: ${trade.entry_price?.toFixed(2)} → Exit: ${trade.exit_price?.toFixed(2)}</div>
+        <div>Entry: ${trade.entry_price?.toFixed(2) ?? '—'} → Exit: ${trade.exit_price?.toFixed(2) ?? '—'}</div>
         <div>Held {trade.days_held} days | Exit reason: {trade.exit_reason}</div>
       </div>
     </div>
