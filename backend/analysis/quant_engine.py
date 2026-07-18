@@ -38,6 +38,8 @@ from analysis.rentech import (
     get_mean_reversion_signals, assess_portfolio_risk,
     calculate_drawdown_circuit_breaker, get_alt_data_signals
 )
+logger = logging.getLogger(__name__)
+
 try:
     from analytics.stochastic_models import compute_stochastic_bundle as _stoch_bundle
     _STOCHASTIC_ENABLED = True
@@ -45,8 +47,6 @@ except Exception as _stoch_import_err:
     logger.warning(f"Stochastic models import failed (disabling): {_stoch_import_err}")
     _STOCHASTIC_ENABLED = False
     def _stoch_bundle(closes, symbol=""): return {"stochastic_score": 0.0}
-
-logger = logging.getLogger(__name__)
 
 # ============================================================
 #  CACHING & THROTTLING (shared with existing system)
