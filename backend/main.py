@@ -3836,11 +3836,22 @@ def _startup_picks_warmup():
 
     def _warmup():
         try:
-            _t_wp.sleep(90)
+            # 2026-07-17: reduced from 90s to 15s — start universe scan as early
+            # as possible so LASTGOOD cache is warm before users hit the UI.
+            # App Runner container is fully up well within 15s.
+            _t_wp.sleep(15)
             logger.warning("STARTUP WARMUP: Pre-generating quant picks cache...")
             from analysis.quant_engine import generate_quant_picks
             generate_quant_picks()
-            logger.warning("STARTUP WARMUP: Quant picks cache ready.")
+            logger.warning("STARTUP WARMUP: Quant picks cache ready (scan 1/2).")
+            # SECOND WARMUP SCAN: fires ~15 min after first completes.
+            # By then the background drip-feed warmer has added uncached tickers
+            # to _PRICE_DATA_LASTGOOD. This second scan picks them up via cache
+            # fallback, pushing coverage from ~600 → 700+ on fresh deploys.
+            _t_wp.sleep(900)
+            logger.warning("STARTUP WARMUP: Firing second scan to capture drip-warmer additions...")
+            generate_quant_picks()
+            logger.warning("STARTUP WARMUP: Second scan complete.")
         except Exception as _wp_err:
             logger.warning(f"STARTUP WARMUP: Non-fatal error: {_wp_err}")
 

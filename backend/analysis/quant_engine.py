@@ -4659,7 +4659,11 @@ def _generate_quant_picks_impl() -> dict:
         m = [t for t in QUANT_UNIVERSE if t not in price_data]
         if m:
             from datetime import datetime as _dt_cache, timedelta as _td_cache
-            stale_cutoff = _dt_cache.utcnow() - _td_cache(days=14)
+            # 30-day TTL (was 14 days): stale data from last month is still valid
+            # for factor scoring — Layer 9 multi_source corrects live price divergence
+            # at serve time. Extending to 30 days means a ticker cached 3 weeks ago
+            # still contributes to the scan rather than leaving a coverage hole.
+            stale_cutoff = _dt_cache.utcnow() - _td_cache(days=30)
             cache_used = 0
             for t in m:
                 cached = _PRICE_DATA_LASTGOOD.get(t)
@@ -4776,17 +4780,80 @@ def _generate_quant_picks_impl() -> dict:
         except Exception:
             pass  # never let streak logic crash the scan
 
+        # ── TIER 9: GUARANTEED COVERAGE PUSH ─────────────────────────────────
+        # If coverage is still below 700 after all 8 tiers + cache fallback,
+        # target ONLY tickers with NO LASTGOOD entry at all (truly uncached).
+        # These are the only ones the cache fallback cannot cover regardless of TTL.
+        # Runs without a time budget — keeps going until every uncached ticker
+        # has been attempted exactly once. On warm systems this list is empty
+        # and tier 9 is an instant no-op. On cold starts it bridges the gap.
+        _T9_TARGET = 700
+        if len(price_data) < _T9_TARGET:
+            _t9_uncached = [t for t in QUANT_UNIVERSE
+                            if t not in price_data and t not in _PRICE_DATA_LASTGOOD]
+            if _t9_uncached:
+                logger.warning(
+                    f"UNIVERSE SCAN tier9 COVERAGE PUSH: {len(price_data)}/{len(QUANT_UNIVERSE)} "
+                    f"— targeting {len(_t9_uncached)} completely uncached tickers to reach {_T9_TARGET}+"
+                )
+                _t9_added = 0
+                import threading as _t9_thr_mod
+                for _t9_sym in _t9_uncached:
+                    if len(price_data) >= _T9_TARGET:
+                        break  # hit target — stop early
+                    _time_scan.sleep(0.5)
+                    try:
+                        _t9_r = [None]
+                        _t9_thr = _t9_thr_mod.Thread(
+                            target=lambda r=_t9_r, s=_t9_sym: r.__setitem__(
+                                0, yf.Ticker(s).history(period="1y", auto_adjust=True)
+                            ),
+                            daemon=True,
+                        )
+                        _t9_thr.start()
+                        _t9_thr.join(timeout=12)
+                        _df9 = _t9_r[0]
+                        if _df9 is None or _df9.empty or len(_df9) < 60:
+                            continue
+                        if isinstance(_df9.columns, pd.MultiIndex):
+                            if _t9_sym in _df9.columns.get_level_values(1):
+                                _df9 = _df9.xs(_t9_sym, axis=1, level=1)
+                            elif _t9_sym in _df9.columns.get_level_values(0):
+                                _df9 = _df9[_t9_sym]
+                        _df9 = _df9.dropna(how="all")
+                        if "Close" in _df9.columns:
+                            while len(_df9) > 0 and pd.isna(_df9["Close"].iloc[-1]):
+                                _df9 = _df9.iloc[:-1]
+                        if len(_df9) >= 60:
+                            price_data[_t9_sym] = _df9
+                            _PRICE_DATA_LASTGOOD[_t9_sym] = {
+                                "df": _df9,
+                                "ts": datetime.utcnow(),
+                            }
+                            _t9_added += 1
+                    except Exception:
+                        continue
+                if _t9_added:
+                    logger.warning(
+                        f"UNIVERSE SCAN tier9: added {_t9_added} "
+                        f"→ {len(price_data)}/{len(QUANT_UNIVERSE)}"
+                    )
+
         final_coverage = len(price_data) * 100 // max(1, len(QUANT_UNIVERSE))
-        logger.info(f"UNIVERSE SCAN FINAL: {len(price_data)}/{len(QUANT_UNIVERSE)} ({final_coverage}%) after 7-tier retry + cache fallback")
+        logger.info(f"UNIVERSE SCAN FINAL: {len(price_data)}/{len(QUANT_UNIVERSE)} ({final_coverage}%) after all tiers + cache fallback + tier9 push")
         # Alarm: if final coverage is below 70%, log loudly so it gets noticed
         if final_coverage < 70:
             logger.warning(f"UNIVERSE SCAN LOW COVERAGE: only {final_coverage}% — yfinance may be throttling or down. Trading decisions running on a degraded sample.")
 
         # ── S3 SAVE: persist updated LASTGOOD cache for next cold start ───────
         # Save in a daemon thread so it never adds latency to the scan result.
-        # Only save when coverage ≥ 80% — don't overwrite a good cache with a
-        # degraded one (e.g., if yfinance is down and only 400 tickers fetched).
-        if final_coverage >= 80:
+        # ALWAYS save when LASTGOOD has ≥300 entries (was: only at ≥80% coverage).
+        # Rationale: _PRICE_DATA_LASTGOOD is ADDITIVE — entries are never deleted,
+        # only updated when fresh data arrives. So even a 60% scan still leaves
+        # all previously-cached entries intact. Saving at every scan ratchets
+        # coverage higher across deploys. Old threshold of ≥80% meant a slow
+        # first scan (500 tickers) would NEVER save, breaking the ratchet from day 1.
+        if len(_PRICE_DATA_LASTGOOD) >= 300 or final_coverage >= 60:
             import threading as _s3_thr
             _s3_thr.Thread(
                 target=_save_lastgood_to_s3,
@@ -4806,45 +4873,65 @@ def _generate_quant_picks_impl() -> dict:
         if _drip_missing:
             import threading as _drip_thr
             def _drip_warmer(_syms=_drip_missing):
+                """Background cache builder — uses 5-ticker batches (5x faster than
+                one-at-a-time at the same ~40 req/min rate). Each batch: download 5
+                tickers in one yfinance call (3s timeout per batch), 3s sleep between
+                batches. This fills LASTGOOD for the next scan cycle."""
                 import time as _drip_time, threading as _drip_thr_inner
                 from datetime import datetime as _drip_dt
                 _drip_time.sleep(5)  # brief pause after scan before starting drip
                 _deadline = _drip_time.time() + 1200  # 20-min cap
                 _added = 0
-                for _sym in _syms:
+                _DRIP_BATCH = 5
+                # Deduplicate and filter already-cached tickers
+                _todo = [s for s in dict.fromkeys(_syms) if s not in _PRICE_DATA_LASTGOOD]
+                for _i in range(0, len(_todo), _DRIP_BATCH):
                     if _drip_time.time() > _deadline:
                         break
-                    if _sym in _PRICE_DATA_LASTGOOD:
-                        continue  # already cached by another path
-                    _drip_time.sleep(1.5)  # polite: 40 req/min max
+                    _chunk = [s for s in _todo[_i:_i+_DRIP_BATCH]
+                               if s not in _PRICE_DATA_LASTGOOD]
+                    if not _chunk:
+                        continue
+                    _drip_time.sleep(3.0)  # 3s between batches → 5 tickers/3s = ~100/min (safe)
                     try:
-                        # Thread with timeout — prevents yfinance hangs blocking the drip
                         _drip_r = [None]
                         _drip_t = _drip_thr_inner.Thread(
-                            target=lambda r=_drip_r, s=_sym: r.__setitem__(
-                                0, yf.download(s, period="1y", progress=False)
+                            target=lambda r=_drip_r, c=_chunk: r.__setitem__(
+                                0, yf.download(c, period="1y", progress=False)
                             ),
                             daemon=True,
                         )
                         _drip_t.start()
-                        _drip_t.join(timeout=15)
-                        _df = _drip_r[0]
-                        if _df is None or _df.empty or len(_df) < 60:
+                        _drip_t.join(timeout=30)  # 30s for 5-ticker batch
+                        _df_batch = _drip_r[0]
+                        if _df_batch is None or _df_batch.empty:
                             continue
-                        if isinstance(_df.columns, pd.MultiIndex):
-                            if _sym in _df.columns.get_level_values(1):
-                                _df = _df.xs(_sym, axis=1, level=1)
-                            elif _sym in _df.columns.get_level_values(0):
-                                _df = _df[_sym]
-                            else:
-                                _df.columns = _df.columns.get_level_values(0)
-                        _df = _df.dropna(how="all")
-                        if "Close" in _df.columns:
-                            while len(_df) > 0 and pd.isna(_df["Close"].iloc[-1]):
-                                _df = _df.iloc[:-1]
-                        if len(_df) >= 60:
-                            _PRICE_DATA_LASTGOOD[_sym] = {"df": _df, "ts": _drip_dt.utcnow()}
-                            _added += 1
+                        # Extract each ticker from the batch result
+                        for _sym in _chunk:
+                            if _sym in _PRICE_DATA_LASTGOOD:
+                                continue
+                            try:
+                                if isinstance(_df_batch.columns, pd.MultiIndex):
+                                    lvl0 = _df_batch.columns.get_level_values(0)
+                                    lvl1 = _df_batch.columns.get_level_values(1)
+                                    if _sym in lvl1:
+                                        _df = _df_batch.xs(_sym, axis=1, level=1).dropna(how="all")
+                                    elif _sym in lvl0:
+                                        _df = _df_batch[_sym].dropna(how="all")
+                                    else:
+                                        continue
+                                elif len(_chunk) == 1:
+                                    _df = _df_batch.dropna(how="all")
+                                else:
+                                    continue
+                                if "Close" in _df.columns:
+                                    while len(_df) > 0 and pd.isna(_df["Close"].iloc[-1]):
+                                        _df = _df.iloc[:-1]
+                                if len(_df) >= 60:
+                                    _PRICE_DATA_LASTGOOD[_sym] = {"df": _df, "ts": _drip_dt.utcnow()}
+                                    _added += 1
+                            except Exception:
+                                continue
                     except Exception:
                         continue
                 if _added:
