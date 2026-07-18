@@ -81,9 +81,12 @@ def _load_lastgood_from_s3() -> None:
     Silent on any error — S3 unavailability must never break the scan."""
     global _PRICE_DATA_LASTGOOD
     try:
-        import boto3, pickle, io, os
+        import boto3, pickle, os
+        from botocore.config import Config as _BotoConfig
         _bucket = os.environ.get("DB_BACKUP_BUCKET", "epic-fury-portfolio-db")
-        s3 = boto3.client("s3", region_name="us-east-1")
+        # Short timeouts: startup must not hang if S3 is unreachable.
+        s3 = boto3.client("s3", region_name="us-east-1",
+                          config=_BotoConfig(connect_timeout=5, read_timeout=15))
         obj = s3.get_object(Bucket=_bucket, Key=_LASTGOOD_S3_KEY)
         data = pickle.loads(obj["Body"].read())
         if isinstance(data, dict) and data:
@@ -103,9 +106,11 @@ def _save_lastgood_to_s3() -> None:
     """Persist _PRICE_DATA_LASTGOOD to S3 after a successful scan.
     Called in a daemon thread so it never blocks the scan result."""
     try:
-        import boto3, pickle, io, os
+        import boto3, pickle, os
+        from botocore.config import Config as _BotoConfig
         _bucket = os.environ.get("DB_BACKUP_BUCKET", "epic-fury-portfolio-db")
-        s3 = boto3.client("s3", region_name="us-east-1")
+        s3 = boto3.client("s3", region_name="us-east-1",
+                          config=_BotoConfig(connect_timeout=5, read_timeout=60))
         payload = pickle.dumps(_PRICE_DATA_LASTGOOD, protocol=4)
         s3.put_object(
             Bucket=_bucket,
@@ -4646,7 +4651,12 @@ def _generate_quant_picks_impl() -> dict:
         # longer collapse the trading universe. Frames older than 14 days
         # are treated as stale and not used (avoid trading on month-old
         # data even if every fetch path is failing).
-        m = _missing()
+        # IMPORTANT: use QUANT_UNIVERSE directly (not _missing()) so that
+        # dead tickers excluded from _batch_universe still get their cache
+        # entries loaded. Without this, dead tickers with valid cached data
+        # would never appear in price_data and their fail streak would keep
+        # incrementing, making them permanently dead even when data exists.
+        m = [t for t in QUANT_UNIVERSE if t not in price_data]
         if m:
             from datetime import datetime as _dt_cache, timedelta as _td_cache
             stale_cutoff = _dt_cache.utcnow() - _td_cache(days=14)
@@ -4796,18 +4806,29 @@ def _generate_quant_picks_impl() -> dict:
         if _drip_missing:
             import threading as _drip_thr
             def _drip_warmer(_syms=_drip_missing):
-                import time as _dt
-                _dt.sleep(5)  # brief pause after scan before starting drip
-                _deadline = _dt.time() + 1200  # 20-min cap
+                import time as _drip_time, threading as _drip_thr_inner
+                from datetime import datetime as _drip_dt
+                _drip_time.sleep(5)  # brief pause after scan before starting drip
+                _deadline = _drip_time.time() + 1200  # 20-min cap
                 _added = 0
                 for _sym in _syms:
-                    if _dt.time() > _deadline:
+                    if _drip_time.time() > _deadline:
                         break
                     if _sym in _PRICE_DATA_LASTGOOD:
                         continue  # already cached by another path
-                    _dt.sleep(1.5)  # polite: 40 req/min max
+                    _drip_time.sleep(1.5)  # polite: 40 req/min max
                     try:
-                        _df = yf.download(_sym, period="1y", progress=False)
+                        # Thread with timeout — prevents yfinance hangs blocking the drip
+                        _drip_r = [None]
+                        _drip_t = _drip_thr_inner.Thread(
+                            target=lambda r=_drip_r, s=_sym: r.__setitem__(
+                                0, yf.download(s, period="1y", progress=False)
+                            ),
+                            daemon=True,
+                        )
+                        _drip_t.start()
+                        _drip_t.join(timeout=15)
+                        _df = _drip_r[0]
                         if _df is None or _df.empty or len(_df) < 60:
                             continue
                         if isinstance(_df.columns, pd.MultiIndex):
@@ -4822,8 +4843,7 @@ def _generate_quant_picks_impl() -> dict:
                             while len(_df) > 0 and pd.isna(_df["Close"].iloc[-1]):
                                 _df = _df.iloc[:-1]
                         if len(_df) >= 60:
-                            from datetime import datetime as _dt_drip
-                            _PRICE_DATA_LASTGOOD[_sym] = {"df": _df, "ts": _dt_drip.utcnow()}
+                            _PRICE_DATA_LASTGOOD[_sym] = {"df": _df, "ts": _drip_dt.utcnow()}
                             _added += 1
                     except Exception:
                         continue
