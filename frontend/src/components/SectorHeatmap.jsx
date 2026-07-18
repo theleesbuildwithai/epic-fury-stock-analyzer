@@ -74,7 +74,7 @@ export default function SectorHeatmap() {
           >
             <div className="text-sm font-bold opacity-90">{s.name}</div>
             <div className="text-2xl font-bold font-mono mt-1">
-              {s.change_pct >= 0 ? '+' : ''}{s.change_pct}%
+              {(s.change_pct ?? 0) >= 0 ? '+' : ''}{s.change_pct ?? 0}%
             </div>
             <div className="text-xs opacity-70 font-mono mt-1">{s.symbol} &middot; ${s.price}</div>
           </div>

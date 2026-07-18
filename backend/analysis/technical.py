@@ -523,28 +523,37 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
         tf_mean = adjusted_mean * days
         tf_std = blended_std * np.sqrt(days)
 
-        # Probability of going up (log return > 0)
-        prob_up = float(1 - norm.cdf(0, loc=tf_mean, scale=tf_std))
-        prob_down = 1 - prob_up
+        # Guard: if volatility is effectively zero (perfectly flat price history),
+        # norm.cdf/ppf raises ValueError("scale must be positive"). Return 50/50.
+        if tf_std <= 0:
+            prob_up = 0.5
+            prob_down = 0.5
+            prob_up_by = {}
+            prob_down_by = {}
+            bear_return = base_return = bull_return = 0.0
+        else:
+            # Probability of going up (log return > 0)
+            prob_up = float(1 - norm.cdf(0, loc=tf_mean, scale=tf_std))
+            prob_down = 1 - prob_up
 
-        # Probability of specific percentage moves
-        thresholds = [5, 10, 15, 20, 25] if days >= 60 else [5, 10, 15]
-        prob_up_by = {}
-        prob_down_by = {}
-        for pct in thresholds:
-            log_threshold = np.log(1 + pct / 100)
-            prob_up_by[f"+{pct}%"] = round(
-                float(1 - norm.cdf(log_threshold, loc=tf_mean, scale=tf_std)) * 100, 1
-            )
-            log_threshold_down = np.log(1 - pct / 100)
-            prob_down_by[f"-{pct}%"] = round(
-                float(norm.cdf(log_threshold_down, loc=tf_mean, scale=tf_std)) * 100, 1
-            )
+            # Probability of specific percentage moves
+            thresholds = [5, 10, 15, 20, 25] if days >= 60 else [5, 10, 15]
+            prob_up_by = {}
+            prob_down_by = {}
+            for pct in thresholds:
+                log_threshold = np.log(1 + pct / 100)
+                prob_up_by[f"+{pct}%"] = round(
+                    float(1 - norm.cdf(log_threshold, loc=tf_mean, scale=tf_std)) * 100, 1
+                )
+                log_threshold_down = np.log(1 - pct / 100)
+                prob_down_by[f"-{pct}%"] = round(
+                    float(norm.cdf(log_threshold_down, loc=tf_mean, scale=tf_std)) * 100, 1
+                )
 
-        # Price targets (percentile-based)
-        bear_return = float(norm.ppf(0.25, loc=tf_mean, scale=tf_std))
-        base_return = float(norm.ppf(0.50, loc=tf_mean, scale=tf_std))
-        bull_return = float(norm.ppf(0.75, loc=tf_mean, scale=tf_std))
+            # Price targets (percentile-based)
+            bear_return = float(norm.ppf(0.25, loc=tf_mean, scale=tf_std))
+            base_return = float(norm.ppf(0.50, loc=tf_mean, scale=tf_std))
+            bull_return = float(norm.ppf(0.75, loc=tf_mean, scale=tf_std))
 
         bear_price = round(current_price * np.exp(bear_return), 2)
         base_price = round(current_price * np.exp(base_return), 2)

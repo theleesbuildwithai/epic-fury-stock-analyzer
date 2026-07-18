@@ -2791,17 +2791,21 @@ def _send_daily_email_job():
     except Exception as e:
         logger.error(f"DAILY EMAIL: error — {e}")
 
-scheduler.add_job(
-    _send_daily_email_job,
-    "cron",
-    day_of_week="mon-fri",
-    hour=15,
-    minute=0,
-    id="daily_email_report",
-    name="Daily Performance Email (3:00 PM ET)",
-    max_instances=1,
-    misfire_grace_time=1800,
-)
+# DISABLED 2026-07-17: automatic daily email turned off per user request.
+# The send_daily_report() function and _send_daily_email_job() wrapper are
+# preserved so /api/admin/send-daily-report still works for manual on-demand sends.
+# To re-enable, uncomment the scheduler.add_job block below.
+# scheduler.add_job(
+#     _send_daily_email_job,
+#     "cron",
+#     day_of_week="mon-fri",
+#     hour=15,
+#     minute=0,
+#     id="daily_email_report",
+#     name="Daily Performance Email (3:00 PM ET)",
+#     max_instances=1,
+#     misfire_grace_time=1800,
+# )
 
 # --- HISTORICAL CALIBRATION (50-year pattern analysis) ---
 # Runs 15 min after startup and weekly on Sunday 8am.
