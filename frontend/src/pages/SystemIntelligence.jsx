@@ -251,7 +251,7 @@ function SectorBars({sectors}) {
 }
 
 function CorrelationHeatmap({matrix}) {
-  if (!matrix || !matrix.labels) return <div style={{color: '#888'}}>No correlation data</div>
+  if (!matrix || !matrix.labels || !matrix.matrix) return <div style={{color: '#888'}}>No correlation data</div>
   const cells = []
   matrix.matrix.forEach((row, i) => {
     row.forEach((v, j) => {
