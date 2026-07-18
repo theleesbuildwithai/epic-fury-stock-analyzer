@@ -65,7 +65,7 @@ _SCAN_RUNNING = False
 
 # Fundamentals cache — 24-hour TTL for yfinance .info data
 _fundamentals_cache = {}
-_PRICE_DATA_LASTGOOD: dict = {}  # per-ticker last-good price cache (14-day TTL), populated by generate_quant_picks()
+_PRICE_DATA_LASTGOOD: dict = {}  # per-ticker last-good price cache (30-day TTL), populated by generate_quant_picks()
 _FUNDAMENTALS_CACHE_TTL = 86400  # 24 hours
 
 # ── S3 persistence for _PRICE_DATA_LASTGOOD ──────────────────────────────────
@@ -4863,12 +4863,12 @@ def _generate_quant_picks_impl() -> dict:
 
         # ── BACKGROUND DRIP-FEED WARMER ───────────────────────────────────────
         # For tickers still missing after all 8 tiers + cache fallback,
-        # launch a daemon thread that slowly fetches them one-by-one (1.5s apart)
-        # and loads results into _PRICE_DATA_LASTGOOD. These won't help the
-        # CURRENT scan but will be available from cache for the NEXT scan cycle,
-        # ratcheting coverage higher with every pass.
-        # Safety: skips tickers already in LASTGOOD with fresh data, caps at
-        # 20 min total, and never runs concurrent with a live scan.
+        # launch a daemon thread that fetches them in 5-ticker batches (3s between
+        # batches) and loads results into _PRICE_DATA_LASTGOOD. These won't help
+        # the CURRENT scan but will be available from cache for the NEXT scan
+        # cycle, ratcheting coverage higher with every pass.
+        # Safety: skips tickers already in LASTGOOD, caps at 20 min total,
+        # and saves to S3 when done so new coverage persists across restarts.
         _drip_missing = [t for t in QUANT_UNIVERSE if t not in price_data and t not in _PRICE_DATA_LASTGOOD]
         if _drip_missing:
             import threading as _drip_thr
