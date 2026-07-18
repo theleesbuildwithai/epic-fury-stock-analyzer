@@ -89,11 +89,13 @@ export default function Watchlist() {
     // Refresh prices: every 30s during market hours, every 5 min outside
     const isMarketHours = () => {
       const now = new Date()
-      const etOffset = -4 // EDT
-      const utcHours = now.getUTCHours()
-      const etHours = (utcHours + etOffset + 24) % 24
-      const etMins = now.getUTCMinutes()
-      const t = etHours * 60 + etMins
+      // Use Intl API — auto-handles EDT (-4) vs EST (-5) DST switchover
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false,
+      }).formatToParts(now)
+      const h = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0')
+      const m = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0')
+      const t = h * 60 + m
       return t >= 570 && t <= 960 // 9:30am - 4:00pm ET
     }
 

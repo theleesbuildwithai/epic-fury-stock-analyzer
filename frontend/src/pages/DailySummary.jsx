@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 
 function getWatchlistTickers() {
   try {
@@ -262,7 +263,7 @@ export default function DailySummary() {
 
           {!data.watchlist_summary?.length && (
             <div className="bg-black border border-neutral-700 rounded-xl p-6 mb-6 text-center">
-              <p className="text-neutral-400">Add stocks to your <a href="/watchlist" className="text-white underline hover:text-neutral-300">Watchlist</a> to see a personalized summary here.</p>
+              <p className="text-neutral-400">Add stocks to your <Link to="/watchlist" className="text-white underline hover:text-neutral-300">Watchlist</Link> to see a personalized summary here.</p>
             </div>
           )}
 
