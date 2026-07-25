@@ -89,14 +89,15 @@ PAIRS_UNIVERSE = [
 ]
 
 # Trade gating thresholds — tuned conservatively to avoid false signals
-ENTRY_Z_THRESHOLD = 1.5          # was 2.0 — relaxed to fire more pairs trades (still statistically significant)
+ENTRY_Z_THRESHOLD = 2.0          # minimum |z-score| to enter (2-sigma = statistically significant)
 EXIT_Z_THRESHOLD = 0.3           # exit when spread reverts close to mean
 STOP_Z_THRESHOLD = 4.0           # cut losses if spread blows out further
 MAX_HALF_LIFE_DAYS = 25          # ignore pairs that take too long to revert
-MIN_CORRELATION = 0.60           # was 0.70 — relaxed to allow more sector pairs through
+MIN_CORRELATION = 0.70           # require strong sector correlation to filter noise
 MIN_DATA_POINTS = 100            # need at least 100 daily bars
 ADF_PVALUE_THRESHOLD = 0.05      # spread must be stationary at p < 0.05
 ADF_PVALUE_FALLBACK = 0.02       # stricter when statsmodels unavailable
+MAX_PAIRS_PER_SCAN = 5           # cap simultaneous pair signals — prevents overtrading
 
 # Cache to avoid hammering Yahoo Finance
 _pairs_cache = {"data": None, "time": 0.0, "last_good": None}
@@ -392,6 +393,17 @@ def scan_pairs() -> list:
         return _pairs_cache["data"]
 
     try:
+        # VIX crisis gate — in extreme volatility, historical correlations break
+        # and pairs spreads don't mean-revert. Disable entirely above VIX 35.
+        try:
+            from analytics.vix_guard import get_vix_safe
+            _vix_val = float((get_vix_safe() or {}).get("value") or 20.0)
+            if _vix_val > 35.0:
+                logger.info(f"pairs_engine: VIX {_vix_val:.1f} > 35 (crisis) — pairs disabled, correlations unreliable")
+                return _pairs_cache.get("last_good") or []
+        except Exception as _vg_e:
+            logger.debug(f"pairs_engine VIX gate soft-fail: {_vg_e}")
+
         prices = _fetch_universe_prices()
         if not prices:
             logger.info("pairs_engine: no price data fetched, returning last-good cache")
@@ -409,8 +421,9 @@ def scan_pairs() -> list:
                 logger.debug(f"pairs_engine analyze failed {sym_a}/{sym_b}: {e}")
                 continue
 
-        # Sort by absolute z-score, strongest first
+        # Sort by absolute z-score, strongest first; cap to avoid overtrading
         signals.sort(key=lambda s: abs(s["z_score"]), reverse=True)
+        signals = signals[:MAX_PAIRS_PER_SCAN]
 
         _pairs_cache["data"] = signals
         _pairs_cache["time"] = now

@@ -82,7 +82,7 @@ def check_sector_cooldown(sector: str, direction: str, confidence: int) -> tuple
 _recent_opens = deque()  # (timestamp, symbol) tuples
 _opens_lock = Lock()
 RAPID_FIRE_WINDOW_MIN = 60
-RAPID_FIRE_MAX_OPENS = 8
+RAPID_FIRE_MAX_OPENS = 4
 
 
 def record_open(symbol: str):
@@ -146,7 +146,7 @@ def options_timing_ok() -> tuple:
 # If the system is generating picks with confidence < 30, something is wrong
 # with the signal — don't trade noise.
 
-CONFIDENCE_FLOOR = 30
+CONFIDENCE_FLOOR = 55
 
 
 def check_confidence_floor(confidence: int) -> tuple:
