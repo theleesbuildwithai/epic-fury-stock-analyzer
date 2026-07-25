@@ -6924,12 +6924,26 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # ── Prefetch fundamentals for all STB candidates ─────────────────────────
     # _fundamentals_cache is already warmed for most symbols by score_quant_picks().
     # This fills any gaps (lastgood-only symbols) using the same shared cache.
-    _all_stb_syms = [
-        (p.get("ticker") or p.get("symbol") or "") for p in quant_longs
-    ] + list(lastgood_stocks.keys())
+    #
+    # COLD-START GUARD (2026-07-24): On cold deploy the fundamentals cache is empty
+    # and _prefetch_fundamentals() calls _throttle() + 5s yf.Ticker().info for EACH
+    # symbol sequentially. With 150+ symbols that is 150 × 8s = 20 minutes, far
+    # exceeding the 8-minute stuck-flag window and blocking the STB indefinitely.
+    # Fix: on cold start only fetch fundamentals for the quant longs (≤20 symbols,
+    # ~160s). The lastgood supplement stocks score fine on price history alone;
+    # the quality bonus they miss is small (0-20 pts of 158). On warm deploys the
+    # fundamentals cache is already populated so the full list is instant anyway.
+    if _is_cold_start:
+        _all_stb_syms = [
+            (p.get("ticker") or p.get("symbol") or "") for p in quant_longs
+        ]
+    else:
+        _all_stb_syms = [
+            (p.get("ticker") or p.get("symbol") or "") for p in quant_longs
+        ] + list(lastgood_stocks.keys())
     _all_stb_syms = [s for s in _all_stb_syms if s]
     _stb_fundamentals = _prefetch_fundamentals(_all_stb_syms) if _all_stb_syms else {}
-    logger.info(f"STB FUNDAMENTALS: fetched data for {len(_stb_fundamentals)}/{len(_all_stb_syms)} symbols")
+    logger.info(f"STB FUNDAMENTALS: fetched data for {len(_stb_fundamentals)}/{len(_all_stb_syms)} symbols (cold_start={_is_cold_start})")
 
     # Score quant picks using their pre-computed quant data
     for p in quant_longs:
