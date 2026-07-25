@@ -5344,6 +5344,12 @@ def _generate_quant_picks_impl() -> dict:
 
         # RENTECH: Run full Renaissance Technologies analysis suite
         rentech_data = {}
+        # Initialize TACO sector sets before the try block so the return
+        # statement at the end of this function can always reference them,
+        # even when run_rentech_analysis() throws and the except fires before
+        # these variables are assigned inside the try block.
+        TACO_PROTECTED_LONG_SECTORS = set()
+        TACO_PENALIZED_SECTORS = set()
         try:
             # Get open trades for portfolio risk assessment
             try:
