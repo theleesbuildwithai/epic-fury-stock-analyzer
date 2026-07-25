@@ -49,8 +49,8 @@ def _collect_report_data() -> dict:
         today_str  = date.today().isoformat()
         all_closed = get_closed_trades(limit=500) or []
         closed_today = [t for t in all_closed
-                        if (t.get("closed_at") or "").startswith(today_str)]
-        data["today_pnl"]    = sum(float(t.get("pnl") or t.get("realized_pnl") or 0)
+                        if (t.get("exit_date") or "").startswith(today_str)]
+        data["today_pnl"]    = sum(float(t.get("pnl_dollars") or 0)
                                    for t in closed_today)
         data["closed_count"] = len(closed_today)
     except Exception as e:
