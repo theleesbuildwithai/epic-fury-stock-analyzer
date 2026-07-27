@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 
 // SYMBOLS TO BUY — Fundamental long-term picks (6-12 week holds).
@@ -375,6 +375,10 @@ export default function SymbolsToBuy() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [retryCountdown, setRetryCountdown] = useState(null)
+  const [retryTick, setRetryTick] = useState(0)
+  const retryTimerRef = useRef(null)
+  const countdownRef = useRef(null)
   const [cash, setCash] = useState(() => {
     try {
       const stored = localStorage.getItem('stb_cash')
@@ -398,7 +402,7 @@ export default function SymbolsToBuy() {
       const res = await fetch(`/api/symbols-to-buy${force ? '?force_refresh=true' : ''}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const j = await res.json()
-      if (!j.ok && j.reason && j.reason !== 'warming_up') throw new Error(j.message || j.reason)
+      if (!j.ok && j.reason && j.reason !== 'warming_up' && j.reason !== 'no_picks_yet') throw new Error(j.message || j.reason)
       setData(j)
     } catch (e) {
       setError(e.message)
@@ -409,6 +413,48 @@ export default function SymbolsToBuy() {
   }
 
   useEffect(() => { load(false) }, [])
+
+  // Auto-retry every 45s when picks haven't loaded yet (warming_up / no_picks_yet).
+  // Without this, users who land on the page during cold-start see the warming_up
+  // message forever and must manually click Force Refresh.
+  useEffect(() => {
+    const notReady = data && data.ok === false
+    if (!notReady) {
+      // Picks loaded — clear any pending retry timers
+      if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null }
+      if (countdownRef.current)  { clearInterval(countdownRef.current);  countdownRef.current  = null }
+      setRetryCountdown(null)
+      return
+    }
+    // Start a 45-second countdown then retry silently
+    const RETRY_SECS = 45
+    setRetryCountdown(RETRY_SECS)
+    countdownRef.current = setInterval(() => {
+      setRetryCountdown(prev => (prev != null && prev > 1 ? prev - 1 : null))
+    }, 1000)
+    retryTimerRef.current = setTimeout(() => {
+      if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null }
+      setRetryCountdown(null)
+      // Silent refresh: show "Refreshing…" on the button but keep existing content visible
+      setRefreshing(true)
+      fetch('/api/symbols-to-buy')
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+        .then(j => {
+          if (!j.ok && j.reason && j.reason !== 'warming_up' && j.reason !== 'no_picks_yet') {
+            throw new Error(j.message || j.reason)
+          }
+          setData(j)
+          // If still not ready, bump tick so the effect re-fires for another cycle
+          if (!j.ok) setRetryTick(t => t + 1)
+        })
+        .catch(e => setError(e.message))
+        .finally(() => setRefreshing(false))
+    }, RETRY_SECS * 1000)
+    return () => {
+      if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null }
+      if (countdownRef.current)  { clearInterval(countdownRef.current);  countdownRef.current  = null }
+    }
+  }, [data?.ok, data?.reason, retryTick])
 
   const cacheMinutes = data?.cache_age_seconds != null
     ? Math.round(data.cache_age_seconds / 60)
@@ -481,13 +527,32 @@ export default function SymbolsToBuy() {
         </div>
       )}
 
-      {error && !loading && (
-        <div className="bg-red-900/30 border border-red-700 rounded-lg p-4 text-red-300 mb-6">
-          {error}
+      {/* Warming-up banner — shown while backend scan is still running */}
+      {data && data.ok === false && !loading && (
+        <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-8 text-center mb-4">
+          <div className="text-amber-300 font-bold text-lg mb-2">Fundamental scan running…</div>
+          <div className="text-amber-200/70 text-sm mb-3">
+            {data.message || 'Picks will appear automatically when the scan completes.'}
+          </div>
+          {retryCountdown != null && (
+            <div className="text-neutral-500 text-xs">
+              Auto-refreshing in <span className="text-amber-400 font-mono font-bold">{retryCountdown}s</span>
+            </div>
+          )}
         </div>
       )}
 
-      {data && !loading && (
+      {error && !loading && (
+        <div className="bg-red-900/30 border border-red-700 rounded-lg p-4 text-red-300 mb-6">
+          {error}
+          <button
+            onClick={() => { setError(null); load(false) }}
+            className="ml-4 text-xs underline text-red-400 hover:text-red-200"
+          >Retry</button>
+        </div>
+      )}
+
+      {data && data.ok !== false && !loading && (
         <div className="space-y-6">
           {data.guidance && (
             <div className="bg-blue-950/20 border border-blue-800/40 rounded-lg px-4 py-3 text-sm text-blue-200">
