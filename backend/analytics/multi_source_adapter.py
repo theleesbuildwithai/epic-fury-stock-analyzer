@@ -29,6 +29,8 @@ import time
 import logging
 import threading
 import re
+import gzip
+import zlib
 import urllib.request
 import urllib.parse
 from typing import Optional
@@ -44,7 +46,10 @@ _BROWSER_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Only advertise encodings the stdlib can actually decode. Brotli ("br") is
+    # NOT decodable without a third-party package, so requesting it silently
+    # yielded unparseable compressed bytes (broke finviz/stockanalysis scrapes).
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
 }
 _JSON_HEADERS = {
@@ -71,12 +76,33 @@ def _run_with_timeout(fn, timeout: int = 12):
     return result[0]
 
 
+def _decompress(raw: bytes, content_encoding: str) -> bytes:
+    """Decompress a response body per its Content-Encoding. Falls back to the
+    raw bytes if decoding fails (never raises)."""
+    if not raw or not content_encoding:
+        return raw
+    enc = content_encoding.lower().strip()
+    try:
+        if enc == "gzip":
+            return gzip.decompress(raw)
+        if enc == "deflate":
+            try:
+                return zlib.decompress(raw)
+            except zlib.error:
+                # Raw deflate stream (no zlib header)
+                return zlib.decompress(raw, -zlib.MAX_WBITS)
+    except Exception as e:
+        logger.debug(f"MultiSource _decompress failed ({enc}): {e}")
+    return raw
+
+
 def _http_get(url: str, headers: dict = None, timeout: int = _HTTP_TIMEOUT) -> Optional[bytes]:
-    """Simple urllib GET. Returns raw bytes or None."""
+    """Simple urllib GET. Returns decoded (decompressed) bytes or None."""
     try:
         req = urllib.request.Request(url, headers=headers or _BROWSER_HEADERS)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
+            raw = resp.read()
+            return _decompress(raw, resp.headers.get("Content-Encoding", ""))
     except Exception as e:
         logger.debug(f"MultiSource _http_get failed ({url[:80]}): {e}")
         return None

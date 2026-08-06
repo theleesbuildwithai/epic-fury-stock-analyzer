@@ -3,15 +3,15 @@ News Sentiment Engine v2 — Institutional-grade news intelligence.
 
 Upgrades over v1:
   - WEIGHTED keyword scoring (crash = -3, decline = -1)
-  - Reuters RSS feeds for breaking geopolitical/military news
   - Tariff/trade war specific intelligence layer
   - Recency weighting (newer headlines score higher)
   - Multi-source confirmation (same story from 2+ sources = stronger signal)
   - Sector-specific sentiment tracking
-  - 8 CNN feeds covering world, politics, Middle East, Asia, Europe
+  - 7 CNN feeds covering markets, world, politics, Middle East, Asia, Europe
   - Bloomberg RSS for financial markets
 
-All data from approved sources: Yahoo Finance, CNN, CNBC, Reuters, Bloomberg.
+All data from approved live sources: Yahoo Finance, CNN, CNBC, Bloomberg.
+(Reuters public RSS was retired by Reuters — feeds.reuters.com no longer resolves.)
 """
 
 import urllib.request
@@ -365,8 +365,8 @@ def _is_relevant_to_ticker(title, ticker, company_name=""):
 # ============================================================
 def get_market_news():
     """
-    Fetch latest market news from Yahoo Finance, CNN (8 feeds), CNBC,
-    Reuters, and Bloomberg RSS feeds.
+    Fetch latest market news from Yahoo Finance, CNN (7 feeds), CNBC,
+    and Bloomberg RSS feeds.
     Returns headlines with weighted sentiment scores and recency.
     """
     cache_key = "market_news"
@@ -387,16 +387,19 @@ def get_market_news():
             item["source"] = "Yahoo Finance"
             all_headlines.append(item)
 
-    # CNN RSS — 8 feeds covering business, world, politics, regions
+    # CNN RSS — 7 feeds covering markets, world, politics, regions.
+    # NOTE: rss.cnn.com (Google FeedProxy) no longer serves a valid TLS cert, so
+    # https handshakes fail. The plain-http endpoints still return live items and
+    # are safe here (public headlines only). money_latest.rss was dropped — it is
+    # effectively dead (returns a single stale item).
     cnn_feeds = [
-        "https://rss.cnn.com/rss/money_latest.rss",
-        "https://rss.cnn.com/rss/money_markets.rss",
-        "https://rss.cnn.com/rss/edition_world.rss",
-        "https://rss.cnn.com/rss/cnn_allpolitics.rss",
-        "https://rss.cnn.com/rss/cnn_topstories.rss",
-        "https://rss.cnn.com/rss/edition_meast.rss",
-        "https://rss.cnn.com/rss/edition_asia.rss",
-        "https://rss.cnn.com/rss/edition_europe.rss",
+        "http://rss.cnn.com/rss/money_markets.rss",
+        "http://rss.cnn.com/rss/edition_world.rss",
+        "http://rss.cnn.com/rss/cnn_allpolitics.rss",
+        "http://rss.cnn.com/rss/cnn_topstories.rss",
+        "http://rss.cnn.com/rss/edition_meast.rss",
+        "http://rss.cnn.com/rss/edition_asia.rss",
+        "http://rss.cnn.com/rss/edition_europe.rss",
     ]
     for feed_url in cnn_feeds:
         items = _fetch_rss(feed_url)
@@ -416,17 +419,9 @@ def get_market_news():
             item["source"] = "CNBC"
             all_headlines.append(item)
 
-    # Reuters RSS (top news + world)
-    reuters_feeds = [
-        "https://feeds.reuters.com/reuters/topNews",
-        "https://feeds.reuters.com/reuters/worldNews",
-        "https://feeds.reuters.com/reuters/businessNews",
-    ]
-    for feed_url in reuters_feeds:
-        items = _fetch_rss(feed_url)
-        for item in items[:10]:
-            item["source"] = "Reuters"
-            all_headlines.append(item)
+    # Reuters RSS retired: feeds.reuters.com no longer resolves (NXDOMAIN).
+    # Reuters discontinued its public RSS feeds, so these are removed rather than
+    # left as dead calls that always return nothing.
 
     # Bloomberg RSS
     bloomberg_feeds = [
