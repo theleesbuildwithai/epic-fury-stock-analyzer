@@ -91,11 +91,46 @@ function formatPct(v) {
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
 }
 
+// Carry an STB pick into the Watchlist with its entry/stop/target intact, so the
+// Watchlist can fire SELL alerts against the exact levels the pick was built on.
+// Writes the same localStorage schema Watchlist.jsx reads; it refreshes the live
+// price on mount. Returns 'added' | 'exists' | 'error'.
+function addPickToWatchlist(pick) {
+  try {
+    const KEY = 'sentinel_quant_watchlist'
+    const ticker = String(pick.ticker || '').trim().toUpperCase()
+    if (!ticker) return 'error'
+    let list = []
+    try {
+      const raw = localStorage.getItem(KEY)
+      const parsed = raw ? JSON.parse(raw) : []
+      if (Array.isArray(parsed)) list = parsed
+    } catch { list = [] }
+    if (list.some(s => s && String(s.ticker).toUpperCase() === ticker)) return 'exists'
+    const num = v => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null)
+    const entry = num(pick.entry_price)
+    list.push({
+      ticker,
+      name: pick.company_name || pick.name || ticker,
+      entry_price: entry ?? 0,
+      shares: null,
+      stop_loss: num(pick.stop_loss),
+      target_price: num(pick.target_price),
+      current_price: entry ?? 0,
+      added_at: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+    })
+    localStorage.setItem(KEY, JSON.stringify(list))
+    return 'added'
+  } catch { return 'error' }
+}
+
 function PickSummaryCard({ pick, side }) {
   if (!pick) return null
   const isLong = side === 'long'
   const dirColor = isLong ? 'text-emerald-300' : 'text-rose-300'
   const dirBg = isLong ? 'from-emerald-950/30 to-emerald-900/10 border-emerald-700/40' : 'from-rose-950/30 to-rose-900/10 border-rose-700/40'
+  const [wlState, setWlState] = useState(null) // null | 'added' | 'exists' | 'error'
 
   return (
     <div className={`bg-gradient-to-br ${dirBg} border rounded-xl p-6 mb-6`}>
@@ -195,6 +230,36 @@ function PickSummaryCard({ pick, side }) {
           </div>
         )}
       </div>
+
+      {isLong && (
+        <div className="mt-5">
+          <button
+            onClick={() => setWlState(addPickToWatchlist(pick))}
+            disabled={wlState === 'added' || wlState === 'exists'}
+            className={`w-full px-4 py-3 rounded-lg font-bold text-sm transition-colors ${
+              wlState === 'added'
+                ? 'bg-emerald-600/20 border border-emerald-600/50 text-emerald-300 cursor-default'
+                : wlState === 'exists'
+                ? 'bg-neutral-800 border border-neutral-700 text-neutral-400 cursor-default'
+                : wlState === 'error'
+                ? 'bg-rose-600/20 border border-rose-600/50 text-rose-300 hover:bg-rose-600/30'
+                : 'bg-white text-black hover:bg-neutral-200'
+            }`}
+          >
+            {wlState === 'added'
+              ? '✓ Added to watchlist — stop & target carried over'
+              : wlState === 'exists'
+              ? 'Already in your watchlist'
+              : wlState === 'error'
+              ? 'Could not add — try again'
+              : 'Add to watchlist (buy this pick)'}
+          </button>
+          <p className="text-[11px] text-neutral-500 mt-2 text-center">
+            Adds {pick.ticker} with the entry, stop {formatPrice(pick.stop_loss)} & target {formatPrice(pick.target_price)} above.
+            Watchlist will alert you to SELL when price hits either level.
+          </p>
+        </div>
+      )}
 
       <div className="mt-5 px-3 py-2 bg-amber-950/20 border border-amber-800/30 rounded text-xs text-amber-200">
         <span className="font-bold">No day trading.</span> Hold this position 3-5 days minimum. Best

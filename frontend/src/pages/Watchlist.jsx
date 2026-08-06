@@ -43,6 +43,53 @@ function fmtDate(v) {
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString()
 }
 
+// ─── Sell-signal engine (LONG positions) ──────────────────────────────────────
+// Correlates a holding with its STB stop/target levels + the QHF signal to
+// produce a clear HOLD / SELL verdict — so "when it says sell, you sell".
+// Long-only, matching the buy-a-pick-then-hold workflow. Every branch is
+// null-guarded; missing levels simply yield a neutral verdict.
+const TONE = {
+  emerald: { text: 'text-emerald-300', border: 'border-emerald-600/60', ring: 'border-l-emerald-500', bg: 'bg-emerald-950/30', dot: 'bg-emerald-400' },
+  rose:    { text: 'text-rose-300',    border: 'border-rose-600/60',    ring: 'border-l-rose-500',    bg: 'bg-rose-950/30',    dot: 'bg-rose-400' },
+  amber:   { text: 'text-amber-300',   border: 'border-amber-600/60',   ring: 'border-l-amber-500',   bg: 'bg-amber-950/30',   dot: 'bg-amber-400' },
+  neutral: { text: 'text-neutral-400', border: 'border-neutral-800/60', ring: 'border-l-transparent', bg: '',                 dot: 'bg-neutral-600' },
+}
+function pctBetween(from, to) {
+  if (!(from > 0) || !(to > 0)) return null
+  return ((to - from) / from) * 100
+}
+function computeAction(stock, qhf) {
+  const px   = Number(stock.current_price) || 0
+  const stop = Number(stock.stop_loss)     || 0
+  const tgt  = Number(stock.target_price)  || 0
+  const hasLevels  = stop > 0 || tgt > 0
+  const qhfBearish = !!(qhf && qhf.direction === 'SHORT')
+
+  if (px > 0 && tgt > 0 && px >= tgt)
+    return { status: 'target', label: 'SELL · TARGET HIT', tone: 'emerald',
+      detail: `Live ${fmtPrice(px)} reached target ${fmtPrice(tgt)} — take profit.` }
+  if (px > 0 && stop > 0 && px <= stop)
+    return { status: 'stop', label: 'SELL · STOP HIT', tone: 'rose',
+      detail: `Live ${fmtPrice(px)} hit stop ${fmtPrice(stop)} — cut the loss.` }
+
+  const dTgt  = px > 0 && tgt  > 0 ? pctBetween(px, tgt)  : null   // +% remaining to target
+  const dStop = px > 0 && stop > 0 ? pctBetween(px, stop) : null   // −% cushion above stop
+  if (dTgt != null && dTgt >= 0 && dTgt <= 2)
+    return { status: 'near_target', label: 'NEAR TARGET', tone: 'emerald',
+      detail: `Only ${dTgt.toFixed(1)}% from target ${fmtPrice(tgt)} — watch to take profit.` }
+  if (dStop != null && dStop <= 0 && dStop >= -2)
+    return { status: 'near_stop', label: 'NEAR STOP', tone: 'rose',
+      detail: `Only ${Math.abs(dStop).toFixed(1)}% above stop ${fmtPrice(stop)} — watch closely.` }
+  if (qhfBearish)
+    return { status: 'review', label: 'REVIEW · QHF SHORT', tone: 'amber',
+      detail: 'Quant model turned bearish on a long you hold — consider trimming.' }
+  if (hasLevels)
+    return { status: 'hold', label: 'HOLD', tone: 'neutral',
+      detail: 'Between stop and target — let the position work.' }
+  return { status: 'none', label: '', tone: 'neutral', detail: '' }
+}
+const ACTION_NEEDED = new Set(['target', 'stop', 'near_target', 'near_stop', 'review'])
+
 // ─── Market-hours check ───────────────────────────────────────────────────────
 function isMarketHours() {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -156,6 +203,8 @@ export default function Watchlist() {
   const [addTicker, setAddTicker]       = useState('')
   const [addEntryPx, setAddEntryPx]     = useState('')
   const [addShares, setAddShares]       = useState('')
+  const [addStop, setAddStop]           = useState('')
+  const [addTarget, setAddTarget]       = useState('')
   const [adding, setAdding]             = useState(false)
   const [suggestions, setSuggestions]   = useState([])
   const [showSugg, setShowSugg]         = useState(false)
@@ -265,10 +314,16 @@ export default function Watchlist() {
       const entryPx = Number.isFinite(typedEntry) && typedEntry > 0 ? typedEntry : livePrice
       const typedShares = parseFloat(addShares)
       const shares  = Number.isFinite(typedShares) && typedShares > 0 ? typedShares : null
+      const typedStop = parseFloat(addStop)
+      const stopLoss  = Number.isFinite(typedStop) && typedStop > 0 ? round(typedStop, 2) : null
+      const typedTgt  = parseFloat(addTarget)
+      const target    = Number.isFinite(typedTgt) && typedTgt > 0 ? round(typedTgt, 2) : null
       const newStock = {
         ticker, name: stockName,
         entry_price: round(entryPx, 2),
         shares: shares,
+        stop_loss: stopLoss,
+        target_price: target,
         current_price: livePrice,
         added_at: new Date().toISOString(),
         last_updated: new Date().toISOString(),
@@ -279,6 +334,8 @@ export default function Watchlist() {
       setAddTicker('')
       setAddEntryPx('')
       setAddShares('')
+      setAddStop('')
+      setAddTarget('')
     } catch {}
     setAdding(false)
   }
@@ -330,6 +387,12 @@ export default function Watchlist() {
   const totalVal     = watchlist.reduce((sum, s) => sum + (s.shares > 0 ? (s.current_price || 0) * s.shares : 0), 0)
   const totalPnl     = totalVal - totalCost
   const totalPnlPct  = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0
+
+  // Sell-signal alerts across all holdings (correlates STB stop/target + QHF).
+  const actionable = watchlist
+    .map(s => ({ stock: s, action: computeAction(s, quantSignals[s.ticker] || null) }))
+    .filter(x => ACTION_NEEDED.has(x.action.status))
+  const sellNow = actionable.filter(x => x.action.status === 'target' || x.action.status === 'stop')
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -424,6 +487,34 @@ export default function Watchlist() {
             />
           </div>
 
+          {/* Stop loss */}
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-rose-400/80 block mb-1">Stop loss</label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 text-sm">$</span>
+              <input type="number" min="0" step="0.01" value={addStop}
+                onChange={e => setAddStop(e.target.value)}
+                placeholder="optional"
+                className="w-28 pl-6 pr-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm font-mono
+                           focus:outline-none focus:border-rose-600 placeholder-neutral-600"
+              />
+            </div>
+          </div>
+
+          {/* Target */}
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-emerald-400/80 block mb-1">Target</label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 text-sm">$</span>
+              <input type="number" min="0" step="0.01" value={addTarget}
+                onChange={e => setAddTarget(e.target.value)}
+                placeholder="optional"
+                className="w-28 pl-6 pr-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm font-mono
+                           focus:outline-none focus:border-emerald-600 placeholder-neutral-600"
+              />
+            </div>
+          </div>
+
           <button
             onClick={() => { if (addTicker.trim()) addStock(addTicker.trim()) }}
             disabled={adding || !addTicker.trim()}
@@ -432,8 +523,8 @@ export default function Watchlist() {
           >
             {adding ? 'Adding…' : 'Add'}
           </button>
-          <p className="text-[11px] text-neutral-600 self-center">
-            Leave entry price blank to use today's price. Shares optional but required for P&amp;L.
+          <p className="text-[11px] text-neutral-600 self-center max-w-[16rem]">
+            Blank entry = today's price. Add the STB stop &amp; target to get automatic SELL alerts.
           </p>
         </div>
       </div>
@@ -577,6 +668,38 @@ export default function Watchlist() {
         </div>
       )}
 
+      {/* Sell-signal alerts — the STB↔Watchlist correlation surface */}
+      {actionable.length > 0 && (
+        <div className={`rounded-xl border p-4 mb-6 ${sellNow.length > 0 ? 'bg-amber-950/25 border-amber-700/50' : 'bg-neutral-900/50 border-neutral-800/60'}`}>
+          <div className="flex items-center gap-2 mb-3">
+            <span className={`w-2 h-2 rounded-full ${sellNow.length > 0 ? 'bg-amber-400 animate-pulse' : 'bg-neutral-500'}`} />
+            <p className="text-sm font-bold text-white">
+              {sellNow.length > 0
+                ? `${sellNow.length} holding${sellNow.length > 1 ? 's' : ''} hit a SELL level`
+                : `${actionable.length} holding${actionable.length > 1 ? 's' : ''} to watch`}
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            {actionable.map(({ stock, action }) => {
+              const tone = TONE[action.tone] || TONE.neutral
+              return (
+                <button
+                  key={stock.ticker}
+                  onClick={() => setExpanded(stock.ticker)}
+                  className="w-full flex items-center gap-3 text-left px-3 py-1.5 rounded-lg hover:bg-neutral-800/40 transition-colors"
+                >
+                  <span className={`text-[10px] font-black px-2 py-0.5 rounded border ${tone.bg} ${tone.border} ${tone.text} shrink-0`}>
+                    {action.label}
+                  </span>
+                  <span className="font-mono font-bold text-white text-sm shrink-0">{stock.ticker}</span>
+                  <span className="text-xs text-neutral-400 truncate">{action.detail}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Holdings list */}
       {watchlist.length > 0 ? (
         <div className="space-y-3">
@@ -604,18 +727,27 @@ export default function Watchlist() {
             const pnlPct    = costBasis > 0 ? ((px - entry) / entry) * 100 : null
             const pnlColor  = pnlDollar == null ? 'text-neutral-500' : pnlDollar >= 0 ? 'text-emerald-400' : 'text-rose-400'
             const dayChgPct = entry > 0 ? ((px - entry) / entry) * 100 : null
+            const action    = computeAction(stock, qhf)
+            const tone      = TONE[action.tone] || TONE.neutral
+            const flagged   = ACTION_NEEDED.has(action.status)
 
             return (
-              <div key={stock.ticker} className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
+              <div key={stock.ticker} className={`bg-neutral-900/40 border border-neutral-800/60 border-l-4 ${flagged ? tone.ring : 'border-l-transparent'} rounded-xl overflow-hidden`}>
                 {/* Main row */}
                 <div
                   className="grid grid-cols-12 gap-2 items-center px-5 py-4 cursor-pointer hover:bg-neutral-800/30 transition-colors"
                   onClick={() => setExpanded(isExp ? null : stock.ticker)}
                 >
-                  {/* Ticker + Name */}
+                  {/* Ticker + Name + action pill */}
                   <div className="col-span-2 min-w-0">
                     <div className="font-mono font-bold text-white text-sm">{stock.ticker}</div>
-                    {stock.name && <div className="text-neutral-500 text-[10px] truncate">{stock.name}</div>}
+                    {flagged ? (
+                      <span className={`inline-block mt-0.5 text-[9px] font-black px-1.5 py-0.5 rounded border ${tone.bg} ${tone.border} ${tone.text}`}>
+                        {action.label}
+                      </span>
+                    ) : (
+                      stock.name && <div className="text-neutral-500 text-[10px] truncate">{stock.name}</div>
+                    )}
                   </div>
 
                   {/* Live price */}
@@ -687,6 +819,16 @@ export default function Watchlist() {
                 {/* Expanded panel */}
                 {isExp && (
                   <div className="border-t border-neutral-800/60 px-5 py-4 bg-neutral-950/40">
+                    {/* Recommended action — the sell/hold verdict */}
+                    {action.status !== 'none' && (
+                      <div className={`mb-4 rounded-lg border px-4 py-3 ${tone.bg || 'bg-neutral-900/40'} ${tone.border}`}>
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${tone.dot}`} />
+                          <span className={`text-sm font-black ${tone.text}`}>{action.label || 'HOLD'}</span>
+                        </div>
+                        <p className="text-xs text-neutral-300 mt-1">{action.detail}</p>
+                      </div>
+                    )}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {/* Position details */}
                       <div>
@@ -703,6 +845,28 @@ export default function Watchlist() {
                           <div className="flex justify-between">
                             <span className="text-neutral-500">Shares</span>
                             <span className="font-mono text-neutral-300">{shares > 0 ? shares : '—'}</span>
+                          </div>
+                          <div className="flex justify-between items-center" onClick={e => e.stopPropagation()}>
+                            <span className="text-rose-400/80">Stop loss</span>
+                            <span className="font-mono text-rose-200 flex items-center gap-2">
+                              {stock.stop_loss > 0 && px > 0 && (
+                                <span className="text-[10px] text-neutral-500">
+                                  {pctBetween(px, stock.stop_loss)?.toFixed(1)}%
+                                </span>
+                              )}
+                              <InlineEdit value={stock.stop_loss || null} onSave={v => updateField(stock.ticker, 'stop_loss', v)} prefix="$" />
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center" onClick={e => e.stopPropagation()}>
+                            <span className="text-emerald-400/80">Target</span>
+                            <span className="font-mono text-emerald-200 flex items-center gap-2">
+                              {stock.target_price > 0 && px > 0 && (
+                                <span className="text-[10px] text-neutral-500">
+                                  +{pctBetween(px, stock.target_price)?.toFixed(1)}%
+                                </span>
+                              )}
+                              <InlineEdit value={stock.target_price || null} onSave={v => updateField(stock.ticker, 'target_price', v)} prefix="$" />
+                            </span>
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-500">Cost basis</span>
