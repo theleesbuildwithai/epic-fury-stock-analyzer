@@ -165,15 +165,36 @@ export default function Watchlist() {
   const [backtestLoading, setBtLoading] = useState(false)
   const [showBacktest, setShowBacktest] = useState(false)
 
+  const refreshingAllRef = useRef(false)
+
+  // ── Rate-limit-safe refresh: sequential, staggered, non-overlapping ─────────
+  // Firing N parallel /api/quote calls (mount + every interval) risks tripping
+  // Yahoo's rate limits on a cold backend cache. Instead we walk the tickers one
+  // at a time with a small gap, and skip a cycle if the previous one is still running.
+  async function refreshAll(tickers) {
+    if (refreshingAllRef.current) return
+    const list = (tickers || []).filter(t => typeof t === 'string' && t)
+    if (!list.length) return
+    refreshingAllRef.current = true
+    try {
+      for (const t of list) {
+        await refreshPrice(t)
+        if (list.length > 1) await new Promise(r => setTimeout(r, 250))
+      }
+    } finally {
+      refreshingAllRef.current = false
+    }
+  }
+
   // ── Mount: load watchlist, fetch prices, quant signals ──────────────────────
   useEffect(() => {
     const wl = getWatchlist()
     setWatchlist(wl)
-    wl.forEach(s => refreshPrice(s.ticker))
+    refreshAll(wl.map(s => s.ticker))
     fetchQuantSignals()
 
     const iv = setInterval(() => {
-      getWatchlist().forEach(s => refreshPrice(s.ticker))
+      refreshAll(getWatchlist().map(s => s.ticker))
     }, isMarketHours() ? 30000 : 300000)
     return () => clearInterval(iv)
   }, [])
@@ -194,17 +215,28 @@ export default function Watchlist() {
   }
 
   // ── Live price refresh (quote endpoint, cached on backend) ──────────────────
+  // CRITICAL: never overwrite a known-good price with a bad quote. A transient
+  // 0 / null / NaN from the upstream feed would otherwise show a false ~-100%
+  // P&L wipeout. We only commit a price that is a finite number > 0; otherwise
+  // we keep the previous value untouched.
   async function refreshPrice(ticker) {
     setPriceLoading(prev => ({ ...prev, [ticker]: true }))
     try {
       const res = await fetch(`/api/quote/${ticker}`)
       if (res.ok) {
         const data = await res.json()
-        const livePrice = data.current_price || 0
+        const raw = Number(data.current_price)
+        const validPrice = Number.isFinite(raw) && raw > 0
         setWatchlist(prev => {
           const updated = prev.map(s => {
             if (s.ticker !== ticker) return s
-            return { ...s, current_price: livePrice, name: data.name || s.name, last_updated: new Date().toISOString() }
+            return {
+              ...s,
+              // Only update price when the quote is sane; else preserve last good price.
+              current_price: validPrice ? raw : s.current_price,
+              name: data.name || s.name,
+              last_updated: validPrice ? new Date().toISOString() : s.last_updated,
+            }
           })
           saveWatchlist(updated)
           return updated
@@ -215,7 +247,8 @@ export default function Watchlist() {
   }
 
   // ── Add holding ─────────────────────────────────────────────────────────────
-  async function addStock(ticker, nameHint) {
+  async function addStock(rawTicker, nameHint) {
+    const ticker = typeof rawTicker === 'string' ? rawTicker.trim().toUpperCase() : ''
     if (!ticker || watchlist.some(s => s.ticker === ticker)) return
     setAdding(true)
     setShowSugg(false)
@@ -224,11 +257,14 @@ export default function Watchlist() {
       let livePrice = 0, stockName = nameHint || ticker
       if (res.ok) {
         const d = await res.json()
-        livePrice = d.current_price || 0
+        const raw = Number(d.current_price)
+        livePrice = Number.isFinite(raw) && raw > 0 ? raw : 0
         stockName = d.name || stockName
       }
-      const entryPx = parseFloat(addEntryPx) > 0 ? parseFloat(addEntryPx) : livePrice
-      const shares  = parseFloat(addShares)   > 0 ? parseFloat(addShares)  : null
+      const typedEntry = parseFloat(addEntryPx)
+      const entryPx = Number.isFinite(typedEntry) && typedEntry > 0 ? typedEntry : livePrice
+      const typedShares = parseFloat(addShares)
+      const shares  = Number.isFinite(typedShares) && typedShares > 0 ? typedShares : null
       const newStock = {
         ticker, name: stockName,
         entry_price: round(entryPx, 2),

@@ -15,6 +15,7 @@ import SymbolsToBuy from './pages/SymbolsToBuy'
 import SymbolDetail from './pages/SymbolDetail'
 import SystemIntelligence from './pages/SystemIntelligence'
 import CookieConsent from './components/CookieConsent'
+import ErrorBoundary from './components/ErrorBoundary'
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
       <div className="min-h-screen bg-neutral-950">
         <TickerBanner />
         <Navbar />
+        <ErrorBoundary>
         <Routes>
           <Route path="/" element={<Home />} />
 
@@ -38,6 +40,7 @@ export default function App() {
           <Route path="/symbol/:ticker" element={<SymbolDetail />} />
           <Route path="/system-intelligence" element={<SystemIntelligence />} />
         </Routes>
+        </ErrorBoundary>
         <CookieConsent />
       </div>
     </Router>
