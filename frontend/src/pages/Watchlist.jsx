@@ -422,7 +422,14 @@ export default function Watchlist() {
             <p className="text-neutral-500 text-sm text-center py-8">Analyzing portfolio…</p>
           )}
 
-          {backtestData && (
+          {/* Error / empty response guard — never white-screen on a bad payload */}
+          {backtestData && !backtestData.portfolio_stats && !backtestLoading && (
+            <p className="text-neutral-500 text-sm text-center py-8">
+              {backtestData.error || backtestData.detail || 'Not enough shared price history to analyze this portfolio yet. Try again once holdings have a few days of overlap.'}
+            </p>
+          )}
+
+          {backtestData && backtestData.portfolio_stats && (
             <div className="space-y-6">
               {/* Equal-weight stats */}
               <div className="bg-neutral-950/60 border border-neutral-800 rounded-lg p-4">
@@ -430,18 +437,18 @@ export default function Watchlist() {
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                   <div>
                     <p className="text-neutral-500 text-[10px]">Return since added</p>
-                    <p className={`text-lg font-bold font-mono ${backtestData.portfolio_stats.total_return >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {backtestData.portfolio_stats.total_return >= 0 ? '+' : ''}{backtestData.portfolio_stats.total_return}%
+                    <p className={`text-lg font-bold font-mono ${(backtestData.portfolio_stats.total_return ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {(backtestData.portfolio_stats.total_return ?? 0) >= 0 ? '+' : ''}{backtestData.portfolio_stats.total_return ?? '—'}%
                     </p>
                   </div>
                   <div>
                     <p className="text-neutral-500 text-[10px]">Volatility</p>
-                    <p className="text-white text-lg font-bold font-mono">{backtestData.portfolio_stats.annualized_vol}%</p>
+                    <p className="text-white text-lg font-bold font-mono">{backtestData.portfolio_stats.annualized_vol ?? '—'}%</p>
                   </div>
                   <div>
                     <p className="text-neutral-500 text-[10px]">Sharpe</p>
-                    <p className={`text-lg font-bold font-mono ${backtestData.portfolio_stats.sharpe_ratio >= 1 ? 'text-emerald-400' : backtestData.portfolio_stats.sharpe_ratio >= 0 ? 'text-neutral-400' : 'text-rose-400'}`}>
-                      {backtestData.portfolio_stats.sharpe_ratio}
+                    <p className={`text-lg font-bold font-mono ${(backtestData.portfolio_stats.sharpe_ratio ?? 0) >= 1 ? 'text-emerald-400' : (backtestData.portfolio_stats.sharpe_ratio ?? 0) >= 0 ? 'text-neutral-400' : 'text-rose-400'}`}>
+                      {backtestData.portfolio_stats.sharpe_ratio ?? '—'}
                     </p>
                   </div>
                   {backtestData.portfolio_stats.diversification_benefit != null && (
@@ -454,6 +461,7 @@ export default function Watchlist() {
               </div>
 
               {/* Per-stock table */}
+              {backtestData.stock_stats && Object.keys(backtestData.stock_stats).length > 0 && (
               <div>
                 <p className="text-neutral-500 text-[10px] uppercase tracking-wider mb-2">Stock Performance</p>
                 <div className="overflow-x-auto">
@@ -467,27 +475,28 @@ export default function Watchlist() {
                     </thead>
                     <tbody>
                       {Object.entries(backtestData.stock_stats)
-                        .sort(([,a],[,b]) => b.total_return - a.total_return)
+                        .sort(([,a],[,b]) => (b.total_return ?? 0) - (a.total_return ?? 0))
                         .map(([sym, stats]) => (
                           <tr key={sym} className="border-b border-neutral-900 hover:bg-neutral-900/50">
                             <td className="py-2 px-3 font-mono font-bold text-white text-xs">{sym}</td>
-                            <td className={`py-2 px-3 text-right font-mono text-xs font-bold ${stats.total_return >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {stats.total_return >= 0 ? '+' : ''}{stats.total_return}%
+                            <td className={`py-2 px-3 text-right font-mono text-xs font-bold ${(stats.total_return ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {(stats.total_return ?? 0) >= 0 ? '+' : ''}{stats.total_return ?? '—'}%
                             </td>
-                            <td className="py-2 px-3 text-right font-mono text-xs text-neutral-400">{stats.annualized_vol}%</td>
-                            <td className={`py-2 px-3 text-right font-mono text-xs ${stats.sharpe_ratio >= 1 ? 'text-emerald-400' : stats.sharpe_ratio >= 0 ? 'text-neutral-300' : 'text-rose-400'}`}>
-                              {stats.sharpe_ratio}
+                            <td className="py-2 px-3 text-right font-mono text-xs text-neutral-400">{stats.annualized_vol ?? '—'}%</td>
+                            <td className={`py-2 px-3 text-right font-mono text-xs ${(stats.sharpe_ratio ?? 0) >= 1 ? 'text-emerald-400' : (stats.sharpe_ratio ?? 0) >= 0 ? 'text-neutral-300' : 'text-rose-400'}`}>
+                              {stats.sharpe_ratio ?? '—'}
                             </td>
-                            <td className="py-2 px-3 text-right font-mono text-xs text-rose-400">{stats.max_drawdown}%</td>
+                            <td className="py-2 px-3 text-right font-mono text-xs text-rose-400">{stats.max_drawdown ?? '—'}%</td>
                           </tr>
                         ))}
                     </tbody>
                   </table>
                 </div>
               </div>
+              )}
 
               {/* Correlation matrix */}
-              {backtestData.correlation_matrix && Object.keys(backtestData.correlation_matrix).length >= 2 && (
+              {backtestData.correlation_matrix && Array.isArray(backtestData.tickers) && backtestData.tickers.length >= 2 && (
                 <div>
                   <p className="text-neutral-500 text-[10px] uppercase tracking-wider mb-2">
                     Correlation Matrix <span className="normal-case text-neutral-600">(green = diversified · red = correlated)</span>
