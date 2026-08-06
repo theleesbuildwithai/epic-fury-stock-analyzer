@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import AnalysisDashboard from '../components/AnalysisDashboard'
+import { addPickToWatchlist } from '../lib/watchlist'
 
 // ─── Quant HF Signal Card ─────────────────────────────────────────────────────
 function QuantHFCard({ sig }) {
@@ -92,39 +93,6 @@ function formatPct(v) {
 }
 
 // Carry an STB pick into the Watchlist with its entry/stop/target intact, so the
-// Watchlist can fire SELL alerts against the exact levels the pick was built on.
-// Writes the same localStorage schema Watchlist.jsx reads; it refreshes the live
-// price on mount. Returns 'added' | 'exists' | 'error'.
-function addPickToWatchlist(pick) {
-  try {
-    const KEY = 'sentinel_quant_watchlist'
-    const ticker = String(pick.ticker || '').trim().toUpperCase()
-    if (!ticker) return 'error'
-    let list = []
-    try {
-      const raw = localStorage.getItem(KEY)
-      const parsed = raw ? JSON.parse(raw) : []
-      if (Array.isArray(parsed)) list = parsed
-    } catch { list = [] }
-    if (list.some(s => s && String(s.ticker).toUpperCase() === ticker)) return 'exists'
-    const num = v => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null)
-    const entry = num(pick.entry_price)
-    list.push({
-      ticker,
-      name: pick.company_name || pick.name || ticker,
-      entry_price: entry ?? 0,
-      shares: null,
-      stop_loss: num(pick.stop_loss),
-      target_price: num(pick.target_price),
-      current_price: entry ?? 0,
-      added_at: new Date().toISOString(),
-      last_updated: new Date().toISOString(),
-    })
-    localStorage.setItem(KEY, JSON.stringify(list))
-    return 'added'
-  } catch { return 'error' }
-}
-
 function PickSummaryCard({ pick, side }) {
   if (!pick) return null
   const isLong = side === 'long'

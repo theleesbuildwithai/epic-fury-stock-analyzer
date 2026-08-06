@@ -1,21 +1,32 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import Navbar from './components/Navbar'
 import TickerBanner from './components/TickerBanner'
-import Home from './pages/Home'
-
-import Watchlist from './pages/Watchlist'
-import ExtraResources from './pages/ExtraResources'
-import News from './pages/News'
-import DailySummary from './pages/DailySummary'
-// QUANT HF PAGE — hidden; restore by uncommenting import and route below
-// import QuantDashboard from './pages/QuantDashboard'
-import IBKRDashboard from './pages/IBKRDashboard'
-import BacktestDashboard from './pages/BacktestDashboard'
-import SymbolsToBuy from './pages/SymbolsToBuy'
-import SymbolDetail from './pages/SymbolDetail'
-import SystemIntelligence from './pages/SystemIntelligence'
 import CookieConsent from './components/CookieConsent'
 import ErrorBoundary from './components/ErrorBoundary'
+
+// Route-level code splitting: each page ships in its own chunk and loads on
+// demand, so the initial bundle stays small instead of one ~830 kB blob.
+const Home              = lazy(() => import('./pages/Home'))
+const Watchlist         = lazy(() => import('./pages/Watchlist'))
+const ExtraResources    = lazy(() => import('./pages/ExtraResources'))
+const News              = lazy(() => import('./pages/News'))
+const DailySummary      = lazy(() => import('./pages/DailySummary'))
+// QUANT HF PAGE — hidden; restore by uncommenting the lazy import and route below
+// const QuantDashboard = lazy(() => import('./pages/QuantDashboard'))
+const IBKRDashboard     = lazy(() => import('./pages/IBKRDashboard'))
+const BacktestDashboard = lazy(() => import('./pages/BacktestDashboard'))
+const SymbolsToBuy      = lazy(() => import('./pages/SymbolsToBuy'))
+const SymbolDetail      = lazy(() => import('./pages/SymbolDetail'))
+const SystemIntelligence = lazy(() => import('./pages/SystemIntelligence'))
+
+function PageFallback() {
+  return (
+    <div className="max-w-7xl mx-auto px-4 py-20 text-center text-neutral-500 text-sm">
+      Loading…
+    </div>
+  )
+}
 
 export default function App() {
   return (
@@ -24,6 +35,7 @@ export default function App() {
         <TickerBanner />
         <Navbar />
         <ErrorBoundary>
+        <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<Home />} />
 
@@ -40,6 +52,7 @@ export default function App() {
           <Route path="/symbol/:ticker" element={<SymbolDetail />} />
           <Route path="/system-intelligence" element={<SystemIntelligence />} />
         </Routes>
+        </Suspense>
         </ErrorBoundary>
         <CookieConsent />
       </div>

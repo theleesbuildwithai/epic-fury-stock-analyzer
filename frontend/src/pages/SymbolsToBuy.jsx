@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
+import { addPickToWatchlist } from '../lib/watchlist'
 
 // SYMBOLS TO BUY — Fundamental long-term picks (6-12 week holds).
 // Powered by generate_fundamental_picks() — separate from the paper trading system.
@@ -155,6 +156,7 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
     : 'text-rose-400'
 
   const reasons = Array.isArray(p.reasons) ? p.reasons.filter(Boolean) : []
+  const [wlState, setWlState] = useState(null) // null | 'added' | 'exists' | 'error'
 
   return (
     <div>
@@ -263,6 +265,34 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
             <span className="text-xs text-neutral-600">No signal details available for this pick.</span>
           )}
           <QHFFactors sig={qhfSig} />
+
+          {/* Buy this pick → carry entry/stop/target into the Watchlist sell engine */}
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              onClick={e => { e.stopPropagation(); setWlState(addPickToWatchlist(p)) }}
+              disabled={wlState === 'added' || wlState === 'exists'}
+              className={`px-4 py-2 rounded-lg font-bold text-xs transition-colors ${
+                wlState === 'added'
+                  ? 'bg-emerald-600/20 border border-emerald-600/50 text-emerald-300 cursor-default'
+                  : wlState === 'exists'
+                  ? 'bg-neutral-800 border border-neutral-700 text-neutral-400 cursor-default'
+                  : wlState === 'error'
+                  ? 'bg-rose-600/20 border border-rose-600/50 text-rose-300 hover:bg-rose-600/30'
+                  : 'bg-white text-black hover:bg-neutral-200'
+              }`}
+            >
+              {wlState === 'added'
+                ? '✓ Added to watchlist'
+                : wlState === 'exists'
+                ? 'Already in watchlist'
+                : wlState === 'error'
+                ? 'Could not add — retry'
+                : 'Add to watchlist (buy this pick)'}
+            </button>
+            <span className="text-[11px] text-neutral-500">
+              Carries stop {fmtPrice(p.stop_loss)} &amp; target {fmtPrice(p.target_price)} for automatic SELL alerts.
+            </span>
+          </div>
         </div>
       )}
     </div>

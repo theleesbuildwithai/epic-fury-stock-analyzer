@@ -8,8 +8,8 @@ function getWatchlist() {
     const parsed = JSON.parse(data)
     if (!Array.isArray(parsed)) return []
     // Normalize + drop corrupt entries (missing/blank ticker). Backward-compatible
-    // with legacy entries that lack entry_price / shares — those fields stay undefined
-    // and the P&L math already null-guards them.
+    // with legacy entries that lack entry_price / previous_close — those fields stay
+    // undefined and the daily-P&L math null-guards them (shows '—').
     return parsed
       .filter(s => s && typeof s.ticker === 'string' && s.ticker.trim())
       .map(s => ({ ...s, ticker: s.ticker.trim().toUpperCase() }))
@@ -21,21 +21,9 @@ function saveWatchlist(list) {
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
 function round(n, d) { return Math.round(n * Math.pow(10, d)) / Math.pow(10, d) }
-function fmtDollar(v) {
-  if (v == null || isNaN(v)) return '—'
-  return (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })
-}
 function fmtPrice(v) {
   if (v == null || isNaN(v) || v <= 0) return '—'
   return '$' + Number(v).toFixed(2)
-}
-function fmtPct(v) {
-  if (v == null || isNaN(v)) return '—'
-  return (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%'
-}
-function fmtValue(v) {
-  if (v == null || isNaN(v)) return '—'
-  return '$' + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 function fmtDate(v) {
   if (!v) return '—'
@@ -149,16 +137,6 @@ function QHFFactors({ sig }) {
   )
 }
 
-// ─── Correlation Cell ─────────────────────────────────────────────────────────
-function CorrelationCell({ value }) {
-  if (value == null || isNaN(value)) return <td className="px-2 py-1.5 text-center text-[11px] font-mono bg-neutral-800 text-neutral-400">—</td>
-  const bg = value >= 0.7  ? 'bg-red-500/30 text-red-300'
-           : value >= 0.4  ? 'bg-neutral-500/20 text-neutral-300'
-           : value >= -0.1 ? 'bg-neutral-800 text-neutral-400'
-           : 'bg-emerald-500/20 text-emerald-300'
-  return <td className={`px-2 py-1.5 text-center text-[11px] font-mono ${bg}`}>{value.toFixed(2)}</td>
-}
-
 // ─── Inline number editor ─────────────────────────────────────────────────────
 function InlineEdit({ value, onSave, prefix = '', suffix = '', min = 0 }) {
   const [editing, setEditing] = useState(false)
@@ -202,7 +180,6 @@ export default function Watchlist() {
   const [priceLoading, setPriceLoading] = useState({})
   const [addTicker, setAddTicker]       = useState('')
   const [addEntryPx, setAddEntryPx]     = useState('')
-  const [addShares, setAddShares]       = useState('')
   const [addStop, setAddStop]           = useState('')
   const [addTarget, setAddTarget]       = useState('')
   const [adding, setAdding]             = useState(false)
@@ -210,9 +187,6 @@ export default function Watchlist() {
   const [showSugg, setShowSugg]         = useState(false)
   const [expanded, setExpanded]         = useState(null)
   const [quantSignals, setQuantSignals] = useState({})   // ticker → {direction, confidence, ...}
-  const [backtestData, setBacktestData] = useState(null)
-  const [backtestLoading, setBtLoading] = useState(false)
-  const [showBacktest, setShowBacktest] = useState(false)
 
   const refreshingAllRef = useRef(false)
 
@@ -264,10 +238,10 @@ export default function Watchlist() {
   }
 
   // ── Live price refresh (quote endpoint, cached on backend) ──────────────────
-  // CRITICAL: never overwrite a known-good price with a bad quote. A transient
+  // CRITICAL: never overwrite a known-good value with a bad quote. A transient
   // 0 / null / NaN from the upstream feed would otherwise show a false ~-100%
-  // P&L wipeout. We only commit a price that is a finite number > 0; otherwise
-  // we keep the previous value untouched.
+  // daily P&L wipeout. We only commit price / previous_close when each is a
+  // finite number > 0; otherwise we keep the previous value untouched.
   async function refreshPrice(ticker) {
     setPriceLoading(prev => ({ ...prev, [ticker]: true }))
     try {
@@ -276,13 +250,16 @@ export default function Watchlist() {
         const data = await res.json()
         const raw = Number(data.current_price)
         const validPrice = Number.isFinite(raw) && raw > 0
+        const prevRaw = Number(data.previous_close)
+        const validPrev = Number.isFinite(prevRaw) && prevRaw > 0
         setWatchlist(prev => {
           const updated = prev.map(s => {
             if (s.ticker !== ticker) return s
             return {
               ...s,
-              // Only update price when the quote is sane; else preserve last good price.
+              // Only update when the quote is sane; else preserve last good value.
               current_price: validPrice ? raw : s.current_price,
+              previous_close: validPrev ? prevRaw : s.previous_close,
               name: data.name || s.name,
               last_updated: validPrice ? new Date().toISOString() : s.last_updated,
             }
@@ -303,17 +280,17 @@ export default function Watchlist() {
     setShowSugg(false)
     try {
       const res = await fetch(`/api/quote/${ticker}`)
-      let livePrice = 0, stockName = nameHint || ticker
+      let livePrice = 0, prevClose = null, stockName = nameHint || ticker
       if (res.ok) {
         const d = await res.json()
         const raw = Number(d.current_price)
         livePrice = Number.isFinite(raw) && raw > 0 ? raw : 0
+        const pRaw = Number(d.previous_close)
+        prevClose = Number.isFinite(pRaw) && pRaw > 0 ? pRaw : null
         stockName = d.name || stockName
       }
       const typedEntry = parseFloat(addEntryPx)
       const entryPx = Number.isFinite(typedEntry) && typedEntry > 0 ? typedEntry : livePrice
-      const typedShares = parseFloat(addShares)
-      const shares  = Number.isFinite(typedShares) && typedShares > 0 ? typedShares : null
       const typedStop = parseFloat(addStop)
       const stopLoss  = Number.isFinite(typedStop) && typedStop > 0 ? round(typedStop, 2) : null
       const typedTgt  = parseFloat(addTarget)
@@ -321,10 +298,10 @@ export default function Watchlist() {
       const newStock = {
         ticker, name: stockName,
         entry_price: round(entryPx, 2),
-        shares: shares,
         stop_loss: stopLoss,
         target_price: target,
         current_price: livePrice,
+        previous_close: prevClose,
         added_at: new Date().toISOString(),
         last_updated: new Date().toISOString(),
       }
@@ -333,7 +310,6 @@ export default function Watchlist() {
       saveWatchlist(updated)
       setAddTicker('')
       setAddEntryPx('')
-      setAddShares('')
       setAddStop('')
       setAddTarget('')
     } catch {}
@@ -366,28 +342,6 @@ export default function Watchlist() {
     } catch { setSuggestions([]) }
   }
 
-  // ── Portfolio Visualizer ──────────────────────────────────────────────────────
-  async function fetchBacktest() {
-    const wl = getWatchlist()
-    const tickers = wl.map(s => s.ticker).join(',')
-    if (!tickers) return
-    const addDates = {}
-    wl.forEach(s => { addDates[s.ticker] = s.added_at })
-    setBtLoading(true)
-    try {
-      const res = await fetch(`/api/watchlist-backtest?tickers=${tickers}&add_dates=${encodeURIComponent(JSON.stringify(addDates))}`)
-      if (res.ok) setBacktestData(await res.json())
-    } catch {}
-    setBtLoading(false)
-  }
-
-  // ── Portfolio summary ─────────────────────────────────────────────────────────
-  const hasPositions = watchlist.some(s => s.shares > 0)
-  const totalCost    = watchlist.reduce((sum, s) => sum + (s.shares > 0 ? (s.entry_price || 0) * s.shares : 0), 0)
-  const totalVal     = watchlist.reduce((sum, s) => sum + (s.shares > 0 ? (s.current_price || 0) * s.shares : 0), 0)
-  const totalPnl     = totalVal - totalCost
-  const totalPnlPct  = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0
-
   // Sell-signal alerts across all holdings (correlates STB stop/target + QHF).
   const actionable = watchlist
     .map(s => ({ stock: s, action: computeAction(s, quantSignals[s.ticker] || null) }))
@@ -402,32 +356,9 @@ export default function Watchlist() {
         <div>
           <h1 className="text-3xl font-black text-white tracking-tight">Holdings & Watchlist</h1>
           <p className="text-sm text-neutral-400 mt-1">
-            Track your positions · Enter purchase price + shares to see live P&amp;L · QHF signal wired in
+            Add a pick with its stop &amp; target · get automatic BUY / SELL signals · QHF wired in
           </p>
         </div>
-
-        {/* Portfolio totals */}
-        {hasPositions && (
-          <div className="flex items-center gap-6 bg-neutral-900/60 border border-neutral-800 rounded-xl px-5 py-3 shrink-0">
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-wider text-neutral-500">Cost basis</p>
-              <p className="font-bold text-white font-mono">{fmtValue(totalCost)}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-wider text-neutral-500">Market value</p>
-              <p className="font-bold text-white font-mono">{fmtValue(totalVal)}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] uppercase tracking-wider text-neutral-500">Unrealized P&amp;L</p>
-              <p className={`font-bold text-lg font-mono ${totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {fmtDollar(totalPnl)}
-              </p>
-              <p className={`text-[10px] font-mono ${totalPnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
-                {fmtPct(totalPnlPct)}
-              </p>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Add holding form */}
@@ -476,17 +407,6 @@ export default function Watchlist() {
             </div>
           </div>
 
-          {/* Shares */}
-          <div>
-            <label className="text-[10px] uppercase tracking-wider text-neutral-500 block mb-1">Shares</label>
-            <input type="number" min="0" step="any" value={addShares}
-              onChange={e => setAddShares(e.target.value)}
-              placeholder="optional"
-              className="w-28 px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm font-mono
-                         focus:outline-none focus:border-blue-600 placeholder-neutral-600"
-            />
-          </div>
-
           {/* Stop loss */}
           <div>
             <label className="text-[10px] uppercase tracking-wider text-rose-400/80 block mb-1">Stop loss</label>
@@ -529,142 +449,12 @@ export default function Watchlist() {
         </div>
       </div>
 
-      {/* Portfolio Visualizer toggle */}
-      {watchlist.length >= 2 && (
+      {/* QHF signal refresh */}
+      {watchlist.length > 0 && (
         <div className="mb-6 flex items-center gap-3">
-          <button
-            onClick={() => { setShowBacktest(v => !v); if (!showBacktest && !backtestData) fetchBacktest() }}
-            className="px-5 py-2 bg-blue-950/40 border border-blue-800/40 text-blue-300 font-semibold text-sm rounded-lg hover:bg-blue-950/60 transition-all"
-          >
-            {showBacktest ? 'Hide' : 'Show'} Portfolio Visualizer
-          </button>
           <button onClick={fetchQuantSignals} className="text-xs text-neutral-500 hover:text-white">
             Refresh QHF signals
           </button>
-        </div>
-      )}
-
-      {/* Portfolio Visualizer panel */}
-      {showBacktest && (
-        <div className="bg-neutral-900/40 border border-blue-800/30 rounded-xl p-6 mb-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-white font-bold">Portfolio Visualizer</h2>
-              <p className="text-neutral-500 text-xs">Returns since added · correlations · risk metrics</p>
-            </div>
-            <button onClick={fetchBacktest} disabled={backtestLoading}
-              className="px-3 py-1.5 text-xs bg-blue-500/20 text-blue-300 rounded hover:bg-blue-500/30 disabled:opacity-50">
-              {backtestLoading ? 'Loading…' : 'Refresh'}
-            </button>
-          </div>
-
-          {backtestLoading && !backtestData && (
-            <p className="text-neutral-500 text-sm text-center py-8">Analyzing portfolio…</p>
-          )}
-
-          {/* Error / empty response guard — never white-screen on a bad payload */}
-          {backtestData && !backtestData.portfolio_stats && !backtestLoading && (
-            <p className="text-neutral-500 text-sm text-center py-8">
-              {backtestData.error || backtestData.detail || 'Not enough shared price history to analyze this portfolio yet. Try again once holdings have a few days of overlap.'}
-            </p>
-          )}
-
-          {backtestData && backtestData.portfolio_stats && (
-            <div className="space-y-6">
-              {/* Equal-weight stats */}
-              <div className="bg-neutral-950/60 border border-neutral-800 rounded-lg p-4">
-                <p className="text-neutral-500 text-[10px] uppercase tracking-wider mb-3">Equal-Weight Portfolio</p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  <div>
-                    <p className="text-neutral-500 text-[10px]">Return since added</p>
-                    <p className={`text-lg font-bold font-mono ${(backtestData.portfolio_stats.total_return ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {(backtestData.portfolio_stats.total_return ?? 0) >= 0 ? '+' : ''}{backtestData.portfolio_stats.total_return ?? '—'}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-neutral-500 text-[10px]">Volatility</p>
-                    <p className="text-white text-lg font-bold font-mono">{backtestData.portfolio_stats.annualized_vol ?? '—'}%</p>
-                  </div>
-                  <div>
-                    <p className="text-neutral-500 text-[10px]">Sharpe</p>
-                    <p className={`text-lg font-bold font-mono ${(backtestData.portfolio_stats.sharpe_ratio ?? 0) >= 1 ? 'text-emerald-400' : (backtestData.portfolio_stats.sharpe_ratio ?? 0) >= 0 ? 'text-neutral-400' : 'text-rose-400'}`}>
-                      {backtestData.portfolio_stats.sharpe_ratio ?? '—'}
-                    </p>
-                  </div>
-                  {backtestData.portfolio_stats.diversification_benefit != null && (
-                    <div>
-                      <p className="text-neutral-500 text-[10px]">Diversification</p>
-                      <p className="text-emerald-400 text-lg font-bold font-mono">-{backtestData.portfolio_stats.diversification_benefit}% vol</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Per-stock table */}
-              {backtestData.stock_stats && Object.keys(backtestData.stock_stats).length > 0 && (
-              <div>
-                <p className="text-neutral-500 text-[10px] uppercase tracking-wider mb-2">Stock Performance</p>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-neutral-800">
-                        {['TICKER', 'RETURN', 'ANN VOL', 'SHARPE', 'MAX DD'].map(h => (
-                          <th key={h} className={`py-2 px-3 text-[10px] text-neutral-500 ${h === 'TICKER' ? 'text-left' : 'text-right'}`}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(backtestData.stock_stats)
-                        .sort(([,a],[,b]) => (b.total_return ?? 0) - (a.total_return ?? 0))
-                        .map(([sym, stats]) => (
-                          <tr key={sym} className="border-b border-neutral-900 hover:bg-neutral-900/50">
-                            <td className="py-2 px-3 font-mono font-bold text-white text-xs">{sym}</td>
-                            <td className={`py-2 px-3 text-right font-mono text-xs font-bold ${(stats.total_return ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {(stats.total_return ?? 0) >= 0 ? '+' : ''}{stats.total_return ?? '—'}%
-                            </td>
-                            <td className="py-2 px-3 text-right font-mono text-xs text-neutral-400">{stats.annualized_vol ?? '—'}%</td>
-                            <td className={`py-2 px-3 text-right font-mono text-xs ${(stats.sharpe_ratio ?? 0) >= 1 ? 'text-emerald-400' : (stats.sharpe_ratio ?? 0) >= 0 ? 'text-neutral-300' : 'text-rose-400'}`}>
-                              {stats.sharpe_ratio ?? '—'}
-                            </td>
-                            <td className="py-2 px-3 text-right font-mono text-xs text-rose-400">{stats.max_drawdown ?? '—'}%</td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              )}
-
-              {/* Correlation matrix */}
-              {backtestData.correlation_matrix && Array.isArray(backtestData.tickers) && backtestData.tickers.length >= 2 && (
-                <div>
-                  <p className="text-neutral-500 text-[10px] uppercase tracking-wider mb-2">
-                    Correlation Matrix <span className="normal-case text-neutral-600">(green = diversified · red = correlated)</span>
-                  </p>
-                  <div className="overflow-x-auto">
-                    <table className="text-[11px]">
-                      <thead>
-                        <tr>
-                          <th className="px-2 py-1.5 text-neutral-500" />
-                          {backtestData.tickers.map(t => <th key={t} className="px-2 py-1.5 text-neutral-400 font-mono">{t}</th>)}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {backtestData.tickers.map(t1 => (
-                          <tr key={t1}>
-                            <td className="px-2 py-1.5 text-neutral-400 font-mono font-bold">{t1}</td>
-                            {backtestData.tickers.map(t2 => (
-                              <CorrelationCell key={t2} value={backtestData.correlation_matrix[t1]?.[t2] ?? null} />
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
 
@@ -706,11 +496,9 @@ export default function Watchlist() {
           {/* Column headers */}
           <div className="hidden md:grid grid-cols-12 gap-2 px-5 pb-1 text-[10px] font-bold uppercase tracking-wider text-neutral-600">
             <div className="col-span-2">Ticker</div>
-            <div className="col-span-1 text-right">Live price</div>
-            <div className="col-span-1 text-right">Entry</div>
-            <div className="col-span-1 text-right">Shares</div>
-            <div className="col-span-1 text-right">Position</div>
-            <div className="col-span-2 text-right">Unrealized P&amp;L</div>
+            <div className="col-span-2 text-right">Live price</div>
+            <div className="col-span-2 text-right">Entry</div>
+            <div className="col-span-2 text-right">Daily P&amp;L</div>
             <div className="col-span-2 text-center">QHF Signal</div>
             <div className="col-span-2 text-right">Actions</div>
           </div>
@@ -720,13 +508,13 @@ export default function Watchlist() {
             const isExp     = expanded === stock.ticker
             const px        = stock.current_price || 0
             const entry     = stock.entry_price   || 0
-            const shares    = stock.shares        || 0
-            const posVal    = shares > 0 ? px    * shares : null
-            const costBasis = shares > 0 ? entry * shares : null
-            const pnlDollar = posVal != null && costBasis != null ? posVal - costBasis : null
-            const pnlPct    = costBasis > 0 ? ((px - entry) / entry) * 100 : null
-            const pnlColor  = pnlDollar == null ? 'text-neutral-500' : pnlDollar >= 0 ? 'text-emerald-400' : 'text-rose-400'
-            const dayChgPct = entry > 0 ? ((px - entry) / entry) * 100 : null
+            // Daily P&L = today's move vs the official previous close. Both values
+            // must be finite > 0 or we show '—' (never a fabricated number).
+            const prevClose  = Number(stock.previous_close) || 0
+            const dailyValid = px > 0 && prevClose > 0
+            const dailyDelta = dailyValid ? px - prevClose : null                 // $ per share today
+            const dailyPct   = dailyValid ? ((px - prevClose) / prevClose) * 100 : null
+            const dailyColor = dailyPct == null ? 'text-neutral-500' : dailyPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
             const action    = computeAction(stock, qhf)
             const tone      = TONE[action.tone] || TONE.neutral
             const flagged   = ACTION_NEEDED.has(action.status)
@@ -751,12 +539,12 @@ export default function Watchlist() {
                   </div>
 
                   {/* Live price */}
-                  <div className="col-span-1 text-right">
+                  <div className="col-span-2 text-right">
                     <div className="font-mono text-sm text-white">{priceLoading[stock.ticker] ? '…' : fmtPrice(px)}</div>
                   </div>
 
                   {/* Entry price (inline edit) */}
-                  <div className="col-span-1 text-right text-sm font-mono text-neutral-400" onClick={e => e.stopPropagation()}>
+                  <div className="col-span-2 text-right text-sm font-mono text-neutral-400" onClick={e => e.stopPropagation()}>
                     <InlineEdit
                       value={entry || null}
                       onSave={v => updateField(stock.ticker, 'entry_price', v)}
@@ -764,31 +552,19 @@ export default function Watchlist() {
                     />
                   </div>
 
-                  {/* Shares (inline edit) */}
-                  <div className="col-span-1 text-right text-sm font-mono text-neutral-400" onClick={e => e.stopPropagation()}>
-                    <InlineEdit
-                      value={shares || null}
-                      onSave={v => updateField(stock.ticker, 'shares', v)}
-                      min={0}
-                    />
-                  </div>
-
-                  {/* Position value */}
-                  <div className="col-span-1 text-right text-sm font-mono text-neutral-300">
-                    {posVal != null ? fmtValue(posVal) : <span className="text-neutral-600 text-xs">—</span>}
-                  </div>
-
-                  {/* P&L */}
+                  {/* Daily P&L — today's move vs previous close */}
                   <div className="col-span-2 text-right">
-                    {pnlDollar != null ? (
+                    {dailyPct != null ? (
                       <>
-                        <div className={`font-mono text-sm font-bold ${pnlColor}`}>{fmtDollar(pnlDollar)}</div>
-                        <div className={`font-mono text-[10px] ${pnlColor}`}>{fmtPct(pnlPct)}</div>
+                        <div className={`font-mono text-sm font-bold ${dailyColor}`}>
+                          {dailyPct >= 0 ? '+' : ''}{dailyPct.toFixed(2)}%
+                        </div>
+                        <div className={`font-mono text-[10px] ${dailyColor}`}>
+                          {dailyDelta >= 0 ? '+$' : '-$'}{Math.abs(dailyDelta).toFixed(2)} today
+                        </div>
                       </>
-                    ) : pnlPct != null ? (
-                      <div className={`font-mono text-sm ${pnlColor}`}>{fmtPct(dayChgPct)}</div>
                     ) : (
-                      <span className="text-neutral-600 text-xs">Add shares</span>
+                      <span className="text-neutral-600 text-xs">—</span>
                     )}
                   </div>
 
@@ -843,8 +619,8 @@ export default function Watchlist() {
                             <span className="font-mono text-neutral-300">{fmtPrice(entry)}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span className="text-neutral-500">Shares</span>
-                            <span className="font-mono text-neutral-300">{shares > 0 ? shares : '—'}</span>
+                            <span className="text-neutral-500">Prev close</span>
+                            <span className="font-mono text-neutral-300">{fmtPrice(prevClose)}</span>
                           </div>
                           <div className="flex justify-between items-center" onClick={e => e.stopPropagation()}>
                             <span className="text-rose-400/80">Stop loss</span>
@@ -868,18 +644,12 @@ export default function Watchlist() {
                               <InlineEdit value={stock.target_price || null} onSave={v => updateField(stock.ticker, 'target_price', v)} prefix="$" />
                             </span>
                           </div>
-                          <div className="flex justify-between">
-                            <span className="text-neutral-500">Cost basis</span>
-                            <span className="font-mono text-neutral-300">{costBasis > 0 ? fmtValue(costBasis) : '—'}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-neutral-500">Market value</span>
-                            <span className="font-mono text-neutral-300">{posVal != null ? fmtValue(posVal) : '—'}</span>
-                          </div>
                           <div className="flex justify-between border-t border-neutral-800 pt-1.5 mt-1.5">
-                            <span className="text-neutral-400 font-bold">Unrealized P&amp;L</span>
-                            <span className={`font-mono font-bold ${pnlColor}`}>
-                              {pnlDollar != null ? fmtDollar(pnlDollar) : pnlPct != null ? fmtPct(pnlPct) : '—'}
+                            <span className="text-neutral-400 font-bold">Daily P&amp;L</span>
+                            <span className={`font-mono font-bold ${dailyColor}`}>
+                              {dailyPct != null
+                                ? `${dailyPct >= 0 ? '+' : ''}${dailyPct.toFixed(2)}% (${dailyDelta >= 0 ? '+$' : '-$'}${Math.abs(dailyDelta).toFixed(2)})`
+                                : '—'}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -920,7 +690,7 @@ export default function Watchlist() {
       ) : (
         <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-16 text-center">
           <p className="text-neutral-400 font-medium mb-1">No holdings yet</p>
-          <p className="text-neutral-600 text-sm">Add a ticker above — include your entry price and shares for full P&amp;L tracking</p>
+          <p className="text-neutral-600 text-sm">Add a ticker above — include the stop &amp; target to get automatic BUY / SELL signals</p>
         </div>
       )}
 
