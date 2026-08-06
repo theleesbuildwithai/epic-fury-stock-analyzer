@@ -147,7 +147,7 @@ function SortTh({ label, col, sortCol, sortDir, onSort, right = true }) {
 }
 
 // ─── Pick Row ─────────────────────────────────────────────────────────────────
-function PickRow({ p, rank, cash, expanded, onToggle }) {
+function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
   const alloc = calcAlloc(cash, p.entry_price, rank)
   const rrColor = !p.reward_risk_ratio ? 'text-neutral-500'
     : p.reward_risk_ratio >= 3 ? 'text-emerald-400'
@@ -195,9 +195,12 @@ function PickRow({ p, rank, cash, expanded, onToggle }) {
           {fmt(p.revenue_growth_pct, '%', 0)}
         </div>
 
-        {/* Confidence */}
-        <div className={`col-span-1 text-right font-mono text-xs font-bold ${confColor(p.confidence)}`}>
-          {p.confidence != null ? p.confidence + '%' : '—'}
+        {/* Confidence + QHF alignment */}
+        <div className="col-span-1 text-right">
+          <div className={`font-mono text-xs font-bold ${confColor(p.confidence)}`}>
+            {p.confidence != null ? p.confidence + '%' : '—'}
+          </div>
+          <QHFBadge sig={qhfSig} />
         </div>
 
         {/* ROE */}
@@ -241,11 +244,11 @@ function PickRow({ p, rank, cash, expanded, onToggle }) {
         </div>
       </div>
 
-      {/* Expanded reasons panel */}
+      {/* Expanded reasons + QHF factors panel */}
       {expanded && (
         <div className="px-6 py-3 bg-neutral-900/70 border-b border-blue-900/30">
           {reasons.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 mb-1">
               {reasons.map((r, i) => (
                 <span
                   key={i}
@@ -259,6 +262,7 @@ function PickRow({ p, rank, cash, expanded, onToggle }) {
           ) : (
             <span className="text-xs text-neutral-600">No signal details available for this pick.</span>
           )}
+          <QHFFactors sig={qhfSig} />
         </div>
       )}
     </div>
@@ -266,7 +270,7 @@ function PickRow({ p, rank, cash, expanded, onToggle }) {
 }
 
 // ─── Pick Table ───────────────────────────────────────────────────────────────
-function PickTable({ picks, cash }) {
+function PickTable({ picks, cash, quantSignals }) {
   const [sortCol, setSortCol] = useState(null)
   const [sortDir, setSortDir] = useState('desc')
   const [expandedTickers, setExpandedTickers] = useState(new Set())
@@ -332,6 +336,7 @@ function PickTable({ picks, cash }) {
             cash={cash}
             expanded={expandedTickers.has(p.ticker)}
             onToggle={() => toggleExpand(p.ticker)}
+            qhfSig={(quantSignals || {})[p.ticker] || null}
           />
         ))}
       </div>
@@ -369,6 +374,66 @@ function CashInput({ value, onChange }) {
   )
 }
 
+// ─── QHF Signal Badge ─────────────────────────────────────────────────────────
+function QHFBadge({ sig }) {
+  if (!sig) return <span className="text-neutral-700 text-[9px]">—</span>
+  const isLong  = sig.direction === 'LONG'
+  const isShort = sig.direction === 'SHORT'
+  const col = isLong ? 'text-emerald-400' : isShort ? 'text-rose-400' : 'text-neutral-500'
+  const arrow = isLong ? '▲' : isShort ? '▼' : '·'
+  return (
+    <div className={`text-[9px] font-mono font-bold ${col} leading-tight`}>
+      <span className="text-neutral-600 font-normal">QHF </span>
+      {arrow} {sig.confidence ?? '?'}%
+    </div>
+  )
+}
+
+// ─── QHF Factor Bar ───────────────────────────────────────────────────────────
+function QHFFactors({ sig }) {
+  if (!sig || !sig.factors) return null
+  const entries = Object.entries(sig.factors)
+    .map(([k, v]) => ({ name: k, contrib: v?.contribution ?? 0 }))
+    .filter(e => Math.abs(e.contrib) > 0.03)
+    .sort((a, b) => Math.abs(b.contrib) - Math.abs(a.contrib))
+    .slice(0, 5)
+  if (!entries.length) return null
+  const maxAbs = Math.max(...entries.map(e => Math.abs(e.contrib)), 0.01)
+  const isLong  = sig.direction === 'LONG'
+  const isShort = sig.direction === 'SHORT'
+  const dirCol  = isLong ? 'text-emerald-300' : isShort ? 'text-rose-300' : 'text-neutral-400'
+  const arrow   = isLong ? '▲' : isShort ? '▼' : '·'
+  return (
+    <div className="mt-3 pt-3 border-t border-neutral-800/60">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Quant HF Signal</span>
+        <span className={`text-[10px] font-bold ${dirCol}`}>{arrow} {sig.direction} {sig.confidence}%</span>
+        <span className="text-[9px] text-neutral-600">composite {sig.composite_score?.toFixed(2)}</span>
+      </div>
+      <div className="space-y-1">
+        {entries.map(e => {
+          const pct = Math.abs(e.contrib) / maxAbs * 100
+          const bull = e.contrib > 0
+          return (
+            <div key={e.name} className="flex items-center gap-2">
+              <span className="text-[9px] text-neutral-500 w-24 truncate capitalize">{e.name.replace(/_/g, ' ')}</span>
+              <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${bull ? 'bg-emerald-500/60' : 'bg-rose-500/60'}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <span className={`text-[9px] font-mono ${bull ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {e.contrib > 0 ? '+' : ''}{e.contrib.toFixed(2)}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function SymbolsToBuy() {
   const [data, setData] = useState(null)
@@ -379,6 +444,7 @@ export default function SymbolsToBuy() {
   const [retryTick, setRetryTick] = useState(0)
   const retryTimerRef = useRef(null)
   const countdownRef = useRef(null)
+  const [quantSignals, setQuantSignals] = useState({})
   const [cash, setCash] = useState(() => {
     try {
       const stored = localStorage.getItem('stb_cash')
@@ -413,6 +479,27 @@ export default function SymbolsToBuy() {
   }
 
   useEffect(() => { load(false) }, [])
+
+  // Fetch quant-picks (cache-only, no external calls) to overlay QHF signals on STB picks.
+  // Runs once on mount and does NOT interfere with the STB scoring logic.
+  useEffect(() => {
+    fetch('/api/quant-picks')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        if (!j) return
+        const map = {}
+        for (const p of [...(j.long_picks || []), ...(j.short_picks || [])]) {
+          if (p.ticker) map[p.ticker] = {
+            direction: p.direction,
+            confidence: p.confidence,
+            composite_score: p.composite_score,
+            factors: p.factors,
+          }
+        }
+        setQuantSignals(map)
+      })
+      .catch(() => {})
+  }, [])
 
   // Auto-retry every 45s when picks haven't loaded yet (warming_up / no_picks_yet).
   // Without this, users who land on the page during cold-start see the warming_up
@@ -572,7 +659,7 @@ export default function SymbolsToBuy() {
             <span><span className="font-bold text-neutral-400">Click any column header</span> to sort · <span className="font-bold text-neutral-400">Click row</span> to expand signals</span>
           </div>
 
-          <PickTable picks={data.long_picks} cash={cash} />
+          <PickTable picks={data.long_picks} cash={cash} quantSignals={quantSignals} />
         </div>
       )}
     </div>

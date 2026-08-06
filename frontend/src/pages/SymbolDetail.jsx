@@ -2,6 +2,81 @@ import { useState, useEffect } from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import AnalysisDashboard from '../components/AnalysisDashboard'
 
+// ─── Quant HF Signal Card ─────────────────────────────────────────────────────
+function QuantHFCard({ sig }) {
+  if (!sig) return null
+  const isLong  = sig.direction === 'LONG'
+  const isShort = sig.direction === 'SHORT'
+  const dirCol  = isLong ? 'text-emerald-300' : isShort ? 'text-rose-300' : 'text-neutral-400'
+  const borderCol = isLong ? 'border-emerald-800/40' : isShort ? 'border-rose-800/40' : 'border-neutral-700'
+  const bgCol     = isLong ? 'bg-emerald-950/20' : isShort ? 'bg-rose-950/20' : 'bg-neutral-900/20'
+  const arrow     = isLong ? '▲' : isShort ? '▼' : '·'
+
+  const topFactors = sig.factors
+    ? Object.entries(sig.factors)
+        .map(([k, v]) => ({ name: k, contrib: v?.contribution ?? 0 }))
+        .filter(e => Math.abs(e.contrib) > 0.02)
+        .sort((a, b) => Math.abs(b.contrib) - Math.abs(a.contrib))
+        .slice(0, 6)
+    : []
+  const maxAbs = topFactors.length ? Math.max(...topFactors.map(e => Math.abs(e.contrib)), 0.01) : 0.01
+
+  return (
+    <div className={`${bgCol} border ${borderCol} rounded-xl p-5 mb-6`}>
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-1">
+            Quant HF · 22-Factor Technical Model
+          </p>
+          <div className="flex items-center gap-3">
+            <span className={`text-2xl font-black ${dirCol}`}>{arrow} {sig.direction}</span>
+            <span className="text-neutral-600">|</span>
+            <div>
+              <div className="text-[10px] text-neutral-500">Confidence</div>
+              <div className={`text-xl font-black font-mono ${dirCol}`}>{sig.confidence ?? '—'}%</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-neutral-500">Composite score</div>
+              <div className="text-xl font-black font-mono text-white">{sig.composite_score?.toFixed(2) ?? '—'}</div>
+            </div>
+          </div>
+        </div>
+        <div className="text-[10px] text-neutral-600 text-right">
+          <div>Regime-aware multi-factor</div>
+          <div>momentum · value · quality</div>
+          <div>RSI · vol · smart money</div>
+        </div>
+      </div>
+
+      {topFactors.length > 0 && (
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-2">Factor breakdown</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1.5">
+            {topFactors.map(e => {
+              const bull = e.contrib > 0
+              const pct  = Math.abs(e.contrib) / maxAbs * 100
+              return (
+                <div key={e.name} className="flex items-center gap-2">
+                  <span className="text-[10px] text-neutral-400 w-28 truncate capitalize">{e.name.replace(/_/g, ' ')}</span>
+                  <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${bull ? 'bg-emerald-500/70' : 'bg-rose-500/70'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className={`text-[10px] font-mono w-10 text-right ${bull ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {e.contrib > 0 ? '+' : ''}{e.contrib.toFixed(2)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // SYMBOL DETAIL — drill-down for a Symbols-to-Buy pick.
 // Shows the why-to-buy (entry/stop/target/R-R/reasons from the picks engine)
 // PLUS the full /api/analyze view (chart, signal, indicators, risk, forecast).
@@ -135,17 +210,21 @@ export default function SymbolDetail() {
   const side = params.get('side') || 'long'
   const [analysis, setAnalysis] = useState(null)
   const [pick, setPick] = useState(null)
+  const [quantSignal, setQuantSignal] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
     async function load() {
-      setLoading(true); setError(null); setAnalysis(null); setPick(null)
+      setLoading(true); setError(null); setAnalysis(null); setPick(null); setQuantSignal(null)
       try {
-        const [aRes, sRes] = await Promise.all([
+        // Fetch analyze + STB + quant-picks in parallel.
+        // quant-picks reads only in-memory cache — zero external API calls.
+        const [aRes, sRes, qRes] = await Promise.all([
           fetch(`/api/analyze/${ticker}`),
           fetch(`/api/symbols-to-buy`),
+          fetch(`/api/quant-picks`),
         ])
         if (!aRes.ok) {
           let m = `HTTP ${aRes.status}`
@@ -165,6 +244,19 @@ export default function SymbolDetail() {
               || (sJson.short_picks || []).find(p => p.ticker === ticker)
             if (found) setPick(found)
           }
+        }
+
+        // Wire quant HF signal (cache-only, no rate-limit risk)
+        if (!cancelled && qRes.ok) {
+          const qJson = await qRes.json()
+          const allPicks = [...(qJson.long_picks || []), ...(qJson.short_picks || [])]
+          const qp = allPicks.find(p => p.ticker === ticker)
+          if (qp) setQuantSignal({
+            direction: qp.direction,
+            confidence: qp.confidence,
+            composite_score: qp.composite_score,
+            factors: qp.factors,
+          })
         }
       } catch (e) {
         if (!cancelled) setError(e.message)
@@ -205,6 +297,9 @@ export default function SymbolDetail() {
           showing the standard analysis only. The picks engine refreshes every ~30 min.
         </div>
       )}
+
+      {/* Quant HF 22-factor signal card — shown when ticker appears in the quant engine queue */}
+      {quantSignal && !loading && <QuantHFCard sig={quantSignal} />}
 
       {analysis && !loading && (
         <div className="mt-4">

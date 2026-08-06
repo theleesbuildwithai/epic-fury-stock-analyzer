@@ -4,6 +4,7 @@ import AnalysisDashboard from '../components/AnalysisDashboard'
 
 export default function Home() {
   const [analysisData, setAnalysisData] = useState(null)
+  const [quantSignal, setQuantSignal] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -11,9 +12,15 @@ export default function Home() {
     setLoading(true)
     setError(null)
     setAnalysisData(null)
+    setQuantSignal(null)
 
     try {
-      const res = await fetch(`/api/analyze/${ticker}`)
+      // Fetch analyze + quant-picks in parallel.
+      // quant-picks reads only in-memory cache — zero external API calls.
+      const [res, qRes] = await Promise.all([
+        fetch(`/api/analyze/${ticker}`),
+        fetch(`/api/quant-picks`),
+      ])
       if (!res.ok) {
         let errMsg = 'Failed to analyze stock'
         try { const err = await res.json(); errMsg = err.detail || errMsg } catch {}
@@ -21,6 +28,19 @@ export default function Home() {
       }
       const data = await res.json()
       setAnalysisData(data)
+
+      // Wire quant HF signal if ticker appears in the queue
+      if (qRes.ok) {
+        const qJson = await qRes.json()
+        const allPicks = [...(qJson.long_picks || []), ...(qJson.short_picks || [])]
+        const qp = allPicks.find(p => p.ticker === ticker?.toUpperCase())
+        if (qp) setQuantSignal({
+          direction: qp.direction,
+          confidence: qp.confidence,
+          composite_score: qp.composite_score,
+          factors: qp.factors,
+        })
+      }
     } catch (err) {
       setError(err.message)
     }
@@ -48,7 +68,7 @@ export default function Home() {
         </div>
       )}
 
-      {analysisData && <AnalysisDashboard data={analysisData} />}
+      {analysisData && <AnalysisDashboard data={analysisData} quantSignal={quantSignal} />}
     </div>
   )
 }

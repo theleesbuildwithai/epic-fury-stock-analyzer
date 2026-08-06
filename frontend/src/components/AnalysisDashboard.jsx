@@ -6,6 +6,67 @@ import RiskScore from './RiskScore'
 import KeyStats from './KeyStats'
 import PriceForecast from './PriceForecast'
 
+// ─── Quant HF Signal Card (inline) ───────────────────────────────────────────
+function QuantHFSignalCard({ sig }) {
+  if (!sig) return null
+  const isLong  = sig.direction === 'LONG'
+  const isShort = sig.direction === 'SHORT'
+  const dirCol    = isLong ? 'text-emerald-300' : isShort ? 'text-rose-300' : 'text-neutral-400'
+  const borderCol = isLong ? 'border-emerald-800/40' : isShort ? 'border-rose-800/40' : 'border-neutral-700'
+  const bgCol     = isLong ? 'bg-emerald-950/20' : isShort ? 'bg-rose-950/20' : 'bg-neutral-900/30'
+  const arrow     = isLong ? '▲' : isShort ? '▼' : '·'
+
+  const topFactors = sig.factors
+    ? Object.entries(sig.factors)
+        .map(([k, v]) => ({ name: k, contrib: v?.contribution ?? 0 }))
+        .filter(e => Math.abs(e.contrib) > 0.02)
+        .sort((a, b) => Math.abs(b.contrib) - Math.abs(a.contrib))
+        .slice(0, 6)
+    : []
+  const maxAbs = topFactors.length ? Math.max(...topFactors.map(e => Math.abs(e.contrib)), 0.01) : 0.01
+
+  return (
+    <div className={`${bgCol} border ${borderCol} rounded-xl p-5`}>
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-3">
+        <div className="flex items-center gap-4">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Quant HF · 22-Factor Technical</p>
+            <div className="flex items-center gap-3 mt-0.5">
+              <span className={`text-xl font-black ${dirCol}`}>{arrow} {sig.direction}</span>
+              <span className={`text-lg font-black font-mono ${dirCol}`}>{sig.confidence ?? '—'}%</span>
+              <span className="text-neutral-600 text-sm font-mono">score {sig.composite_score?.toFixed(2)}</span>
+            </div>
+          </div>
+        </div>
+        {topFactors.length > 0 && (
+          <div className="flex-1 min-w-[200px] max-w-[480px]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+              {topFactors.map(e => {
+                const bull = e.contrib > 0
+                const pct  = Math.abs(e.contrib) / maxAbs * 100
+                return (
+                  <div key={e.name} className="flex items-center gap-2">
+                    <span className="text-[9px] text-neutral-500 w-20 truncate capitalize">{e.name.replace(/_/g, ' ')}</span>
+                    <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${bull ? 'bg-emerald-500/70' : 'bg-rose-500/70'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className={`text-[9px] font-mono w-8 text-right ${bull ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {e.contrib > 0 ? '+' : ''}{e.contrib.toFixed(2)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function getWatchlist() {
   try {
     const data = localStorage.getItem('sentinel_quant_watchlist')
@@ -31,7 +92,7 @@ function isInWatchlist(ticker) {
   return getWatchlist().some(s => s.ticker === ticker)
 }
 
-export default function AnalysisDashboard({ data }) {
+export default function AnalysisDashboard({ data, quantSignal }) {
   const [added, setAdded] = useState(false)
   const [onWatchlist, setOnWatchlist] = useState(false)
 
@@ -69,6 +130,9 @@ export default function AnalysisDashboard({ data }) {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+      {/* Quant HF 22-factor signal — shown when ticker is in the quant engine queue */}
+      <QuantHFSignalCard sig={quantSignal} />
+
       {/* Top: Key Stats */}
       <KeyStats
         info={data.info}
