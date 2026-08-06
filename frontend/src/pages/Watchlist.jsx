@@ -4,7 +4,15 @@ import { useState, useEffect, useRef } from 'react'
 function getWatchlist() {
   try {
     const data = localStorage.getItem('sentinel_quant_watchlist')
-    return data ? JSON.parse(data) : []
+    if (!data) return []
+    const parsed = JSON.parse(data)
+    if (!Array.isArray(parsed)) return []
+    // Normalize + drop corrupt entries (missing/blank ticker). Backward-compatible
+    // with legacy entries that lack entry_price / shares — those fields stay undefined
+    // and the P&L math already null-guards them.
+    return parsed
+      .filter(s => s && typeof s.ticker === 'string' && s.ticker.trim())
+      .map(s => ({ ...s, ticker: s.ticker.trim().toUpperCase() }))
   } catch { return [] }
 }
 function saveWatchlist(list) {
@@ -28,6 +36,11 @@ function fmtPct(v) {
 function fmtValue(v) {
   if (v == null || isNaN(v)) return '—'
   return '$' + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 })
+}
+function fmtDate(v) {
+  if (!v) return '—'
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString()
 }
 
 // ─── Market-hours check ───────────────────────────────────────────────────────
@@ -671,7 +684,7 @@ export default function Watchlist() {
                           </div>
                           <div className="flex justify-between">
                             <span className="text-neutral-500">Added</span>
-                            <span className="text-neutral-500 text-[10px]">{new Date(stock.added_at).toLocaleDateString()}</span>
+                            <span className="text-neutral-500 text-[10px]">{fmtDate(stock.added_at)}</span>
                           </div>
                         </div>
                       </div>
