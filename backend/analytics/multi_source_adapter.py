@@ -1150,11 +1150,19 @@ def validate_ohlcv(df, trusted_px: Optional[float] = None,
                 f"validate_ohlcv reject {ticker}: last {last:.4f} vs trailing "
                 f"median {med:.4f} (>60% off — likely corruption)")
             return False
-        # agreement with the trusted live quote, when we have one
+        # agreement with the trusted live quote, when we have one — compared on
+        # the recent BODY (median of the 5 bars before the last), NOT the last
+        # close. The body carries the shape integrity of the series; a single
+        # bad final print is corrected downstream by price-anchoring, whereas a
+        # frame with a coincidentally-correct last close but a wrong body (the
+        # JPM $316 body vs $357 live case) MUST be rejected here so the next
+        # source gets a chance to supply a corroborating series.
         if trusted_px is not None and float(trusted_px) > 0:
-            if abs(last - float(trusted_px)) / float(trusted_px) > tol:
+            body = (float(_np.median(vals[-6:-1])) if len(vals) >= 6
+                    else float(_np.median(vals)))
+            if body > 0 and abs(body - float(trusted_px)) / float(trusted_px) > tol:
                 logger.debug(
-                    f"validate_ohlcv reject {ticker}: last {last:.4f} vs trusted "
+                    f"validate_ohlcv reject {ticker}: body {body:.4f} vs trusted "
                     f"quote {float(trusted_px):.4f} (> {int(tol*100)}% off)")
                 return False
         return True
@@ -1163,7 +1171,8 @@ def validate_ohlcv(df, trusted_px: Optional[float] = None,
 
 
 def get_historical_any_source(ticker: str, period: str = "6mo",
-                              trusted_px: Optional[float] = None) -> Optional[pd.DataFrame]:
+                              trusted_px: Optional[float] = None,
+                              tol: float = 0.30) -> Optional[pd.DataFrame]:
     """
     Try every source for historical OHLCV data and return the first frame that
     passes validate_ohlcv (structural sanity + agreement with trusted_px when
@@ -1173,11 +1182,15 @@ def get_historical_any_source(ticker: str, period: str = "6mo",
     All except Twelve Data and Polygon require optional env-var API keys.
 
     trusted_px (optional): a live/trusted quote. When given, ONLY a frame whose
-    last close agrees with it (within tolerance) is returned — a source that
+    recent body agrees with it (within `tol`) is returned — a source that
     disagrees is skipped so the next source gets a chance, and if none agree we
     return None (the caller's safety nets then withhold rather than act on a
     corrupt series). When NOT given (quote feed also down), the first
     structurally-sane frame is returned as a best effort.
+
+    tol (default 0.30): body-agreement tolerance when trusted_px is supplied.
+    A caller that wants selection to mirror a tighter scoring gate (e.g. the
+    per-ticker scorer's 8% body-corroboration net) can pass a smaller value.
     """
     _sources = (
         ("tiingo", get_tiingo_historical),
@@ -1196,7 +1209,7 @@ def get_historical_any_source(ticker: str, period: str = "6mo",
             continue
         if df is None or len(df) < 5:
             continue
-        if validate_ohlcv(df, trusted_px=trusted_px, ticker=ticker):
+        if validate_ohlcv(df, trusted_px=trusted_px, ticker=ticker, tol=tol):
             logger.info(
                 f"MultiSource historical for {ticker}: {_name} "
                 f"({len(df)} rows, validated)")

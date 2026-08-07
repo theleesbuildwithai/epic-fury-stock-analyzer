@@ -6078,6 +6078,30 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 return False
             return abs(lc - _trusted_px) / _trusted_px <= 0.25
 
+        def _body_matches(df):
+            """True if the frame's recent BODY (median of the 5 bars before the
+            last) corroborates the trusted quote within 8% — mirrors the
+            downstream body-corroboration gate so we SELECT a frame that will
+            actually score, not one whose coincidentally-correct last close
+            sneaks past _px_matches (the JPM $316 body / $357 live case). If no
+            trusted quote is available we cannot reject."""
+            if _trusted_px is None:
+                return True
+            try:
+                d = df
+                if isinstance(d.columns, pd.MultiIndex):
+                    d = d.copy()
+                    d.columns = d.columns.get_level_values(0)
+                vals = _safe_close(d).dropna().values
+                if len(vals) < 6:
+                    return True
+                body = float(np.median(vals[-6:-1]))
+                if body <= 0:
+                    return False
+                return abs(body - _trusted_px) / _trusted_px <= 0.08
+            except Exception:
+                return False
+
         # Tier 1: yfinance (10s thread timeout)
         _throttle()
         import threading as _aws_thr
@@ -6094,15 +6118,15 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         _candidates = []
         if _rows(stock_df) >= 1:
             _candidates.append(stock_df)
-        if _rows(stock_df) < 60 or not _px_matches(stock_df):
+        if _rows(stock_df) < 60 or not _px_matches(stock_df) or not _body_matches(stock_df):
             try:
                 from analytics.multi_source_adapter import get_historical_any_source
-                _t2 = get_historical_any_source(symbol, "1y", trusted_px=_trusted_px)
+                _t2 = get_historical_any_source(symbol, "1y", trusted_px=_trusted_px, tol=0.08)
                 if _rows(_t2) >= 1:
                     _candidates.append(_t2)
             except Exception:
                 pass
-        if not any(_rows(c) >= 60 and _px_matches(c) for c in _candidates):
+        if not any(_rows(c) >= 60 and _px_matches(c) and _body_matches(c) for c in _candidates):
             try:
                 from analytics.data_shield import safe_download
                 _t3 = safe_download(symbol, period="1y")
@@ -6111,10 +6135,17 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             except Exception:
                 pass
 
-        # Prefer a >=60-row frame that agrees with the trusted quote (longest
-        # wins); else the longest >=60-row frame; else the longest of anything.
+        # Prefer a >=60-row frame whose BODY corroborates the trusted quote
+        # (longest wins) — that frame will actually score rather than be withheld
+        # by the downstream body-corroboration net. Then fall back to a
+        # last-close-matching frame, then the longest >=60-row frame, then the
+        # longest of anything.
+        _best = [c for c in _candidates
+                 if _rows(c) >= 60 and _px_matches(c) and _body_matches(c)]
         _valid = [c for c in _candidates if _rows(c) >= 60 and _px_matches(c)]
-        if _valid:
+        if _best:
+            stock_df = max(_best, key=_rows)
+        elif _valid:
             stock_df = max(_valid, key=_rows)
         else:
             _long = [c for c in _candidates if _rows(c) >= 60]

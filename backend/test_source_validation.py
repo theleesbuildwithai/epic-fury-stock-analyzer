@@ -139,6 +139,39 @@ def run():
     r = get_historical_any_source("V", "1y", trusted_px=good_last)
     check("23 exploding source skipped, next good source used", r is not None)
 
+    # ---- BODY-based trusted check (the JPM regression) ----
+    # A frame with a coincidentally-correct last close but a wrong BODY must be
+    # rejected under a tight tolerance so the next source is tried, while a frame
+    # with a correct body but a single bad final print is ACCEPTED (the last bar
+    # is anchored downstream).
+    jpm_bad = mkdf([316.0] * 119 + [357.0])  # body 316 vs live 357 (~11.5% off)
+    check("24 JPM-style bad body accepted at loose 30% tol",
+          validate_ohlcv(jpm_bad, trusted_px=357.0, tol=0.30) is True)
+    check("25 JPM-style bad body rejected at tight 8% tol",
+          validate_ohlcv(jpm_bad, trusted_px=357.0, tol=0.08) is False)
+    good_body_bad_tail = mkdf(
+        list(357.0 + np.cumsum(np.random.default_rng(7).normal(0, 0.5, 119))) + [500.0])
+    check("26 good body + bad final print accepted (tail anchored downstream)",
+          validate_ohlcv(good_body_bad_tail, trusted_px=357.0, tol=0.08) is True)
+
+    # H: with a tight tol, the bad-body source is skipped and the body-
+    # corroborating source is selected (JPM would score instead of withhold).
+    msa.get_tiingo_historical = lambda t, p: jpm_bad          # right last close, wrong body
+    msa.get_alphavantage_historical = lambda t, p: mkdf([357.0] * 120)  # frozen -> rejected
+    msa.get_fmp_historical = lambda t, p: mkdf(
+        list(357.0 + np.cumsum(np.random.default_rng(2).normal(0, 0.5, 120))))  # good body
+    msa.get_twelvedata_historical = _none
+    msa.get_polygon_historical = _none
+    r = get_historical_any_source("JPM", "1y", trusted_px=357.0, tol=0.08)
+    body = float(np.median(r["Close"].values[-6:-1])) if r is not None else None
+    check("27 tight tol: bad-body source skipped, body-corroborating source chosen",
+          r is not None and abs(body - 357.0) / 357.0 <= 0.08)
+
+    # I: tight tol + every source body-off -> None (genuinely ambiguous -> withhold)
+    _restore_all(lambda t, p: jpm_bad)
+    check("28 tight tol, all bodies off -> None",
+          get_historical_any_source("JPM", "1y", trusted_px=357.0, tol=0.08) is None)
+
     passed = sum(1 for _, ok in _checks if ok)
     total = len(_checks)
     print(f"\n{passed}/{total} checks passed")
