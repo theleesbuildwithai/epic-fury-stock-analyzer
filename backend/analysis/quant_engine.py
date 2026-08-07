@@ -5919,6 +5919,83 @@ def _generate_quant_picks_impl() -> dict:
     return result
 
 
+def _scan_price_corruption(closes) -> dict:
+    """Advanced multi-signature price-corruption scanner.
+
+    The last-bar / gross-range guards (net1–3) miss corruption that lives INSIDE
+    the series — a single bad tick 40 rows back still poisons every EMA, RSI and
+    momentum reading. This scans the scoring window (the last ~60 bars, EXCLUDING
+    the final bar, which is owned by live-price anchoring) for three corruption
+    signatures, each tuned for a LOW false-positive rate so real volatility
+    (earnings gaps, crashes that PERSIST) is never mistaken for corruption:
+
+      1. Bad-tick spike/revert — a large move immediately reversed. Detected both
+         at a fixed floor (~30%) AND relative to the instrument's own robust
+         volatility (>8 MAD), so a bad print on a low-vol ETF is caught too. Real
+         moves persist; only a reverted spike is flagged.
+      2. Frozen feed — a long run of identical consecutive closes (stale/wrong).
+      3. Unadjusted split — a persistent level shift landing on a split ratio
+         (x0.5, x2, x1/3, x3, x0.25, x4) with no offsetting revert.
+
+    Returns {"corrupt": bool, "reason": str}. Never raises.
+    """
+    try:
+        c = np.asarray(closes, dtype=float)
+        c = c[np.isfinite(c) & (c > 0)]
+        n = len(c)
+        if n < 12:
+            return {"corrupt": False, "reason": ""}
+        # Body only — drop the final bar (anchoring reconciles it to the live quote).
+        win = c[-61:-1] if n >= 61 else c[:-1]
+        w = len(win)
+        if w < 10:
+            return {"corrupt": False, "reason": ""}
+
+        # Robust return scale for this instrument (median absolute deviation).
+        rets = np.diff(np.log(win))
+        med = float(np.median(rets))
+        mad = float(np.median(np.abs(rets - med)))
+        scale = 1.4826 * mad if mad > 1e-9 else 0.0
+
+        # 1. volatility-aware bad-tick: a large move (fixed floor OR >8 MAD) that
+        #    the very next bar reverses by >=60% — the signature of a bad print.
+        for i in range(len(rets) - 1):
+            ri, rj = rets[i], rets[i + 1]
+            big = (abs(ri) > 0.26) or (scale > 0 and abs(ri) / scale > 8.0)
+            if big and (ri * rj < 0) and (abs(rj) >= 0.6 * abs(ri)):
+                a, b, d = win[i], win[i + 1], win[i + 2]
+                return {"corrupt": True,
+                        "reason": f"bad-tick spike/revert {a:.2f}->{b:.2f}->{d:.2f}"}
+
+        # 2. frozen feed — longest identical-close run
+        run = maxrun = 1
+        for i in range(1, w):
+            if win[i] == win[i - 1]:
+                run += 1
+                if run > maxrun:
+                    maxrun = run
+            else:
+                run = 1
+        if maxrun > 10:
+            return {"corrupt": True,
+                    "reason": f"frozen feed: {maxrun} identical consecutive closes"}
+
+        # 3. unadjusted split — persistent level shift on a split ratio
+        for i in range(1, w):
+            r = win[i] / win[i - 1]
+            for tgt in (0.5, 2.0, 1.0 / 3.0, 3.0, 0.25, 4.0):
+                if abs(r - tgt) <= 0.02 * tgt:
+                    fwd = (win[i + 1] / win[i]) if i + 1 < w else 1.0
+                    reverts = (tgt > 1 and fwd < 0.8) or (tgt < 1 and fwd > 1.25)
+                    if not reverts:
+                        return {"corrupt": True,
+                                "reason": f"possible unadjusted split x{tgt:g}"}
+
+        return {"corrupt": False, "reason": ""}
+    except Exception:
+        return {"corrupt": False, "reason": ""}
+
+
 def analyze_watchlist_stock(symbol: str) -> dict:
     """
     Run compressed quant analysis on a single stock — same intelligence
@@ -6138,16 +6215,29 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         # an old feed) gives a stale SHAPE even when prices look sane. Markets are
         # never dark 7 straight calendar days, so a last bar older than that means
         # the feed is stale/wrong — withhold rather than score outdated momentum.
-        try:
-            _last_dt = pd.Timestamp(stock_df.index[-1])
-            if _last_dt.tzinfo is not None:
-                _last_dt = _last_dt.tz_localize(None)
-            _age_days = (pd.Timestamp.utcnow().tz_localize(None) - _last_dt).days
-            if _age_days > 7:
-                return _withhold_signal(
-                    f"stale price history: last bar {_age_days}d old", _trusted_px or price)
-        except Exception:
-            pass
+        # Only assess staleness when the frame is genuinely date-indexed — some
+        # fallback sources return an integer index, and coercing that to a
+        # Timestamp yields 1970 (a false "stale" withhold on good data).
+        if isinstance(stock_df.index, pd.DatetimeIndex) and len(stock_df.index):
+            try:
+                _last_dt = pd.Timestamp(stock_df.index[-1])
+                if _last_dt.tzinfo is not None:
+                    _last_dt = _last_dt.tz_localize(None)
+                _age_days = (pd.Timestamp.now() - _last_dt).days
+                if _age_days > 7:
+                    return _withhold_signal(
+                        f"stale price history: last bar {_age_days}d old", _trusted_px or price)
+            except Exception:
+                pass
+
+        # SAFETY NET 7: advanced whole-series corruption scan. Catches mid-series
+        # bad ticks, frozen feeds, unadjusted splits, and extreme statistical
+        # outliers that the last-bar/range guards miss but which still poison
+        # every EMA/RSI/momentum reading. Withhold rather than score a corrupt
+        # shape (tuned for low false positives — real volatility passes through).
+        _corr = _scan_price_corruption(closes)
+        if _corr.get("corrupt"):
+            return _withhold_signal(f"corrupt series: {_corr.get('reason')}", _trusted_px or price)
 
         # STB-STYLE PRICE ANCHORING (mirrors the picks-engine L1 correction at
         # ~line 5167). The trusted live quote is the source of truth for the
