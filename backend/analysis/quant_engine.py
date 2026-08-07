@@ -6124,6 +6124,55 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                         f"data glitch: last ${price:.2f} vs 5-day median ${_med5:.2f}",
                         _trusted_px or price)
 
+        # SAFETY NET 3: split-adjustment corruption guard. A single price series
+        # should never span >20x over one year (even NVDA didn't). A range that
+        # wide means the history mixes pre/post-split rows (or a wrong ticker) and
+        # every EMA/SMA/momentum reading is meaningless — withhold.
+        _cmin = float(np.min(closes)); _cmax = float(np.max(closes))
+        if _cmin > 0 and (_cmax / _cmin) > 20.0:
+            return _withhold_signal(
+                f"corrupt series: {_cmax / _cmin:.0f}x range (${_cmin:.2f}–${_cmax:.2f})",
+                _trusted_px or price)
+
+        # STB-STYLE PRICE ANCHORING (mirrors the picks-engine L1 correction at
+        # ~line 5167). The trusted live quote is the source of truth for the
+        # CURRENT price; the historical series only supplies the SHAPE (momentum,
+        # RSI, EMA/SMA trajectory), which is scale-invariant. So we reconcile the
+        # series to the live quote before scoring — this fixes the displayed price
+        # AND every absolute-price factor (price>EMA50, price>SMA200, BB position)
+        # without corrupting ratio-based factors. Root cause of the V bug
+        # (2026-08-07): a ~9.6% off last close ($400 vs live $364.57) slipped
+        # under the 25%/50% gross guards and emitted BUY on off-price data.
+        if _trusted_px and price > 0:
+            _raw_last = price
+            _prior_med = float(np.median(closes[-6:-1])) if len(closes) >= 6 else price
+            _body_ratio = (_prior_med / _trusted_px) if _trusted_px > 0 else 1.0
+            if 0.92 <= _body_ratio <= 1.08:
+                # Series BODY agrees with the live quote (within 8%): trust its
+                # shape and force the current price to live, anchoring the last
+                # close to it. Kills a bad final print (last-row glitch) without
+                # distorting the good body — the V case.
+                closes = closes.copy()
+                closes[-1] = _trusted_px
+                price = float(_trusted_px)
+            else:
+                # Body disagrees with live. If the last close still tracks the
+                # body (internally consistent), it's a UNIFORM offset (split/
+                # adjust drift) — scale the whole series to live (ratio-invariant,
+                # so momentum/RSI survive and the display is correct).
+                _last_vs_body = (_raw_last / _prior_med) if _prior_med > 0 else 1.0
+                if 0.92 <= _last_vs_body <= 1.08:
+                    _scale = _trusted_px / _raw_last
+                    closes = closes * _scale
+                    price = float(closes[-1])
+                else:
+                    # Body AND last disagree with live and with each other — the
+                    # whole series is unusable (stale/wrong-ticker). Withhold.
+                    return _withhold_signal(
+                        f"series (body ${_prior_med:.2f}, last ${_raw_last:.2f}) "
+                        f"disagrees with live quote ${_trusted_px:.2f}",
+                        _trusted_px)
+
         # --- Calculate all factors ---
         # Momentum (20d & 60d returns)
         ret_20d = (closes[-1] / closes[-20] - 1) * 100 if len(closes) >= 20 else 0
@@ -6290,6 +6339,15 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         # Apply learned confidence cap
         conf_cap = mistake_adj.get("confidence_cap", 95) if mistake_adj else 95
         confidence = min(confidence, conf_cap)
+
+        # SAFETY NET 4 (final output guard): the price we're about to publish must
+        # be finite, positive, and — when a trusted quote exists — within 2% of it.
+        # After anchoring this always holds; this is a last-line backstop so a
+        # wrong price can NEVER leave this function even if logic above regresses.
+        if not np.isfinite(price) or price <= 0:
+            return _withhold_signal("non-finite/zero final price", _trusted_px)
+        if _trusted_px and abs(price - _trusted_px) / _trusted_px > 0.02:
+            price = float(_trusted_px)
 
         # Build compact result
         result = {
