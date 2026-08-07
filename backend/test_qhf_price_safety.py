@@ -78,6 +78,38 @@ def _run(closes, trusted, end_offset_days=0):
     return q.analyze_watchlist_stock("TESTX")
 
 
+def _run_with_df(df, trusted):
+    """Same as _run but drives the engine with a pre-built DataFrame (lets a
+    test control the DatetimeIndex and per-column values directly)."""
+    _TRUSTED["px"] = trusted
+    q.yf.download = lambda *a, **k: df
+    try:
+        q._quant_cache.clear()
+    except Exception:
+        pass
+    return q.analyze_watchlist_stock("TESTX")
+
+
+def _make_df_future(closes, days_ahead):
+    """Build a DataFrame whose LAST bar is dated `days_ahead` in the future."""
+    n = len(closes)
+    end = pd.Timestamp.now().normalize() + pd.Timedelta(days=days_ahead)
+    idx = pd.bdate_range(end=end, periods=n)
+    closes = np.asarray(closes, dtype=float)
+    return pd.DataFrame(
+        {"Open": closes, "High": closes * 1.005, "Low": closes * 0.995,
+         "Close": closes, "Volume": np.full(n, 1_000_000.0)},
+        index=idx,
+    )
+
+
+def _make_df_vol(closes, volume):
+    """Build a DataFrame with a caller-supplied (possibly zero) volume level."""
+    df = _make_df(closes)
+    df["Volume"] = float(volume)
+    return df
+
+
 def _all_finite(obj):
     if isinstance(obj, float):
         return math.isfinite(obj)
@@ -193,6 +225,62 @@ def main():
     r = _run(gap, 380.0)
     check("net7 persistent earnings gap NOT flagged", is_ok(r),
           f"signal={r.get('signal')} dq={r.get('data_quality')}")
+
+    # A genuinely directional series whose NATURAL last bar already yields a
+    # strong LONG call (moderate RSI, above EMAs, positive momentum). Using a
+    # quote == the natural last close makes anchoring a no-op, so the ONLY
+    # difference between the quote/no-quote runs is the NET 8 governor itself.
+    rng2 = np.random.default_rng(3)
+    updrift = list(100.0 * np.exp(np.cumsum(rng2.normal(0.004, 0.010, 120))))
+    up_last = float(updrift[-1])
+
+    # 17. NET 8 governor — NO trusted quote caps a directional call at exactly 75,
+    #     while the IDENTICAL series WITH a corroborating quote is uncapped (94).
+    #     Same direction, strictly lower confidence -> proves the governor bites.
+    r_q = _run(updrift, up_last)   # quote == last -> no anchor move, uncapped
+    r_nq = _run(updrift, None)     # no quote -> data-quality cap 75
+    check("NET8 no-quote governor caps at <=75",
+          is_ok(r_q) and is_ok(r_nq)
+          and r_q.get("direction") == r_nq.get("direction") != "NEUTRAL"
+          and r_q.get("confidence") > 75
+          and r_nq.get("confidence") == 75
+          and r_nq.get("confidence") < r_q.get("confidence"),
+          f"quote_conf={r_q.get('confidence')} noquote_conf={r_nq.get('confidence')}")
+
+    # 18. NET 8 governor — thin history (<120 rows) caps a directional call at <=80.
+    thin_series = updrift[-90:]    # 90 rows, still an uptrend
+    r = _run(thin_series, float(thin_series[-1]))
+    check("NET8 thin-history governor caps at <=80",
+          is_ok(r) and r.get("direction") != "NEUTRAL" and r.get("confidence") <= 80,
+          f"conf={r.get('confidence')} dir={r.get('direction')}")
+
+    # 19. Volume-integrity — a zero-volume feed neutralizes the smart-money read
+    #     ("Volume data unavailable") and the governor caps confidence at <=80,
+    #     yet a legit price shape is still allowed to score (not withheld).
+    r = _run_with_df(_make_df_vol(updrift, 0.0), up_last)
+    _sm = (r.get("factors", {}).get("smart_money", {}) or {}).get("label")
+    check("volume-degenerate neutralized + governed",
+          is_ok(r) and _sm == "Volume data unavailable"
+          and (r.get("direction") == "NEUTRAL" or r.get("confidence") <= 80),
+          f"smart_money={_sm} conf={r.get('confidence')} dir={r.get('direction')}")
+
+    # 20. Date-index integrity — a scrambled index (duplicate date + descending
+    #     order) is repaired (dedupe keep-last + sort) and scores the same as the
+    #     clean series, rather than reading scrambled momentum/EMA.
+    _clean_df = _make_df(updrift)
+    _scr_df = pd.concat([_clean_df, _clean_df.iloc[[5]]]).iloc[::-1]  # dup + reversed
+    r_clean = _run_with_df(_clean_df, up_last)
+    r_scr = _run_with_df(_scr_df, up_last)
+    check("date-index dedupe/sort repair matches clean",
+          is_ok(r_scr) and r_scr.get("direction") == r_clean.get("direction")
+          and abs((r_scr.get("price") or 0) - (r_clean.get("price") or 0)) <= 0.01,
+          f"scr_dir={r_scr.get('direction')} clean_dir={r_clean.get('direction')} "
+          f"scr_px={r_scr.get('price')} clean_px={r_clean.get('price')}")
+
+    # 21. Future-dated bar — a last bar dated ahead of today is impossible for real
+    #     market data (corrupt/misparsed feed) and must be withheld.
+    r = _run_with_df(_make_df_future(updrift, 10), up_last)
+    check("future-dated bar withheld", is_withheld(r), r.get("note", ""))
 
     # --- Direct scanner unit checks on a REALISTIC (noisy) series, so every
     #     corruption signature is proven live on data that resembles a real feed

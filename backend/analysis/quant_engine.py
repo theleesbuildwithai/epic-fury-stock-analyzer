@@ -6125,6 +6125,14 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             stock_df.columns = stock_df.columns.get_level_values(0)
         stock_df = stock_df.dropna(how="all")
 
+        # DATE-INDEX INTEGRITY: a merged multi-source frame can carry duplicate or
+        # out-of-order bars, which silently scramble momentum/EMA. Repair defensively
+        # (drop duplicate dates keeping the latest, sort ascending) so every reading
+        # downstream is chronologically sound.
+        if isinstance(stock_df.index, pd.DatetimeIndex):
+            if stock_df.index.has_duplicates or not stock_df.index.is_monotonic_increasing:
+                stock_df = stock_df[~stock_df.index.duplicated(keep="last")].sort_index()
+
         if len(stock_df) < 60:
             result["error"] = "Not enough price history (need 60+ days)"
             return result
@@ -6151,6 +6159,18 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             _vmed = float(np.median(volumes[_vmask])) if _vmask.any() else 0.0
             volumes = np.where(_vmask, volumes, _vmed)
         price = float(closes[-1])
+
+        # Volume-integrity flag: a wrong/delisted/halted ticker often has zero (or
+        # mostly zero) volume, which makes the volume-trend and smart-money reads
+        # pure noise. We do NOT withhold on this alone (some legitimate ETFs trade
+        # thin), but we neutralize the volume-based factors below and cap final
+        # confidence so a phantom-volume read can never drive a bogus call.
+        _recent_vol = volumes[-60:] if len(volumes) >= 60 else volumes
+        _vol_degenerate = (len(_recent_vol) == 0) or (
+            int(np.count_nonzero(np.asarray(_recent_vol) > 0)) < 0.5 * len(_recent_vol))
+        # Data-quality signals for the confidence governor (NET 8).
+        _hist_rows = int(len(closes))
+        _anchor_move_pct = 0.0
 
         # Unified safe fallback: emit a non-committal HOLD (NEVER a false
         # directional call) whenever price data can't be trusted. The watchlist
@@ -6227,6 +6247,11 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 if _age_days > 7:
                     return _withhold_signal(
                         f"stale price history: last bar {_age_days}d old", _trusted_px or price)
+                # A bar dated in the future is impossible for real market data —
+                # it means a corrupt/misparsed feed. Withhold.
+                if _age_days < -2:
+                    return _withhold_signal(
+                        f"future-dated price bar ({-_age_days}d ahead)", _trusted_px or price)
             except Exception:
                 pass
 
@@ -6257,6 +6282,8 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 # shape and force the current price to live, anchoring the last
                 # close to it. Kills a bad final print (last-row glitch) without
                 # distorting the good body — the V case.
+                if _raw_last > 0:
+                    _anchor_move_pct = abs(_raw_last - _trusted_px) / _trusted_px
                 closes = closes.copy()
                 closes[-1] = _trusted_px
                 price = float(_trusted_px)
@@ -6328,7 +6355,10 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         price_dir = "up" if second_half_price > first_half_price else "down"
         vol_dir = "up" if second_half_vol > first_half_vol else "down"
 
-        if price_dir == "down" and vol_dir == "down":
+        if _vol_degenerate:
+            # Volume is unreliable — do not infer accumulation/distribution from it.
+            smart_money = "Volume data unavailable"
+        elif price_dir == "down" and vol_dir == "down":
             smart_money = "Accumulation (bullish)"
         elif price_dir == "up" and vol_dir == "down":
             smart_money = "Distribution (bearish)"
@@ -6349,8 +6379,9 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         elif rsi14 > 70: score -= 2  # overbought
         elif rsi14 > 60: score -= 1
 
-        if vol_ratio > 1.3: score += 1  # rising volume
-        elif vol_ratio < 0.7: score -= 1
+        if not _vol_degenerate:  # skip volume factor entirely when volume is noise
+            if vol_ratio > 1.3: score += 1  # rising volume
+            elif vol_ratio < 0.7: score -= 1
 
         if price > ema_50: score += 1  # above 50 EMA
         else: score -= 1
@@ -6446,6 +6477,29 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         # Apply learned confidence cap
         conf_cap = mistake_adj.get("confidence_cap", 95) if mistake_adj else 95
         confidence = min(confidence, conf_cap)
+
+        # SAFETY NET 8: graduated confidence governor. Weaker or less-verified data
+        # can never yield a strong, confident directional call — capital
+        # preservation over conviction. We only ever CAP confidence (never inflate)
+        # and never override a HOLD; each cap corresponds to a concrete data-quality
+        # weakness so a call on shaky evidence is quietly de-risked.
+        _dq_caps = []
+        if not _trusted_px:
+            _dq_caps.append(75)          # current price never cross-checked vs live
+        if _hist_rows < 120:
+            _dq_caps.append(80)          # < ~6 months of history = thin base
+        if _anchor_move_pct > 0.03:
+            _dq_caps.append(78)          # live quote disagreed with the last print
+        if _vol_degenerate:
+            _dq_caps.append(80)          # volume-based factors were unreliable
+        if _dq_caps and direction != "NEUTRAL":
+            _gov = min(_dq_caps)
+            if confidence > _gov:
+                logger.info(
+                    f"QHF confidence governed for {symbol}: {confidence}->{_gov} "
+                    f"(no_quote={not _trusted_px}, rows={_hist_rows}, "
+                    f"anchor_move={_anchor_move_pct:.2%}, vol_degenerate={_vol_degenerate})")
+                confidence = _gov
 
         # Clamp confidence to a sane integer band — a directional call must never
         # publish a nonsensical/negative/over-100 or non-finite confidence.
