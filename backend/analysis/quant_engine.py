@@ -6134,6 +6134,21 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 f"corrupt series: {_cmax / _cmin:.0f}x range (${_cmin:.2f}–${_cmax:.2f})",
                 _trusted_px or price)
 
+        # SAFETY NET 3b: staleness guard. A stale series (cache/fallback returning
+        # an old feed) gives a stale SHAPE even when prices look sane. Markets are
+        # never dark 7 straight calendar days, so a last bar older than that means
+        # the feed is stale/wrong — withhold rather than score outdated momentum.
+        try:
+            _last_dt = pd.Timestamp(stock_df.index[-1])
+            if _last_dt.tzinfo is not None:
+                _last_dt = _last_dt.tz_localize(None)
+            _age_days = (pd.Timestamp.utcnow().tz_localize(None) - _last_dt).days
+            if _age_days > 7:
+                return _withhold_signal(
+                    f"stale price history: last bar {_age_days}d old", _trusted_px or price)
+        except Exception:
+            pass
+
         # STB-STYLE PRICE ANCHORING (mirrors the picks-engine L1 correction at
         # ~line 5167). The trusted live quote is the source of truth for the
         # CURRENT price; the historical series only supplies the SHAPE (momentum,
@@ -6148,7 +6163,7 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             _prior_med = float(np.median(closes[-6:-1])) if len(closes) >= 6 else price
             _body_ratio = (_prior_med / _trusted_px) if _trusted_px > 0 else 1.0
             if 0.92 <= _body_ratio <= 1.08:
-                # Series BODY agrees with the live quote (within 8%): trust its
+                # Series BODY corroborates the live quote (within 8%): trust its
                 # shape and force the current price to live, anchoring the last
                 # close to it. Kills a bad final print (last-row glitch) without
                 # distorting the good body — the V case.
@@ -6156,22 +6171,16 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 closes[-1] = _trusted_px
                 price = float(_trusted_px)
             else:
-                # Body disagrees with live. If the last close still tracks the
-                # body (internally consistent), it's a UNIFORM offset (split/
-                # adjust drift) — scale the whole series to live (ratio-invariant,
-                # so momentum/RSI survive and the display is correct).
-                _last_vs_body = (_raw_last / _prior_med) if _prior_med > 0 else 1.0
-                if 0.92 <= _last_vs_body <= 1.08:
-                    _scale = _trusted_px / _raw_last
-                    closes = closes * _scale
-                    price = float(closes[-1])
-                else:
-                    # Body AND last disagree with live and with each other — the
-                    # whole series is unusable (stale/wrong-ticker). Withhold.
-                    return _withhold_signal(
-                        f"series (body ${_prior_med:.2f}, last ${_raw_last:.2f}) "
-                        f"disagrees with live quote ${_trusted_px:.2f}",
-                        _trusted_px)
+                # Body does NOT corroborate the live quote. We deliberately do NOT
+                # scale-to-live here: with a single trusted source we cannot tell a
+                # genuine uniform offset (real split/adjust) from a bad outlier
+                # quote, so anchoring an internally-consistent series to a possibly-
+                # wrong price would risk a mistake. Zero-mistake policy: withhold.
+                # (Real splits are >25% and already caught by SAFETY NET 1.)
+                return _withhold_signal(
+                    f"series body ${_prior_med:.2f} does not corroborate live "
+                    f"quote ${_trusted_px:.2f} ({(_body_ratio - 1) * 100:+.1f}%)",
+                    _trusted_px)
 
         # --- Calculate all factors ---
         # Momentum (20d & 60d returns)
@@ -6300,6 +6309,14 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         except Exception:
             learned_weights = {}
 
+        # SAFETY NET 5: the score must be a finite number before it can drive a
+        # directional call. A NaN/inf score (from any poisoned factor) would make
+        # every comparison below False and silently emit HOLD — but make it an
+        # explicit, logged withhold so a corrupt factor can never masquerade as a
+        # real HOLD and can never flip into a directional signal.
+        if not np.isfinite(score):
+            return _withhold_signal("non-finite composite score", _trusted_px or price)
+
         # Direction and signal
         if score >= 4:
             signal = "STRONG BUY"
@@ -6339,6 +6356,16 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         # Apply learned confidence cap
         conf_cap = mistake_adj.get("confidence_cap", 95) if mistake_adj else 95
         confidence = min(confidence, conf_cap)
+
+        # Clamp confidence to a sane integer band — a directional call must never
+        # publish a nonsensical/negative/over-100 or non-finite confidence.
+        try:
+            confidence = int(confidence)
+        except Exception:
+            confidence = 40
+        if not np.isfinite(confidence):
+            confidence = 40
+        confidence = max(0, min(100, confidence))
 
         # SAFETY NET 4 (final output guard): the price we're about to publish must
         # be finite, positive, and — when a trusted quote exists — within 2% of it.
@@ -6388,6 +6415,19 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             },
             "learning_applied": learning_applied,
         }
+
+        # SAFETY NET 6: scrub any NaN/inf that slipped into a published number.
+        # FastAPI's default encoder emits invalid JSON (NaN/Infinity) that breaks
+        # the frontend parse; a lone non-finite factor must never poison the card.
+        def _scrub(v):
+            if isinstance(v, float):
+                return v if np.isfinite(v) else None
+            if isinstance(v, dict):
+                return {k: _scrub(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [_scrub(x) for x in v]
+            return v
+        result = _scrub(result)
 
         # Cache it
         _quant_cache[cache_key] = {"data": result, "time": time.time()}
