@@ -282,6 +282,24 @@ def main():
     r = _run_with_df(_make_df_future(updrift, 10), up_last)
     check("future-dated bar withheld", is_withheld(r), r.get("note", ""))
 
+    # 22. TREND-CONTEXT accuracy — a CONFIRMED, OVERBOUGHT uptrend must NOT read
+    #     HOLD. This is the "everything is HOLD" root cause (e.g. MSFT +30%/mo,
+    #     RSI>70, top-of-band BB): mean-reversion must not cancel a real trend.
+    up_ob = list(np.linspace(300, 400, 120))  # smooth strong uptrend -> RSI/BB hot
+    r = _run(up_ob, 400.0)
+    check("confirmed overbought uptrend is LONG (not HOLD)",
+          is_ok(r) and r.get("direction") == "LONG" and r.get("signal") in ("BUY", "STRONG BUY"),
+          f"signal={r.get('signal')} dir={r.get('direction')} score={r.get('composite_score')}")
+
+    # 23. TREND-CONTEXT symmetry — a CONFIRMED, OVERSOLD downtrend must NOT be
+    #     rescued into a BUY (falling knife). Oversold RSI/low BB inside a
+    #     confirmed downtrend is trend continuation, not a dip to buy.
+    dn_os = list(np.linspace(400, 300, 120))  # smooth strong downtrend -> RSI/BB cold
+    r = _run(dn_os, 300.0)
+    check("confirmed oversold downtrend is SHORT (not BUY-rescued)",
+          is_ok(r) and r.get("direction") == "SHORT" and r.get("signal") in ("SELL", "STRONG SELL"),
+          f"signal={r.get('signal')} dir={r.get('direction')} score={r.get('composite_score')}")
+
     # --- Direct scanner unit checks on a REALISTIC (noisy) series, so every
     #     corruption signature is proven live on data that resembles a real feed
     #     (nonzero volatility) rather than being shadowed by another signature. ---

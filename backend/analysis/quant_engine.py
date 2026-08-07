@@ -6367,30 +6367,54 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         else:
             smart_money = "Confirmed Downtrend"
 
-        # Composite score (simplified — can't z-score a single stock, use raw signals)
+        # Composite score (simplified — can't z-score a single stock, use raw signals).
+        #
+        # TREND-CONTEXT FIX (2026-08-07): the old model summed trend-following
+        # (momentum, price>EMA/SMA) and mean-reversion (overbought/oversold RSI,
+        # Bollinger position) with EQUAL, OPPOSING weights. A strong trend then
+        # cancelled itself into the HOLD band — e.g. MSFT +30%/mo in a confirmed
+        # bull trend read HOLD because overbought RSI (-2) + top-of-band BB (-1)
+        # exactly offset momentum (+2) + trend (+2). That is the "everything is
+        # HOLD" symptom. The trend is the dominant signal, so mean-reversion must
+        # NOT fight a CONFIRMED trend: overbought can persist in an uptrend (it is
+        # strength, not a sell), and oversold can persist in a downtrend (a falling
+        # knife, not a buy). We therefore gate the mean-reversion tilt by trend.
+        _bull_trend = (price > ema_50) and (price > sma_200) and (ema_9 > ema_21)
+        _bear_trend = (price < ema_50) and (price < sma_200) and (ema_9 < ema_21)
+
         score = 0
+        # 1. Momentum (trend-following) — unchanged.
         if momentum > 5: score += 2
         elif momentum > 0: score += 1
         elif momentum < -5: score -= 2
         elif momentum < 0: score -= 1
 
-        if rsi14 < 30: score += 2  # oversold
-        elif rsi14 < 40: score += 1
-        elif rsi14 > 70: score -= 2  # overbought
-        elif rsi14 > 60: score -= 1
+        # 2. Mean-reversion sub-score (RSI + Bollinger position) computed together,
+        #    then gated so it can never oppose a confirmed trend.
+        mr = 0
+        if rsi14 < 30: mr += 2  # oversold
+        elif rsi14 < 40: mr += 1
+        elif rsi14 > 70: mr -= 2  # overbought
+        elif rsi14 > 60: mr -= 1
+        if bb_position < 20: mr += 1  # near lower band
+        elif bb_position > 80: mr -= 1  # near upper band
+        if _bull_trend and mr < 0:
+            mr = 0  # don't penalize strength inside a confirmed uptrend
+        elif _bear_trend and mr > 0:
+            mr = 0  # don't reward a falling knife inside a confirmed downtrend
+        score += mr
 
-        if not _vol_degenerate:  # skip volume factor entirely when volume is noise
+        # 3. Volume confirmation — skip entirely when volume is noise.
+        if not _vol_degenerate:
             if vol_ratio > 1.3: score += 1  # rising volume
             elif vol_ratio < 0.7: score -= 1
 
+        # 4. Structural trend location — unchanged.
         if price > ema_50: score += 1  # above 50 EMA
         else: score -= 1
 
         if price > sma_200: score += 1  # above 200 SMA
         else: score -= 1
-
-        if bb_position < 20: score += 1  # near lower band
-        elif bb_position > 80: score -= 1  # near upper band
 
         # Macro adjustment — use 3-tier sector lookup so unknown tickers
         # get the same macro treatment as known ones (instead of getting
