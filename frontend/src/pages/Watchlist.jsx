@@ -89,18 +89,30 @@ function isMarketHours() {
   return t >= 570 && t <= 960 // 9:30am – 4:00pm ET
 }
 
+// Derive the STRONG SELL / SELL / HOLD / BUY / STRONG BUY verdict for a pick
+// that only carries a direction + confidence (the pre-scanned quant-picks
+// universe). The per-ticker scorer returns an authoritative `signal` field, so
+// this is only used as a fallback for universe picks.
+function deriveSignal(direction, confidence) {
+  const c = Number(confidence) || 0
+  if (direction === 'LONG')  return c >= 85 ? 'STRONG BUY'  : 'BUY'
+  if (direction === 'SHORT') return c >= 85 ? 'STRONG SELL' : 'SELL'
+  return 'HOLD'
+}
+
 // ─── QHF Signal Badge ─────────────────────────────────────────────────────────
 function QHFBadge({ sig }) {
   if (!sig) return null
-  const isLong  = sig.direction === 'LONG'
-  const isShort = sig.direction === 'SHORT'
-  const col   = isLong ? 'bg-emerald-950/50 border-emerald-800/40 text-emerald-300'
-              : isShort ? 'bg-rose-950/50 border-rose-800/40 text-rose-300'
-              : 'bg-neutral-900 border-neutral-700 text-neutral-500'
-  const arrow = isLong ? '▲' : isShort ? '▼' : '·'
+  const label = sig.signal || deriveSignal(sig.direction, sig.confidence)
+  const isBuy  = label.includes('BUY')
+  const isSell = label.includes('SELL')
+  const col   = isBuy ? 'bg-emerald-950/50 border-emerald-800/40 text-emerald-300'
+              : isSell ? 'bg-rose-950/50 border-rose-800/40 text-rose-300'
+              : 'bg-neutral-900 border-neutral-700 text-neutral-400'
+  const arrow = isBuy ? '▲' : isSell ? '▼' : '·'
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold font-mono ${col}`}>
-      {arrow} {sig.direction} {sig.confidence}%
+      {arrow} {label}{sig.confidence != null ? ` ${sig.confidence}%` : ''}
     </span>
   )
 }
@@ -222,19 +234,64 @@ export default function Watchlist() {
     return () => clearInterval(iv)
   }, [])
 
-  // ── QHF signals: one cache-only call, no external API hits ──────────────────
-  function fetchQuantSignals() {
-    fetch('/api/quant-picks')
-      .then(r => r.ok ? r.json() : null)
-      .then(j => {
-        if (!j) return
-        const map = {}
-        for (const p of [...(j.long_picks || []), ...(j.short_picks || [])]) {
-          if (p.ticker) map[p.ticker] = { direction: p.direction, confidence: p.confidence, composite_score: p.composite_score, factors: p.factors }
+  // ── QHF signals: cover EVERY holding, not just the pick universe ─────────────
+  // 1) One cache-only /api/quant-picks call instantly covers any holding that is
+  //    already in the pre-scanned universe.
+  // 2) Every remaining holding gets the on-demand per-ticker scorer
+  //    (/api/watchlist-analysis/{ticker}) so a QHF verdict always shows.
+  // Per-ticker calls are staggered to stay rate-limit-safe on a cold backend.
+  const quantFetchingRef = useRef(false)
+  async function fetchQuantSignals() {
+    if (quantFetchingRef.current) return
+    const tickers = getWatchlist().map(s => s.ticker).filter(Boolean)
+    if (!tickers.length) return
+    quantFetchingRef.current = true
+    try {
+      // Fast pass: pick universe (cache-only, zero external calls).
+      const covered = new Set()
+      try {
+        const r = await fetch('/api/quant-picks')
+        if (r.ok) {
+          const j = await r.json()
+          const map = {}
+          for (const p of [...(j.long_picks || []), ...(j.short_picks || [])]) {
+            if (p.ticker && tickers.includes(p.ticker)) {
+              map[p.ticker] = {
+                direction: p.direction, confidence: p.confidence,
+                composite_score: p.composite_score, factors: p.factors,
+                signal: deriveSignal(p.direction, p.confidence),
+              }
+              covered.add(p.ticker)
+            }
+          }
+          if (Object.keys(map).length) setQuantSignals(prev => ({ ...prev, ...map }))
         }
-        setQuantSignals(map)
-      })
-      .catch(() => {})
+      } catch { /* fall through to per-ticker */ }
+
+      // Per-ticker pass: authoritative STRONG SELL…STRONG BUY signal for the rest.
+      for (const t of tickers) {
+        if (covered.has(t)) continue
+        try {
+          const wr = await fetch(`/api/watchlist-analysis/${t}`)
+          if (wr.ok) {
+            const w = await wr.json()
+            if (w && w.analyzed && w.signal) {
+              setQuantSignals(prev => ({
+                ...prev,
+                [t]: {
+                  direction: w.direction, confidence: w.confidence,
+                  composite_score: w.composite_score, factors: w.factors,
+                  signal: w.signal,
+                },
+              }))
+            }
+          }
+        } catch { /* skip this ticker; others still populate */ }
+        await new Promise(r => setTimeout(r, 200))
+      }
+    } finally {
+      quantFetchingRef.current = false
+    }
   }
 
   // ── Live price refresh (quote endpoint, cached on backend) ──────────────────
@@ -674,7 +731,7 @@ export default function Watchlist() {
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-600 mb-1">Quant HF Signal</p>
                             <p className="text-xs text-neutral-600">
-                              {stock.ticker} is not in the current quant engine queue.{' '}
+                              Signal loading for {stock.ticker}…{' '}
                               <button onClick={e => { e.stopPropagation(); fetchQuantSignals() }} className="text-blue-400 hover:text-blue-300 underline">Refresh signals</button>
                             </p>
                           </div>
