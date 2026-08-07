@@ -73,6 +73,7 @@ def _run(closes, trusted, end_offset_days=0):
     q.yf.download = lambda *a, **k: df
     try:
         q._quant_cache.clear()
+        q._quant_last_good.clear()  # isolate each case from anti-flap reuse
     except Exception:
         pass
     return q.analyze_watchlist_stock("TESTX")
@@ -85,6 +86,7 @@ def _run_with_df(df, trusted):
     q.yf.download = lambda *a, **k: df
     try:
         q._quant_cache.clear()
+        q._quant_last_good.clear()  # isolate each case from anti-flap reuse
     except Exception:
         pass
     return q.analyze_watchlist_stock("TESTX")
@@ -299,6 +301,44 @@ def main():
     check("confirmed oversold downtrend is SHORT (not BUY-rescued)",
           is_ok(r) and r.get("direction") == "SHORT" and r.get("signal") in ("SELL", "STRONG SELL"),
           f"signal={r.get('signal')} dir={r.get('direction')} score={r.get('composite_score')}")
+
+    # --- ANTI-FLAP: a transient upstream data outage must reuse the last
+    #     validated signal (live-anchored) instead of dropping to HOLD — but ONLY
+    #     when it is safe to do so. Each case seeds a validated LONG, then forces a
+    #     withhold-triggering fetch while keeping _quant_last_good intact. ---
+
+    # 24. Transient outage + stable live price -> REUSE the validated signal.
+    q._quant_cache.clear(); q._quant_last_good.clear()
+    r_seed = _run(updrift, up_last)                 # validated LONG -> stored last-good
+    _TRUSTED["px"] = up_last                         # live quote unchanged (stable)
+    q.yf.download = lambda *a, **k: _make_df([up_last * 1.6] * 120)  # corrupt -> net1 withhold
+    q._quant_cache.clear()                           # expire 10-min cache, KEEP last-good
+    r = q.analyze_watchlist_stock("TESTX")
+    check("anti-flap reuses last validated signal on transient outage",
+          r.get("data_quality") == "stale_reused"
+          and r.get("direction") == r_seed.get("direction") != "NEUTRAL"
+          and abs((r.get("price") or 0) - up_last) <= 0.01,
+          f"dq={r.get('data_quality')} dir={r.get('direction')} px={r.get('price')}")
+
+    # 25. Outage + MATERIAL (>10%) live move -> do NOT reuse; safe withhold.
+    q._quant_cache.clear(); q._quant_last_good.clear()
+    _run(updrift, up_last)                           # validated LONG @ up_last
+    _TRUSTED["px"] = up_last * 1.30                  # live gapped +30% (material)
+    q.yf.download = lambda *a, **k: _make_df([up_last * 3.0] * 120)  # corrupt -> withhold
+    q._quant_cache.clear()
+    r = q.analyze_watchlist_stock("TESTX")
+    check("anti-flap does NOT reuse across a material (>10%) move", is_withheld(r),
+          f"dq={r.get('data_quality')} note={r.get('note')}")
+
+    # 26. Outage + NO trusted quote -> cannot verify price, so safe withhold.
+    q._quant_cache.clear(); q._quant_last_good.clear()
+    _run(updrift, up_last)                           # validated LONG stored
+    _TRUSTED["px"] = None                            # live quote unavailable
+    q.yf.download = lambda *a, **k: _make_df(list(np.linspace(360, 365, 119)) + [600.0])
+    q._quant_cache.clear()
+    r = q.analyze_watchlist_stock("TESTX")
+    check("anti-flap requires a trusted quote (else safe withhold)", is_withheld(r),
+          f"dq={r.get('data_quality')}")
 
     # --- Direct scanner unit checks on a REALISTIC (noisy) series, so every
     #     corruption signature is proven live on data that resembles a real feed

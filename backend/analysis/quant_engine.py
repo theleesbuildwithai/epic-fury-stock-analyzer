@@ -55,6 +55,11 @@ except Exception as _stoch_import_err:
 _quant_cache = {}
 _QUANT_CACHE_TTL = 300  # 5 minutes
 _last_quant_call = [0.0]
+# Last VALIDATED (reliable) per-ticker analysis, keyed by symbol. Used only to
+# ride out a transient upstream data-source outage (anti-flap) — see the
+# stale-good reuse in _withhold_signal. Never a substitute for a live signal.
+_quant_last_good = {}
+_QUANT_STALE_GOOD_TTL = 6 * 3600  # reuse a validated signal for up to 6h
 _QUANT_DELAY = 3.0  # seconds between Yahoo Finance calls
 
 # Global scan lock — prevents concurrent scans splitting the Finnhub API budget.
@@ -6176,6 +6181,38 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         # directional call) whenever price data can't be trusted. The watchlist
         # still shows a signal, but a confident wrong SELL/BUY can never surface.
         def _withhold_signal(reason, display_px):
+            # ANTI-FLAP (2026-08-07): a transient upstream data outage must not
+            # drop a validated signal to HOLD. If a RECENT reliable analysis
+            # exists AND the live quote confirms the price has not materially
+            # moved, reuse that validated result (price re-anchored to the live
+            # quote) instead of flapping to HOLD. Strict guards keep this safe:
+            #   - a trusted live quote MUST exist (else we can't verify price);
+            #   - the cached-good result must be < _QUANT_STALE_GOOD_TTL old;
+            #   - the live quote must be within 10% of the cached-good price, so
+            #     a real gap/halt/crash (a material move) still WITHHOLDS.
+            # Net effect: rides out throttling without ever surfacing a stale
+            # signal across a real move or a wrong price.
+            try:
+                _lg = _quant_last_good.get(symbol)
+                if _lg and _trusted_px and float(_trusted_px) > 0:
+                    _age = time.time() - _lg["time"]
+                    _prev_px = _lg["data"].get("price")
+                    if (_age < _QUANT_STALE_GOOD_TTL and _prev_px and _prev_px > 0
+                            and abs(float(_trusted_px) - _prev_px) / _prev_px <= 0.10):
+                        import copy as _copy
+                        _reused = _copy.deepcopy(_lg["data"])
+                        _reused["price"] = round(float(_trusted_px), 2)
+                        _reused["data_quality"] = "stale_reused"
+                        _reused["note"] = (
+                            "Live price feed briefly unavailable — showing the last "
+                            "validated signal, re-anchored to the live quote "
+                            f"({int(_age // 60)} min old).")
+                        logger.warning(
+                            f"QHF stale-good reuse for {symbol} ({int(_age//60)}m): {reason}")
+                        _quant_cache[cache_key] = {"data": _reused, "time": time.time()}
+                        return _reused
+            except Exception:
+                pass
             logger.warning(f"QHF signal withheld for {symbol}: {reason}")
             _r = {
                 "symbol": symbol,
@@ -6597,8 +6634,11 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             return v
         result = _scrub(result)
 
-        # Cache it
+        # Cache it, and record it as the last VALIDATED analysis for this symbol
+        # so a later transient data outage can ride out on it (anti-flap reuse in
+        # _withhold_signal) instead of dropping the signal to HOLD.
         _quant_cache[cache_key] = {"data": result, "time": time.time()}
+        _quant_last_good[symbol] = {"data": result, "time": time.time()}
         return result
 
     except Exception as e:
