@@ -5948,7 +5948,54 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         regime = detect_market_regime()
         macro = get_macro_overlay()
 
-        # Download stock data only (SPY not needed for single-stock analysis)
+        # Download stock data only (SPY not needed for single-stock analysis).
+        # We pull from every source, then pick the series that BEST agrees with a
+        # trusted live quote. A wrong-symbol / stale / split-mismatched frame
+        # otherwise produces bogus momentum and a dangerous confident signal
+        # (e.g. STRONG SELL on garbage price data — ROST/TRGP 2026-08-07).
+
+        # Trusted live price (9-layer multi-source) used to validate history.
+        _trusted_px = None
+        try:
+            from analytics.multi_source_adapter import multi_source_quote_batch
+            _tq = multi_source_quote_batch([symbol]) or {}
+            _tqd = _tq.get(symbol) or _tq.get(symbol.upper()) or {}
+            _tpx = _tqd.get("price")
+            if _tpx and float(_tpx) > 0:
+                _trusted_px = float(_tpx)
+        except Exception:
+            _trusted_px = None
+
+        def _rows(df):
+            try:
+                return 0 if df is None else len(df)
+            except Exception:
+                return 0
+
+        def _last_close(df):
+            """Last close of a candidate frame (defensive MultiIndex handling)."""
+            try:
+                if df is None or df.empty:
+                    return None
+                d = df
+                if isinstance(d.columns, pd.MultiIndex):
+                    d = d.copy()
+                    d.columns = d.columns.get_level_values(0)
+                v = float(_safe_close(d).values[-1])
+                return v if v > 0 else None
+            except Exception:
+                return None
+
+        def _px_matches(df):
+            """True if the frame's last close agrees with the trusted quote
+            (within 25%). If no trusted quote is available we cannot reject."""
+            if _trusted_px is None:
+                return True
+            lc = _last_close(df)
+            if lc is None:
+                return False
+            return abs(lc - _trusted_px) / _trusted_px <= 0.25
+
         # Tier 1: yfinance (10s thread timeout)
         _throttle()
         import threading as _aws_thr
@@ -5960,38 +6007,37 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         _aws_t.start(); _aws_t.join(timeout=10)
         stock_df = _aws_r[0]
 
-        # Row count helper — a truncated (non-empty but <60-row) frame from one
-        # source must NOT short-circuit the fallback tiers, or a flaky partial
-        # yfinance response leaves the ticker with "Not enough price history"
-        # even when Tiingo/Stooq have the full year. Fire the next tier whenever
-        # we have <60 rows, and keep whichever source returns the most history.
-        def _rows(df):
-            try:
-                return 0 if df is None else len(df)
-            except Exception:
-                return 0
-
-        # Tier 2: multi-source historical (Tiingo/AV/FMP) if tier 1 was
-        # missing OR truncated.
-        if _rows(stock_df) < 60:
+        # Collect every candidate frame. Tiers 2/3 fire when tier 1 is missing,
+        # truncated (<60 rows), OR price-mismatched vs the trusted quote.
+        _candidates = []
+        if _rows(stock_df) >= 1:
+            _candidates.append(stock_df)
+        if _rows(stock_df) < 60 or not _px_matches(stock_df):
             try:
                 from analytics.multi_source_adapter import get_historical_any_source
                 _t2 = get_historical_any_source(symbol, "1y")
-                if _rows(_t2) > _rows(stock_df):
-                    stock_df = _t2
+                if _rows(_t2) >= 1:
+                    _candidates.append(_t2)
             except Exception:
                 pass
-
-        # Tier 3: data_shield safe_download (yfinance retry + Stooq) if still
-        # missing OR truncated.
-        if _rows(stock_df) < 60:
+        if not any(_rows(c) >= 60 and _px_matches(c) for c in _candidates):
             try:
                 from analytics.data_shield import safe_download
                 _t3 = safe_download(symbol, period="1y")
-                if _rows(_t3) > _rows(stock_df):
-                    stock_df = _t3
+                if _rows(_t3) >= 1:
+                    _candidates.append(_t3)
             except Exception:
                 pass
+
+        # Prefer a >=60-row frame that agrees with the trusted quote (longest
+        # wins); else the longest >=60-row frame; else the longest of anything.
+        _valid = [c for c in _candidates if _rows(c) >= 60 and _px_matches(c)]
+        if _valid:
+            stock_df = max(_valid, key=_rows)
+        else:
+            _long = [c for c in _candidates if _rows(c) >= 60]
+            stock_df = max(_long, key=_rows) if _long else (
+                max(_candidates, key=_rows) if _candidates else None)
 
         if stock_df is None or (hasattr(stock_df, 'empty') and stock_df.empty):
             result["error"] = "No price data available"
@@ -6011,7 +6057,72 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         if hasattr(vol_col, "columns"):
             vol_col = vol_col.iloc[:, 0]
         volumes = vol_col.values.astype(float)
+
+        # Scrub NaN/Inf/non-positive closes before anything reads them — a single
+        # bad row otherwise poisons momentum/RSI/EMA and every downstream factor.
+        _mask = np.isfinite(closes) & (closes > 0)
+        if _mask.sum() < 60:
+            result["error"] = "Not enough clean price history (need 60+ days)"
+            return result
+        closes = closes[_mask]
+        volumes = volumes[_mask] if len(volumes) == len(_mask) else volumes[-len(closes):]
+        # Align volume length defensively; fill any bad volume with the median.
+        if len(volumes) != len(closes):
+            volumes = np.resize(volumes, len(closes))
+        _vmask = np.isfinite(volumes) & (volumes >= 0)
+        if _vmask.sum() < len(volumes):
+            _vmed = float(np.median(volumes[_vmask])) if _vmask.any() else 0.0
+            volumes = np.where(_vmask, volumes, _vmed)
         price = float(closes[-1])
+
+        # Unified safe fallback: emit a non-committal HOLD (NEVER a false
+        # directional call) whenever price data can't be trusted. The watchlist
+        # still shows a signal, but a confident wrong SELL/BUY can never surface.
+        def _withhold_signal(reason, display_px):
+            logger.warning(f"QHF signal withheld for {symbol}: {reason}")
+            _r = {
+                "symbol": symbol,
+                "analyzed": True,
+                "price": round(float(display_px), 2) if (display_px and float(display_px) > 0) else None,
+                "sector": _get_sector_with_fallback(symbol),
+                "signal": "HOLD",
+                "direction": "NEUTRAL",
+                "confidence": 40,
+                "composite_score": 0.0,
+                "regime": (regime or {}).get("regime", "SIDEWAYS"),
+                "regime_confidence": (regime or {}).get("confidence", 50),
+                "factors": {},
+                "data_quality": "unreliable_price_data",
+                "note": f"Signal withheld — {reason}.",
+            }
+            _quant_cache[cache_key] = {"data": _r, "time": time.time()}
+            return _r
+
+        # SAFETY NET 1: the series must agree with the trusted live quote. If no
+        # source matched (last close diverges >25%), the factor math is garbage.
+        if _trusted_px and price > 0 and abs(price - _trusted_px) / _trusted_px > 0.25:
+            return _withhold_signal(
+                f"price history ${price:.2f} disagreed with live quote ${_trusted_px:.2f}",
+                _trusted_px,
+            )
+
+        # SAFETY NET 2: intra-series glitch guard (mirrors the picks engine). A
+        # >50% up / >33% down single-day jump vs the prior close, or a >50%/-50%
+        # move vs the 5-day median, is a data glitch (wrong ticker, split error,
+        # missing decimal) — withhold rather than score phantom data.
+        if len(closes) >= 2 and closes[-2] > 0:
+            _r1 = closes[-1] / closes[-2]
+            if _r1 > 1.5 or _r1 < 0.67:
+                return _withhold_signal(
+                    f"data glitch: {(_r1 - 1) * 100:+.0f}% single-day jump", _trusted_px or price)
+        if len(closes) >= 6:
+            _med5 = float(np.median(closes[-6:-1]))
+            if _med5 > 0:
+                _rm = closes[-1] / _med5
+                if _rm > 1.5 or _rm < 0.5:
+                    return _withhold_signal(
+                        f"data glitch: last ${price:.2f} vs 5-day median ${_med5:.2f}",
+                        _trusted_px or price)
 
         # --- Calculate all factors ---
         # Momentum (20d & 60d returns)
