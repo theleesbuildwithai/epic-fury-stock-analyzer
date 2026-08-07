@@ -18,7 +18,9 @@ venv/
 .fund_inception_date
 .sp500_disk_cache.json
 .daily_pause_clear_*_done
+.cash_recovery_*_done
 backend/.portfolio_reset_*_done
 backend/predictions/.fund_inception_date
 backend/predictions/.sp500_disk_cache.json
 backend/.daily_pause_clear_*_done
+backend/.cash_recovery_*_done

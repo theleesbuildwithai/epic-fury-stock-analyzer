@@ -128,16 +128,13 @@ def is_malicious_request(path: str, query: str, user_agent: str) -> str:
     return ""
 
 # --- Attack Log (in-memory, last 500 events) ---
-import hashlib
+import hmac
 from datetime import datetime
 
 attack_log = []          # list of attack event dicts
 MAX_LOG_SIZE = 500       # keep last 500 events
 total_attacks_blocked = 0
 total_requests_served = 0
-
-# Secret admin key — only Jackson knows this
-ADMIN_SECRET = hashlib.sha256(b"epicfury-jackson-2026").hexdigest()[:16]  # short hash
 
 def log_attack(client_ip: str, attack_type: str, path: str, user_agent: str):
     """Record an attack attempt for the security dashboard."""
@@ -193,6 +190,16 @@ class FirewallMiddleware(BaseHTTPMiddleware):
                 return JSONResponse(status_code=413, content={"detail": "Request too large"})
         except ValueError:
             pass
+
+        # 5. Centralized admin gate — protects EVERY destructive endpoint
+        # (all /api/admin/* plus explicit non-prefixed destructive routes) in one
+        # place, so a route that forgets require_admin is still covered. Fail-open
+        # when ADMIN_API_KEY is unset; setting it locks everything down at once.
+        if _is_protected_admin_path(path):
+            failure = _admin_auth_failure(request)
+            if failure is not None:
+                status_code, reason = failure
+                return JSONResponse(status_code=status_code, content={"detail": reason})
 
         # Process request and add security headers
         response = await call_next(request)
@@ -314,18 +321,44 @@ def admin_audit(request: Request, action: str, success: bool, details: str = "")
         logger.warning(f"ADMIN AUTH FAIL [{action}] from {client_ip}: {details}")
 
 
-def require_admin(request: Request):
+# Extra destructive endpoints that are NOT under the /api/admin/ prefix but
+# still mutate portfolio/trading state. Centralized enforcement (middleware +
+# require_admin) covers everything under /api/admin/ automatically; this list
+# closes the non-prefixed gaps so no destructive route is ever left open.
+_PROTECTED_EXACT_PATHS = frozenset({
+    "/api/force-reset",
+    "/api/trigger-learning",
+    "/api/trigger-premarket",
+    "/api/trigger-trade-cycle",
+    "/api/ibkr/kill-switch",
+    "/api/ibkr/toggle",
+    "/api/ibkr/unhalt",
+    "/api/clear-daily-pause",
+    "/api/paper-trade/rebalance",
+    "/api/auto-fix/feedback-loop",
+    "/api/auto-fix/clear-penalties",
+})
+
+
+def _is_protected_admin_path(path: str) -> bool:
+    """True if the path is a sensitive/destructive endpoint requiring admin auth."""
+    return path.startswith("/api/admin/") or path in _PROTECTED_EXACT_PATHS
+
+
+def _admin_auth_failure(request: Request):
     """
-    Gatekeeper for sensitive endpoints. Enforces:
-      1. Admin API key (X-Admin-Key header) — REQUIRED if ADMIN_API_KEY env var is set
-      2. IP allowlist — REQUIRED if ADMIN_IP_ALLOWLIST env var is set
-    If neither env var is set, auth is bypassed (dev mode only — set both in production).
+    Core admin-auth check. Returns None when access is ALLOWED, otherwise a
+    (status_code, reason) tuple when DENIED. Non-raising so it can be shared by
+    both the FastAPI dependency (require_admin) and the firewall middleware.
+
+    Fail-open semantics: if ADMIN_API_KEY is not configured, access is allowed
+    (dev/back-compat). Setting ADMIN_API_KEY in the environment instantly locks
+    down EVERY destructive endpoint at once — no UI depends on these routes.
     """
-    # If no admin key configured, log warning but allow (back-compat / dev mode)
     if not ADMIN_API_KEY:
         admin_audit(request, "AUTH_BYPASSED_NO_KEY_SET", True,
                     "ADMIN_API_KEY env var not set — endpoint open. Set it in App Runner config.")
-        return True
+        return None
 
     try:
         client_ip = request.client.host if request.client else "unknown"
@@ -335,14 +368,28 @@ def require_admin(request: Request):
     # IP allowlist (if configured)
     if ADMIN_IP_ALLOWLIST and client_ip not in ADMIN_IP_ALLOWLIST:
         admin_audit(request, "IP_DENIED", False, f"IP {client_ip} not in allowlist")
-        raise HTTPException(status_code=403, detail="Access denied")
+        return (403, "Access denied")
 
-    # API key check
+    # API key check — constant-time comparison to prevent timing attacks
     api_key = request.headers.get("X-Admin-Key", "").strip()
-    if not api_key or api_key != ADMIN_API_KEY:
+    if not api_key or not hmac.compare_digest(api_key, ADMIN_API_KEY):
         admin_audit(request, "INVALID_API_KEY", False, f"Bad/missing X-Admin-Key from {client_ip}")
-        raise HTTPException(status_code=401, detail="Access denied")
+        return (401, "Access denied")
 
+    return None
+
+
+def require_admin(request: Request):
+    """
+    Gatekeeper for sensitive endpoints. Enforces:
+      1. Admin API key (X-Admin-Key header) — REQUIRED if ADMIN_API_KEY env var is set
+      2. IP allowlist — REQUIRED if ADMIN_IP_ALLOWLIST env var is set
+    If neither env var is set, auth is bypassed (dev mode only — set both in production).
+    """
+    failure = _admin_auth_failure(request)
+    if failure is not None:
+        status_code, reason = failure
+        raise HTTPException(status_code=status_code, detail=reason)
     return True
 
 
@@ -11104,6 +11151,7 @@ def stock_learning_leaderboard(request: Request, mode: str = "best",
 def stock_learning_ticker(ticker: str, request: Request, lookback_days: int = 90):
     """Per-ticker historical stats + confidence adjustment factor."""
     check_rate_limit(request.client.host)
+    ticker = validate_ticker(ticker)
     try:
         from predictions.stock_learning import get_stock_stats
         return get_stock_stats(ticker, lookback_days=int(lookback_days))
@@ -11388,6 +11436,7 @@ def admin_inspect_trade(ticker: str, request: Request):
     """Dump ALL raw fields for a specific ticker from paper_trades.
     Use to diagnose why scrub doesn't match a row."""
     check_rate_limit(request.client.host)
+    ticker = validate_ticker(ticker)
     try:
         from predictions.models import get_db
         conn = get_db()
@@ -12009,6 +12058,7 @@ def earnings_drift_summary(request: Request, min_events: int = 4):
 def earnings_drift_predict(ticker: str, request: Request):
     """Predict drift signal for a ticker based on historical pattern."""
     check_rate_limit(request.client.host)
+    ticker = validate_ticker(ticker)
     try:
         from predictions.earnings_drift import predict_drift
         return predict_drift(ticker)
@@ -12021,6 +12071,7 @@ def earnings_drift_ticker(ticker: str, request: Request,
                            lookback_quarters: int = 8):
     """Per-ticker historical drift pattern from earnings."""
     check_rate_limit(request.client.host)
+    ticker = validate_ticker(ticker)
     try:
         from predictions.earnings_drift import build_ticker_drift_history
         return build_ticker_drift_history(ticker,
