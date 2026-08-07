@@ -5960,19 +5960,36 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         _aws_t.start(); _aws_t.join(timeout=10)
         stock_df = _aws_r[0]
 
-        # Tier 2: multi-source historical (Tiingo/AV/FMP) if yfinance failed
-        if stock_df is None or stock_df.empty:
+        # Row count helper — a truncated (non-empty but <60-row) frame from one
+        # source must NOT short-circuit the fallback tiers, or a flaky partial
+        # yfinance response leaves the ticker with "Not enough price history"
+        # even when Tiingo/Stooq have the full year. Fire the next tier whenever
+        # we have <60 rows, and keep whichever source returns the most history.
+        def _rows(df):
+            try:
+                return 0 if df is None else len(df)
+            except Exception:
+                return 0
+
+        # Tier 2: multi-source historical (Tiingo/AV/FMP) if tier 1 was
+        # missing OR truncated.
+        if _rows(stock_df) < 60:
             try:
                 from analytics.multi_source_adapter import get_historical_any_source
-                stock_df = get_historical_any_source(symbol, "1y")
+                _t2 = get_historical_any_source(symbol, "1y")
+                if _rows(_t2) > _rows(stock_df):
+                    stock_df = _t2
             except Exception:
                 pass
 
-        # Tier 3: data_shield safe_download (yfinance retry + Stooq)
-        if stock_df is None or (hasattr(stock_df, 'empty') and stock_df.empty):
+        # Tier 3: data_shield safe_download (yfinance retry + Stooq) if still
+        # missing OR truncated.
+        if _rows(stock_df) < 60:
             try:
                 from analytics.data_shield import safe_download
-                stock_df = safe_download(symbol, period="1y")
+                _t3 = safe_download(symbol, period="1y")
+                if _rows(_t3) > _rows(stock_df):
+                    stock_df = _t3
             except Exception:
                 pass
 
