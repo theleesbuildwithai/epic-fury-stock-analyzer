@@ -1080,59 +1080,149 @@ def get_fundamentals_any_source(ticker: str) -> Optional[dict]:
     return None
 
 
-def get_historical_any_source(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+def _last_close_value(df) -> Optional[float]:
+    """Last close of an OHLCV frame, defensive against MultiIndex columns.
+    Returns None if it cannot be read as a positive number."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return None
+        d = df
+        if isinstance(d.columns, pd.MultiIndex):
+            d = d.copy()
+            d.columns = d.columns.get_level_values(0)
+        if "Close" not in d.columns:
+            return None
+        v = float(pd.Series(d["Close"]).dropna().values[-1])
+        return v if (v > 0 and v == v and v != float("inf")) else None
+    except Exception:
+        return None
+
+
+def validate_ohlcv(df, trusted_px: Optional[float] = None,
+                   ticker: str = "", tol: float = 0.30) -> bool:
     """
-    Try every source for historical OHLCV data.
-    Returns first DataFrame with >= 5 rows, or None.
+    SOURCE-BOUNDARY DATA VALIDATOR (2026-08-07).
+
+    A free historical source occasionally returns a grossly wrong series for a
+    ticker (e.g. V at $3.30 vs a live $362.50, or a split-glitched / frozen
+    frame). Such a series silently corrupts every downstream indicator. This
+    validator is the single gate every historical frame must pass before it is
+    trusted. It is deliberately CONSERVATIVE: it only rejects data that is
+    unambiguously wrong, so it can never reject a legitimate price series.
+
+    Rejects when the frame:
+      - is missing / empty / has < 5 rows / has no Close column;
+      - contains a non-positive, NaN, or infinite close;
+      - is frozen (every close identical);
+      - has a last close that deviates > 60% from the trailing-20 median
+        (catches corruption / bad split ticks; legitimate 20-bar moves are
+        far smaller than this);
+      - (only when trusted_px is supplied) has a last close more than `tol`
+        away from the live/trusted quote.
+    """
+    try:
+        if df is None or getattr(df, "empty", True):
+            return False
+        d = df
+        if isinstance(d.columns, pd.MultiIndex):
+            d = d.copy()
+            d.columns = d.columns.get_level_values(0)
+        if "Close" not in d.columns:
+            return False
+        closes = pd.Series(d["Close"]).dropna()
+        if len(closes) < 5:
+            return False
+        vals = closes.astype(float).values
+        # non-positive / NaN / inf
+        if not all(v > 0 and v == v and v != float("inf") and v != float("-inf")
+                   for v in vals):
+            return False
+        # frozen series (no variation at all is not a real market)
+        if float(vals.max()) == float(vals.min()):
+            return False
+        last = float(vals[-1])
+        # last close as a wild outlier vs the recent trailing median
+        tail = vals[-20:] if len(vals) >= 20 else vals
+        import numpy as _np
+        med = float(_np.median(tail))
+        if med > 0 and abs(last - med) / med > 0.60:
+            logger.debug(
+                f"validate_ohlcv reject {ticker}: last {last:.4f} vs trailing "
+                f"median {med:.4f} (>60% off — likely corruption)")
+            return False
+        # agreement with the trusted live quote, when we have one
+        if trusted_px is not None and float(trusted_px) > 0:
+            if abs(last - float(trusted_px)) / float(trusted_px) > tol:
+                logger.debug(
+                    f"validate_ohlcv reject {ticker}: last {last:.4f} vs trusted "
+                    f"quote {float(trusted_px):.4f} (> {int(tol*100)}% off)")
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def get_historical_any_source(ticker: str, period: str = "6mo",
+                              trusted_px: Optional[float] = None) -> Optional[pd.DataFrame]:
+    """
+    Try every source for historical OHLCV data and return the first frame that
+    passes validate_ohlcv (structural sanity + agreement with trusted_px when
+    supplied). Returns None if nothing validates.
 
     Chain: tiingo → alpha_vantage → fmp → twelve_data → polygon
     All except Twelve Data and Polygon require optional env-var API keys.
+
+    trusted_px (optional): a live/trusted quote. When given, ONLY a frame whose
+    last close agrees with it (within tolerance) is returned — a source that
+    disagrees is skipped so the next source gets a chance, and if none agree we
+    return None (the caller's safety nets then withhold rather than act on a
+    corrupt series). When NOT given (quote feed also down), the first
+    structurally-sane frame is returned as a best effort.
     """
-    # 1. Tiingo (500/day — most generous free tier)
-    try:
-        df = get_tiingo_historical(ticker, period)
-        if df is not None and len(df) >= 5:
-            logger.info(f"MultiSource historical for {ticker}: tiingo ({len(df)} rows)")
-            return df
-    except Exception:
-        pass
+    _sources = (
+        ("tiingo", get_tiingo_historical),
+        ("alphavantage", get_alphavantage_historical),
+        ("fmp", get_fmp_historical),
+        ("twelvedata", get_twelvedata_historical),
+        ("polygon", get_polygon_historical),
+    )
 
-    # 2. Alpha Vantage (25/day — excellent data quality)
-    try:
-        df = get_alphavantage_historical(ticker, period)
-        if df is not None and len(df) >= 5:
-            logger.info(f"MultiSource historical for {ticker}: alphavantage ({len(df)} rows)")
+    # Pass 1: return the first frame that FULLY validates.
+    _structural_fallback = None
+    for _name, _fn in _sources:
+        try:
+            df = _fn(ticker, period)
+        except Exception:
+            continue
+        if df is None or len(df) < 5:
+            continue
+        if validate_ohlcv(df, trusted_px=trusted_px, ticker=ticker):
+            logger.info(
+                f"MultiSource historical for {ticker}: {_name} "
+                f"({len(df)} rows, validated)")
             return df
-    except Exception:
-        pass
+        # Remember a structurally-sane frame (ignoring the trusted-price check)
+        # only as a last resort for when NO trusted quote is available.
+        if _structural_fallback is None and validate_ohlcv(df, trusted_px=None,
+                                                           ticker=ticker):
+            _structural_fallback = (_name, df)
 
-    # 3. FMP historical (250/day)
-    try:
-        df = get_fmp_historical(ticker, period)
-        if df is not None and len(df) >= 5:
-            logger.info(f"MultiSource historical for {ticker}: fmp ({len(df)} rows)")
-            return df
-    except Exception:
-        pass
+    # Pass 2: no source agreed with the trusted quote.
+    #   - If we had a trusted quote, every frame disagreed with it → the data is
+    #     unreliable; return None so the caller withholds (never act on it).
+    #   - If we had NO trusted quote, fall back to the best structurally-sane
+    #     frame (preserves prior best-effort behaviour, minus obvious corruption).
+    if trusted_px is None and _structural_fallback is not None:
+        _name, df = _structural_fallback
+        logger.info(
+            f"MultiSource historical for {ticker}: {_name} "
+            f"({len(df)} rows, structural-only, no trusted quote)")
+        return df
 
-    # 4. Twelve Data historical (key-gated, ~30 credits per call)
-    try:
-        df = get_twelvedata_historical(ticker, period)
-        if df is not None and len(df) >= 5:
-            logger.info(f"MultiSource historical for {ticker}: twelvedata ({len(df)} rows)")
-            return df
-    except Exception:
-        pass
-
-    # 5. Polygon historical (key-gated, delayed data, no daily cap)
-    try:
-        df = get_polygon_historical(ticker, period)
-        if df is not None and len(df) >= 5:
-            logger.info(f"MultiSource historical for {ticker}: polygon ({len(df)} rows)")
-            return df
-    except Exception:
-        pass
-
+    if trusted_px is not None:
+        logger.warning(
+            f"MultiSource historical for {ticker}: no source agreed with the "
+            f"trusted quote {float(trusted_px):.2f} — withholding data")
     return None
 
 

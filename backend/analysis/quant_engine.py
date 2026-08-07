@@ -6097,7 +6097,7 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         if _rows(stock_df) < 60 or not _px_matches(stock_df):
             try:
                 from analytics.multi_source_adapter import get_historical_any_source
-                _t2 = get_historical_any_source(symbol, "1y")
+                _t2 = get_historical_any_source(symbol, "1y", trusted_px=_trusted_px)
                 if _rows(_t2) >= 1:
                     _candidates.append(_t2)
             except Exception:
