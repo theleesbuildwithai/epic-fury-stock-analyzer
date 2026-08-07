@@ -280,16 +280,36 @@ export default function SymbolDetail() {
         }
 
         // Wire quant HF signal (cache-only, no rate-limit risk)
+        let qp = null
         if (!cancelled && qRes.ok) {
           const qJson = await qRes.json()
           const allPicks = [...(qJson.long_picks || []), ...(qJson.short_picks || [])]
-          const qp = allPicks.find(p => p.ticker === ticker)
+          qp = allPicks.find(p => p.ticker === ticker) || null
           if (qp) setQuantSignal({
             direction: qp.direction,
             confidence: qp.confidence,
             composite_score: qp.composite_score,
             factors: qp.factors,
           })
+        }
+        // Fallback: ticker not in the pre-scanned pick universe. Run the
+        // per-ticker quant scorer so a QHF signal ALWAYS shows for any symbol
+        // instead of leaving the card blank.
+        if (!cancelled && !qp) {
+          try {
+            const wRes = await fetch(`/api/watchlist-analysis/${ticker}`)
+            if (wRes.ok) {
+              const wJson = await wRes.json()
+              if (!cancelled && wJson && wJson.analyzed && wJson.direction) {
+                setQuantSignal({
+                  direction: wJson.direction,
+                  confidence: wJson.confidence,
+                  composite_score: wJson.composite_score,
+                  factors: wJson.factors,
+                })
+              }
+            }
+          } catch { /* leave card hidden only if the scorer itself fails */ }
         }
       } catch (e) {
         if (!cancelled) setError(e.message)
