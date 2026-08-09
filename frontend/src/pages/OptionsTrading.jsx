@@ -260,58 +260,102 @@ function NoTrade({ rec }) {
   )
 }
 
+// ─── Client-side cache (survives reloads so we ALWAYS show last-good picks) ────
+const CACHE_KEY = 'optionsTrading:v1'
+const CACHE_TTL = 30 * 60 * 1000   // 30 min — matches the backend anti-flap window
+const REQ_TIMEOUT = 12000          // per-request cap so one hung fetch can't stall the scan
+const REQ_RETRIES = 2              // attempts per ticker before giving up this pass
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const c = JSON.parse(raw)
+    if (!c || typeof c !== 'object' || !c.recs) return null
+    return c   // { recs, tickers, ts }
+  } catch { return null }
+}
+function saveCache(recs, tickers) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ recs, tickers, ts: Date.now() })) } catch {}
+}
+
+// fetch with an abort timeout so a slow/hung upstream can never block the loop.
+async function fetchJSON(url, timeout = REQ_TIMEOUT) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeout)
+  try {
+    const r = await fetch(url, { signal: ctrl.signal })
+    if (!r.ok) return null
+    return await r.json()
+  } catch { return null } finally { clearTimeout(timer) }
+}
+
 // ─── Page ──────────────────────────────────────────────────────────────────────
 export default function OptionsTrading() {
-  const [recs, setRecs] = useState({})        // ticker -> rec
-  const [tickers, setTickers] = useState([])  // universe order
-  const [loading, setLoading] = useState(true)
+  const cached = typeof window !== 'undefined' ? loadCache() : null
+  const cacheFresh = cached && (Date.now() - (cached.ts || 0) < CACHE_TTL)
+  const [recs, setRecs] = useState(cached?.recs || {})           // ticker -> rec (hydrated from cache)
+  const [tickers, setTickers] = useState(cached?.tickers || [])  // universe order
+  const [loading, setLoading] = useState(!cached)                // only block if we have nothing to show
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState(null)
+  const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [query, setQuery] = useState('')
   const [lookupBusy, setLookupBusy] = useState(false)
   const runningRef = useRef(false)
+  const recsRef = useRef(recs)          // latest recs for cache persistence without stale closures
+  recsRef.current = recs
 
-  async function fetchRec(t) {
-    try {
-      const r = await fetch(`/api/options-recommendation/${encodeURIComponent(t)}`)
-      if (!r.ok) return null
-      const j = await r.json()
-      // Defensive shape check: must be an object with a string ticker.
+  // Fetch one ticker with timeout + retry/backoff; commit into state + cache.
+  async function fetchRec(t, { retries = REQ_RETRIES } = {}) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const j = await fetchJSON(`/api/options-recommendation/${encodeURIComponent(t)}`)
       if (j && typeof j === 'object' && typeof j.ticker === 'string' && j.ticker) {
         // Never trust `actionable` unless the core fields are present & sane.
         if (j.actionable && !(isNum(j.underlying_price) && (Array.isArray(j.strategies) ? j.strategies.length : isNum(j.strike)))) {
           j.actionable = false
           j.reason = j.reason || 'Incomplete recommendation data — withheld for safety.'
         }
-        setRecs(prev => ({ ...prev, [j.ticker]: j }))
+        setRecs(prev => {
+          const next = { ...prev, [j.ticker]: j }
+          saveCache(next, tickers.includes(j.ticker) ? tickers : [...tickers, j.ticker])
+          return next
+        })
         return j
       }
-      return null
-    } catch { return null }
+      // transient miss — back off briefly, then retry (unless last attempt).
+      if (attempt < retries) await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+    }
+    return null   // keep any previously-cached rec for this ticker (don't wipe it)
   }
 
   async function loadUniverse(force = false) {
     if (runningRef.current) return
     runningRef.current = true
-    if (force) setRefreshing(true); else setLoading(true)
+    if (force) setRefreshing(true)
+    else if (!cacheFresh) setLoading(true)   // if cache is fresh, refresh silently in the background
     setError(null)
     try {
-      const res = await fetch('/api/symbols-to-buy')
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const j = await res.json()
-      const list = [...new Set((j.long_picks || []).map(p => p.ticker).filter(Boolean))]
-      setTickers(list)
-      if (!list.length) {
-        setError(j.message || 'Universe warming up — check back shortly.')
-      } else {
-        // Sequential + staggered to stay rate-limit-safe.
+      const j = await fetchJSON('/api/symbols-to-buy', 15000)
+      const list = [...new Set(((j && j.long_picks) || []).map(p => p.ticker).filter(Boolean))]
+      if (list.length) {
+        setTickers(list)
+        setLoading(false)   // universe known → stop the full-page blocker; cards stream in
+        setProgress({ done: 0, total: list.length })
+        // Sequential + staggered to stay rate-limit-safe; each has its own timeout+retry.
+        let done = 0
         for (const t of list) {
           await fetchRec(t)
-          await new Promise(r => setTimeout(r, 250))
+          done += 1
+          setProgress({ done, total: list.length })
+          await new Promise(r => setTimeout(r, 200))
         }
+      } else if (!Object.keys(recsRef.current).length) {
+        // No universe AND nothing cached to show.
+        setError((j && j.message) || 'Universe warming up — check back shortly.')
       }
     } catch (e) {
-      setError(e.message)
+      if (!Object.keys(recsRef.current).length) setError(e.message || 'Failed to load options.')
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -326,15 +370,17 @@ export default function OptionsTrading() {
     const t = query.trim().toUpperCase()
     if (!t) return
     setLookupBusy(true)
-    const j = await fetchRec(t)
     setTickers(prev => (prev.includes(t) ? prev : [t, ...prev]))
+    const j = await fetchRec(t)
     setLookupBusy(false)
-    if (!j) setError(`Could not fetch options for ${t}.`)
+    if (!j && !recsRef.current[t]) setError(`Could not fetch options for ${t}.`)
   }
 
   const ordered = tickers.map(t => recs[t]).filter(Boolean)
   const actionable = ordered.filter(r => r.actionable)
   const withheld = ordered.filter(r => !r.actionable)
+  const scanning = progress.total > 0 && progress.done < progress.total
+  const cacheAgeMin = cached?.ts ? Math.round((Date.now() - cached.ts) / 60000) : null
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -346,13 +392,18 @@ export default function OptionsTrading() {
               Buy &amp; collateralized-sell options ideas · same universe as Symbols to Buy · technical + fundamental + news + macro-regime + IV analytics · recommendation only
             </p>
           </div>
-          <button
-            onClick={() => loadUniverse(true)}
-            disabled={refreshing || loading}
-            className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 rounded-lg text-sm font-medium text-neutral-200 transition-colors"
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
+          <div className="text-right">
+            <button
+              onClick={() => loadUniverse(true)}
+              disabled={refreshing}
+              className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 rounded-lg text-sm font-medium text-neutral-200 transition-colors"
+            >
+              {refreshing || scanning ? 'Refreshing…' : 'Refresh'}
+            </button>
+            {isNum(cacheAgeMin) && !scanning && (
+              <div className="text-[10px] text-neutral-600 mt-1">cached {cacheAgeMin === 0 ? 'just now' : `${cacheAgeMin}m ago`}</div>
+            )}
+          </div>
         </div>
 
         {/* Manual lookup */}
@@ -385,9 +436,23 @@ export default function OptionsTrading() {
         </div>
       </div>
 
-      {loading && (
+      {/* Full-page blocker ONLY when we truly have nothing to show yet. */}
+      {loading && ordered.length === 0 && (
         <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-12 text-center text-neutral-500">
           Scanning options across the universe…
+        </div>
+      )}
+
+      {/* Live progress bar — cards stream in beneath it while the scan continues. */}
+      {scanning && (
+        <div className="mb-4">
+          <div className="flex items-center justify-between text-[11px] text-neutral-400 mb-1">
+            <span>Scanning options… {progress.done}/{progress.total}{ordered.length ? ` · ${actionable.length} actionable so far` : ''}</span>
+            <span>{Math.round((progress.done / progress.total) * 100)}%</span>
+          </div>
+          <div className="h-1 bg-neutral-800 rounded-full overflow-hidden">
+            <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+          </div>
         </div>
       )}
 
@@ -398,7 +463,7 @@ export default function OptionsTrading() {
         </div>
       )}
 
-      {!loading && (
+      {(!loading || ordered.length > 0) && (
         <div className="space-y-6">
           {actionable.length > 0 && (
             <div>
@@ -416,7 +481,7 @@ export default function OptionsTrading() {
             </div>
           )}
 
-          {actionable.length === 0 && !error && (
+          {actionable.length === 0 && !error && !scanning && (
             <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-8 text-center text-neutral-500">
               No actionable options trades right now — the engine is withholding until conviction, liquidity, and price all line up.
             </div>
