@@ -5191,6 +5191,29 @@ def get_history(request: Request, ticker: str, period: str = "6mo"):
         }
 
 
+@app.get("/api/options-recommendation/{ticker}")
+def options_recommendation(request: Request, ticker: str):
+    """Actionable, DEFINED-RISK options order ticket for one ticker.
+
+    BULLETPROOF — never 404s / 500s.  Returns a 200 with actionable=False and a
+    plain-English reason whenever no safe trade exists (no conviction, illiquid
+    chain, or a price disagreement that could signal corruption).  Recommendation
+    only — this endpoint NEVER places a trade."""
+    check_rate_limit(request.client.host)
+    clean_ticker = validate_ticker(ticker)
+    try:
+        from predictions.options_recommendation import build_options_recommendation
+        return build_options_recommendation(clean_ticker)
+    except Exception as e:
+        logger.error(f"Options recommendation error for {clean_ticker}: {e}")
+        return {
+            "ticker": clean_ticker,
+            "actionable": False,
+            "reason": "Options recommendation temporarily unavailable. Will retry automatically.",
+            "_error_origin": str(e)[:120],
+        }
+
+
 @app.get("/api/benchmarks")
 def get_benchmarks(request: Request, period: str = "1y"):
     """Get performance data for S&P 500, Nasdaq, and Dow Jones."""

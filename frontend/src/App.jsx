@@ -16,6 +16,7 @@ const DailySummary      = lazy(() => import('./pages/DailySummary'))
 // const QuantDashboard = lazy(() => import('./pages/QuantDashboard'))
 const BacktestDashboard = lazy(() => import('./pages/BacktestDashboard'))
 const SymbolsToBuy      = lazy(() => import('./pages/SymbolsToBuy'))
+const OptionsTrading    = lazy(() => import('./pages/OptionsTrading'))
 const SymbolDetail      = lazy(() => import('./pages/SymbolDetail'))
 const SystemIntelligence = lazy(() => import('./pages/SystemIntelligence'))
 
@@ -47,6 +48,7 @@ export default function App() {
           */}
           <Route path="/backtest" element={<BacktestDashboard />} />
           <Route path="/symbols-to-buy" element={<SymbolsToBuy />} />
+          <Route path="/options" element={<OptionsTrading />} />
           <Route path="/symbol/:ticker" element={<SymbolDetail />} />
           <Route path="/system-intelligence" element={<SystemIntelligence />} />
           {/* Catch-all: any unknown/removed route (e.g. old /ibkr) redirects
