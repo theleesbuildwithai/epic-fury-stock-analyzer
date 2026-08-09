@@ -265,6 +265,15 @@ const CACHE_KEY = 'optionsTrading:v1'
 const CACHE_TTL = 30 * 60 * 1000   // 30 min — matches the backend anti-flap window
 const REQ_TIMEOUT = 12000          // per-request cap so one hung fetch can't stall the scan
 const REQ_RETRIES = 2              // attempts per ticker before giving up this pass
+// Safety net: if Symbols-to-Buy is momentarily empty (cold cache / warming up),
+// fall back to these liquid, deep-options large-caps so the page ALWAYS shows
+// picks. Each still runs through the same gated recommendation engine, so a
+// fallback ticker only surfaces a card if it independently earns an actionable
+// signal — no fabricated trades. STB stays the source of truth when it's warm.
+const FALLBACK_UNIVERSE = [
+  'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD',
+  'NFLX', 'JPM', 'BAC', 'GS', 'XOM', 'CVX', 'AVGO', 'CRM',
+]
 
 function loadCache() {
   try {
@@ -336,8 +345,16 @@ export default function OptionsTrading() {
     else if (!cacheFresh) setLoading(true)   // if cache is fresh, refresh silently in the background
     setError(null)
     try {
-      const j = await fetchJSON('/api/symbols-to-buy', 15000)
-      const list = [...new Set(((j && j.long_picks) || []).map(p => p.ticker).filter(Boolean))]
+      let j = null
+      try { j = await fetchJSON('/api/symbols-to-buy', 15000) } catch { j = null }
+      let list = [...new Set(((j && j.long_picks) || []).map(p => p.ticker).filter(Boolean))]
+      // Safety net: STB momentarily empty (cold cache) → use the fallback large-caps
+      // so the page still produces picks. The gated engine still decides per ticker.
+      let usingFallback = false
+      if (!list.length) {
+        list = [...FALLBACK_UNIVERSE]
+        usingFallback = true
+      }
       if (list.length) {
         setTickers(list)
         setLoading(false)   // universe known → stop the full-page blocker; cards stream in
@@ -349,6 +366,11 @@ export default function OptionsTrading() {
           done += 1
           setProgress({ done, total: list.length })
           await new Promise(r => setTimeout(r, 200))
+        }
+        // If we ran the fallback because STB was cold, quietly re-pull STB once it's
+        // likely warm so the real universe takes over on the next pass.
+        if (usingFallback && !force) {
+          setTimeout(() => { runningRef.current = false; loadUniverse(true) }, 45000)
         }
       } else if (!Object.keys(recsRef.current).length) {
         // No universe AND nothing cached to show.
