@@ -1,4 +1,30 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Component } from 'react'
+
+// ─── Per-card error boundary: one malformed rec can never blank the grid ──────
+class CardBoundary extends Component {
+  constructor(props) { super(props); this.state = { failed: false } }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(e) { try { console.error('Options card error:', e) } catch {} }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-lg px-4 py-3 text-xs text-neutral-500">
+          <span className="font-bold text-neutral-300 font-mono">{this.props.ticker || '—'}</span>
+          {' '}— couldn't render this ticket safely; skipped.
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+// ─── Strategy metadata (buy + collateralized-sell, never naked) ───────────────
+const STRUCTURE_META = {
+  LONG_CALL:        { label: 'Buy Call',        kind: 'BUY',  tone: 'green', outlookTxt: 'Bullish · leveraged' },
+  LONG_PUT:         { label: 'Buy Put',         kind: 'BUY',  tone: 'red',   outlookTxt: 'Bearish · leveraged' },
+  CASH_SECURED_PUT: { label: 'Sell Put (CSP)',  kind: 'SELL', tone: 'green', outlookTxt: 'Bullish/neutral · income' },
+  COVERED_CALL:     { label: 'Sell Call (CC)',  kind: 'SELL', tone: 'amber', outlookTxt: 'Neutral/mild-bearish · income' },
+}
 
 // OPTIONS TRADING — actionable, defined-risk options recommendations.
 // Same universe as "Symbols to Buy" (/api/symbols-to-buy) plus a manual lookup.
@@ -51,19 +77,120 @@ function Chip({ children, tone = 'neutral' }) {
   )
 }
 
-// ─── The order ticket card ─────────────────────────────────────────────────────
+// ─── One strategy block (buy call/put, or collateralized sell put/call) ────────
+function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
+  const [open, setOpen] = useState(!!defaultOpen)
+  const meta = STRUCTURE_META[strat.structure] || { label: strat.title || strat.structure, kind: strat.action?.startsWith('BUY') ? 'BUY' : 'SELL', tone: 'neutral', outlookTxt: '' }
+  const isBuy = meta.kind === 'BUY'
+  const netTone = strat.net_type === 'CREDIT' ? 'green' : 'blue'
+  const liqTone = strat.liquidity_quality === 'GOOD' ? 'text-emerald-400'
+    : strat.liquidity_quality === 'FAIR' ? 'text-amber-300' : 'text-rose-400'
+  const headMoney = strat.net_type === 'CREDIT'
+    ? { label: 'Credit received', val: money(strat.net_credit), tone: 'text-emerald-400' }
+    : { label: 'Total cost (debit)', val: money(strat.net_debit), tone: 'text-white' }
+
+  return (
+    <div className={`rounded-lg border ${strat.is_primary ? 'border-neutral-600' : 'border-neutral-800/70'} bg-neutral-950/40 overflow-hidden`}>
+      {/* header */}
+      <button onClick={() => setOpen(o => !o)} className="w-full text-left px-4 py-3 flex items-start justify-between gap-3 hover:bg-neutral-900/40 transition-colors">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <Chip tone={meta.tone}>{meta.label}</Chip>
+            <Chip tone={netTone}>{strat.net_type}</Chip>
+            <Chip tone={strat.risk_type === 'DEFINED' ? 'green' : 'amber'}>{strat.risk_type === 'DEFINED' ? 'DEFINED RISK' : 'COLLATERALIZED'}</Chip>
+            {strat.is_primary && <Chip tone="blue">PRIMARY</Chip>}
+          </div>
+          <div className="text-sm font-bold text-neutral-100 font-mono leading-tight truncate">
+            <span className={isBuy ? 'text-emerald-400' : 'text-blue-300'}>{strat.action}</span>
+            {' '}{strat.contracts}× {ticker} {strat.expiration_human} {px(strat.strike)} {strat.option_type}
+          </div>
+          <div className="text-[11px] text-neutral-500 mt-0.5">{meta.outlookTxt} · {strat.moneyness || '—'} · {isNum(strat.dte) ? strat.dte + ' DTE' : '—'} · limit ≈ {px(strat.est_premium_per_share)}/sh</div>
+        </div>
+        <div className="text-right shrink-0">
+          <div className="text-[9px] uppercase tracking-widest text-neutral-500 font-bold">{headMoney.label}</div>
+          <div className={`text-lg font-black font-mono ${headMoney.tone}`}>{headMoney.val}</div>
+          <div className="text-[10px] text-neutral-500 mt-0.5">{open ? '▲ hide' : '▼ details'}</div>
+        </div>
+      </button>
+
+      {/* economics grid — always visible */}
+      <div className="px-4 pb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Breakeven" value={px(strat.breakeven)} accent="text-white" />
+        <Stat label="Max loss" value={money(strat.max_loss)} accent="text-rose-400" />
+        <Stat label="Max gain" value={strat.max_gain == null ? 'Unlimited' : money(strat.max_gain)} accent="text-emerald-400" />
+        {strat.collateral_required > 0
+          ? <Stat label="Cash collateral" value={money(strat.collateral_required)} accent="text-amber-300" />
+          : strat.requires_shares > 0
+            ? <Stat label="Shares needed" value={`${strat.requires_shares}`} accent="text-amber-300" />
+            : <Stat label="Need to move" value={isNum(strat.breakeven_move_pct) ? pctPos(Math.abs(strat.breakeven_move_pct)) : '—'} />}
+      </div>
+
+      {open && (
+        <>
+          {/* advanced data */}
+          <div className="px-4 pb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Stat label="Expected move (1σ)" value={isNum(strat.expected_move_pct) ? '±' + pctPos(strat.expected_move_pct) : '—'} />
+            <Stat label="Prob. ITM (est)" value={isNum(strat.prob_itm_est_pct) ? pctPos(strat.prob_itm_est_pct, 0) : '—'} />
+            <Stat label="Delta" value={num(strat.delta)} />
+            <Stat label="Impl. Vol" value={isNum(strat.iv_pct) ? pctPos(strat.iv_pct, 0) : '—'}
+                  accent={strat.iv_environment === 'ELEVATED' ? 'text-amber-300' : 'text-neutral-100'} />
+            <Stat label="IV env" value={strat.iv_environment || '—'} />
+            <Stat label="Volume / OI" value={`${strat.volume ?? '—'} / ${strat.open_interest ?? '—'}`} />
+            <Stat label="Liquidity" value={strat.liquidity_quality || '—'} accent={liqTone} />
+            <Stat label="Premium/contract" value={money(strat.est_premium_per_contract)} />
+          </div>
+
+          <div className="px-4 pb-3">
+            <p className="text-[11px] text-neutral-400 leading-relaxed">{strat.summary}</p>
+            <p className="text-[11px] text-neutral-500 mt-1"><span className="text-neutral-400 font-semibold">Max loss:</span> {strat.max_loss_label}</p>
+            <p className="text-[11px] text-neutral-500"><span className="text-neutral-400 font-semibold">Max gain:</span> {strat.max_gain_label}</p>
+          </div>
+
+          {/* order steps */}
+          <div className="px-4 pb-3">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-2">How to place this order</div>
+            <ol className="space-y-1.5">
+              {(strat.order_instructions || []).map((s, i) => (
+                <li key={i} className="flex gap-2 text-xs text-neutral-300">
+                  <span className="shrink-0 w-4 h-4 rounded-full bg-neutral-800 text-neutral-400 text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
+                  <span>{s}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {/* risk */}
+          <div className="px-4 pb-4">
+            <div className="bg-amber-950/20 border border-amber-800/40 rounded-lg px-3 py-2.5">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-amber-300 mb-1.5">Risk — read before you trade</div>
+              <ul className="space-y-1">
+                {(strat.risk_disclosures || []).map((r, i) => (
+                  <li key={i} className="text-[11px] text-amber-100/80 flex gap-1.5">
+                    <span className="text-amber-500">•</span><span>{r}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── The order ticket card (headline + analysis + all strategies) ─────────────
 function OrderTicket({ rec }) {
   const isCall = rec.option_type === 'CALL'
   const dirTone = isCall ? 'green' : 'red'
   const accentClass = isCall ? 'card-accent-green' : 'card-accent-red'
-  const oa = rec.options_analytics || {}
   const ta = rec.technical_analysis || {}
   const fa = rec.fundamental_analysis || {}
   const na = rec.news_analysis || {}
   const stb = rec.stb_context || {}
+  const strategies = Array.isArray(rec.strategies) && rec.strategies.length
+    ? rec.strategies
+    : [rec]  // backward-compat: synthesize from the flat rec if strategies absent
 
-  const liqTone = oa.liquidity_quality === 'GOOD' ? 'green'
-    : oa.liquidity_quality === 'FAIR' ? 'amber' : 'red'
   const alignTone = rec.fundamental_alignment === 'AGREES' ? 'green'
     : rec.fundamental_alignment === 'DIVERGES' ? 'red' : 'neutral'
   const newsTone = rec.news_alignment === 'AGREES' ? 'green'
@@ -73,11 +200,11 @@ function OrderTicket({ rec }) {
 
   return (
     <div className={`bg-neutral-900/50 border border-neutral-700 rounded-xl overflow-hidden ${accentClass}`}>
-      {/* Headline order line */}
+      {/* Headline */}
       <div className="px-5 py-4 border-b border-neutral-800/70">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div>
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <span className="text-2xl font-black text-white tracking-tight">{rec.ticker}</span>
               <Chip tone={dirTone}>{isCall ? '▲ BULLISH' : '▼ BEARISH'}</Chip>
               {isNum(rec.confidence) && <Chip tone="blue">conf {rec.confidence}%</Chip>}
@@ -85,39 +212,15 @@ function OrderTicket({ rec }) {
               {stb.in_stb_longs && <Chip tone="green">★ STB long</Chip>}
               {rec.stale_reused && <Chip tone="amber">stale</Chip>}
             </div>
-            <div className="text-lg font-bold text-neutral-100 font-mono leading-tight">
-              <span className={isCall ? 'text-emerald-400' : 'text-rose-400'}>{rec.action}</span>
-              {' '}{rec.contracts}× {rec.ticker} {rec.expiration_human} {px(rec.strike)} {rec.option_type}
-            </div>
             <div className="text-xs text-neutral-500 mt-0.5">
-              Limit ≈ {px(rec.est_premium_per_share)}/sh · underlying {px(rec.underlying_price)} · {rec.moneyness || '—'} · {isNum(rec.dte) ? rec.dte + ' DTE' : '—'}
+              underlying {px(rec.underlying_price)} · signal {rec.signal || '—'} · {rec.regime || 'NEUTRAL'} regime · {strategies.length} way{strategies.length !== 1 ? 's' : ''} to trade
             </div>
-          </div>
-          <div className="text-right">
-            <div className="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">Total cost</div>
-            <div className="text-2xl font-black text-white font-mono">{money(rec.est_total_cost)}</div>
-            <div className="text-[10px] text-rose-300 font-bold mt-0.5">max loss {money(rec.max_loss)}</div>
           </div>
         </div>
       </div>
 
-      {/* Key economics */}
-      <div className="px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat label="Breakeven" value={px(rec.breakeven)} accent="text-white" />
-        <Stat label="Need to move" value={isNum(oa.breakeven_move_pct) ? pctPos(Math.abs(oa.breakeven_move_pct)) : '—'}
-              accent={oa.breakeven_within_1sigma ? 'text-emerald-400' : 'text-amber-300'} />
-        <Stat label="Expected move (1σ)" value={isNum(oa.expected_move_pct) ? '±' + pctPos(oa.expected_move_pct) : '—'} />
-        <Stat label="Prob. ITM (est)" value={isNum(oa.prob_itm_est_pct) ? pctPos(oa.prob_itm_est_pct, 0) : '—'} />
-        <Stat label="Delta" value={num(rec.delta)} />
-        <Stat label="Impl. Vol" value={isNum(rec.iv_pct) ? pctPos(rec.iv_pct, 0) : '—'}
-              accent={oa.iv_environment === 'ELEVATED' ? 'text-amber-300' : 'text-neutral-100'} />
-        <Stat label="Volume / OI" value={`${rec.volume ?? '—'} / ${rec.open_interest ?? '—'}`} />
-        <Stat label="Liquidity" value={oa.liquidity_quality || '—'}
-              accent={liqTone === 'green' ? 'text-emerald-400' : liqTone === 'amber' ? 'text-amber-300' : 'text-rose-400'} />
-      </div>
-
       {/* Rationale + analysis chips */}
-      <div className="px-5 pb-4 space-y-3">
+      <div className="px-5 py-4 space-y-3 border-b border-neutral-800/70">
         <p className="text-xs text-neutral-300 leading-relaxed">{rec.rationale}</p>
         <div className="flex flex-wrap gap-1.5">
           {ta.ema_trend && <Chip tone={ta.ema_trend === 'Bullish' ? 'green' : ta.ema_trend === 'Bearish' ? 'red' : 'neutral'}>EMA {ta.ema_trend}</Chip>}
@@ -136,31 +239,12 @@ function OrderTicket({ rec }) {
         </div>
       </div>
 
-      {/* How to place it */}
-      <div className="px-5 pb-4">
-        <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-2">How to place this order</div>
-        <ol className="space-y-1.5">
-          {(rec.order_instructions || []).map((s, i) => (
-            <li key={i} className="flex gap-2 text-xs text-neutral-300">
-              <span className="shrink-0 w-4 h-4 rounded-full bg-neutral-800 text-neutral-400 text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>
-              <span>{s}</span>
-            </li>
-          ))}
-        </ol>
-      </div>
-
-      {/* Risk box */}
-      <div className="px-5 pb-5">
-        <div className="bg-amber-950/20 border border-amber-800/40 rounded-lg px-4 py-3">
-          <div className="text-[10px] font-bold uppercase tracking-widest text-amber-300 mb-1.5">Risk — read before you buy</div>
-          <ul className="space-y-1">
-            {(rec.risk_disclosures || []).map((r, i) => (
-              <li key={i} className="text-[11px] text-amber-100/80 flex gap-1.5">
-                <span className="text-amber-500">•</span><span>{r}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {/* Strategies — buy + collateralized-sell */}
+      <div className="px-5 py-4 space-y-3">
+        <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Ways to trade this view</div>
+        {strategies.map((s, i) => (
+          <StrategyBlock key={s.structure || i} strat={s} ticker={rec.ticker} underlying={rec.underlying_price} defaultOpen={i === 0} />
+        ))}
       </div>
     </div>
   )
@@ -192,8 +276,17 @@ export default function OptionsTrading() {
       const r = await fetch(`/api/options-recommendation/${encodeURIComponent(t)}`)
       if (!r.ok) return null
       const j = await r.json()
-      if (j && j.ticker) setRecs(prev => ({ ...prev, [j.ticker]: j }))
-      return j
+      // Defensive shape check: must be an object with a string ticker.
+      if (j && typeof j === 'object' && typeof j.ticker === 'string' && j.ticker) {
+        // Never trust `actionable` unless the core fields are present & sane.
+        if (j.actionable && !(isNum(j.underlying_price) && (Array.isArray(j.strategies) ? j.strategies.length : isNum(j.strike)))) {
+          j.actionable = false
+          j.reason = j.reason || 'Incomplete recommendation data — withheld for safety.'
+        }
+        setRecs(prev => ({ ...prev, [j.ticker]: j }))
+        return j
+      }
+      return null
     } catch { return null }
   }
 
@@ -250,7 +343,7 @@ export default function OptionsTrading() {
           <div>
             <h1 className="text-3xl font-black text-white tracking-tight">Options Trading</h1>
             <p className="text-sm text-neutral-400 mt-1">
-              Defined-risk options ideas · same universe as Symbols to Buy · technical + fundamental + news + macro-regime + IV analytics · recommendation only
+              Buy &amp; collateralized-sell options ideas · same universe as Symbols to Buy · technical + fundamental + news + macro-regime + IV analytics · recommendation only
             </p>
           </div>
           <button
@@ -282,7 +375,9 @@ export default function OptionsTrading() {
         {/* Safety banner */}
         <div className="mt-4 bg-blue-950/20 border border-blue-800/40 rounded-lg px-4 py-2.5 text-xs text-blue-200 flex flex-wrap items-center gap-x-4 gap-y-1">
           <span className="font-bold">Safety:</span>
-          <span>Long calls/puts only — max loss = premium</span>
+          <span>Buy calls/puts (max loss = premium) + collateralized selling (cash-secured puts / covered calls)</span>
+          <span className="text-blue-500">·</span>
+          <span>No naked shorts — ever</span>
           <span className="text-blue-500">·</span>
           <span>Withholds on low conviction, thin liquidity, or price disagreement</span>
           <span className="text-blue-500">·</span>
@@ -312,7 +407,11 @@ export default function OptionsTrading() {
                 <span className="text-xs text-neutral-500">{actionable.length} ready to place</span>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {actionable.map(r => <OrderTicket key={r.ticker} rec={r} />)}
+                {actionable.map(r => (
+                  <CardBoundary key={r.ticker} ticker={r.ticker}>
+                    <OrderTicket rec={r} />
+                  </CardBoundary>
+                ))}
               </div>
             </div>
           )}

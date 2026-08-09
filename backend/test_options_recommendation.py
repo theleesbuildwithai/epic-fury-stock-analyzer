@@ -233,7 +233,8 @@ def main():
                "risk_disclosures", "technical_analysis", "fundamental_analysis",
                "fundamental_alignment", "news_analysis", "news_alignment",
                "macro_regime", "macro_alignment", "stb_context", "signal_confluence",
-               "confirmations", "options_analytics", "safety"]
+               "confirmations", "options_analytics", "safety", "strategies",
+               "strategy_count"]
     missing = [k for k in required if k not in r]
     check("all order-ticket fields present", not missing, f"missing={missing}")
     check("order_instructions non-empty list",
@@ -260,7 +261,79 @@ def main():
           r.get("signal_confluence") == "5/5" and "STB-long" in (r.get("confirmations") or []),
           f"confluence={r.get('signal_confluence')} confirms={r.get('confirmations')}")
 
+    # 10b. Multi-strategy: BUY -> [LONG_CALL primary, CASH_SECURED_PUT alt].
+    _reset()
+    r = _build()
+    strats = r.get("strategies") or []
+    by_struct = {s.get("structure"): s for s in strats}
+    check("BUY yields long-call + cash-secured-put",
+          "LONG_CALL" in by_struct and "CASH_SECURED_PUT" in by_struct,
+          f"structures={list(by_struct)}")
+    lc = by_struct.get("LONG_CALL", {})
+    check("LONG_CALL primary + defined risk",
+          lc.get("is_primary") is True and lc.get("risk_type") == "DEFINED"
+          and lc.get("action") == "BUY TO OPEN" and lc.get("net_type") == "DEBIT",
+          f"lc={ {k: lc.get(k) for k in ('is_primary','risk_type','action','net_type')} }")
+    check("LONG_CALL economics (debit/max_loss/breakeven)",
+          lc.get("net_debit") == 500.0 and lc.get("max_loss") == 500.0
+          and abs((lc.get("breakeven") or 0) - 105.0) < 1e-6 and lc.get("max_gain") is None,
+          f"debit={lc.get('net_debit')} loss={lc.get('max_loss')} be={lc.get('breakeven')} gain={lc.get('max_gain')}")
+    csp = by_struct.get("CASH_SECURED_PUT", {})
+    check("CASH_SECURED_PUT collateralized economics",
+          csp.get("risk_type") == "COLLATERALIZED" and csp.get("action") == "SELL TO OPEN"
+          and csp.get("net_type") == "CREDIT" and csp.get("net_credit") == 500.0
+          and csp.get("collateral_required") == 10000.0 and csp.get("requires_shares") == 0
+          and csp.get("max_loss") == 9500.0 and abs((csp.get("breakeven") or 0) - 95.0) < 1e-6
+          and csp.get("max_gain") == 500.0,
+          f"csp={ {k: csp.get(k) for k in ('net_credit','collateral_required','max_loss','breakeven','max_gain')} }")
+
+    # 10c. Multi-strategy: SELL -> [LONG_PUT primary, COVERED_CALL alt].
+    _reset(); _STATE["signal"] = "SELL"; _NEWS["sentiment"] = "BEARISH"
+    r = _build()
+    strats = r.get("strategies") or []
+    by_struct = {s.get("structure"): s for s in strats}
+    check("SELL yields long-put + covered-call",
+          "LONG_PUT" in by_struct and "COVERED_CALL" in by_struct,
+          f"structures={list(by_struct)}")
+    lp = by_struct.get("LONG_PUT", {})
+    check("LONG_PUT economics (debit/max_gain/breakeven)",
+          lp.get("risk_type") == "DEFINED" and lp.get("net_debit") == 500.0
+          and lp.get("max_loss") == 500.0 and lp.get("max_gain") == 9500.0
+          and abs((lp.get("breakeven") or 0) - 95.0) < 1e-6,
+          f"lp={ {k: lp.get(k) for k in ('net_debit','max_loss','max_gain','breakeven')} }")
+    cc = by_struct.get("COVERED_CALL", {})
+    check("COVERED_CALL requires shares + collateralized",
+          cc.get("risk_type") == "COLLATERALIZED" and cc.get("action") == "SELL TO OPEN"
+          and cc.get("net_type") == "CREDIT" and cc.get("requires_shares") == 100
+          and cc.get("collateral_required") == 0.0 and cc.get("net_credit") == 500.0
+          and abs((cc.get("breakeven") or 0) - 95.0) < 1e-6,
+          f"cc={ {k: cc.get(k) for k in ('requires_shares','collateral_required','net_credit','breakeven')} }")
+
+    # 10d. Capital-preservation invariant: NEVER a naked/unlimited-risk structure.
+    _reset()
+    all_ok = True
+    for sig, news in (("BUY", "BULLISH"), ("SELL", "BEARISH")):
+        _reset(); _STATE["signal"] = sig; _NEWS["sentiment"] = news
+        rr = _build()
+        for s in (rr.get("strategies") or []):
+            if s.get("structure") not in ("LONG_CALL", "LONG_PUT", "CASH_SECURED_PUT", "COVERED_CALL"):
+                all_ok = False
+            if s.get("risk_type") not in ("DEFINED", "COLLATERALIZED"):
+                all_ok = False
+    check("no naked/unlimited-risk structure ever emitted", all_ok)
+    _reset(); r = _build()
+    check("safety flags naked_short_blocked",
+          (r.get("safety") or {}).get("naked_short_blocked") is True
+          and (r.get("safety") or {}).get("collateralized_selling_only") is True)
+    check("every strategy order/risk lists populated",
+          all(isinstance(s.get("order_instructions"), list) and len(s["order_instructions"]) >= 4
+              and isinstance(s.get("risk_disclosures"), list) and len(s["risk_disclosures"]) >= 3
+              for s in (r.get("strategies") or [])),
+          f"count={len(r.get('strategies') or [])}")
+
     # 11. Output is NaN/inf-clean everywhere.
+    _reset()
+    r = _build()
     check("actionable rec is NaN/inf-clean", _all_finite(r))
 
     # 12. Never raises: force the signal engine to throw -> actionable:false dict.

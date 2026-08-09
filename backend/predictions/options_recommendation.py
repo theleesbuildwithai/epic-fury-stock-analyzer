@@ -349,6 +349,237 @@ def _maybe_reuse_stale(symbol: str, ref_px, reason: str):
     return _scrub(stale)
 
 
+# Every structure we ever surface is either defined-risk (long premium, max loss =
+# debit) or fully collateralized (cash-secured put / covered call). We NEVER build a
+# naked short — selling a naked call is unlimited-loss and a naked put risks the whole
+# strike; both violate capital-preservation discipline, so they are simply not modeled.
+_ALLOWED_STRUCTURES = {"LONG_CALL", "LONG_PUT", "CASH_SECURED_PUT", "COVERED_CALL"}
+
+
+def _build_strategy(structure: str, symbol: str, pick: dict, ref_px: float,
+                    contracts: int = 1) -> dict:
+    """Build ONE complete, actionable options order ticket for a given structure.
+
+    Supported (all defined-risk or collateralized — NEVER naked/unlimited-risk):
+      LONG_CALL        buy call  — debit; max loss = premium; bullish, leveraged upside.
+      LONG_PUT         buy put   — debit; max loss = premium; bearish, leveraged downside.
+      CASH_SECURED_PUT sell put  — credit; cash-collateralized; bullish/neutral income,
+                                   assigned → you buy 100 shares at the strike.
+      COVERED_CALL     sell call — credit; share-collateralized (needs 100 shares);
+                                   neutral/mildly-bearish income, caps upside at strike.
+    Returns {} on any incomplete/invalid contract data (caller filters these out).
+    """
+    try:
+        if structure not in _ALLOWED_STRUCTURES:
+            return {}  # hard guard — never emit anything but the four safe structures
+        strike = pick.get("strike"); premium = pick.get("premium")
+        dte = pick.get("dte"); expiry = pick.get("expiry")
+        if not (_finite_pos(strike) and _finite_pos(premium) and _finite_pos(dte) and expiry):
+            return {}
+        if not _finite_pos(ref_px):
+            return {}
+        strike = float(strike); premium = float(premium); dte = int(dte)
+        c = max(1, int(contracts or 1))
+        shares = c * 100
+        gross_prem = round(premium * 100.0 * c, 2)          # total premium across contracts
+        prem_per_contract = round(premium * 100.0, 2)
+        delta = pick.get("delta_est")
+        iv = pick.get("iv")
+        iv_pct = round(float(iv) * 100.0, 1) if _finite_pos(iv) else None
+        iv_env = _iv_environment(iv_pct)
+        vol = pick.get("volume") or 0
+        oi = pick.get("open_interest") or 0
+        liquidity_quality = "GOOD" if (oi >= 500 or vol >= 200) else ("FAIR" if (oi >= 50 or vol >= 25) else "THIN")
+        exp_move = _expected_move(ref_px, float(iv) if _finite_pos(iv) else 0.0, dte)
+        exp_move_pct = round(exp_move / ref_px * 100.0, 1) if exp_move else None
+        exp_move = round(exp_move, 2) if exp_move else None
+        prob_itm_est = round(abs(float(delta)) * 100.0, 0) if isinstance(delta, (int, float)) else None
+        human_exp = _human_expiry(expiry)
+        moneyness = pick.get("moneyness_label")
+
+        leg_type = "put" if structure in ("LONG_PUT", "CASH_SECURED_PUT") else "call"
+        opt_label = "CALL" if leg_type == "call" else "PUT"
+        occ = _occ_symbol(symbol, expiry, leg_type, strike)
+        contract_label = f"{symbol} {human_exp} ${strike:g} {opt_label}"
+
+        # ── per-structure economics ──────────────────────────────────────────────
+        if structure == "LONG_CALL":
+            action, net_type = "BUY TO OPEN", "DEBIT"
+            net_debit, net_credit = gross_prem, 0.0
+            collateral_required, requires_shares = 0.0, 0
+            max_loss = gross_prem
+            max_loss_label = f"${gross_prem:,.2f} (the premium paid — you cannot lose more)"
+            max_gain = None
+            max_gain_label = f"Unlimited above ${strike + premium:.2f} (rises with {symbol})"
+            breakeven = round(strike + premium, 2)
+            be_move_pct = round((breakeven - ref_px) / ref_px * 100.0, 1)
+            risk_type, outlook = "DEFINED", "BULLISH"
+            title = f"Buy {opt_label} (long call)"
+            summary = f"Leveraged bullish bet; max loss capped at the ${gross_prem:,.2f} premium."
+        elif structure == "LONG_PUT":
+            action, net_type = "BUY TO OPEN", "DEBIT"
+            net_debit, net_credit = gross_prem, 0.0
+            collateral_required, requires_shares = 0.0, 0
+            max_loss = gross_prem
+            max_loss_label = f"${gross_prem:,.2f} (the premium paid — you cannot lose more)"
+            max_gain = round((strike - premium) * 100.0 * c, 2)
+            max_gain_label = f"Up to ${max_gain:,.2f} if {symbol} falls to $0"
+            breakeven = round(strike - premium, 2)
+            be_move_pct = round((breakeven - ref_px) / ref_px * 100.0, 1)
+            risk_type, outlook = "DEFINED", "BEARISH"
+            title = f"Buy {opt_label} (long put)"
+            summary = f"Leveraged bearish bet; max loss capped at the ${gross_prem:,.2f} premium."
+        elif structure == "CASH_SECURED_PUT":
+            action, net_type = "SELL TO OPEN", "CREDIT"
+            net_debit, net_credit = 0.0, gross_prem
+            collateral_required = round(strike * 100.0 * c, 2)
+            requires_shares = 0
+            max_gain = gross_prem
+            max_gain_label = f"${gross_prem:,.2f} credit kept in full if {symbol} stays above ${strike:g}"
+            max_loss = round((strike - premium) * 100.0 * c, 2)
+            max_loss_label = (f"Up to ${max_loss:,.2f} if {symbol} goes to $0 "
+                              f"(you'd be assigned {shares} shares at ${strike:g})")
+            breakeven = round(strike - premium, 2)
+            be_move_pct = round((breakeven - ref_px) / ref_px * 100.0, 1)
+            risk_type, outlook = "COLLATERALIZED", "BULLISH_NEUTRAL"
+            title = f"Sell {opt_label} (cash-secured put)"
+            summary = (f"Get paid ${gross_prem:,.2f} now; if assigned you buy {shares} shares at "
+                       f"${strike:g} (an effective ${breakeven:.2f} cost basis). "
+                       f"Requires ${collateral_required:,.2f} cash collateral.")
+        else:  # COVERED_CALL
+            action, net_type = "SELL TO OPEN", "CREDIT"
+            net_debit, net_credit = 0.0, gross_prem
+            collateral_required = 0.0
+            requires_shares = shares
+            share_cost_estimate = round(ref_px * shares, 2)
+            capped_upside = round(max(0.0, strike - ref_px) * 100.0 * c, 2)
+            max_gain = round(gross_prem + capped_upside, 2)
+            max_gain_label = (f"${max_gain:,.2f} = ${gross_prem:,.2f} premium + up to ${capped_upside:,.2f} "
+                              f"share gain to ${strike:g} (upside capped there)")
+            # Downside on the shares, cushioned by the premium collected.
+            max_loss = round(ref_px * shares - gross_prem, 2)
+            max_loss_label = (f"Substantial on the shares if {symbol} falls (up to ${max_loss:,.2f} to $0), "
+                              f"but reduced by the ${gross_prem:,.2f} premium; breakeven ${round(ref_px - premium, 2):.2f}")
+            breakeven = round(ref_px - premium, 2)
+            be_move_pct = round((breakeven - ref_px) / ref_px * 100.0, 1)
+            risk_type, outlook = "COLLATERALIZED", "NEUTRAL_MILD_BEARISH"
+            title = f"Sell {opt_label} (covered call)"
+            summary = (f"Own {shares} shares (≈ ${share_cost_estimate:,.2f}); collect ${gross_prem:,.2f} income. "
+                       f"Upside capped at ${strike:g}; premium cushions the downside.")
+
+        # ── order instructions (plain-English, broker-ready) ─────────────────────
+        if action == "BUY TO OPEN":
+            order_instructions = [
+                f"Open your broker's options ticket for {symbol}.",
+                "Action: BUY TO OPEN.",
+                f"Contract: {contract_label}  (OCC: {occ}).",
+                f"Quantity: {c} contract{'s' if c != 1 else ''} ({shares} shares of exposure).",
+                f"Order type: LIMIT ~${premium:.2f}/share (≈ ${prem_per_contract:,.2f} per contract).",
+                f"Confirm max loss ≈ ${gross_prem:,.2f} and breakeven ${breakeven:.2f}, then submit.",
+            ]
+        elif structure == "CASH_SECURED_PUT":
+            order_instructions = [
+                f"Ensure ${collateral_required:,.2f} cash is available as collateral (cash-secured).",
+                f"Open your broker's options ticket for {symbol}.",
+                "Action: SELL TO OPEN.",
+                f"Contract: {contract_label}  (OCC: {occ}).",
+                f"Quantity: {c} contract{'s' if c != 1 else ''}.",
+                f"Order type: LIMIT ~${premium:.2f}/share (≈ ${prem_per_contract:,.2f} credit per contract).",
+                f"You collect ${gross_prem:,.2f}. If assigned you buy {shares} shares at ${strike:g}; submit.",
+            ]
+        else:  # COVERED_CALL
+            order_instructions = [
+                f"Confirm you own at least {shares} shares of {symbol} (this is a covered call).",
+                f"Open your broker's options ticket for {symbol}.",
+                "Action: SELL TO OPEN.",
+                f"Contract: {contract_label}  (OCC: {occ}).",
+                f"Quantity: {c} contract{'s' if c != 1 else ''} (covered by your {shares} shares).",
+                f"Order type: LIMIT ~${premium:.2f}/share (≈ ${prem_per_contract:,.2f} credit per contract).",
+                f"You collect ${gross_prem:,.2f}. Shares may be called away at ${strike:g}; submit.",
+            ]
+
+        # ── risk disclosures (structure-specific) ────────────────────────────────
+        risk_disclosures = []
+        if action == "BUY TO OPEN":
+            risk_disclosures += [
+                f"Maximum loss is the ${gross_prem:,.2f} premium — you cannot lose more on a long {opt_label.lower()}.",
+                f"The {opt_label.lower()} expires worthless if {symbol} is "
+                f"{'below' if leg_type == 'call' else 'above'} ${strike:g} on {human_exp}.",
+                f"{symbol} must move ~{abs(be_move_pct):.1f}% to ${breakeven:.2f} to break even at expiry.",
+                "Time decay (theta) works against long options — plan to exit before ~5 DTE.",
+                "Place a LIMIT near the mid, not a market order; check earnings dates (IV crush).",
+            ]
+        elif structure == "CASH_SECURED_PUT":
+            risk_disclosures += [
+                f"Max gain is the ${gross_prem:,.2f} credit; max loss ${max_loss:,.2f} if {symbol} goes to $0.",
+                f"If {symbol} closes below ${strike:g} you are ASSIGNED {shares} shares at ${strike:g} "
+                f"(effective cost ${breakeven:.2f}).",
+                f"Requires ${collateral_required:,.2f} in cash reserved as collateral — never sell puts naked.",
+                "Best when you would be happy to own the shares at the strike; a bullish/neutral income trade.",
+            ]
+        else:  # COVERED_CALL
+            risk_disclosures += [
+                f"You MUST already own {shares} shares — do NOT sell this call uncovered (naked = unlimited risk).",
+                f"Upside is capped: shares can be called away at ${strike:g}, forgoing gains above it.",
+                f"Downside is the share risk cushioned by the ${gross_prem:,.2f} premium; breakeven ${breakeven:.2f}.",
+                "Income/neutral-to-mildly-bearish trade; roll or let it be called away near expiry.",
+            ]
+        if iv_env == "ELEVATED" and action == "BUY TO OPEN":
+            risk_disclosures.append(f"IV is ELEVATED ({iv_pct:.0f}%) — the option is expensive; smaller size or a spread may be safer.")
+        if iv_env == "ELEVATED" and action == "SELL TO OPEN":
+            risk_disclosures.append(f"IV is ELEVATED ({iv_pct:.0f}%) — richer premium, but the move it implies is larger too.")
+        if liquidity_quality == "THIN":
+            risk_disclosures.append("Liquidity is THIN — expect wider fills; use a strict limit and small size.")
+
+        strat = {
+            "structure": structure,
+            "title": title,
+            "summary": summary,
+            "action": action,
+            "net_type": net_type,               # DEBIT (you pay) / CREDIT (you get paid)
+            "risk_type": risk_type,             # DEFINED / COLLATERALIZED
+            "outlook": outlook,
+            "is_collateralized_short": action == "SELL TO OPEN",
+            "option_type": opt_label,
+            "leg_type": leg_type,
+            "strike": strike,
+            "expiration": expiry,
+            "expiration_human": human_exp,
+            "dte": dte,
+            "contracts": c,
+            "contract_label": contract_label,
+            "occ_symbol": occ,
+            "est_premium_per_share": round(premium, 2),
+            "est_premium_per_contract": prem_per_contract,
+            "net_debit": round(net_debit, 2),
+            "net_credit": round(net_credit, 2),
+            "collateral_required": round(collateral_required, 2),
+            "requires_shares": requires_shares,
+            "breakeven": breakeven,
+            "breakeven_move_pct": be_move_pct,
+            "max_loss": max_loss,
+            "max_loss_label": max_loss_label,
+            "max_gain": max_gain,
+            "max_gain_label": max_gain_label,
+            "delta": delta,
+            "iv_pct": iv_pct,
+            "iv_environment": iv_env,
+            "moneyness": moneyness,
+            "volume": pick.get("volume"),
+            "open_interest": pick.get("open_interest"),
+            "liquidity_quality": liquidity_quality,
+            "expected_move": exp_move,
+            "expected_move_pct": exp_move_pct,
+            "prob_itm_est_pct": prob_itm_est,
+            "order_instructions": order_instructions,
+            "risk_disclosures": risk_disclosures,
+        }
+        return _scrub(strat)
+    except Exception as e:  # never let a single structure break the whole response
+        logger.error(f"[options] _build_strategy {structure} failed for {symbol}: {e}")
+        return {}
+
+
 def build_options_recommendation(symbol: str) -> dict:
     """
     Produce ONE fully-actionable, defined-risk options order ticket for `symbol`,
@@ -360,6 +591,9 @@ def build_options_recommendation(symbol: str) -> dict:
         symbol = (symbol or "").upper().strip()
         if not symbol:
             return _withhold(symbol, "No ticker provided.")
+        # Defensive symbol sanity (endpoint already validates; this is a second net).
+        if len(symbol) > 8 or not all(ch.isalnum() or ch in ".-" for ch in symbol):
+            return _withhold(symbol, "Ticker format not recognized — no options trade.")
 
         # 1) Trusted live underlying price (source of truth for the anchor).
         trusted = _trusted_price(symbol)
@@ -615,6 +849,32 @@ def build_options_recommendation(symbol: str) -> dict:
             risk_disclosures.append(
                 "Liquidity is THIN (low volume/open interest) — expect wider fills; use a strict limit and small size.")
 
+        # ── Multi-strategy: the leveraged long (primary) PLUS a collateralized
+        #    premium-selling alternative in the SAME direction. Bullish → long call +
+        #    cash-secured put; bearish → long put + covered call. We NEVER surface a
+        #    naked short (unlimited / full-strike risk) — only defined-risk or fully
+        #    collateralized structures reach the user.
+        strategies = []
+        primary_structure = "LONG_CALL" if opt_type == "call" else "LONG_PUT"
+        primary_strat = _build_strategy(primary_structure, symbol, pick, ref_px, contracts)
+        if primary_strat:
+            primary_strat["is_primary"] = True
+            strategies.append(primary_strat)
+
+        # Collateralized premium-selling alternative (same directional bias).
+        alt_structure = "CASH_SECURED_PUT" if want_bull else "COVERED_CALL"
+        alt_leg_type = "put" if want_bull else "call"
+        try:
+            alt_pick = select_strike(chain_for_strike, ref_px, alt_leg_type, conf, float(score or 0))
+        except Exception as _e:
+            logger.error(f"[options] alt strike select failed for {symbol}: {_e}")
+            alt_pick = None
+        if alt_pick:
+            alt_strat = _build_strategy(alt_structure, symbol, alt_pick, ref_px, contracts)
+            if alt_strat:
+                alt_strat["is_primary"] = False
+                strategies.append(alt_strat)
+
         rec = {
             "ticker": symbol,
             "actionable": True,
@@ -650,6 +910,9 @@ def build_options_recommendation(symbol: str) -> dict:
             "rationale": rationale,
             "order_instructions": order_instructions,
             "risk_disclosures": risk_disclosures,
+            # ── all applicable structures (long primary + collateralized alt) ──
+            "strategies": strategies,
+            "strategy_count": len(strategies),
             # ── analysis a real desk relies on ──
             "technical_analysis": technical,
             "fundamental_analysis": fundamental,
@@ -681,6 +944,9 @@ def build_options_recommendation(symbol: str) -> dict:
                 "macro_aware": True,
                 "stb_aware": True,
                 "liquidity_gate": True,
+                "collateralized_selling_only": True,
+                "naked_short_blocked": True,
+                "structures_allowed": sorted(_ALLOWED_STRUCTURES),
             },
             "stale_reused": False,
         }
