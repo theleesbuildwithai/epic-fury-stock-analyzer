@@ -290,10 +290,43 @@ const REQ_RETRIES = 2              // attempts per ticker before giving up this 
 // picks. Each still runs through the same gated recommendation engine, so a
 // fallback ticker only surfaces a card if it independently earns an actionable
 // signal — no fabricated trades. STB stays the source of truth when it's warm.
-const FALLBACK_UNIVERSE = [
-  'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD',
-  'NFLX', 'JPM', 'BAC', 'GS', 'XOM', 'CVX', 'AVGO', 'CRM',
+// Broad, liquid, deep-options mainstream S&P names across every sector. The
+// options page scans THIS whole set (merged with STB's long picks) so the engine
+// can surface BOTH directions — bullish names → calls, bearish names → puts —
+// instead of only STB's long-only (bullish) list. Each ticker still runs through
+// the same gated engine: a card appears only if it independently earns an
+// actionable signal (no fabricated trades). STB stays long-only and untouched.
+const SP_MAINSTREAM = [
+  // Mega-cap tech & semis
+  'AAPL', 'MSFT', 'NVDA', 'AMD', 'AVGO', 'CRM', 'ORCL', 'ADBE', 'INTC', 'QCOM',
+  'TXN', 'CSCO', 'IBM', 'MU', 'AMAT', 'NOW', 'ANET', 'PANW', 'CRWD', 'SNPS',
+  'CDNS', 'KLAC', 'LRCX', 'MRVL', 'ADI', 'MCHP', 'FTNT', 'ADSK', 'INTU', 'SMCI',
+  // Communication & media
+  'GOOGL', 'META', 'NFLX', 'DIS', 'CMCSA', 'T', 'VZ', 'TMUS', 'CHTR', 'EA', 'TTWO', 'WBD',
+  // Consumer discretionary
+  'AMZN', 'TSLA', 'HD', 'MCD', 'NKE', 'SBUX', 'LOW', 'TGT', 'BKNG', 'TJX', 'ROST',
+  'ORLY', 'AZO', 'YUM', 'CMG', 'MAR', 'GM', 'F', 'ABNB', 'DASH', 'EBAY', 'LULU',
+  // Consumer staples
+  'WMT', 'COST', 'PG', 'KO', 'PEP', 'PM', 'MO', 'CL', 'KMB', 'GIS', 'KHC', 'STZ',
+  'MDLZ', 'KDP', 'HSY', 'SYY',
+  // Financials & payments
+  'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'AXP', 'BLK', 'SCHW', 'V', 'MA', 'PYPL',
+  'USB', 'PNC', 'TFC', 'COF', 'MET', 'PRU', 'AIG', 'CB', 'ICE', 'CME', 'SPGI', 'MCO', 'PGR',
+  // Healthcare
+  'UNH', 'JNJ', 'LLY', 'PFE', 'MRK', 'ABBV', 'TMO', 'ABT', 'BMY', 'AMGN', 'GILD', 'CVS',
+  'DHR', 'ISRG', 'SYK', 'MDT', 'ELV', 'CI', 'HUM', 'VRTX', 'REGN', 'ZTS', 'BSX', 'BDX', 'HCA', 'MRNA', 'BIIB',
+  // Energy
+  'XOM', 'CVX', 'COP', 'SLB', 'OXY', 'MPC', 'PSX', 'EOG', 'VLO', 'KMI', 'WMB', 'HAL', 'DVN', 'HES',
+  // Industrials
+  'BA', 'CAT', 'GE', 'HON', 'UPS', 'RTX', 'LMT', 'DE', 'UNP', 'MMM', 'EMR', 'ETN',
+  'ITW', 'GD', 'NOC', 'NSC', 'FDX', 'WM', 'PH', 'CSX',
+  // Materials, utilities & real estate
+  'LIN', 'SHW', 'FCX', 'NEM', 'APD', 'DOW', 'NUE', 'ECL', 'NEE', 'DUK', 'SO', 'AMT', 'PLD', 'EQIX', 'O',
 ]
+// Hard cap so the scan can never run away, even if STB returns a huge list.
+const MAX_UNIVERSE = 200
+// Only scan well-formed tickers (defense-in-depth; endpoint validates too).
+const isValidTicker = (t) => typeof t === 'string' && /^[A-Z][A-Z.\-]{0,6}$/.test(t)
 
 function loadCache() {
   try {
@@ -367,14 +400,23 @@ export default function OptionsTrading() {
     try {
       let j = null
       try { j = await fetchJSON('/api/symbols-to-buy', 15000) } catch { j = null }
-      let list = [...new Set(((j && j.long_picks) || []).map(p => p.ticker).filter(Boolean))]
-      // Safety net: STB momentarily empty (cold cache) → use the fallback large-caps
-      // so the page still produces picks. The gated engine still decides per ticker.
-      let usingFallback = false
-      if (!list.length) {
-        list = [...FALLBACK_UNIVERSE]
-        usingFallback = true
+      // STB long picks (bullish, long-only) + broad S&P mainstream so the engine
+      // can surface BOTH calls and puts. Deduped, format-validated, hard-capped.
+      let stbPicks = []
+      try {
+        stbPicks = ((j && j.long_picks) || []).map(p => p && p.ticker).filter(Boolean)
+      } catch { stbPicks = [] }
+      const stbCold = !stbPicks.length
+      let list = []
+      try {
+        list = [...new Set([...stbPicks, ...SP_MAINSTREAM])]
+          .map(t => String(t).toUpperCase().trim())
+          .filter(isValidTicker)
+          .slice(0, MAX_UNIVERSE)
+      } catch {
+        list = SP_MAINSTREAM.slice(0, MAX_UNIVERSE)   // last-ditch safety net
       }
+      if (!list.length) list = [...SP_MAINSTREAM]      // never end up empty
       if (list.length) {
         setTickers(list)
         setLoading(false)   // universe known → stop the full-page blocker; cards stream in
@@ -387,9 +429,8 @@ export default function OptionsTrading() {
           setProgress({ done, total: list.length })
           await new Promise(r => setTimeout(r, 200))
         }
-        // If we ran the fallback because STB was cold, quietly re-pull STB once it's
-        // likely warm so the real universe takes over on the next pass.
-        if (usingFallback && !force) {
+        // If STB was cold, quietly re-pull once it's warm so its picks join the set.
+        if (stbCold && !force) {
           setTimeout(() => { runningRef.current = false; loadUniverse(true) }, 45000)
         }
       } else if (!Object.keys(recsRef.current).length) {
@@ -431,7 +472,7 @@ export default function OptionsTrading() {
           <div>
             <h1 className="text-3xl font-black text-white tracking-tight">Options Trading</h1>
             <p className="text-sm text-neutral-400 mt-1">
-              Buy &amp; collateralized-sell options ideas · same universe as Symbols to Buy · technical + fundamental + news + macro-regime + IV analytics · recommendation only
+              Buy &amp; collateralized-sell options ideas · bullish calls + bearish puts across STB + broad S&amp;P mainstream · technical + fundamental + news + macro-regime + IV analytics · recommendation only
             </p>
           </div>
           <div className="text-right">
