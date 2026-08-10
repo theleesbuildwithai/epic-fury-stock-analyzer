@@ -178,8 +178,12 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
   )
 }
 
-// ─── The order ticket card (headline + analysis + all strategies) ─────────────
+// ─── The order ticket card ────────────────────────────────────────────────────
+// Compact by default: one glance = ticker, the trade, cost, max loss. Click the
+// card to reveal the full detail (rationale, all analytics chips, every strategy
+// with order steps + risk). Keeps the grid scannable instead of bulky.
 function OrderTicket({ rec }) {
+  const [expanded, setExpanded] = useState(false)
   const isCall = rec.option_type === 'CALL'
   const dirTone = isCall ? 'green' : 'red'
   const accentClass = isCall ? 'card-accent-green' : 'card-accent-red'
@@ -190,6 +194,7 @@ function OrderTicket({ rec }) {
   const strategies = Array.isArray(rec.strategies) && rec.strategies.length
     ? rec.strategies
     : [rec]  // backward-compat: synthesize from the flat rec if strategies absent
+  const primary = strategies.find(s => s.is_primary) || strategies[0] || rec
 
   const alignTone = rec.fundamental_alignment === 'AGREES' ? 'green'
     : rec.fundamental_alignment === 'DIVERGES' ? 'red' : 'neutral'
@@ -197,55 +202,70 @@ function OrderTicket({ rec }) {
     : rec.news_alignment === 'DIVERGES' ? 'red' : 'neutral'
   const macroTone = rec.macro_alignment === 'SUPPORTS' ? 'green'
     : rec.macro_alignment === 'CAUTION' ? 'amber' : 'neutral'
+  const headMoney = primary.net_type === 'CREDIT'
+    ? { label: 'Credit', val: money(primary.net_credit), tone: 'text-emerald-400' }
+    : { label: 'Total cost', val: money(primary.net_debit), tone: 'text-white' }
 
   return (
     <div className={`bg-neutral-900/50 border border-neutral-700 rounded-xl overflow-hidden ${accentClass}`}>
-      {/* Headline */}
-      <div className="px-5 py-4 border-b border-neutral-800/70">
-        <div className="flex items-start justify-between gap-3 flex-wrap">
-          <div>
-            <div className="flex items-center gap-2 mb-1 flex-wrap">
-              <span className="text-2xl font-black text-white tracking-tight">{rec.ticker}</span>
-              <Chip tone={dirTone}>{isCall ? '▲ BULLISH' : '▼ BEARISH'}</Chip>
-              {isNum(rec.confidence) && <Chip tone="blue">conf {rec.confidence}%</Chip>}
-              {rec.signal_confluence && <Chip tone="blue">confluence {rec.signal_confluence}</Chip>}
-              {stb.in_stb_longs && <Chip tone="green">★ STB long</Chip>}
-              {rec.stale_reused && <Chip tone="amber">stale</Chip>}
-            </div>
-            <div className="text-xs text-neutral-500 mt-0.5">
-              underlying {px(rec.underlying_price)} · signal {rec.signal || '—'} · {rec.regime || 'NEUTRAL'} regime · {strategies.length} way{strategies.length !== 1 ? 's' : ''} to trade
-            </div>
+      {/* Compact header — always visible; click toggles full detail */}
+      <button onClick={() => setExpanded(e => !e)} className="w-full text-left px-5 py-4 flex items-start justify-between gap-3 hover:bg-neutral-900/40 transition-colors">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className="text-xl font-black text-white tracking-tight">{rec.ticker}</span>
+            <Chip tone={dirTone}>{isCall ? '▲ BULLISH' : '▼ BEARISH'}</Chip>
+            {isNum(rec.confidence) && <Chip tone="blue">conf {rec.confidence}%</Chip>}
+            {stb.in_stb_longs && <Chip tone="green">★ STB</Chip>}
+            {rec.stale_reused && <Chip tone="amber">stale</Chip>}
+          </div>
+          <div className="text-sm font-bold text-neutral-100 font-mono leading-tight truncate">
+            <span className={isCall ? 'text-emerald-400' : 'text-rose-400'}>{primary.action}</span>
+            {' '}{primary.contracts}× {rec.ticker} {primary.expiration_human} {px(primary.strike)} {primary.option_type}
+          </div>
+          <div className="text-[11px] text-neutral-500 mt-0.5">
+            underlying {px(rec.underlying_price)} · {isNum(primary.dte) ? primary.dte + ' DTE' : '—'} · limit ≈ {px(primary.est_premium_per_share)}/sh · BE {px(primary.breakeven)} · {strategies.length} way{strategies.length !== 1 ? 's' : ''}
           </div>
         </div>
-      </div>
-
-      {/* Rationale + analysis chips */}
-      <div className="px-5 py-4 space-y-3 border-b border-neutral-800/70">
-        <p className="text-xs text-neutral-300 leading-relaxed">{rec.rationale}</p>
-        <div className="flex flex-wrap gap-1.5">
-          {ta.ema_trend && <Chip tone={ta.ema_trend === 'Bullish' ? 'green' : ta.ema_trend === 'Bearish' ? 'red' : 'neutral'}>EMA {ta.ema_trend}</Chip>}
-          {isNum(ta.rsi14) && <Chip>RSI {ta.rsi14.toFixed(0)}</Chip>}
-          {isNum(ta.momentum_pct) && <Chip tone={ta.momentum_pct >= 0 ? 'green' : 'red'}>Mom {pct(ta.momentum_pct, 0)}</Chip>}
-          {isNum(ta.volatility_ann_pct) && <Chip>Vol {ta.volatility_ann_pct.toFixed(0)}%</Chip>}
-          <Chip tone={alignTone}>Fundamentals {rec.fundamental_alignment || 'N/A'}</Chip>
-          {isNum(fa.trailing_pe) && <Chip>P/E {fa.trailing_pe.toFixed(0)}</Chip>}
-          {isNum(fa.eps) && <Chip tone={fa.eps >= 0 ? 'green' : 'red'}>EPS {fa.eps.toFixed(2)}</Chip>}
-          {isNum(fa.market_cap) && <Chip>Cap {big(fa.market_cap)}</Chip>}
-          {rec.news_alignment && <Chip tone={newsTone}>News {rec.news_alignment}{na.sentiment ? ` · ${na.sentiment}` : ''}</Chip>}
-          {rec.macro_regime && <Chip tone={macroTone}>Macro {rec.macro_regime.replace('_', '-')}</Chip>}
-          {isNum(stb.revenue_growth_pct) && <Chip tone="green">Rev {pct(stb.revenue_growth_pct, 0)}</Chip>}
-          {isNum(stb.roe_pct) && <Chip>ROE {stb.roe_pct.toFixed(0)}%</Chip>}
-          {isNum(stb.peg_ratio) && <Chip>PEG {stb.peg_ratio.toFixed(2)}</Chip>}
+        <div className="text-right shrink-0">
+          <div className="text-[9px] uppercase tracking-widest text-neutral-500 font-bold">{headMoney.label}</div>
+          <div className={`text-lg font-black font-mono ${headMoney.tone}`}>{headMoney.val}</div>
+          <div className="text-[10px] text-rose-400 mt-0.5">max loss {money(primary.max_loss)}</div>
+          <div className="text-[10px] text-neutral-500 mt-0.5">{expanded ? '▲ hide' : '▼ full detail'}</div>
         </div>
-      </div>
+      </button>
 
-      {/* Strategies — buy + collateralized-sell */}
-      <div className="px-5 py-4 space-y-3">
-        <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Ways to trade this view</div>
-        {strategies.map((s, i) => (
-          <StrategyBlock key={s.structure || i} strat={s} ticker={rec.ticker} underlying={rec.underlying_price} defaultOpen={i === 0} />
-        ))}
-      </div>
+      {expanded && (
+        <>
+          {/* Rationale + analysis chips */}
+          <div className="px-5 py-4 space-y-3 border-t border-neutral-800/70">
+            <div className="text-xs text-neutral-500">signal {rec.signal || '—'} · {rec.regime || 'NEUTRAL'} regime{rec.signal_confluence ? ` · confluence ${rec.signal_confluence}` : ''}</div>
+            <p className="text-xs text-neutral-300 leading-relaxed">{rec.rationale}</p>
+            <div className="flex flex-wrap gap-1.5">
+              {ta.ema_trend && <Chip tone={ta.ema_trend === 'Bullish' ? 'green' : ta.ema_trend === 'Bearish' ? 'red' : 'neutral'}>EMA {ta.ema_trend}</Chip>}
+              {isNum(ta.rsi14) && <Chip>RSI {ta.rsi14.toFixed(0)}</Chip>}
+              {isNum(ta.momentum_pct) && <Chip tone={ta.momentum_pct >= 0 ? 'green' : 'red'}>Mom {pct(ta.momentum_pct, 0)}</Chip>}
+              {isNum(ta.volatility_ann_pct) && <Chip>Vol {ta.volatility_ann_pct.toFixed(0)}%</Chip>}
+              <Chip tone={alignTone}>Fundamentals {rec.fundamental_alignment || 'N/A'}</Chip>
+              {isNum(fa.trailing_pe) && <Chip>P/E {fa.trailing_pe.toFixed(0)}</Chip>}
+              {isNum(fa.eps) && <Chip tone={fa.eps >= 0 ? 'green' : 'red'}>EPS {fa.eps.toFixed(2)}</Chip>}
+              {isNum(fa.market_cap) && <Chip>Cap {big(fa.market_cap)}</Chip>}
+              {rec.news_alignment && <Chip tone={newsTone}>News {rec.news_alignment}{na.sentiment ? ` · ${na.sentiment}` : ''}</Chip>}
+              {rec.macro_regime && <Chip tone={macroTone}>Macro {rec.macro_regime.replace('_', '-')}</Chip>}
+              {isNum(stb.revenue_growth_pct) && <Chip tone="green">Rev {pct(stb.revenue_growth_pct, 0)}</Chip>}
+              {isNum(stb.roe_pct) && <Chip>ROE {stb.roe_pct.toFixed(0)}%</Chip>}
+              {isNum(stb.peg_ratio) && <Chip>PEG {stb.peg_ratio.toFixed(2)}</Chip>}
+            </div>
+          </div>
+
+          {/* Strategies — buy + collateralized-sell */}
+          <div className="px-5 py-4 space-y-3">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Ways to trade this view</div>
+            {strategies.map((s, i) => (
+              <StrategyBlock key={s.structure || i} strat={s} ticker={rec.ticker} underlying={rec.underlying_price} defaultOpen={i === 0} />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -489,9 +509,11 @@ export default function OptionsTrading() {
         <div className="space-y-6">
           {actionable.length > 0 && (
             <div>
-              <div className="flex items-center gap-2 mb-3">
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <h2 className="text-lg font-bold text-white">Actionable trades</h2>
                 <span className="text-xs text-neutral-500">{actionable.length} ready to place</span>
+                <span className="text-[11px] text-emerald-400 font-semibold">▲ {actionable.filter(r => r.option_type === 'CALL').length} bullish</span>
+                <span className="text-[11px] text-rose-400 font-semibold">▼ {actionable.filter(r => r.option_type === 'PUT').length} bearish</span>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {actionable.map(r => (
