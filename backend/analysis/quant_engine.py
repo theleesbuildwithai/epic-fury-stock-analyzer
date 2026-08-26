@@ -6568,38 +6568,41 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             return _withhold_signal("non-finite composite score", _trusted_px or price)
 
         # Direction and signal
-        # v58 calibration: a clear directional LEAN must surface an actionable call
-        # rather than collapse into a flat "HOLD 40%". BUY/SELL now trigger at
-        # |score| >= 1.5 (was 2.0), so e.g. a +1.5 / -1.8 composite reads BUY / SELL.
-        # STRONG stays reserved for |score| >= 4 (high-conviction only). The
-        # confidence formulas are UNCHANGED and continuous, so a 1.5 BUY honestly
-        # prints ~69% — clearly weaker than a 4.0 STRONG BUY at 92% — and the NET-8
-        # data-quality governor below can still only ever CAP confidence, never
-        # inflate it. Genuinely balanced names (|score| < 1.5) stay HOLD by design.
-        if score >= 4:
+        # v59 calibration — HOLD-BIASED for a LONG-TERM holder. Jackson buys STB
+        # names and wants to hold them for MONTHS, only selling when there is a real,
+        # major problem — while a bullish read should readily CONFIRM the hold. So
+        # the tiers are ASYMMETRIC and generous on the long side:
+        #   STRONG BUY score>=3.5, BUY score>=1.0  (easier to earn a buy / strong buy)
+        #   SELL score<=-2.0, STRONG SELL score<=-4 (a sell needs a CLEAR bearish
+        #   signal — a mild -1 to -2 lean stays HOLD; we do NOT sell into noise, e.g.
+        #   a fundamentally sound name that dipped stays a HOLD, not a SELL).
+        # Confidence formulas are unchanged & continuous (a 1.0 BUY honestly prints
+        # ~67%, well below a STRONG's 89%+); the NET-8 governor below still only CAPS.
+        if score >= 3.5:
             signal = "STRONG BUY"
             direction = "LONG"
-            confidence = min(94, 72 + score * 5)   # score=4→92%, score=5→97%→94%
-        elif score >= 1.5:
+            confidence = min(94, 72 + score * 5)   # 3.5→89%, 4→92%, 5→97%→94%
+        elif score >= 1.0:
             signal = "BUY"
             direction = "LONG"
-            confidence = min(87, 62 + score * 5)   # score=1.5→69%, 2→72%, 3→77%
+            confidence = min(87, 62 + score * 5)   # 1.0→67%, 1.5→69%, 2→72%, 3→77%
         elif score <= -4:
             signal = "STRONG SELL"
             direction = "SHORT"
             confidence = min(94, 72 + abs(score) * 5)
-        elif score <= -1.5:
+        elif score <= -2.0:
             signal = "SELL"
             direction = "SHORT"
-            confidence = min(87, 62 + abs(score) * 5)   # score=-1.5→69%, -2→72%
+            confidence = min(87, 62 + abs(score) * 5)   # -2.0→72%, -3→77%
         else:
-            # Genuinely balanced / mediocre name (|score| < 1.5): HOLD is the correct
-            # call, but grade the confidence by how firm the neutral read is instead
-            # of a flat 40 — so an okay stock reads distinctly from a true coin-flip.
-            # Stays clear of the withhold sentinel (40 + data_quality flag).
+            # HOLD band is intentionally WIDER on the downside (-2.0 < score < 1.0):
+            # a mild bearish lean is a HOLD for a months-long holder, not a sell.
+            # Confidence sits in a tight, modest 45–49 band (a HOLD is a low-conviction
+            # "just keep holding", e.g. a -1.8 lean like ROST reads ~49%), graded just
+            # enough to read distinctly and stay clear of the withhold sentinel (40).
             signal = "HOLD"
             direction = "NEUTRAL"
-            confidence = int(round(45 + abs(score) * 8))   # score 0→45 … ~1.5→57
+            confidence = int(round(45 + abs(score) * 2))   # 0→45 … -1.8→49 … -2.0→49
 
         # Regime adjustment — GENTLE, not a kill shot
         # OVERHAUL: was 0.7x (30% penalty) — now ±10% max
