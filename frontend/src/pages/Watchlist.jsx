@@ -69,14 +69,14 @@ function computeAction(stock, qhf) {
     return { status: 'near_stop', label: 'NEAR STOP', tone: 'rose',
       detail: `Only ${Math.abs(dStop).toFixed(1)}% above stop ${fmtPrice(stop)} — watch closely.` }
   if (qhfBearish)
-    return { status: 'review', label: 'REVIEW · QHF SHORT', tone: 'amber',
-      detail: 'Quant model turned bearish on a long you hold — consider trimming.' }
+    return { status: 'strong_sell', label: 'STRONG SELL', tone: 'rose',
+      detail: 'Quant model turned bearish on a long you hold — exit the position.' }
   if (hasLevels)
     return { status: 'hold', label: 'HOLD', tone: 'neutral',
       detail: 'Between stop and target — let the position work.' }
   return { status: 'none', label: '', tone: 'neutral', detail: '' }
 }
-const ACTION_NEEDED = new Set(['target', 'stop', 'near_target', 'near_stop', 'review'])
+const ACTION_NEEDED = new Set(['target', 'stop', 'strong_sell', 'near_target', 'near_stop'])
 
 // ─── Market-hours check ───────────────────────────────────────────────────────
 function isMarketHours() {
@@ -403,7 +403,7 @@ export default function Watchlist() {
   const actionable = watchlist
     .map(s => ({ stock: s, action: computeAction(s, quantSignals[s.ticker] || null) }))
     .filter(x => ACTION_NEEDED.has(x.action.status))
-  const sellNow = actionable.filter(x => x.action.status === 'target' || x.action.status === 'stop')
+  const sellNow = actionable.filter(x => x.action.status === 'target' || x.action.status === 'stop' || x.action.status === 'strong_sell')
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
