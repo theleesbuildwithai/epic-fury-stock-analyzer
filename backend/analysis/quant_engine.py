@@ -6568,26 +6568,38 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             return _withhold_signal("non-finite composite score", _trusted_px or price)
 
         # Direction and signal
+        # v58 calibration: a clear directional LEAN must surface an actionable call
+        # rather than collapse into a flat "HOLD 40%". BUY/SELL now trigger at
+        # |score| >= 1.5 (was 2.0), so e.g. a +1.5 / -1.8 composite reads BUY / SELL.
+        # STRONG stays reserved for |score| >= 4 (high-conviction only). The
+        # confidence formulas are UNCHANGED and continuous, so a 1.5 BUY honestly
+        # prints ~69% — clearly weaker than a 4.0 STRONG BUY at 92% — and the NET-8
+        # data-quality governor below can still only ever CAP confidence, never
+        # inflate it. Genuinely balanced names (|score| < 1.5) stay HOLD by design.
         if score >= 4:
             signal = "STRONG BUY"
             direction = "LONG"
-            confidence = min(94, 72 + score * 5)   # v57b: score=4→92%, score=5→97%→94%
-        elif score >= 2:
+            confidence = min(94, 72 + score * 5)   # score=4→92%, score=5→97%→94%
+        elif score >= 1.5:
             signal = "BUY"
             direction = "LONG"
-            confidence = min(87, 62 + score * 5)   # v57b: score=2→72%, score=3→77%
+            confidence = min(87, 62 + score * 5)   # score=1.5→69%, 2→72%, 3→77%
         elif score <= -4:
             signal = "STRONG SELL"
             direction = "SHORT"
             confidence = min(94, 72 + abs(score) * 5)
-        elif score <= -2:
+        elif score <= -1.5:
             signal = "SELL"
             direction = "SHORT"
-            confidence = min(87, 62 + abs(score) * 5)
+            confidence = min(87, 62 + abs(score) * 5)   # score=-1.5→69%, -2→72%
         else:
+            # Genuinely balanced / mediocre name (|score| < 1.5): HOLD is the correct
+            # call, but grade the confidence by how firm the neutral read is instead
+            # of a flat 40 — so an okay stock reads distinctly from a true coin-flip.
+            # Stays clear of the withhold sentinel (40 + data_quality flag).
             signal = "HOLD"
             direction = "NEUTRAL"
-            confidence = 40
+            confidence = int(round(45 + abs(score) * 8))   # score 0→45 … ~1.5→57
 
         # Regime adjustment — GENTLE, not a kill shot
         # OVERHAUL: was 0.7x (30% penalty) — now ±10% max
