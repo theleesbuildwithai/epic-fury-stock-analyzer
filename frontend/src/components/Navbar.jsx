@@ -102,8 +102,8 @@ export default function Navbar() {
               to="/options"
               className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${
                 isActive('/options')
-                  ? 'bg-blue-500 text-black shadow-lg shadow-blue-500/20'
-                  : 'bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200'
+                  ? 'bg-white text-black shadow-lg shadow-white/10'
+                  : 'bg-white/10 text-neutral-200 hover:bg-white/20 hover:text-white'
               }`}
             >
               Options

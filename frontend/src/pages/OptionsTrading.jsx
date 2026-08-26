@@ -10,7 +10,7 @@ class CardBoundary extends Component {
       return (
         <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-lg px-4 py-3 text-xs text-neutral-500">
           <span className="font-bold text-neutral-300 font-mono">{this.props.ticker || '—'}</span>
-          {' '}— couldn't render this ticket safely; skipped.
+          {' '}— order ticket could not be rendered safely; excluded.
         </div>
       )
     }
@@ -23,7 +23,7 @@ const STRUCTURE_META = {
   LONG_CALL:        { label: 'Buy Call',        kind: 'BUY',  tone: 'green', outlookTxt: 'Bullish · leveraged' },
   LONG_PUT:         { label: 'Buy Put',         kind: 'BUY',  tone: 'red',   outlookTxt: 'Bearish · leveraged' },
   CASH_SECURED_PUT: { label: 'Sell Put (CSP)',  kind: 'SELL', tone: 'green', outlookTxt: 'Bullish/neutral · income' },
-  COVERED_CALL:     { label: 'Sell Call (CC)',  kind: 'SELL', tone: 'amber', outlookTxt: 'Neutral/mild-bearish · income' },
+  COVERED_CALL:     { label: 'Sell Call (CC)',  kind: 'SELL', tone: 'neutral', outlookTxt: 'Neutral/mild-bearish · income' },
 }
 
 // OPTIONS TRADING — actionable, defined-risk options recommendations.
@@ -67,8 +67,8 @@ function Chip({ children, tone = 'neutral' }) {
     neutral: 'bg-neutral-900 border-neutral-700 text-neutral-300',
     green: 'bg-emerald-950/50 border-emerald-800/40 text-emerald-300',
     red: 'bg-rose-950/50 border-rose-800/40 text-rose-300',
-    amber: 'bg-amber-950/40 border-amber-800/40 text-amber-200',
-    blue: 'bg-blue-950/40 border-blue-800/40 text-blue-200',
+    amber: 'bg-neutral-800/60 border-neutral-600/50 text-neutral-200',
+    blue: 'bg-white/10 border-white/25 text-white',
   }
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold ${map[tone] || map.neutral}`}>
@@ -84,7 +84,7 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
   const isBuy = meta.kind === 'BUY'
   const netTone = strat.net_type === 'CREDIT' ? 'green' : 'blue'
   const liqTone = strat.liquidity_quality === 'GOOD' ? 'text-emerald-400'
-    : strat.liquidity_quality === 'FAIR' ? 'text-amber-300' : 'text-rose-400'
+    : strat.liquidity_quality === 'FAIR' ? 'text-neutral-300' : 'text-rose-400'
   const headMoney = strat.net_type === 'CREDIT'
     ? { label: 'Credit received', val: money(strat.net_credit), tone: 'text-emerald-400' }
     : { label: 'Total cost (debit)', val: money(strat.net_debit), tone: 'text-white' }
@@ -101,7 +101,7 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
             {strat.is_primary && <Chip tone="blue">PRIMARY</Chip>}
           </div>
           <div className="text-sm font-bold text-neutral-100 font-mono leading-tight truncate">
-            <span className={isBuy ? 'text-emerald-400' : 'text-blue-300'}>{strat.action}</span>
+            <span className={isBuy ? 'text-emerald-400' : 'text-neutral-200'}>{strat.action}</span>
             {' '}{strat.contracts}× {ticker} {strat.expiration_human} {px(strat.strike)} {strat.option_type}
           </div>
           <div className="text-[11px] text-neutral-500 mt-0.5">{meta.outlookTxt} · {strat.moneyness || '—'} · {isNum(strat.dte) ? strat.dte + ' DTE' : '—'} · limit ≈ {px(strat.est_premium_per_share)}/sh</div>
@@ -119,9 +119,9 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
         <Stat label="Max loss" value={money(strat.max_loss)} accent="text-rose-400" />
         <Stat label="Max gain" value={strat.max_gain == null ? 'Unlimited' : money(strat.max_gain)} accent="text-emerald-400" />
         {strat.collateral_required > 0
-          ? <Stat label="Cash collateral" value={money(strat.collateral_required)} accent="text-amber-300" />
+          ? <Stat label="Cash collateral" value={money(strat.collateral_required)} accent="text-neutral-100" />
           : strat.requires_shares > 0
-            ? <Stat label="Shares needed" value={`${strat.requires_shares}`} accent="text-amber-300" />
+            ? <Stat label="Shares needed" value={`${strat.requires_shares}`} accent="text-neutral-100" />
             : <Stat label="Need to move" value={isNum(strat.breakeven_move_pct) ? pctPos(Math.abs(strat.breakeven_move_pct)) : '—'} />}
       </div>
 
@@ -133,7 +133,7 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
             <Stat label="Prob. ITM (est)" value={isNum(strat.prob_itm_est_pct) ? pctPos(strat.prob_itm_est_pct, 0) : '—'} />
             <Stat label="Delta" value={num(strat.delta)} />
             <Stat label="Impl. Vol" value={isNum(strat.iv_pct) ? pctPos(strat.iv_pct, 0) : '—'}
-                  accent={strat.iv_environment === 'ELEVATED' ? 'text-amber-300' : 'text-neutral-100'} />
+                  accent={strat.iv_environment === 'ELEVATED' ? 'text-white' : 'text-neutral-100'} />
             <Stat label="IV env" value={strat.iv_environment || '—'} />
             <Stat label="Volume / OI" value={`${strat.volume ?? '—'} / ${strat.open_interest ?? '—'}`} />
             <Stat label="Liquidity" value={strat.liquidity_quality || '—'} accent={liqTone} />
@@ -161,12 +161,12 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
 
           {/* risk */}
           <div className="px-4 pb-4">
-            <div className="bg-amber-950/20 border border-amber-800/40 rounded-lg px-3 py-2.5">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-amber-300 mb-1.5">Risk — read before you trade</div>
+            <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-lg px-3 py-2.5">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-300 mb-1.5">Risk disclosures — review before execution</div>
               <ul className="space-y-1">
                 {(strat.risk_disclosures || []).map((r, i) => (
-                  <li key={i} className="text-[11px] text-amber-100/80 flex gap-1.5">
-                    <span className="text-amber-500">•</span><span>{r}</span>
+                  <li key={i} className="text-[11px] text-neutral-400 flex gap-1.5">
+                    <span className="text-neutral-500">•</span><span>{r}</span>
                   </li>
                 ))}
               </ul>
@@ -435,7 +435,7 @@ export default function OptionsTrading() {
         }
       } else if (!Object.keys(recsRef.current).length) {
         // No universe AND nothing cached to show.
-        setError((j && j.message) || 'Universe warming up — check back shortly.')
+        setError((j && j.message) || 'Screening universe is initializing — please retry shortly.')
       }
     } catch (e) {
       if (!Object.keys(recsRef.current).length) setError(e.message || 'Failed to load options.')
@@ -472,7 +472,7 @@ export default function OptionsTrading() {
           <div>
             <h1 className="text-3xl font-black text-white tracking-tight">Options Trading</h1>
             <p className="text-sm text-neutral-400 mt-1">
-              Buy &amp; collateralized-sell options ideas · bullish calls + bearish puts across STB + broad S&amp;P mainstream · technical + fundamental + news + macro-regime + IV analytics · recommendation only
+              Defined-risk long and collateralized-sell structures · directional calls and puts across the Symbols-to-Buy set and broad S&amp;P universe · technical, fundamental, news, macro-regime, and implied-volatility analytics · recommendation only
             </p>
           </div>
           <div className="text-right">
@@ -495,34 +495,34 @@ export default function OptionsTrading() {
             value={query}
             onChange={e => setQuery(e.target.value)}
             placeholder="Look up any ticker (e.g. AAPL)"
-            className="px-3 py-2 w-64 bg-neutral-900 border border-neutral-700 rounded-lg text-sm text-white font-mono placeholder-neutral-600 focus:border-blue-500 focus:outline-none uppercase"
+            className="px-3 py-2 w-64 bg-neutral-900 border border-neutral-700 rounded-lg text-sm text-white font-mono placeholder-neutral-600 focus:border-neutral-500 focus:outline-none uppercase"
           />
           <button
             type="submit"
             disabled={lookupBusy}
             className="px-4 py-2 bg-white text-black hover:bg-neutral-200 disabled:opacity-50 rounded-lg text-sm font-bold transition-colors"
           >
-            {lookupBusy ? 'Loading…' : 'Get options'}
+            {lookupBusy ? 'Loading…' : 'Analyze options'}
           </button>
         </form>
 
         {/* Safety banner */}
-        <div className="mt-4 bg-blue-950/20 border border-blue-800/40 rounded-lg px-4 py-2.5 text-xs text-blue-200 flex flex-wrap items-center gap-x-4 gap-y-1">
-          <span className="font-bold">Safety:</span>
-          <span>Buy calls/puts (max loss = premium) + collateralized selling (cash-secured puts / covered calls)</span>
-          <span className="text-blue-500">·</span>
-          <span>No naked shorts — ever</span>
-          <span className="text-blue-500">·</span>
+        <div className="mt-4 bg-neutral-900/50 border border-neutral-700/50 rounded-lg px-4 py-2.5 text-xs text-neutral-300 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="font-bold text-white">Risk framework:</span>
+          <span>Long calls/puts (max loss = premium) plus collateralized selling (cash-secured puts / covered calls)</span>
+          <span className="text-neutral-600">·</span>
+          <span>No naked short premium</span>
+          <span className="text-neutral-600">·</span>
           <span>Withholds on low conviction, thin liquidity, or price disagreement</span>
-          <span className="text-blue-500">·</span>
-          <span>Never auto-executes</span>
+          <span className="text-neutral-600">·</span>
+          <span>Recommendation only — never auto-executes</span>
         </div>
       </div>
 
       {/* Full-page blocker ONLY when we truly have nothing to show yet. */}
       {loading && ordered.length === 0 && (
         <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-12 text-center text-neutral-500">
-          Scanning options across the universe…
+          Scanning options chains across the universe…
         </div>
       )}
 
@@ -534,15 +534,15 @@ export default function OptionsTrading() {
             <span>{Math.round((progress.done / progress.total) * 100)}%</span>
           </div>
           <div className="h-1 bg-neutral-800 rounded-full overflow-hidden">
-            <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+            <div className="h-full bg-white transition-all duration-300" style={{ width: `${(progress.done / progress.total) * 100}%` }} />
           </div>
         </div>
       )}
 
       {error && !loading && (
-        <div className="bg-amber-950/30 border border-amber-800/40 rounded-lg p-4 text-amber-200 mb-6 text-sm">
+        <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-lg p-4 text-neutral-300 mb-6 text-sm">
           {error}
-          <button onClick={() => loadUniverse(false)} className="ml-4 text-xs underline text-amber-400 hover:text-amber-200">Retry</button>
+          <button onClick={() => loadUniverse(false)} className="ml-4 text-xs underline text-neutral-400 hover:text-white">Retry</button>
         </div>
       )}
 

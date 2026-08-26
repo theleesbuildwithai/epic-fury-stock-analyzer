@@ -151,9 +151,9 @@ function PickSummaryCard({ pick, side }) {
               : '—'}
           </div>
         </div>
-        <div className="bg-neutral-900/60 border border-blue-800/40 rounded-lg px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wider text-blue-400">Reward / Risk</div>
-          <div className="text-lg font-bold text-blue-200 font-mono">
+        <div className="bg-neutral-900/60 border border-neutral-700/60 rounded-lg px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-neutral-400">Reward / Risk</div>
+          <div className="text-lg font-bold text-white font-mono">
             {pick.reward_risk_ratio != null ? pick.reward_risk_ratio.toFixed(2) + 'x' : '—'}
           </div>
           <div className="text-[10px] text-neutral-500">2.0x minimum</div>
@@ -229,9 +229,9 @@ function PickSummaryCard({ pick, side }) {
         </div>
       )}
 
-      <div className="mt-5 px-3 py-2 bg-amber-950/20 border border-amber-800/30 rounded text-xs text-amber-200">
-        <span className="font-bold">No day trading.</span> Hold this position 3-5 days minimum. Best
-        winners often run 4-8 weeks. Always honor the stop.
+      <div className="mt-5 px-3 py-2 bg-neutral-900/50 border border-neutral-700/50 rounded text-xs text-neutral-300">
+        <span className="font-bold text-white">Position discipline.</span> Minimum hold horizon of 3–5
+        trading days; leading positions typically run 4–8 weeks. Honor the predefined stop without exception.
       </div>
     </div>
   )
@@ -345,9 +345,9 @@ export default function SymbolDetail() {
       {pick && !loading && <PickSummaryCard pick={pick} side={side} />}
 
       {!pick && analysis && !loading && (
-        <div className="bg-amber-950/20 border border-amber-800/30 rounded-lg px-4 py-3 text-sm text-amber-200 mb-6">
-          <span className="font-bold">{ticker}</span> is not on the current Symbols-to-Buy queue —
-          showing the standard analysis only. The picks engine refreshes every ~30 min.
+        <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-lg px-4 py-3 text-sm text-neutral-300 mb-6">
+          <span className="font-bold text-white">{ticker}</span> is not currently in the Symbols-to-Buy
+          selection set — displaying standard analysis only. The screening engine refreshes every ~30 minutes.
         </div>
       )}
 

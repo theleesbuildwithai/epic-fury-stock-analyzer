@@ -28,7 +28,7 @@ function fmtMoney(v) {
 function confColor(c) {
   if (c == null) return 'text-neutral-500'
   if (c >= 75) return 'text-emerald-400'
-  if (c >= 65) return 'text-amber-300'
+  if (c >= 65) return 'text-neutral-300'
   return 'text-neutral-400'
 }
 function growthColor(v) {
@@ -41,7 +41,7 @@ function growthColor(v) {
 function scoreColor(s) {
   if (s == null) return 'text-neutral-500'
   if (s >= 70) return 'text-emerald-400'
-  if (s >= 55) return 'text-amber-300'
+  if (s >= 55) return 'text-neutral-300'
   return 'text-neutral-400'
 }
 
@@ -83,16 +83,16 @@ function RegimeBanner({ regime }) {
     <div className={`flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5 border rounded-lg text-xs ${
       isRiskOn
         ? 'bg-emerald-950/30 border-emerald-800/40'
-        : 'bg-blue-950/30 border-blue-800/40'
+        : 'bg-neutral-900/50 border-neutral-700/50'
     }`}>
       <div className="flex items-center gap-2">
-        <span className={`w-2 h-2 rounded-full shrink-0 animate-pulse ${isRiskOn ? 'bg-emerald-400' : 'bg-blue-400'}`} />
-        <span className={`font-bold uppercase tracking-wider ${isRiskOn ? 'text-emerald-300' : 'text-blue-300'}`}>
+        <span className={`w-2 h-2 rounded-full shrink-0 animate-pulse ${isRiskOn ? 'bg-emerald-400' : 'bg-neutral-300'}`} />
+        <span className={`font-bold uppercase tracking-wider ${isRiskOn ? 'text-emerald-300' : 'text-neutral-200'}`}>
           Bridgewater Pure Alpha: {isRiskOn ? 'RISK-ON' : 'RISK-OFF'}
         </span>
       </div>
       <div className="text-neutral-400">
-        <span className={`font-semibold mr-1 ${isRiskOn ? 'text-emerald-300' : 'text-blue-300'}`}>▲ Favored:</span>
+        <span className={`font-semibold mr-1 ${isRiskOn ? 'text-emerald-300' : 'text-neutral-200'}`}>▲ Favored:</span>
         {favored.join(' · ')}
       </div>
       <div className="text-neutral-400">
@@ -139,7 +139,7 @@ function SortTh({ label, col, sortCol, sortDir, onSort, right = true }) {
   return (
     <button
       onClick={() => onSort(col)}
-      className={`w-full font-bold uppercase tracking-wider text-[10px] hover:text-white transition-colors select-none ${right ? 'text-right' : 'text-left'} ${active ? 'text-blue-300' : 'text-neutral-500'}`}
+      className={`w-full font-bold uppercase tracking-wider text-[10px] hover:text-white transition-colors select-none ${right ? 'text-right' : 'text-left'} ${active ? 'text-white' : 'text-neutral-500'}`}
     >
       {label}
       {active && <span className="ml-0.5 text-[8px]">{sortDir === 'desc' ? '▼' : '▲'}</span>}
@@ -152,7 +152,7 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
   const alloc = calcAlloc(cash, p.entry_price, rank)
   const rrColor = !p.reward_risk_ratio ? 'text-neutral-500'
     : p.reward_risk_ratio >= 3 ? 'text-emerald-400'
-    : p.reward_risk_ratio >= 2 ? 'text-amber-300'
+    : p.reward_risk_ratio >= 2 ? 'text-neutral-300'
     : 'text-rose-400'
 
   const reasons = Array.isArray(p.reasons) ? p.reasons.filter(Boolean) : []
@@ -175,7 +175,7 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
           <Link
             to={`/symbol/${p.ticker}?side=long`}
             onClick={e => e.stopPropagation()}
-            className="font-bold text-white text-base group-hover:text-blue-300 hover:underline truncate"
+            className="font-bold text-white text-base group-hover:text-neutral-300 hover:underline truncate"
           >
             {p.ticker}
           </Link>
@@ -214,7 +214,7 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
         <div className={`col-span-1 text-right font-mono text-xs ${
           p.peg_ratio == null ? 'text-neutral-500'
           : p.peg_ratio < 1 ? 'text-emerald-400'
-          : p.peg_ratio < 2 ? 'text-amber-300'
+          : p.peg_ratio < 2 ? 'text-neutral-300'
           : 'text-rose-400'
         }`}>
           {fmtPos(p.peg_ratio, 'x', 1)}
@@ -239,7 +239,7 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
             <span className="text-neutral-600 text-[10px]">skip</span>
           ) : (
             <div>
-              <div className="text-amber-200 font-bold">{alloc.shares} sh</div>
+              <div className="text-neutral-100 font-bold">{alloc.shares} sh</div>
               <div className="text-[10px] text-neutral-500">{fmtMoney(alloc.dollars)}</div>
             </div>
           )}
@@ -248,15 +248,15 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
 
       {/* Expanded reasons + QHF factors panel */}
       {expanded && (
-        <div className="px-6 py-3 bg-neutral-900/70 border-b border-blue-900/30">
+        <div className="px-6 py-3 bg-neutral-900/70 border-b border-neutral-800/60">
           {reasons.length > 0 ? (
             <div className="flex flex-wrap gap-2 mb-1">
               {reasons.map((r, i) => (
                 <span
                   key={i}
-                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1 bg-blue-950/50 border border-blue-800/30 rounded-full text-blue-200"
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1 bg-neutral-800/60 border border-neutral-600/40 rounded-full text-neutral-200"
                 >
-                  <span className="text-blue-500 font-bold">·</span>
+                  <span className="text-neutral-500 font-bold">·</span>
                   {r}
                 </span>
               ))}
@@ -321,7 +321,7 @@ function PickTable({ picks, cash, quantSignals }) {
   if (!picks || !picks.length) {
     return (
       <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-8 text-center text-neutral-500">
-        No picks available yet — fundamental scan warming up. Check back in 2 minutes.
+        No picks available — the fundamental scan is initializing. Results populate within approximately 2 minutes.
       </div>
     )
   }
@@ -330,14 +330,14 @@ function PickTable({ picks, cash, quantSignals }) {
 
   return (
     <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
-      <div className="px-4 py-3 border-b border-neutral-800/60 flex items-center justify-between bg-blue-950/20">
+      <div className="px-4 py-3 border-b border-neutral-800/60 flex items-center justify-between bg-neutral-900/60">
         <div>
-          <h2 className="text-lg font-bold text-blue-300">Long-Term Fundamental Picks</h2>
+          <h2 className="text-lg font-bold text-white">Long-Term Fundamental Picks</h2>
           <p className="text-xs text-neutral-500 mt-0.5">
             {picks.length} picks · {sortCol ? `Sorted by ${sortCol.replace(/_/g, ' ')} ${sortDir}` : 'Ranked by fundamental score'} · Click row to expand signals · Click ticker to view detail
           </p>
         </div>
-        <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 border border-blue-800/40 px-2 py-1 rounded">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-300 border border-neutral-600/50 px-2 py-1 rounded">
           6-12 Week Hold
         </span>
       </div>
@@ -391,7 +391,7 @@ function CashInput({ value, onChange }) {
             const n = Number(v)
             onChange(isNaN(n) || n < 0 ? null : n)
           }}
-          className="pl-7 pr-3 py-2 w-44 bg-neutral-900 border border-neutral-700 rounded-lg text-sm text-white font-mono placeholder-neutral-600 focus:border-blue-500 focus:outline-none"
+          className="pl-7 pr-3 py-2 w-44 bg-neutral-900 border border-neutral-700 rounded-lg text-sm text-white font-mono placeholder-neutral-600 focus:border-neutral-500 focus:outline-none"
         />
       </div>
       {value > 0 && (
@@ -611,7 +611,7 @@ export default function SymbolsToBuy() {
         {/* Meta bar */}
         {data && (
           <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-500 mt-3">
-            <span className="px-2 py-1 bg-blue-950/30 rounded border border-blue-900/40 text-blue-300 font-bold">
+            <span className="px-2 py-1 bg-white/10 rounded border border-white/20 text-white font-bold">
               FUNDAMENTAL ENGINE
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
@@ -627,7 +627,7 @@ export default function SymbolsToBuy() {
               Scored: <span className="text-white font-bold">{data.candidates_scored ?? '—'}</span>
             </span>
             <span className="px-2 py-1 bg-neutral-900 rounded border border-neutral-800">
-              Cache age: <span className={data.cache_is_restoring ? 'text-yellow-400 font-bold' : 'text-white font-bold'}>
+              Cache age: <span className={data.cache_is_restoring ? 'text-neutral-300 font-bold' : 'text-white font-bold'}>
                 {data.cache_is_restoring ? 'Warming up…' : cacheMinutes != null ? `${cacheMinutes} min` : '—'}
               </span>
             </span>
@@ -646,14 +646,14 @@ export default function SymbolsToBuy() {
 
       {/* Warming-up banner — shown while backend scan is still running */}
       {data && data.ok === false && !loading && (
-        <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-8 text-center mb-4">
-          <div className="text-amber-300 font-bold text-lg mb-2">Fundamental scan running…</div>
-          <div className="text-amber-200/70 text-sm mb-3">
-            {data.message || 'Picks will appear automatically when the scan completes.'}
+        <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-xl p-8 text-center mb-4">
+          <div className="text-white font-bold text-lg mb-2">Fundamental scan in progress…</div>
+          <div className="text-neutral-400 text-sm mb-3">
+            {data.message || 'Picks will populate automatically once the scan completes.'}
           </div>
           {retryCountdown != null && (
             <div className="text-neutral-500 text-xs">
-              Auto-refreshing in <span className="text-amber-400 font-mono font-bold">{retryCountdown}s</span>
+              Auto-refreshing in <span className="text-white font-mono font-bold">{retryCountdown}s</span>
             </div>
           )}
         </div>
@@ -672,15 +672,15 @@ export default function SymbolsToBuy() {
       {data && data.ok !== false && !loading && (
         <div className="space-y-6">
           {data.guidance && (
-            <div className="bg-blue-950/20 border border-blue-800/40 rounded-lg px-4 py-3 text-sm text-blue-200">
-              <span className="font-bold mr-2">Strategy:</span>{data.guidance}
+            <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-lg px-4 py-3 text-sm text-neutral-300">
+              <span className="font-bold mr-2 text-white">Strategy:</span>{data.guidance}
             </div>
           )}
 
           {/* Score legend */}
           <div className="flex flex-wrap gap-4 text-xs text-neutral-500">
             <span><span className="text-emerald-400 font-bold">Score 70+</span> = Strong buy</span>
-            <span><span className="text-amber-300 font-bold">Score 55–70</span> = Good quality</span>
+            <span><span className="text-neutral-300 font-bold">Score 55–70</span> = Good quality</span>
             <span><span className="text-emerald-400 font-bold">Conf 75%+</span> = High conviction · min 70% required</span>
             <span><span className="font-bold text-neutral-400">Rev Gr</span> = YoY revenue growth</span>
             <span><span className="font-bold text-neutral-400">ROE</span> = Return on equity</span>

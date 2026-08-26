@@ -195,15 +195,15 @@ export default function QuantDashboard() {
 // TAB 1: QUANT PICKS
 // ============================================================
 function QuantPicksTab({ picks, loading, RegimeBadge, onRefresh }) {
-  if (loading) return <LoadingSpinner text="Analyzing 520+ stocks across 14 quant factors... this takes ~90 seconds" />
+  if (loading) return <LoadingSpinner text="Analyzing 520+ equities across 14 quant factors — approximately 90 seconds" />
   if (!picks || picks.cache_status === 'cold') {
     return (
       <div className="text-center py-16">
-        <p className="text-neutral-400 text-lg mb-2">Picks engine is warming up</p>
-        <p className="text-neutral-600 text-sm mb-6">Analyzing 520+ stocks... refresh in ~60 seconds after deploy.</p>
+        <p className="text-neutral-400 text-lg mb-2">Selection engine initializing</p>
+        <p className="text-neutral-600 text-sm mb-6">Analyzing 520+ equities — refresh in approximately 60 seconds.</p>
         <button
           onClick={onRefresh}
-          className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl transition-all"
+          className="px-6 py-3 bg-white hover:bg-neutral-200 text-black font-semibold rounded-xl transition-all"
         >
           Refresh Picks
         </button>

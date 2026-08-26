@@ -39,7 +39,7 @@ function fmtDate(v) {
 const TONE = {
   emerald: { text: 'text-emerald-300', border: 'border-emerald-600/60', ring: 'border-l-emerald-500', bg: 'bg-emerald-950/30', dot: 'bg-emerald-400' },
   rose:    { text: 'text-rose-300',    border: 'border-rose-600/60',    ring: 'border-l-rose-500',    bg: 'bg-rose-950/30',    dot: 'bg-rose-400' },
-  amber:   { text: 'text-amber-300',   border: 'border-amber-600/60',   ring: 'border-l-amber-500',   bg: 'bg-amber-950/30',   dot: 'bg-amber-400' },
+  amber:   { text: 'text-neutral-200', border: 'border-neutral-600/60',  ring: 'border-l-neutral-400', bg: 'bg-neutral-800/40', dot: 'bg-neutral-300' },
   neutral: { text: 'text-neutral-400', border: 'border-neutral-800/60', ring: 'border-l-transparent', bg: '',                 dot: 'bg-neutral-600' },
 }
 function pctBetween(from, to) {
@@ -168,7 +168,7 @@ function InlineEdit({ value, onSave, prefix = '', suffix = '', min = 0 }) {
 
   if (!editing) {
     return (
-      <button onClick={start} className="text-left hover:text-blue-300 transition-colors underline decoration-dotted underline-offset-2">
+      <button onClick={start} className="text-left hover:text-white transition-colors underline decoration-dotted underline-offset-2">
         {prefix}{value != null && !isNaN(value) ? Number(value).toFixed(2) : '—'}{suffix}
       </button>
     )
@@ -181,7 +181,7 @@ function InlineEdit({ value, onSave, prefix = '', suffix = '', min = 0 }) {
       onChange={e => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
-      className="w-20 px-1 py-0.5 bg-neutral-800 border border-blue-600 rounded text-white text-xs font-mono focus:outline-none"
+      className="w-20 px-1 py-0.5 bg-neutral-800 border border-neutral-500 rounded text-white text-xs font-mono focus:outline-none"
     />
   )
 }
@@ -434,7 +434,7 @@ export default function Watchlist() {
               placeholder="AAPL"
               autoComplete="off"
               className="w-28 px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm font-mono
-                         focus:outline-none focus:border-blue-600 placeholder-neutral-600"
+                         focus:outline-none focus:border-neutral-500 placeholder-neutral-600"
             />
             {showSugg && suggestions.length > 0 && (
               <div className="absolute z-50 top-full mt-1 w-64 bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl overflow-hidden max-h-52 overflow-y-auto">
@@ -459,7 +459,7 @@ export default function Watchlist() {
                 onChange={e => setAddEntryPx(e.target.value)}
                 placeholder="auto"
                 className="w-28 pl-6 pr-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white text-sm font-mono
-                           focus:outline-none focus:border-blue-600 placeholder-neutral-600"
+                           focus:outline-none focus:border-neutral-500 placeholder-neutral-600"
               />
             </div>
           </div>
@@ -517,9 +517,9 @@ export default function Watchlist() {
 
       {/* Sell-signal alerts — the STB↔Watchlist correlation surface */}
       {actionable.length > 0 && (
-        <div className={`rounded-xl border p-4 mb-6 ${sellNow.length > 0 ? 'bg-amber-950/25 border-amber-700/50' : 'bg-neutral-900/50 border-neutral-800/60'}`}>
+        <div className={`rounded-xl border p-4 mb-6 ${sellNow.length > 0 ? 'bg-red-950/25 border-red-800/50' : 'bg-neutral-900/50 border-neutral-800/60'}`}>
           <div className="flex items-center gap-2 mb-3">
-            <span className={`w-2 h-2 rounded-full ${sellNow.length > 0 ? 'bg-amber-400 animate-pulse' : 'bg-neutral-500'}`} />
+            <span className={`w-2 h-2 rounded-full ${sellNow.length > 0 ? 'bg-red-500 animate-pulse' : 'bg-neutral-500'}`} />
             <p className="text-sm font-bold text-white">
               {sellNow.length > 0
                 ? `${sellNow.length} holding${sellNow.length > 1 ? 's' : ''} hit a SELL level`
@@ -732,7 +732,7 @@ export default function Watchlist() {
                             <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-600 mb-1">Quant HF Signal</p>
                             <p className="text-xs text-neutral-600">
                               Signal loading for {stock.ticker}…{' '}
-                              <button onClick={e => { e.stopPropagation(); fetchQuantSignals() }} className="text-blue-400 hover:text-blue-300 underline">Refresh signals</button>
+                              <button onClick={e => { e.stopPropagation(); fetchQuantSignals() }} className="text-neutral-300 hover:text-white underline">Refresh signals</button>
                             </p>
                           </div>
                         )}
