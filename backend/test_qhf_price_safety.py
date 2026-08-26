@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 import analysis.quant_engine as q
+import analysis.rentech as rt
 import analytics.multi_source_adapter as msa
 import analytics.data_shield as ds
 
@@ -31,6 +32,13 @@ q._throttle = lambda: None
 q._get_sector_with_fallback = lambda s: "Technology"
 q.detect_market_regime = lambda: {"regime": "SIDEWAYS", "confidence": 50}
 q.get_macro_overlay = lambda: {"sector_adjustments": {}}
+# The news overlay is a new (network) dependency of analyze_watchlist_stock —
+# pin it to NEUTRAL (0 tilt) so these price-safety cases stay deterministic and
+# offline. News-tilt behavior itself is covered by test_news_overlay.py.
+rt.get_stock_news_sentiment = lambda symbols: {
+    s: {"sentiment": "NEUTRAL", "score": 0, "positive_signals": 0,
+        "negative_signals": 0, "headlines_analyzed": 0} for s in symbols
+}
 # Force tier-2/3 fallbacks to contribute nothing so the controlled tier-1 frame
 # is always the sole candidate — keeps each case deterministic.
 msa.get_historical_any_source = lambda *a, **k: None

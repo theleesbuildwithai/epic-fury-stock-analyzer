@@ -6522,6 +6522,43 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         except Exception:
             learned_weights = {}
 
+        # --- Company-news / current-events overlay (EXIT signal must SEE news) ---
+        # This is the whole point of the watchlist as an EXIT gate: if a stock is
+        # hit by fresh company-specific news, the signal must lean toward SELL
+        # faster (and toward HOLD/BUY on good news) rather than staying blind and
+        # holding through a catalyst. The tilt is small and HARD-CAPPED at ±1.0 so
+        # news can CONFIRM or gently nudge a call across a tier boundary but can
+        # NEVER single-handedly flip HOLD into a strong directional call from a
+        # noisy keyword match. Fully fail-safe: any fetch/parse problem yields a
+        # neutral 0 tilt — never a crash, never a withhold. Uses the shared,
+        # batched/cached(30m)/throttled reader so it respects the API budget.
+        news_view = {"sentiment": "NEUTRAL", "score": 0, "headlines": 0,
+                     "positive_signals": 0, "negative_signals": 0, "tilt": 0.0}
+        try:
+            from analysis.rentech import get_stock_news_sentiment
+            _ns_map = get_stock_news_sentiment([symbol]) or {}
+            _ns = _ns_map.get(symbol) or _ns_map.get(symbol.upper()) or {}
+            _news_lbl = str(_ns.get("sentiment", "NEUTRAL")).upper()
+            _news_tilt = {
+                "VERY_POSITIVE": 0.75, "POSITIVE": 0.4,
+                "NEUTRAL": 0.0,
+                "NEGATIVE": -0.4, "VERY_NEGATIVE": -0.75,
+            }.get(_news_lbl, 0.0)
+            # Defense in depth — the map already bounds this to ±0.75.
+            _news_tilt = max(-1.0, min(1.0, float(_news_tilt)))
+            if np.isfinite(_news_tilt):
+                score += _news_tilt
+                news_view = {
+                    "sentiment": _news_lbl,
+                    "score": _ns.get("score", 0),
+                    "headlines": _ns.get("headlines_analyzed", _ns.get("headlines", 0)),
+                    "positive_signals": _ns.get("positive_signals", 0),
+                    "negative_signals": _ns.get("negative_signals", 0),
+                    "tilt": round(_news_tilt, 2),
+                }
+        except Exception as _news_e:
+            logger.debug(f"[watchlist] news overlay skipped for {symbol}: {_news_e}")
+
         # SAFETY NET 5: the score must be a finite number before it can drive a
         # directional call. A NaN/inf score (from any poisoned factor) would make
         # every comparison below False and silently emit HOLD — but make it an
@@ -6645,6 +6682,7 @@ def analyze_watchlist_stock(symbol: str) -> dict:
                 "ema_trend": "Bullish" if ema_9 > ema_21 > ema_50 else "Bearish" if ema_9 < ema_21 < ema_50 else "Mixed",
             },
             "macro_impact": macro_adj,
+            "news": news_view,
             "returns": {
                 "1m": round(ret_20d, 1),
                 "3m": round(ret_60d, 1),
@@ -7585,6 +7623,72 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 candidates.append(pick)
         except Exception as _e:
             logger.debug(f"FUNDAMENTAL PICKS lastgood score error {sym}: {_e}")
+
+    # ── Company-news / current-events overlay (STB entries must SEE news) ─────
+    # STB already reads Bridgewater regime, geopolitics, AQR quality and an
+    # earnings-blackout guard — but it was blind to fresh company headlines.
+    # This adds a GENTLE, HARD-CAPPED, FAIL-SAFE tilt so current events inform
+    # the ranking and flag risk on the card:
+    #   • never hard-drops a pick (keyword sentiment is noisy — a false-negative
+    #     headline must not veto a quantitatively strong long), and
+    #   • never manufactures conviction, and
+    #   • keeps STB strictly LONG-ONLY (unchanged).
+    # Load is bounded to the strongest ≤20 candidates via the shared
+    # batched/cached(30m)/throttled reader, so the Yahoo budget is respected and
+    # this only runs on a 6-hourly STB rebuild (served from cache in between).
+    _news_default = {"sentiment": "NEUTRAL", "score": 0,
+                     "positive_signals": 0, "negative_signals": 0,
+                     "score_tilt": 0.0, "conf_tilt": 0}
+    for _c in candidates:
+        _c["news"] = dict(_news_default)
+    try:
+        _news_rank = sorted(
+            candidates,
+            key=lambda x: (-x.get("confidence", 0), -x.get("fundamental_score", 0)),
+        )[:20]
+        _news_syms = [(_c.get("ticker") or "") for _c in _news_rank if _c.get("ticker")]
+        if _news_syms:
+            from analysis.rentech import get_stock_news_sentiment as _gsns
+            _news_map = _gsns(_news_syms) or {}
+            _score_tilt_by_lbl = {"VERY_POSITIVE": 6.0, "POSITIVE": 3.0, "NEUTRAL": 0.0,
+                                  "NEGATIVE": -3.0, "VERY_NEGATIVE": -6.0}
+            _conf_tilt_by_lbl = {"VERY_POSITIVE": 2, "POSITIVE": 1, "NEUTRAL": 0,
+                                 "NEGATIVE": -1, "VERY_NEGATIVE": -2}
+            for _c in _news_rank:
+                _sym_n = _c.get("ticker") or ""
+                _nd = _news_map.get(_sym_n) or _news_map.get(_sym_n.upper()) or {}
+                _lbl = str(_nd.get("sentiment", "NEUTRAL")).upper()
+                _st = float(_score_tilt_by_lbl.get(_lbl, 0.0))
+                _ct = int(_conf_tilt_by_lbl.get(_lbl, 0))
+                if not _fm.isfinite(_st):
+                    _st = 0.0
+                _c["news"] = {
+                    "sentiment": _lbl,
+                    "score": _nd.get("score", 0),
+                    "positive_signals": _nd.get("positive_signals", 0),
+                    "negative_signals": _nd.get("negative_signals", 0),
+                    "score_tilt": round(_st, 1),
+                    "conf_tilt": _ct,
+                }
+                # Apply gentle tilt — never hard-drop, always clamp to STB bands.
+                # Confidence floor 72 (below the normal 75 floor but above the 70
+                # hard-cut) means news alone can re-rank but can never drop a pick
+                # out of STB — a noisy bearish keyword must not veto a strong long.
+                _c["fundamental_score"] = round(
+                    max(0.0, float(_c.get("fundamental_score", 0.0)) + _st), 1)
+                _c["confidence"] = max(72, min(95, int(_c.get("confidence", 75)) + _ct))
+                # Surface strong news on the card so the user sees WHY.
+                if _lbl in ("VERY_NEGATIVE", "NEGATIVE"):
+                    _rn = [f"News {_lbl.replace('_', ' ').title()} "
+                           f"({_nd.get('negative_signals', 0)} bearish signals) — monitor"] \
+                        + list(_c.get("reasons") or [])
+                    _c["reasons"] = _rn[:5]
+                elif _lbl in ("VERY_POSITIVE", "POSITIVE"):
+                    _rc = list(_c.get("reasons") or [])
+                    _rc.append(f"News {_lbl.replace('_', ' ').title()} — current-events tailwind")
+                    _c["reasons"] = _rc[:5]
+    except Exception as _news_stb_err:
+        logger.warning(f"STB news overlay skipped (non-fatal): {_news_stb_err}")
 
     # v137: sort by confidence desc (user request), then score as tiebreaker
     candidates.sort(key=lambda x: (-x.get("confidence", 0), -x.get("fundamental_score", 0)))
