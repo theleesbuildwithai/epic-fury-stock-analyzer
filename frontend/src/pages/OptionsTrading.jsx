@@ -270,16 +270,6 @@ function OrderTicket({ rec }) {
   )
 }
 
-// ─── No-trade card ─────────────────────────────────────────────────────────────
-function NoTrade({ rec }) {
-  return (
-    <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-lg px-4 py-3 flex items-start gap-3">
-      <span className="font-bold text-neutral-300 font-mono w-16 shrink-0">{rec.ticker}</span>
-      <span className="text-xs text-neutral-500">{rec.reason || 'No options trade right now.'}</span>
-    </div>
-  )
-}
-
 // ─── Client-side cache (survives reloads so we ALWAYS show last-good picks) ────
 const CACHE_KEY = 'optionsTrading:v1'
 const CACHE_TTL = 30 * 60 * 1000   // 30 min — matches the backend anti-flap window
@@ -461,7 +451,6 @@ export default function OptionsTrading() {
 
   const ordered = tickers.map(t => recs[t]).filter(Boolean)
   const actionable = ordered.filter(r => r.actionable)
-  const withheld = ordered.filter(r => !r.actionable)
   const scanning = progress.total > 0 && progress.done < progress.total
   const cacheAgeMin = cached?.ts ? Math.round((Date.now() - cached.ts) / 60000) : null
 
@@ -569,18 +558,6 @@ export default function OptionsTrading() {
           {actionable.length === 0 && !error && !scanning && (
             <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl p-8 text-center text-neutral-500">
               No actionable options trades right now — the engine is withholding until conviction, liquidity, and price all line up.
-            </div>
-          )}
-
-          {withheld.length > 0 && (
-            <div>
-              <div className="flex items-center gap-2 mb-3">
-                <h2 className="text-sm font-bold text-neutral-400 uppercase tracking-wider">No trade (why)</h2>
-                <span className="text-xs text-neutral-600">{withheld.length}</span>
-              </div>
-              <div className="space-y-2">
-                {withheld.map(r => <NoTrade key={r.ticker} rec={r} />)}
-              </div>
             </div>
           )}
         </div>

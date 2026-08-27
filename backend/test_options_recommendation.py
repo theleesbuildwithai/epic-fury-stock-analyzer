@@ -188,10 +188,30 @@ def main():
           abs((r.get("breakeven") or 0) - (r.get("strike") - r.get("est_premium_per_share"))) < 1e-6,
           f"be={r.get('breakeven')}")
 
-    # 3. HOLD -> withheld (no conviction).
+    # 3. HOLD (bullish score) -> withheld (never a put against an up move).
     _reset(); _STATE["signal"] = "HOLD"
     r = _build()
-    check("HOLD withheld", r.get("actionable") is False, f"reason={r.get('reason')}")
+    check("HOLD (bullish score) withheld", r.get("actionable") is False, f"reason={r.get('reason')}")
+
+    # 3b. HOLD name with a clearly BEARISH composite -> tactical defined-risk PUT
+    #     (watchlist stays hold-biased; the options desk takes the bearish read).
+    _reset(); _STATE["signal"] = "HOLD"; _STATE["score"] = -3.0; _STATE["conf"] = None
+    _NEWS.update(sentiment="BEARISH", article_count=6)
+    r = _build()
+    check("HOLD + bearish score -> PUT actionable",
+          r.get("actionable") is True and r.get("option_type") == "PUT"
+          and r.get("direction") == "BEARISH",
+          f"actionable={r.get('actionable')} type={r.get('option_type')} reason={r.get('reason')}")
+    strats = {s.get("structure"): s for s in (r.get("strategies") or [])}
+    check("HOLD-bearish yields long-put + covered-call (all four structures reachable)",
+          "LONG_PUT" in strats and "COVERED_CALL" in strats,
+          f"structures={list(strats)}")
+
+    # 3c. HOLD name only MILDLY bearish (above the put floor) -> withheld (be sure).
+    _reset(); _STATE["signal"] = "HOLD"; _STATE["score"] = -0.5; _STATE["conf"] = None
+    r = _build()
+    check("HOLD + mildly-bearish (above floor) withheld",
+          r.get("actionable") is False, f"reason={r.get('reason')}")
 
     # 4. Low confidence -> withheld.
     _reset(); _STATE["conf"] = 40

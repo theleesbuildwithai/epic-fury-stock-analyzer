@@ -40,6 +40,8 @@ _CONF_FLOOR = 55            # minimum confidence for any directional options tra
 _PRICE_DISAGREE_TOL = 0.08  # analysis-vs-trusted underlying disagreement → withhold
 _STALE_REUSE_TTL = 20 * 60  # seconds a last-good rec may be reused on transient fail
 _STALE_PX_TOL = 0.05        # underlying must still be within 5% to reuse a stale rec
+_OPT_PUT_SCORE = -1.0       # HOLD name this bearish → tactical defined-risk put
+                            # (symmetric with the BUY→call side, which fires at score ≥ +1.0)
 
 # ticker -> (epoch, recommendation dict)  — anti-flap last-good cache
 _last_good_rec: dict = {}
@@ -108,7 +110,19 @@ def _trusted_price(symbol: str):
 def _directional_view(symbol: str):
     """Run the quant engine (technical + macro + learning); return
     (res, signal, opt_type, confidence, score, regime, price).
-    opt_type is 'call' (bullish) / 'put' (bearish) / None (no conviction)."""
+    opt_type is 'call' (bullish) / 'put' (bearish) / None (no conviction).
+
+    Direction is LABEL-FIRST so the options desk can never contradict an explicit
+    equity signal: a BUY signal is a call, a SELL signal is a put. The watchlist is
+    deliberately HOLD-biased (it won't tell you to sell a good name you hold), which
+    means bearish puts would almost never surface. To keep the options desk tactical
+    — and SYMMETRIC with the call side, which fires on the BUY label at composite
+    score ≥ +1.0 — a HOLD name whose composite score is clearly bearish
+    (≤ _OPT_PUT_SCORE) is mapped to a defined-risk put and given a confidence
+    synthesized from the SAME magnitude formula the engine uses for a real SELL, so
+    the downstream conviction / fundamental / news gates all still apply. This never
+    fires on a bullish score, so a HOLD name that is actually bullish still yields no
+    trade (never a put against an up move)."""
     from analysis.quant_engine import analyze_watchlist_stock
     res = analyze_watchlist_stock(symbol) or {}
     signal = (res.get("signal") or "").upper()
@@ -121,6 +135,15 @@ def _directional_view(symbol: str):
         opt_type = "call"
     elif "SELL" in signal:
         opt_type = "put"
+    elif (res.get("data_quality") != "unreliable_price_data"
+          and isinstance(score, (int, float)) and float(score) <= _OPT_PUT_SCORE):
+        # HOLD name with a clearly bearish composite → tactical defined-risk put.
+        # Watchlist stays hold-biased (don't sell good names); the options desk is
+        # tactical and takes the raw bearish read. Synthesize confidence from the
+        # engine's own SELL magnitude formula so the conviction floor + fundamental
+        # + news gates still govern whether it is actually surfaced.
+        opt_type = "put"
+        conf = int(round(min(87, 62 + abs(float(score)) * 5)))
     return res, signal, opt_type, conf, score, regime, price
 
 
