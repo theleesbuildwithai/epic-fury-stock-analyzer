@@ -214,8 +214,10 @@ function OrderTicket({ rec }) {
           <div className="flex items-center gap-2 mb-1 flex-wrap">
             <span className="text-xl font-black text-white tracking-tight">{rec.ticker}</span>
             <Chip tone={dirTone}>{isCall ? '▲ BULLISH' : '▼ BEARISH'}</Chip>
+            {isNum(rec.opportunity_score) && <Chip tone="blue">{rec.opportunity_tier || 'SCORE'} {rec.opportunity_score}</Chip>}
             {isNum(rec.confidence) && <Chip tone="blue">conf {rec.confidence}%</Chip>}
             {stb.in_stb_longs && <Chip tone="green">★ STB</Chip>}
+            {isNum(rec.earnings?.next_earnings_days) && <Chip tone="amber">⚠ earnings {rec.earnings.next_earnings_days}d</Chip>}
             {rec.stale_reused && <Chip tone="amber">stale</Chip>}
           </div>
           <div className="text-sm font-bold text-neutral-100 font-mono leading-tight truncate">
@@ -354,6 +356,7 @@ export default function OptionsTrading() {
   const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [query, setQuery] = useState('')
   const [lookupBusy, setLookupBusy] = useState(false)
+  const [sortBy, setSortBy] = useState('opportunity')  // best-first by default
   const runningRef = useRef(false)
   const recsRef = useRef(recs)          // latest recs for cache persistence without stale closures
   recsRef.current = recs
@@ -450,7 +453,19 @@ export default function OptionsTrading() {
   }
 
   const ordered = tickers.map(t => recs[t]).filter(Boolean)
-  const actionable = ordered.filter(r => r.actionable)
+  const actionableRaw = ordered.filter(r => r.actionable)
+  // Rank the actionable trades so the strongest opportunities surface first
+  // (mirrors how Symbols-to-Buy ranks its picks). All keys palette-neutral.
+  const primaryOf = (r) => (Array.isArray(r.strategies) && r.strategies.find(s => s.is_primary)) || (r.strategies && r.strategies[0]) || r
+  const costOf = (r) => { const p = primaryOf(r); return isNum(p.net_debit) ? p.net_debit : (isNum(r.est_total_cost) ? r.est_total_cost : Infinity) }
+  const beProxOf = (r) => { const m = r.options_analytics?.breakeven_move_pct; return isNum(m) ? Math.abs(m) : Infinity }
+  const SORTS = {
+    opportunity: { label: 'Opportunity', fn: (a, b) => (b.opportunity_score ?? -1) - (a.opportunity_score ?? -1) },
+    conviction:  { label: 'Conviction',  fn: (a, b) => (b.confidence ?? -1) - (a.confidence ?? -1) },
+    cost:        { label: 'Cost (low→high)', fn: (a, b) => costOf(a) - costOf(b) },
+    breakeven:   { label: 'Breakeven proximity', fn: (a, b) => beProxOf(a) - beProxOf(b) },
+  }
+  const actionable = [...actionableRaw].sort((SORTS[sortBy] || SORTS.opportunity).fn)
   const scanning = progress.total > 0 && progress.done < progress.total
   const cacheAgeMin = cached?.ts ? Math.round((Date.now() - cached.ts) / 60000) : null
 
@@ -544,6 +559,18 @@ export default function OptionsTrading() {
                 <span className="text-xs text-neutral-500">{actionable.length} ready to place</span>
                 <span className="text-[11px] text-emerald-400 font-semibold">▲ {actionable.filter(r => r.option_type === 'CALL').length} bullish</span>
                 <span className="text-[11px] text-rose-400 font-semibold">▼ {actionable.filter(r => r.option_type === 'PUT').length} bearish</span>
+                <div className="ml-auto flex items-center gap-1 flex-wrap">
+                  <span className="text-[10px] uppercase tracking-widest text-neutral-500 font-bold mr-1">Sort</span>
+                  {Object.entries(SORTS).map(([k, v]) => (
+                    <button
+                      key={k}
+                      onClick={() => setSortBy(k)}
+                      className={`px-2 py-1 rounded border text-[10px] font-bold transition-colors ${sortBy === k ? 'bg-white text-black border-white' : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:bg-neutral-800'}`}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {actionable.map(r => (

@@ -42,6 +42,11 @@ _STALE_REUSE_TTL = 20 * 60  # seconds a last-good rec may be reused on transient
 _STALE_PX_TOL = 0.05        # underlying must still be within 5% to reuse a stale rec
 _OPT_PUT_SCORE = -1.0       # HOLD name this bearish → tactical defined-risk put
                             # (symmetric with the BUY→call side, which fires at score ≥ +1.0)
+_EARN_BLACKOUT_DAYS = 3     # long-debit primary WITHHELD if earnings ≤ this many days out
+                            # (imminent IV crush can wipe a directionally-correct long option)
+_EARN_WARN_DAYS = 21        # surface an earnings warning (not a withhold) inside this window
+_MIN_UNDERLYING = 1.0       # absolute underlying price floor — reject sub-$1 / corrupt px
+_MAX_UNDERLYING = 15000.0   # absolute underlying price ceiling — reject absurd px (mirrors STB Layer 8)
 
 # ticker -> (epoch, recommendation dict)  — anti-flap last-good cache
 _last_good_rec: dict = {}
@@ -352,6 +357,70 @@ def _iv_environment(iv_pct):
     return "ELEVATED"
 
 
+def _next_earnings_days(symbol: str):
+    """Days to the next earnings report, recomputed LIVE from the raw timestamp in
+    the quant engine's fundamentals cache. ZERO API calls (pure cache read) — obeys
+    the API-protection rule (never hits Yahoo per-ticker for the options flow).
+    Returns an int (≥0) or None if unknown / already past. Mirrors the STB earnings
+    guard, which also recomputes live because the cached day-count is up to 24h stale."""
+    try:
+        from analysis.quant_engine import _fundamentals_cache
+        fd = (_fundamentals_cache.get(symbol) or {}).get("value_data") or {}
+        ts = fd.get("next_earnings_ts")
+        if ts:
+            raw = (float(ts) - time.time()) / 86400.0
+            return int(round(raw)) if raw >= 0 else None  # None once the date is past
+        ned = fd.get("next_earnings_days")  # fallback: stale cached count
+        return int(ned) if isinstance(ned, (int, float)) and ned >= 0 else None
+    except Exception:
+        return None
+
+
+def _opportunity_score(conf, abs_score, confirmations, want_bull, analytics: dict):
+    """Blend the desk's edge into ONE 0-100 score + a tier, so the UI can rank the
+    highest-quality actionable trades first (mirrors how STB ranks its picks).
+
+    Components (capital-preservation weighted — conviction + confluence dominate):
+      * conviction   (0-45): confidence above the floor + composite-score magnitude
+      * confluence   (0-25): independent confirmations (technical/fund/news/macro/STB)
+      * liquidity    (0-15): GOOD/FAIR/THIN of the chosen contract
+      * options edge (0-15): breakeven inside 1σ (+) and prob-ITM; ELEVATED-IV penalty
+                             (buying rich premium is the #1 way a correct call still loses).
+    Returns (int 0-100, tier)."""
+    try:
+        # conviction (0-45)
+        c = 0.0
+        if isinstance(conf, (int, float)):
+            c += max(0.0, min(30.0, (float(conf) - _CONF_FLOOR) / (95.0 - _CONF_FLOOR) * 30.0))
+        c += max(0.0, min(15.0, float(abs_score) / 6.0 * 15.0))
+        # confluence (0-25): technical is always 1; each extra confirmation adds
+        max_conf = 5 if want_bull else 4
+        extra = max(0, int(confirmations) - 1)
+        conflu = min(25.0, extra / max(1, (max_conf - 1)) * 25.0)
+        # liquidity (0-15)
+        lq = {"GOOD": 15.0, "FAIR": 8.0, "THIN": 2.0}.get(
+            (analytics or {}).get("liquidity_quality"), 5.0)
+        # options edge (0-15)
+        edge = 0.0
+        if (analytics or {}).get("breakeven_within_1sigma"):
+            edge += 8.0
+        pit = (analytics or {}).get("prob_itm_est_pct")
+        if isinstance(pit, (int, float)):
+            edge += max(0.0, min(7.0, (float(pit) - 30.0) / 40.0 * 7.0))
+        if (analytics or {}).get("iv_environment") == "ELEVATED":
+            edge -= 6.0  # long premium into elevated IV is expensive / IV-crush prone
+        total = int(round(max(0.0, min(100.0, c + conflu + lq + edge))))
+        if total >= 75:
+            tier = "PRIME"
+        elif total >= 55:
+            tier = "STRONG"
+        else:
+            tier = "MODERATE"
+        return total, tier
+    except Exception:
+        return 50, "MODERATE"
+
+
 def _maybe_reuse_stale(symbol: str, ref_px, reason: str):
     """If a recent good rec exists and the underlying hasn't moved much, reuse it
     (flagged stale) so the page always shows data on a transient upstream failure."""
@@ -656,6 +725,16 @@ def build_options_recommendation(symbol: str) -> dict:
             reuse = _maybe_reuse_stale(symbol, None, "no price")
             return reuse or _withhold(symbol, "No reliable underlying price available — retry shortly.")
 
+        # 3b) Absolute price sanity bounds (mirrors STB Layer 8). A sub-$1 or absurd
+        #     underlying almost always means corrupt data — never build an options
+        #     order on it, regardless of what the signal says.
+        if not (_MIN_UNDERLYING <= float(ref_px) <= _MAX_UNDERLYING):
+            return _withhold(
+                symbol,
+                f"Underlying price ${float(ref_px):,.2f} is outside sane bounds "
+                f"(${_MIN_UNDERLYING:g}–${_MAX_UNDERLYING:,.0f}) — withholding to avoid a corrupt-price trade.",
+                underlying_price=round(float(ref_px), 2), signal=signal, confidence=conf)
+
         # 4) Conviction gate — no coin-flip options trades.
         if opt_type is None:
             return _withhold(symbol, f"Engine is {signal or 'NEUTRAL'} on {symbol} — no conviction, no options trade.",
@@ -667,6 +746,35 @@ def build_options_recommendation(symbol: str) -> dict:
                              underlying_price=round(ref_px, 2), signal=signal, confidence=conf)
 
         abs_score = abs(float(score)) if isinstance(score, (int, float)) else 0.0
+
+        # 4a) Earnings / IV-crush guard (zero-API — pure fundamentals-cache read).
+        #     A long debit option bought right before earnings is the #1 way a
+        #     directionally-CORRECT trade still loses money: implied vol collapses the
+        #     moment the event passes, so the option can fall even if the stock moves
+        #     your way. We WITHHOLD the primary long-debit trade inside the blackout
+        #     window, and SURFACE a warning (plus the earnings date) inside a wider
+        #     window so the user can size / time around it. Mirrors STB's 14-day drop.
+        earn_days = _next_earnings_days(symbol)
+        earnings_block = None
+        if earn_days is not None and 0 <= earn_days <= _EARN_BLACKOUT_DAYS:
+            reuse = _maybe_reuse_stale(symbol, ref_px, "earnings blackout")
+            return reuse or _withhold(
+                symbol,
+                f"{symbol} reports earnings in {earn_days} day{'s' if earn_days != 1 else ''} — "
+                f"withholding the long {('call' if opt_type == 'call' else 'put')} to avoid "
+                f"post-earnings IV crush (a directionally-correct option can still lose on the vol collapse).",
+                underlying_price=round(float(ref_px), 2), signal=signal, confidence=conf,
+                earnings={"next_earnings_days": earn_days, "in_blackout": True,
+                          "note": "Long-debit options withheld through the earnings IV-crush window."})
+        if earn_days is not None and _EARN_BLACKOUT_DAYS < earn_days <= _EARN_WARN_DAYS:
+            earnings_block = {
+                "next_earnings_days": earn_days, "in_blackout": False,
+                "note": (f"Earnings in {earn_days} days — implied volatility is likely elevated and will "
+                         f"crush after the report; prefer to exit before earnings or size down."),
+            }
+        elif earn_days is not None:
+            earnings_block = {"next_earnings_days": earn_days, "in_blackout": False,
+                              "note": f"Next earnings ~{earn_days} days out — outside the IV-crush window."}
 
         # 4b) Technical + fundamental confirmation (what a real desk checks before
         #     putting on an options position). Technicals come from the quant engine;
@@ -775,6 +883,17 @@ def build_options_recommendation(symbol: str) -> dict:
             return reuse or _withhold(symbol, "Contract data incomplete — withholding to avoid a bad order.",
                                       underlying_price=round(ref_px, 2), signal=signal, confidence=conf)
 
+        # 7c) Premium sanity net. A quoted premium at/above the underlying price is
+        #     economically absurd for a single-leg long option and signals corrupt /
+        #     stale quote data — withhold rather than surface a nonsensical cost.
+        if not (float(premium) < float(ref_px)):
+            reuse = _maybe_reuse_stale(symbol, ref_px, "absurd premium")
+            return reuse or _withhold(
+                symbol,
+                f"Quoted premium ${float(premium):.2f} ≥ underlying ${float(ref_px):.2f} — "
+                f"implausible option pricing, withholding to avoid a corrupt-quote trade.",
+                underlying_price=round(float(ref_px), 2), signal=signal, confidence=conf)
+
         # 8) Defined-risk economics.
         contracts = 1
         cost_per_contract = round(float(premium) * 100.0, 2)
@@ -855,6 +974,10 @@ def build_options_recommendation(symbol: str) -> dict:
         if iv_env == "ELEVATED":
             risk_disclosures.append(
                 f"Implied volatility is ELEVATED ({iv_pct:.0f}%) — the option is expensive; a smaller size or a spread may be safer.")
+        if earnings_block and 0 <= earnings_block.get("next_earnings_days", 99) <= _EARN_WARN_DAYS:
+            risk_disclosures.append(
+                f"EARNINGS in {earnings_block['next_earnings_days']} days — implied vol will crush after the "
+                f"report; plan to exit before earnings or the long premium can lose even on a correct call.")
         if fundamental_alignment == "DIVERGES":
             risk_disclosures.append(
                 f"CAUTION: fundamentals diverge from this trade ({f_reason}) — technical signal is leading.")
@@ -897,6 +1020,18 @@ def build_options_recommendation(symbol: str) -> dict:
             if alt_strat:
                 alt_strat["is_primary"] = False
                 strategies.append(alt_strat)
+
+        options_analytics = {
+            "expected_move": exp_move,
+            "expected_move_pct": exp_move_pct,
+            "breakeven_move_pct": breakeven_move_pct,
+            "breakeven_within_1sigma": breakeven_within_1sigma,
+            "prob_itm_est_pct": prob_itm_est,
+            "iv_environment": iv_env,
+            "liquidity_quality": liquidity_quality,
+        }
+        # Rank quality: one 0-100 opportunity score + tier (best-first sorting in UI).
+        opp_score, opp_tier = _opportunity_score(conf, abs_score, confirmations, want_bull, options_analytics)
 
         rec = {
             "ticker": symbol,
@@ -948,20 +1083,18 @@ def build_options_recommendation(symbol: str) -> dict:
             "stb_context": stb,
             "signal_confluence": signal_confluence,
             "confirmations": confirm_bits,
-            "options_analytics": {
-                "expected_move": exp_move,
-                "expected_move_pct": exp_move_pct,
-                "breakeven_move_pct": breakeven_move_pct,
-                "breakeven_within_1sigma": breakeven_within_1sigma,
-                "prob_itm_est_pct": prob_itm_est,
-                "iv_environment": iv_env,
-                "liquidity_quality": liquidity_quality,
-            },
+            "opportunity_score": opp_score,
+            "opportunity_tier": opp_tier,
+            "earnings": earnings_block,
+            "options_analytics": options_analytics,
             "safety": {
                 "trusted_price_checked": trusted is not None,
                 "defined_risk": True,
                 "auto_executes": False,
                 "conviction_gate": f"conf ≥ {_CONF_FLOOR}%",
+                "price_bounds_gate": f"${_MIN_UNDERLYING:g}–${_MAX_UNDERLYING:,.0f}",
+                "earnings_gate": f"long-debit withheld ≤ {_EARN_BLACKOUT_DAYS}d to earnings",
+                "premium_sanity_gate": True,
                 "fundamental_gate": True,
                 "news_gate": True,
                 "macro_aware": True,

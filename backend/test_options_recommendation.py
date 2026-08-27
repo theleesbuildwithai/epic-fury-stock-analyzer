@@ -62,6 +62,8 @@ _STB = {"picks": [{"ticker": "TESTX", "fundamental_score": 85, "revenue_growth_p
                    "momentum_12m_pct": 18, "sector": "Technology"}]}
 _STRIKE = {"return_none": False}
 _CHAIN = {"empty": False}
+_EARN = {"days": None}        # None => no known earnings date (zero-API cache miss)
+_PREMIUM = {"value": 5.00}    # controllable premium for the premium-sanity net
 
 
 def _fake_analyze(symbol):
@@ -111,9 +113,13 @@ def _fake_select_expiration(chain_data, hold_days, sig):
 def _fake_select_strike(chain, px, opt_type, conf, score):
     if _STRIKE["return_none"]:
         return None
-    return {"strike": float(round(px)), "premium": 5.00, "dte": 42, "expiry": "2026-09-18",
+    return {"strike": float(round(px)), "premium": _PREMIUM["value"], "dte": 42, "expiry": "2026-09-18",
             "delta_est": 0.55 if opt_type == "call" else -0.55, "iv": 0.30,
             "moneyness_label": "ATM", "volume": 800, "open_interest": 1200}
+
+
+def _fake_next_earnings_days(symbol):
+    return _EARN["days"]
 
 
 # ── Wire the fakes onto the real modules the layer imports lazily ────────────
@@ -125,6 +131,7 @@ msa.get_fundamentals_any_source = _fake_fundamentals
 oe.fetch_option_chain = _fake_fetch_chain
 oe.select_expiration = _fake_select_expiration
 oe.select_strike = _fake_select_strike
+orx._next_earnings_days = _fake_next_earnings_days  # zero-API earnings source (deterministic)
 
 
 def _reset():
@@ -137,6 +144,8 @@ def _reset():
     _NEWS.update(sentiment="BULLISH", article_count=8)
     _STRIKE["return_none"] = False
     _CHAIN["empty"] = False
+    _EARN["days"] = None
+    _PREMIUM["value"] = 5.00
     orx._last_good_rec.clear()
 
 
@@ -254,7 +263,7 @@ def main():
                "fundamental_alignment", "news_analysis", "news_alignment",
                "macro_regime", "macro_alignment", "stb_context", "signal_confluence",
                "confirmations", "options_analytics", "safety", "strategies",
-               "strategy_count"]
+               "strategy_count", "opportunity_score", "opportunity_tier", "earnings"]
     missing = [k for k in required if k not in r]
     check("all order-ticket fields present", not missing, f"missing={missing}")
     check("order_instructions non-empty list",
@@ -350,6 +359,73 @@ def main():
               and isinstance(s.get("risk_disclosures"), list) and len(s["risk_disclosures"]) >= 3
               for s in (r.get("strategies") or [])),
           f"count={len(r.get('strategies') or [])}")
+
+    # 10e. Earnings / IV-crush guard — blackout (≤ 3d) WITHHOLDS the long primary.
+    _reset(); _EARN["days"] = 2
+    r = _build()
+    check("earnings blackout (≤3d) withholds long-debit",
+          r.get("actionable") is False and "earnings" in (r.get("reason") or "").lower()
+          and (r.get("earnings") or {}).get("in_blackout") is True,
+          f"reason={r.get('reason')} earnings={r.get('earnings')}")
+
+    # 10f. Earnings mid-window (4-21d) WARNS but does NOT withhold; surfaces the date.
+    _reset(); _EARN["days"] = 10
+    r = _build()
+    check("earnings mid-window warns (actionable), surfaces date",
+          r.get("actionable") is True and (r.get("earnings") or {}).get("next_earnings_days") == 10
+          and (r.get("earnings") or {}).get("in_blackout") is False,
+          f"actionable={r.get('actionable')} earnings={r.get('earnings')}")
+    check("earnings mid-window adds an EARNINGS risk disclosure",
+          any("EARNINGS in 10 days" in d for d in (r.get("risk_disclosures") or [])),
+          f"disclosures={r.get('risk_disclosures')}")
+
+    # 10g. No known earnings date -> no blackout, earnings block None, still actionable.
+    _reset(); _EARN["days"] = None
+    r = _build()
+    check("no earnings date -> actionable, earnings block None",
+          r.get("actionable") is True and r.get("earnings") is None,
+          f"earnings={r.get('earnings')}")
+
+    # 10h. Opportunity score + tier present, 0-100, high for a strong/liquid/confluent BUY.
+    _reset()
+    r = _build()
+    osc = r.get("opportunity_score"); otier = r.get("opportunity_tier")
+    check("opportunity score present + 0-100",
+          isinstance(osc, int) and 0 <= osc <= 100, f"score={osc}")
+    check("opportunity tier valid",
+          otier in ("PRIME", "STRONG", "MODERATE"), f"tier={otier}")
+    check("strong/liquid/5-confluence BUY scores high (PRIME/STRONG)",
+          otier in ("PRIME", "STRONG") and osc >= 55, f"score={osc} tier={otier}")
+
+    # 10i. Opportunity score DROPS for a weaker, lower-conviction, less-confluent trade.
+    _reset(); _STATE["conf"] = 60; _STATE["score"] = 1.2
+    _NEWS.update(sentiment="NEUTRAL", article_count=0); _REGIME["risk_appetite"] = "NEUTRAL"
+    r_weak = _build()
+    check("weaker trade scores lower than the strong one",
+          isinstance(r_weak.get("opportunity_score"), int)
+          and r_weak["opportunity_score"] < osc,
+          f"weak={r_weak.get('opportunity_score')} strong={osc}")
+
+    # 10j. Absolute price bounds — sub-$1 underlying withheld (corrupt-price guard).
+    _reset(); _STATE["price"] = 0.40; _TRUSTED["px"] = 0.40
+    r = _build()
+    check("sub-$1 underlying withheld (price bounds)",
+          r.get("actionable") is False and "bounds" in (r.get("reason") or "").lower(),
+          f"reason={r.get('reason')}")
+
+    # 10k. Absolute price bounds — absurdly high underlying withheld.
+    _reset(); _STATE["price"] = 20000.0; _TRUSTED["px"] = 20000.0
+    r = _build()
+    check("absurd-high underlying withheld (price bounds)",
+          r.get("actionable") is False and "bounds" in (r.get("reason") or "").lower(),
+          f"reason={r.get('reason')}")
+
+    # 10l. Premium sanity — premium ≥ underlying withheld (corrupt-quote guard).
+    _reset(); _PREMIUM["value"] = 150.0  # premium > $100 underlying = absurd
+    r = _build()
+    check("premium ≥ underlying withheld (premium sanity)",
+          r.get("actionable") is False and "premium" in (r.get("reason") or "").lower(),
+          f"reason={r.get('reason')}")
 
     # 11. Output is NaN/inf-clean everywhere.
     _reset()
