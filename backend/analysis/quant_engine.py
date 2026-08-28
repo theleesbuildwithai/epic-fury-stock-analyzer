@@ -6960,10 +6960,81 @@ def _stb_valid(field: str, v):
     return f if lo <= f <= hi else None
 
 
+def _stb_fetch_cnbc_fundamentals(sym: str) -> dict:
+    """Fundamentals from CNBC's public quote API (an APPROVED source that reaches
+    from the App Runner datacenter IP where finviz is blocked). Returns a raw
+    dict of normalized numbers (may be empty). Never raises. Module-level so the
+    enrichment tests can stub it hermetically."""
+    try:
+        import requests as _rq
+    except Exception:
+        return {}
+
+    def _pct(v):  # CNBC sends percents as "12.52%" strings
+        try:
+            return float(str(v).replace("%", "").replace(",", "").replace("+", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _f(v):
+        try:
+            return float(str(v).replace(",", "").replace("+", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        url = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.cnbc.com/",
+        }
+        r = _rq.get(url, params={"symbols": sym.upper(), "requestMethod": "itv", "output": "json"},
+                    headers=headers, timeout=8)
+        if r.status_code != 200:
+            return {}
+        q = (((r.json() or {}).get("FormattedQuoteResult") or {}).get("FormattedQuote") or [])
+        if isinstance(q, dict):
+            q = [q]
+        if not q or q[0].get("code") == 3:
+            return {}
+        q = q[0]
+        de = _pct(q.get("DEBTEQTYQ"))          # CNBC gives D/E as a percentage
+        return {
+            "pe": _f(q.get("pe")),
+            "fwd_pe": _f(q.get("fpe")),
+            "roe_pct": _pct(q.get("ROETTM")),
+            "profit_margin_pct": _pct(q.get("NETPROFTTM")),
+            "debt_equity": (de / 100.0) if de is not None else None,   # -> ratio (finviz-consistent)
+        }
+    except Exception:
+        return {}
+
+
+def _stb_fetch_yahoo_info(sym: str) -> dict:
+    """yfinance .info fundamentals — final fallback that reaches from AWS.
+    Threaded 5s timeout; never raises. Module-level for hermetic test stubbing."""
+    try:
+        import yfinance as yf
+        import threading as _yf_thr
+        _r = [{}]
+        _t = _yf_thr.Thread(
+            target=lambda r=_r, _s=sym: r.__setitem__(0, yf.Ticker(_s).info or {}),
+            daemon=True)
+        _t.start(); _t.join(timeout=5)
+        return _r[0] if isinstance(_r[0], dict) else {}
+    except Exception:
+        return {}
+
+
 def _stb_fetch_fundamentals_multi(sym: str):
-    """MULTI-TIER fetch of one symbol's fundamentals. finviz first (richest),
-    then stockanalysis to backfill valuation. Returns a normalized dict of
-    validated fields (values may be None). Never raises."""
+    """MULTI-TIER fetch of one symbol's fundamentals, fill-only across sources so
+    the richest available value wins per field:
+      Tier 1 finviz (richest; blocked on the App Runner IP in prod)
+      Tier 2 stockanalysis (valuation backfill)
+      Tier 3 CNBC (approved; reaches from AWS — the real prod source)
+      Tier 4 Yahoo/yfinance (final AWS-reachable fallback)
+    Returns a normalized dict of validated fields (values may be None). Never raises."""
     fields = {k: None for k in _STB_FUND_BOUNDS}
 
     # Tier 1 — finviz (has ROE / PEG / growth / margin / debt)
@@ -6992,6 +7063,51 @@ def _stb_fetch_fundamentals_multi(sym: str):
                 fields["pe"] = _stb_valid("pe", sa.get("trailingPE"))
             if fields["fwd_pe"] is None:
                 fields["fwd_pe"] = _stb_valid("fwd_pe", sa.get("forwardPE"))
+
+    # Tier 3 — CNBC (approved source; reaches from the App Runner IP where finviz
+    # is blocked, so this is the REAL production fill). Only runs when core fields
+    # are still missing. Fill-only, validated.
+    if any(fields[k] is None for k in ("roe_pct", "profit_margin_pct", "pe")):
+        cn = _stb_fetch_cnbc_fundamentals(sym)
+        if isinstance(cn, dict):
+            for fk in ("pe", "fwd_pe", "roe_pct", "profit_margin_pct", "debt_equity"):
+                if fields.get(fk) is None:
+                    fields[fk] = _stb_valid(fk, cn.get(fk))
+
+    # Tier 4 — Yahoo (yfinance .info) final fallback. Also reaches from AWS and
+    # adds the growth/PEG fields CNBC does not carry. Only runs when core fields
+    # are STILL missing, so it adds no load when an earlier tier answered.
+    # Threaded 5s timeout; validated + fill-only. All of this sits INSIDE the
+    # enrichment daemon's throttle (0.8s/ticker, max 20, 24h cache, single-flight).
+    if any(fields[k] is None for k in ("roe_pct", "revenue_growth_pct", "profit_margin_pct", "pe")):
+        info = _stb_fetch_yahoo_info(sym)
+        if info:
+            def _pct(v):  # yfinance returns ratios as decimals (0.15 -> 15%)
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return None
+                return f * 100.0 if -1.0 < f < 1.0 else f
+            # debtToEquity arrives as a percentage (16.0 == 0.16x); finviz gives
+            # the ratio, so normalize to the ratio for a consistent display.
+            _de = info.get("debtToEquity")
+            try:
+                _de = float(_de) / 100.0 if _de is not None else None
+            except (TypeError, ValueError):
+                _de = None
+            _y = {
+                "pe": info.get("trailingPE"),
+                "fwd_pe": info.get("forwardPE"),
+                "peg_ratio": info.get("pegRatio") or info.get("trailingPegRatio"),
+                "roe_pct": _pct(info.get("returnOnEquity")),
+                "revenue_growth_pct": _pct(info.get("revenueGrowth")),
+                "earnings_growth_pct": _pct(info.get("earningsGrowth")),
+                "profit_margin_pct": _pct(info.get("profitMargins")),
+                "debt_equity": _de,
+            }
+            for fk, v in _y.items():
+                if fields.get(fk) is None:
+                    fields[fk] = _stb_valid(fk, v)
 
     return fields
 

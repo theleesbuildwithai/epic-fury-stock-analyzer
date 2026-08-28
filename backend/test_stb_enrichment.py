@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import analytics.multi_source_adapter as msa
 from analysis import quant_engine as qe
 
+# Keep the AWS-reachable fallback tiers (CNBC, Yahoo) OFF by default so the suite
+# stays hermetic (no network). Individual tests opt in by reassigning these.
+qe._stb_fetch_cnbc_fundamentals = lambda t: {}
+qe._stb_fetch_yahoo_info = lambda t: {}
+
 PASS = 0
 FAIL = 0
 
@@ -198,11 +203,50 @@ def test_fail_safe():
     check(picks[0]["roe_pct"] is None, "fields stay None on total failure")
 
 
+# ── 6. AWS-reachable fallback tiers: CNBC then Yahoo fill when finviz is blocked ──
+def test_cnbc_yahoo_fallback():
+    print("\n[6] CNBC + Yahoo fallback fill when finviz/stockanalysis are blocked")
+
+    # Simulate the production case: finviz + stockanalysis return nothing (blocked
+    # from the App Runner IP), so the CNBC + Yahoo tiers must carry the fields.
+    orig = (msa.get_finviz_snapshot, msa.get_stockanalysis_fundamentals,
+            qe._stb_fetch_cnbc_fundamentals, qe._stb_fetch_yahoo_info)
+    msa.get_finviz_snapshot = lambda t: {}
+    msa.get_stockanalysis_fundamentals = lambda t: {}
+    # CNBC supplies valuation + quality (but not growth/PEG)
+    qe._stb_fetch_cnbc_fundamentals = lambda t: {
+        "pe": 20.1, "fwd_pe": 13.0, "roe_pct": 12.5,
+        "profit_margin_pct": 9.3, "debt_equity": 0.16,
+    }
+    # Yahoo backfills the growth + PEG fields CNBC does not carry
+    qe._stb_fetch_yahoo_info = lambda t: {
+        "trailingPE": 99.0,           # must NOT overwrite CNBC's 20.1 (fill-only)
+        "pegRatio": 1.4,
+        "revenueGrowth": 0.11,        # decimal -> 11%
+        "earningsGrowth": 0.20,       # decimal -> 20%
+    }
+    try:
+        d = qe._stb_fetch_fundamentals_multi("XOM")
+    finally:
+        (msa.get_finviz_snapshot, msa.get_stockanalysis_fundamentals,
+         qe._stb_fetch_cnbc_fundamentals, qe._stb_fetch_yahoo_info) = orig
+
+    check(d["pe"] == 20.1, "CNBC P/E filled (finviz blocked)")
+    check(d["fwd_pe"] == 13.0, "CNBC forward P/E filled")
+    check(d["roe_pct"] == 12.5, "CNBC ROE filled")
+    check(d["profit_margin_pct"] == 9.3, "CNBC margin filled")
+    check(d["debt_equity"] == 0.16, "CNBC debt/equity filled")
+    check(d["revenue_growth_pct"] == 11.0, "Yahoo revenue growth backfilled (decimal->pct)")
+    check(d["earnings_growth_pct"] == 20.0, "Yahoo earnings growth backfilled")
+    check(d["peg_ratio"] == 1.4, "Yahoo PEG backfilled")
+
+
 if __name__ == "__main__":
     test_multi_tier_fetch()
     test_validation()
     test_fill_only()
     test_launcher()
     test_fail_safe()
+    test_cnbc_yahoo_fallback()
     print(f"\n==== STB ENRICHMENT: {PASS} passed, {FAIL} failed ====")
     sys.exit(1 if FAIL else 0)

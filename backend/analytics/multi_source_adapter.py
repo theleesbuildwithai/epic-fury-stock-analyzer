@@ -1434,12 +1434,14 @@ def multi_source_quote_batch(symbols: list) -> dict:
 
     Layers (in order):
       1. Yahoo direct v7 batch (one HTTP call for all) → v8 threaded fallback
-      2. stockanalysis.com concurrent threads (no key)
-      3. finviz.com concurrent threads (no key)
-      4. Twelve Data batch (one HTTP call, key-gated, 800/day)
-      5. Polygon batch snapshot (one HTTP call, key-gated, delayed)
-      6. FMP individual quotes (key-gated, 250/day)
-      7. Persistent price cache (last resort — survives full outages)
+      2. CNBC quote API (approved source; reaches from the App Runner IP where
+         finviz/stockanalysis are blocked — the real prod fallback for Yahoo)
+      3. stockanalysis.com concurrent threads (no key)
+      4. finviz.com concurrent threads (no key)
+      5. Twelve Data batch (one HTTP call, key-gated, 800/day)
+      6. Polygon batch snapshot (one HTTP call, key-gated, delayed)
+      7. FMP individual quotes (key-gated, 250/day)
+      8. Persistent price cache (last resort — survives full outages)
 
     Returns: {symbol: {"price": float, "change_pct": float}}
     Drop-in replacement for cnbc_quote_batch / stooq_quote_batch.
@@ -1457,7 +1459,26 @@ def multi_source_quote_batch(symbols: list) -> dict:
     except Exception as e:
         logger.debug(f"multi_source_quote_batch yahoo_direct failed: {e}")
 
-    # 2. stockanalysis.com for any still-missing
+    # 2. CNBC for any still-missing — approved source, reaches from AWS where
+    #    finviz/stockanalysis are IP-blocked, so it's the effective prod backup
+    #    when Yahoo is rate-limited. Local import avoids any circular dependency.
+    still_missing = [s for s in syms_upper if s not in out]
+    if still_missing:
+        try:
+            from analysis.extras import cnbc_quote_batch
+            cn_data = cnbc_quote_batch(still_missing) or {}
+            for sym, val in cn_data.items():
+                try:
+                    px_v = float(val.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if px_v > 0:
+                    out[sym] = {"price": round(px_v, 2),
+                                "change_pct": float(val.get("change_pct") or 0.0)}
+        except Exception as e:
+            logger.debug(f"multi_source_quote_batch cnbc failed: {e}")
+
+    # 3. stockanalysis.com for any still-missing
     still_missing = [s for s in syms_upper if s not in out]
     if still_missing:
         try:
@@ -1466,7 +1487,7 @@ def multi_source_quote_batch(symbols: list) -> dict:
         except Exception as e:
             logger.debug(f"multi_source_quote_batch stockanalysis failed: {e}")
 
-    # 3. finviz.com for any still-missing
+    # 4. finviz.com for any still-missing
     still_missing = [s for s in syms_upper if s not in out]
     if still_missing:
         try:
@@ -1475,7 +1496,7 @@ def multi_source_quote_batch(symbols: list) -> dict:
         except Exception as e:
             logger.debug(f"multi_source_quote_batch finviz failed: {e}")
 
-    # 4. Twelve Data batch (one call, key-gated)
+    # 5. Twelve Data batch (one call, key-gated)
     still_missing = [s for s in syms_upper if s not in out]
     if still_missing and _TWELVE_DATA_KEY():
         try:
@@ -1484,7 +1505,7 @@ def multi_source_quote_batch(symbols: list) -> dict:
         except Exception as e:
             logger.debug(f"multi_source_quote_batch twelvedata failed: {e}")
 
-    # 5. Polygon batch snapshot (one call, key-gated, delayed data)
+    # 6. Polygon batch snapshot (one call, key-gated, delayed data)
     still_missing = [s for s in syms_upper if s not in out]
     if still_missing and _POLYGON_KEY():
         try:
@@ -1493,7 +1514,7 @@ def multi_source_quote_batch(symbols: list) -> dict:
         except Exception as e:
             logger.debug(f"multi_source_quote_batch polygon failed: {e}")
 
-    # 6. FMP individual quotes (key-gated, 250/day)
+    # 7. FMP individual quotes (key-gated, 250/day)
     still_missing = [s for s in syms_upper if s not in out]
     if still_missing and _FMP_KEY():
         for sym in still_missing[:20]:
@@ -1504,7 +1525,7 @@ def multi_source_quote_batch(symbols: list) -> dict:
             except Exception:
                 pass
 
-    # 7. Persistent price cache — absolute last resort for any still-missing
+    # 8. Persistent price cache — absolute last resort for any still-missing
     still_missing = [s for s in syms_upper if s not in out]
     if still_missing:
         try:
