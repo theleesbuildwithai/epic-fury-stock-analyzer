@@ -6573,9 +6573,10 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         # major problem — while a bullish read should readily CONFIRM the hold. So
         # the tiers are ASYMMETRIC and generous on the long side:
         #   STRONG BUY score>=3.5, BUY score>=1.0  (easier to earn a buy / strong buy)
-        #   SELL score<=-2.0, STRONG SELL score<=-4 (a sell needs a CLEAR bearish
-        #   signal — a mild -1 to -2 lean stays HOLD; we do NOT sell into noise, e.g.
-        #   a fundamentally sound name that dipped stays a HOLD, not a SELL).
+        #   SELL score<=-3.0, STRONG SELL score<=-4.5 (v60: the SELL bar is RAISED for
+        #   a months-long holder — a mild bearish lean like COST (-2.7: just below
+        #   EMA50/SMA200, -1.3% momentum) is NOISE for a quality name and stays HOLD;
+        #   we only exit on a CLEAR, deep bearish read. We do NOT sell into a dip).
         # Confidence formulas are unchanged & continuous (a 1.0 BUY honestly prints
         # ~67%, well below a STRONG's 89%+); the NET-8 governor below still only CAPS.
         if score >= 3.5:
@@ -6586,23 +6587,24 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             signal = "BUY"
             direction = "LONG"
             confidence = min(87, 62 + score * 5)   # 1.0→67%, 1.5→69%, 2→72%, 3→77%
-        elif score <= -4:
+        elif score <= -4.5:
             signal = "STRONG SELL"
             direction = "SHORT"
             confidence = min(94, 72 + abs(score) * 5)
-        elif score <= -2.0:
+        elif score <= -3.0:
             signal = "SELL"
             direction = "SHORT"
-            confidence = min(87, 62 + abs(score) * 5)   # -2.0→72%, -3→77%
+            confidence = min(87, 62 + abs(score) * 5)   # -3.0→77%, -4→82%
         else:
-            # HOLD band is intentionally WIDER on the downside (-2.0 < score < 1.0):
-            # a mild bearish lean is a HOLD for a months-long holder, not a sell.
-            # Confidence sits in a tight, modest 45–49 band (a HOLD is a low-conviction
-            # "just keep holding", e.g. a -1.8 lean like ROST reads ~49%), graded just
-            # enough to read distinctly and stay clear of the withhold sentinel (40).
+            # HOLD band is intentionally WIDE on the downside (-3.0 < score < 1.0):
+            # a mild-to-moderate bearish lean is a HOLD for a months-long holder, not a
+            # sell (v60: COST at -2.7 now stays HOLD, not SELL). Confidence sits in a
+            # tight, modest 45–50 band (a HOLD is a low-conviction "just keep holding"),
+            # graded just enough to read distinctly and stay clear of the withhold
+            # sentinel (40).
             signal = "HOLD"
             direction = "NEUTRAL"
-            confidence = int(round(45 + abs(score) * 2))   # 0→45 … -1.8→49 … -2.0→49
+            confidence = int(round(45 + abs(score) * 1.7))   # 0→45 … -2.7→50 … -3.0→50
 
         # Regime adjustment — GENTLE, not a kill shot
         # OVERHAUL: was 0.7x (30% penalty) — now ±10% max

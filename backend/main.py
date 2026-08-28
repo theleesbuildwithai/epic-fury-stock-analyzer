@@ -8144,6 +8144,8 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 "revenue_growth_pct": p.get("revenue_growth_pct"),
                 "earnings_growth_pct": p.get("earnings_growth_pct"),
                 "profit_margin_pct": p.get("profit_margin_pct"),
+                "debt_equity": p.get("debt_equity"),
+                "volatility_60d_pct": p.get("volatility_60d_pct"),
                 "momentum_pct": p.get("momentum_12m_pct"),
                 "hold_class": "position",
                 "reasons": (p.get("reasons") or [])[:5],

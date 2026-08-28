@@ -330,6 +330,13 @@ const SP_MAINSTREAM = [
 ]
 // Hard cap so the scan can never run away, even if STB returns a huge list.
 const MAX_UNIVERSE = 200
+// Bounded concurrency: a small worker pool scans several tickers at once so the
+// grid fills in ~1/SCAN_CONCURRENCY of the sequential time (a 184-name scan drops
+// from ~6 min to ~2 min) while staying well under the backend's 200-req/60s limit
+// (~106 req/min at 3 workers, leaving headroom for concurrent quote calls and the
+// shared App-Runner IP). The endpoint already throttles Yahoo and guards each
+// chain fetch with a 10s thread-timeout, so a few in-flight requests are safe.
+const SCAN_CONCURRENCY = 3
 // Only scan well-formed tickers (defense-in-depth; endpoint validates too).
 const isValidTicker = (t) => typeof t === 'string' && /^[A-Z][A-Z.\-]{0,6}$/.test(t)
 
@@ -439,14 +446,24 @@ export default function OptionsTrading() {
         setTickers(list)
         setLoading(false)   // universe known → stop the full-page blocker; cards stream in
         setProgress({ done: 0, total: list.length })
-        // Sequential + staggered to stay rate-limit-safe; each has its own timeout+retry.
+        // Bounded-concurrency worker pool: SCAN_CONCURRENCY tickers scan at once so
+        // cards stream in fast, while each worker staggers its own successive calls
+        // to stay rate-limit-safe. Each fetch has its own timeout+retry.
         let done = 0
-        for (const t of list) {
-          await fetchRec(t)
-          done += 1
-          setProgress({ done, total: list.length })
-          await new Promise(r => setTimeout(r, 200))
+        let idx = 0
+        const worker = async () => {
+          while (true) {
+            const myIdx = idx++
+            if (myIdx >= list.length) return
+            await fetchRec(list[myIdx])
+            done += 1
+            setProgress({ done, total: list.length })
+            await new Promise(r => setTimeout(r, 200))
+          }
         }
+        await Promise.all(
+          Array.from({ length: Math.min(SCAN_CONCURRENCY, list.length) }, worker)
+        )
         // If STB was cold, quietly re-pull once it's warm so its picks join the set.
         if (stbCold && !force) {
           setTimeout(() => { runningRef.current = false; loadUniverse(true) }, 45000)

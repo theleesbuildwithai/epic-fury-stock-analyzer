@@ -51,7 +51,9 @@ function computeAction(stock, qhf) {
   const stop = Number(stock.stop_loss)     || 0
   const tgt  = Number(stock.target_price)  || 0
   const hasLevels  = stop > 0 || tgt > 0
-  const qhfBearish = !!(qhf && qhf.direction === 'SHORT')
+  // A withheld signal (unverifiable data / confidence-40 sentinel) must NEVER
+  // drive a sell verdict — it is "no read", not a bearish read.
+  const qhfBearish = !!(qhf && qhf.direction === 'SHORT' && !isWithheld(qhf))
 
   if (px > 0 && tgt > 0 && px >= tgt)
     return { status: 'target', label: 'SELL · TARGET HIT', tone: 'emerald',
@@ -100,9 +102,28 @@ function deriveSignal(direction, confidence) {
   return 'HOLD'
 }
 
+// A signal is "withheld" when the scorer could not trust the data — NOT a real
+// HOLD. The backend flags this with data_quality !== 'ok' (e.g.
+// "unreliable_price_data") and returns the confidence=40 NEUTRAL sentinel. We
+// surface this honestly as "NO SIGNAL" rather than a misleading "HOLD 40%".
+function isWithheld(sig) {
+  if (!sig) return false
+  const dq = sig.data_quality
+  if (dq && dq !== 'ok') return true
+  return sig.direction === 'NEUTRAL' && Number(sig.confidence) === 40
+}
+
 // ─── QHF Signal Badge ─────────────────────────────────────────────────────────
 function QHFBadge({ sig }) {
   if (!sig) return null
+  if (isWithheld(sig)) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold font-mono bg-neutral-900 border-neutral-700 text-neutral-500"
+            title={sig.note || 'Signal withheld — data could not be verified. Not a HOLD verdict.'}>
+        · NO SIGNAL
+      </span>
+    )
+  }
   const label = sig.signal || deriveSignal(sig.direction, sig.confidence)
   const isBuy  = label.includes('BUY')
   const isSell = label.includes('SELL')
@@ -281,7 +302,7 @@ export default function Watchlist() {
                 [t]: {
                   direction: w.direction, confidence: w.confidence,
                   composite_score: w.composite_score, factors: w.factors,
-                  signal: w.signal,
+                  signal: w.signal, data_quality: w.data_quality, note: w.note,
                 },
               }))
             }

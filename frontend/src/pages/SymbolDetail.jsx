@@ -355,23 +355,28 @@ export default function SymbolDetail() {
     let cancelled = false
     async function load() {
       setLoading(true); setError(null); setAnalysis(null); setPick(null); setQuantSignal(null)
+      // Each source is INDEPENDENT and fail-isolated: a failure in /api/analyze
+      // must never prevent the STB pick card + Why-to-buy evidence from rendering.
+      // We only surface the error banner if EVERY source fails.
+      let analyzeOk = false, pickOk = false, quantOk = false
+      let analyzeErr = null
+
+      // 1) Standard analysis (non-blocking) — quant-picks/STB never gated on this.
       try {
-        // Fetch analyze + STB + quant-picks in parallel.
-        // quant-picks reads only in-memory cache — zero external API calls.
-        const [aRes, sRes, qRes] = await Promise.all([
-          fetch(`/api/analyze/${ticker}`),
-          fetch(`/api/symbols-to-buy`),
-          fetch(`/api/quant-picks`),
-        ])
-        if (!aRes.ok) {
+        const aRes = await fetch(`/api/analyze/${ticker}`)
+        if (aRes.ok) {
+          const aJson = await aRes.json()
+          if (!cancelled) { setAnalysis(aJson); analyzeOk = true }
+        } else {
           let m = `HTTP ${aRes.status}`
           try { const e = await aRes.json(); m = e.detail || m } catch {}
-          throw new Error(m)
+          analyzeErr = m
         }
-        const aJson = await aRes.json()
-        if (cancelled) return
-        setAnalysis(aJson)
+      } catch (e) { analyzeErr = e.message }
 
+      // 2) STB pick + Why-to-buy fundamentals (independent of analyze).
+      try {
+        const sRes = await fetch(`/api/symbols-to-buy`)
         if (sRes.ok) {
           const sJson = await sRes.json()
           if (!cancelled && sJson.ok) {
@@ -379,46 +384,48 @@ export default function SymbolDetail() {
             const found = list.find(p => p.ticker === ticker)
               || (sJson.long_picks || []).find(p => p.ticker === ticker)
               || (sJson.short_picks || []).find(p => p.ticker === ticker)
-            if (found) setPick(found)
+            if (found) { setPick(found); pickOk = true }
           }
         }
+      } catch { /* pick stays null — page still renders analysis + quant */ }
 
-        // Wire quant HF signal (cache-only, no rate-limit risk)
+      // 3) Quant HF signal (cache-only, no rate-limit risk), independent.
+      try {
+        const qRes = await fetch(`/api/quant-picks`)
         let qp = null
         if (!cancelled && qRes.ok) {
           const qJson = await qRes.json()
           const allPicks = [...(qJson.long_picks || []), ...(qJson.short_picks || [])]
           qp = allPicks.find(p => p.ticker === ticker) || null
-          if (qp) setQuantSignal({
+          if (qp) { setQuantSignal({
             direction: qp.direction,
             confidence: qp.confidence,
             composite_score: qp.composite_score,
             factors: qp.factors,
-          })
+          }); quantOk = true }
         }
         // Fallback: ticker not in the pre-scanned pick universe. Run the
-        // per-ticker quant scorer so a QHF signal ALWAYS shows for any symbol
-        // instead of leaving the card blank.
+        // per-ticker quant scorer so a QHF signal ALWAYS shows for any symbol.
         if (!cancelled && !qp) {
-          try {
-            const wRes = await fetch(`/api/watchlist-analysis/${ticker}`)
-            if (wRes.ok) {
-              const wJson = await wRes.json()
-              if (!cancelled && wJson && wJson.analyzed && wJson.direction) {
-                setQuantSignal({
-                  direction: wJson.direction,
-                  confidence: wJson.confidence,
-                  composite_score: wJson.composite_score,
-                  factors: wJson.factors,
-                })
-              }
+          const wRes = await fetch(`/api/watchlist-analysis/${ticker}`)
+          if (wRes.ok) {
+            const wJson = await wRes.json()
+            if (!cancelled && wJson && wJson.analyzed && wJson.direction) {
+              setQuantSignal({
+                direction: wJson.direction,
+                confidence: wJson.confidence,
+                composite_score: wJson.composite_score,
+                factors: wJson.factors,
+              }); quantOk = true
             }
-          } catch { /* leave card hidden only if the scorer itself fails */ }
+          }
         }
-      } catch (e) {
-        if (!cancelled) setError(e.message)
-      } finally {
-        if (!cancelled) setLoading(false)
+      } catch { /* quant card stays hidden if scorer itself fails */ }
+
+      // Only show the error banner when NOTHING rendered.
+      if (!cancelled) {
+        if (!analyzeOk && !pickOk && !quantOk) setError(analyzeErr || 'Unable to load analysis.')
+        setLoading(false)
       }
     }
     load()
