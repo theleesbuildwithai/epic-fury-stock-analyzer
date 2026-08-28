@@ -357,6 +357,7 @@ export default function OptionsTrading() {
   const [query, setQuery] = useState('')
   const [lookupBusy, setLookupBusy] = useState(false)
   const [sortBy, setSortBy] = useState('opportunity')  // best-first by default
+  const [dirFilter, setDirFilter] = useState('all')    // all | calls | puts — keeps puts visible when opportunity-sort would bury them
   const runningRef = useRef(false)
   const recsRef = useRef(recs)          // latest recs for cache persistence without stale closures
   recsRef.current = recs
@@ -402,7 +403,18 @@ export default function OptionsTrading() {
       const stbCold = !stbPicks.length
       let list = []
       try {
-        list = [...new Set([...stbPicks, ...SP_MAINSTREAM])]
+        // INTERLEAVE STB (long-only → bullish) with the broad S&P set so the scan
+        // is directionally MIXED as it streams in. Concatenating STB-first would
+        // front-load every bullish name and only reach the bearish (put) candidates
+        // at the very end — making the page look calls-only mid-scan. Alternating
+        // lets calls AND puts surface together from the start.
+        const merged = []
+        const maxLen = Math.max(stbPicks.length, SP_MAINSTREAM.length)
+        for (let i = 0; i < maxLen; i++) {
+          if (i < stbPicks.length) merged.push(stbPicks[i])
+          if (i < SP_MAINSTREAM.length) merged.push(SP_MAINSTREAM[i])
+        }
+        list = [...new Set(merged)]
           .map(t => String(t).toUpperCase().trim())
           .filter(isValidTicker)
           .slice(0, MAX_UNIVERSE)
@@ -466,6 +478,11 @@ export default function OptionsTrading() {
     breakeven:   { label: 'Breakeven proximity', fn: (a, b) => beProxOf(a) - beProxOf(b) },
   }
   const actionable = [...actionableRaw].sort((SORTS[sortBy] || SORTS.opportunity).fn)
+  const callCount = actionable.filter(r => r.option_type === 'CALL').length
+  const putCount = actionable.filter(r => r.option_type === 'PUT').length
+  const shown = dirFilter === 'all'
+    ? actionable
+    : actionable.filter(r => r.option_type === (dirFilter === 'calls' ? 'CALL' : 'PUT'))
   const scanning = progress.total > 0 && progress.done < progress.total
   const cacheAgeMin = cached?.ts ? Math.round((Date.now() - cached.ts) / 60000) : null
 
@@ -556,9 +573,25 @@ export default function OptionsTrading() {
             <div>
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <h2 className="text-lg font-bold text-white">Actionable trades</h2>
-                <span className="text-xs text-neutral-500">{actionable.length} ready to place</span>
-                <span className="text-[11px] text-emerald-400 font-semibold">▲ {actionable.filter(r => r.option_type === 'CALL').length} bullish</span>
-                <span className="text-[11px] text-rose-400 font-semibold">▼ {actionable.filter(r => r.option_type === 'PUT').length} bearish</span>
+                <span className="text-xs text-neutral-500">{shown.length} of {actionable.length}</span>
+                <button
+                  onClick={() => setDirFilter('all')}
+                  className={`px-2 py-1 rounded border text-[11px] font-bold transition-colors ${dirFilter === 'all' ? 'bg-white text-black border-white' : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:bg-neutral-800'}`}
+                >
+                  All {actionable.length}
+                </button>
+                <button
+                  onClick={() => setDirFilter('calls')}
+                  className={`px-2 py-1 rounded border text-[11px] font-bold transition-colors ${dirFilter === 'calls' ? 'bg-emerald-500 text-black border-emerald-500' : 'bg-neutral-900 border-neutral-700 text-emerald-400 hover:bg-neutral-800'}`}
+                >
+                  ▲ {callCount} bullish
+                </button>
+                <button
+                  onClick={() => setDirFilter('puts')}
+                  className={`px-2 py-1 rounded border text-[11px] font-bold transition-colors ${dirFilter === 'puts' ? 'bg-rose-500 text-black border-rose-500' : 'bg-neutral-900 border-neutral-700 text-rose-400 hover:bg-neutral-800'}`}
+                >
+                  ▼ {putCount} bearish
+                </button>
                 <div className="ml-auto flex items-center gap-1 flex-wrap">
                   <span className="text-[10px] uppercase tracking-widest text-neutral-500 font-bold mr-1">Sort</span>
                   {Object.entries(SORTS).map(([k, v]) => (
@@ -573,12 +606,17 @@ export default function OptionsTrading() {
                 </div>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {actionable.map(r => (
+                {shown.map(r => (
                   <CardBoundary key={r.ticker} ticker={r.ticker}>
                     <OrderTicket rec={r} />
                   </CardBoundary>
                 ))}
               </div>
+              {shown.length === 0 && (
+                <div className="text-neutral-500 text-sm py-6 text-center">
+                  No {dirFilter === 'puts' ? 'bearish (put)' : 'bullish (call)'} trades in the current scan.
+                </div>
+              )}
             </div>
           )}
 
