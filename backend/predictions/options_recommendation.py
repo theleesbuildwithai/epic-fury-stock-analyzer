@@ -40,8 +40,13 @@ _CONF_FLOOR = 55            # minimum confidence for any directional options tra
 _PRICE_DISAGREE_TOL = 0.08  # analysis-vs-trusted underlying disagreement → withhold
 _STALE_REUSE_TTL = 20 * 60  # seconds a last-good rec may be reused on transient fail
 _STALE_PX_TOL = 0.05        # underlying must still be within 5% to reuse a stale rec
-_OPT_PUT_SCORE = -1.0       # HOLD name this bearish → tactical defined-risk put
-                            # (symmetric with the BUY→call side, which fires at score ≥ +1.0)
+_OPT_PUT_SCORE = -3.0       # HOLD name this bearish → tactical defined-risk put.
+                            # v60: aligned to the watchlist SELL bar (score ≤ -3.0) so
+                            # options never turn bearish on a name the equity call still
+                            # HOLDs. A mild lean (e.g. COST ~ -2.5) stays HOLD on BOTH the
+                            # watchlist AND the options desk — no contradiction, consistent
+                            # with the hold-for-months philosophy. Asymmetric by design
+                            # (the BUY→call side still fires at the generous score ≥ +1.0).
 _EARN_BLACKOUT_DAYS = 3     # long-debit primary WITHHELD if earnings ≤ this many days out
                             # (imminent IV crush can wipe a directionally-correct long option)
 _EARN_WARN_DAYS = 21        # surface an earnings warning (not a withhold) inside this window
