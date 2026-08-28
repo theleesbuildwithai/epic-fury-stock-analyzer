@@ -6913,37 +6913,94 @@ _COMPANY_NAMES: dict = {
 # ── STB display-only fundamentals enrichment ────────────────────────────────
 # The Yahoo prefetch (yf.Ticker().info) is blocked in production, so the STB
 # picks arrive with pe/roe/growth/margin = None. This enricher fills those
-# DISPLAY fields for the top picks using the non-Yahoo finviz snapshot so the
-# detail page can show real "why to buy" evidence. It is strictly ADDITIVE:
+# DISPLAY fields for the top picks using a MULTI-TIER non-Yahoo source chain so
+# the detail page can show real "why to buy" evidence. It is strictly ADDITIVE:
 # it never changes scoring, ranking, confidence, or which picks are shown.
-# API-protection safety nets: 24h dedicated cache, hard cap per cycle, throttle
-# between live calls, and fully fail-safe (never raises, never blocks the STB).
+#
+# Safety nets (per the CRO charter):
+#   • MULTI-TIER SOURCES: finviz (richest: ROE/PEG/growth/margin/debt) → then
+#     stockanalysis backfills valuation (P/E, fwd P/E, PEG) it may still be
+#     missing. "Never not get data": if one source is down the next is tried.
+#   • VALIDATED: every value is bounds-checked before it is accepted, so an
+#     obviously corrupt scrape (P/E of 90 000, ROE of -9 999) is discarded, not
+#     shown. "Only correct data."
+#   • NON-BLOCKING: runs in a daemon thread and mutates the cached pick dicts in
+#     place, so it can NEVER delay or block the STB response (cold or warm).
+#   • THROTTLED + CAPPED + 24h CACHE: at most _STB_ENRICH_MAX live fetches per
+#     cycle, spaced by _STB_ENRICH_DELAY, results cached 24h — API-safe.
+#   • FAIL-SAFE: never raises; on total failure the fields simply stay None and
+#     the panel shows "—".
 _STB_ENRICH_CACHE: dict = {}
 _STB_ENRICH_TTL = 86400        # 24h — fundamentals barely move intraday
 _STB_ENRICH_MAX = 20           # hard cap on live source calls per refresh cycle
 _STB_ENRICH_DELAY = 0.8        # seconds between live source calls (rate-limit safety)
+_STB_ENRICH_INFLIGHT = [False]  # single-flight guard so threads never stack
+
+# Plausibility bounds — anything outside is treated as a corrupt scrape (dropped).
+_STB_FUND_BOUNDS = {
+    "pe": (0.1, 2000.0), "fwd_pe": (0.1, 2000.0), "peg_ratio": (-50.0, 100.0),
+    "roe_pct": (-500.0, 500.0), "revenue_growth_pct": (-100.0, 2000.0),
+    "earnings_growth_pct": (-100.0, 5000.0), "profit_margin_pct": (-500.0, 100.0),
+    "debt_equity": (0.0, 100.0),
+}
+
+
+def _stb_valid(field: str, v):
+    """Return v as a validated float within the field's plausible bounds, else None."""
+    import math as _m
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not _m.isfinite(f):
+        return None
+    lo, hi = _STB_FUND_BOUNDS.get(field, (float("-inf"), float("inf")))
+    return f if lo <= f <= hi else None
+
+
+def _stb_fetch_fundamentals_multi(sym: str):
+    """MULTI-TIER fetch of one symbol's fundamentals. finviz first (richest),
+    then stockanalysis to backfill valuation. Returns a normalized dict of
+    validated fields (values may be None). Never raises."""
+    fields = {k: None for k in _STB_FUND_BOUNDS}
+
+    # Tier 1 — finviz (has ROE / PEG / growth / margin / debt)
+    try:
+        from analytics.multi_source_adapter import get_finviz_snapshot
+        snap = get_finviz_snapshot(sym) or {}
+    except Exception:
+        snap = {}
+    if isinstance(snap, dict):
+        _map1 = {"pe": "trailingPE", "fwd_pe": "forwardPE", "peg_ratio": "peg",
+                 "roe_pct": "roe", "revenue_growth_pct": "revenue_growth",
+                 "earnings_growth_pct": "earnings_growth",
+                 "profit_margin_pct": "profit_margins", "debt_equity": "debt_equity"}
+        for fk, sk in _map1.items():
+            fields[fk] = _stb_valid(fk, snap.get(sk))
+
+    # Tier 2 — stockanalysis backfills valuation only (no growth/quality there)
+    if any(fields[k] is None for k in ("pe", "fwd_pe")):
+        try:
+            from analytics.multi_source_adapter import get_stockanalysis_fundamentals
+            sa = get_stockanalysis_fundamentals(sym) or {}
+        except Exception:
+            sa = {}
+        if isinstance(sa, dict):
+            if fields["pe"] is None:
+                fields["pe"] = _stb_valid("pe", sa.get("trailingPE"))
+            if fields["fwd_pe"] is None:
+                fields["fwd_pe"] = _stb_valid("fwd_pe", sa.get("forwardPE"))
+
+    return fields
 
 
 def _enrich_stb_fundamentals(picks: list) -> None:
     """Fill display-only fundamental fields on the top STB picks via the
-    non-Yahoo finviz snapshot. Additive only, throttled, and fail-safe."""
+    multi-tier source chain. Additive, validated, throttled, and fail-safe."""
     if not picks:
-        return
-    import math as _m
-    try:
-        from analytics.multi_source_adapter import get_finviz_snapshot
-    except Exception:
         return
     now = time.time()
     fetched = 0
-
-    def _fin(v):
-        try:
-            f = float(v)
-            return f if _m.isfinite(f) else None
-        except (TypeError, ValueError):
-            return None
-
     for p in picks:
         sym = p.get("ticker") or p.get("symbol") or ""
         if not sym:
@@ -6953,43 +7010,30 @@ def _enrich_stb_fundamentals(picks: list) -> None:
                    ("pe", "roe_pct", "revenue_growth_pct", "profit_margin_pct")):
             continue
 
-        snap = None
+        data = None
         _c = _STB_ENRICH_CACHE.get(sym)
         if _c and (now - _c["time"]) < _STB_ENRICH_TTL:
-            snap = _c["data"]
+            data = _c["data"]
         elif fetched < _STB_ENRICH_MAX:
             if fetched > 0:
                 time.sleep(_STB_ENRICH_DELAY)   # throttle live source calls
-            try:
-                snap = get_finviz_snapshot(sym)  # 12s internal timeout, no key
-            except Exception:
-                snap = None
-            _STB_ENRICH_CACHE[sym] = {"data": snap, "time": now}
+            data = _stb_fetch_fundamentals_multi(sym)
+            _STB_ENRICH_CACHE[sym] = {"data": data, "time": now}
             fetched += 1
-        if not isinstance(snap, dict):
+        if not isinstance(data, dict):
             continue
 
-        _fields = {
-            "pe": _fin(snap.get("trailingPE")),
-            "fwd_pe": _fin(snap.get("forwardPE")),
-            "peg_ratio": _fin(snap.get("peg")),
-            "roe_pct": _fin(snap.get("roe")),
-            "revenue_growth_pct": _fin(snap.get("revenue_growth")),
-            "earnings_growth_pct": _fin(snap.get("earnings_growth")),
-            "profit_margin_pct": _fin(snap.get("profit_margins")),
-            "debt_equity": _fin(snap.get("debt_equity")),
-        }
         # Fill display fields only where currently None — never overwrite good data.
-        for k, v in _fields.items():
+        for k, v in data.items():
             if p.get(k) is None and v is not None:
                 p[k] = v
 
         # Evidence reasons from REAL numbers (surfaced first on the detail page).
         _ev = []
-        _pe, _peg = _fields["pe"], _fields["peg_ratio"]
-        _roe, _rev = _fields["roe_pct"], _fields["revenue_growth_pct"]
-        _eps, _mgn = _fields["earnings_growth_pct"], _fields["profit_margin_pct"]
-        _de = _fields["debt_equity"]
+        _pe, _peg = data["pe"], data["peg_ratio"]
+        _roe, _rev = data["roe_pct"], data["revenue_growth_pct"]
+        _eps, _mgn = data["earnings_growth_pct"], data["profit_margin_pct"]
+        _de = data["debt_equity"]
         if _roe is not None and _roe >= 15:
             _ev.append(f"ROE {_roe:.0f}% — efficient capital returns")
         if _rev is not None and _rev >= 8:
@@ -7007,6 +7051,31 @@ def _enrich_stb_fundamentals(picks: list) -> None:
         if _ev:
             _existing = list(p.get("reasons") or [])
             p["reasons"] = (_ev + [r for r in _existing if r not in _ev])[:6]
+
+
+def _launch_stb_enrichment(picks: list) -> None:
+    """Kick off enrichment in a daemon thread so it NEVER blocks the STB
+    response. The picks are the same dict objects stored in the result cache, so
+    in-place mutation surfaces on the next /api/symbols-to-buy serve. Single-
+    flight guarded so overlapping rebuilds cannot stack threads. Fail-safe."""
+    if not picks or _STB_ENRICH_INFLIGHT[0]:
+        return
+    _STB_ENRICH_INFLIGHT[0] = True
+
+    def _run():
+        try:
+            _enrich_stb_fundamentals(picks)
+        except Exception as _e:
+            logger.warning(f"STB enrichment thread failed (non-fatal): {_e}")
+        finally:
+            _STB_ENRICH_INFLIGHT[0] = False
+
+    try:
+        import threading as _thr
+        _thr.Thread(target=_run, name="stb-fund-enrich", daemon=True).start()
+    except Exception as _e:
+        _STB_ENRICH_INFLIGHT[0] = False
+        logger.warning(f"STB enrichment thread could not start (non-fatal): {_e}")
 
 
 def generate_fundamental_picks(force: bool = False) -> dict:
@@ -7533,6 +7602,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             "earnings_growth_pct": None, "profit_margin_pct": None,
             "debt_equity": None,
             "momentum_12m_pct": round(mom_12m, 1),
+            "volatility_60d_pct": round(vol_60d, 1) if _fm.isfinite(vol_60d) else None,
             "reasons": reasons[:5],
             "hold_recommendation": "6-12 weeks",
             "hold_class": "position",
@@ -7670,6 +7740,7 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 "profit_margin_pct": (_stb_fundamentals.get(ticker) or {}).get("profit_margins"),
                 "debt_equity": (_stb_fundamentals.get(ticker) or {}).get("debt_equity"),
                 "momentum_12m_pct": round(momentum, 1),
+                "volatility_60d_pct": round(vol_60d, 1) if _fm.isfinite(vol_60d) else None,
                 "reasons": reasons[:5] or ["Quant quality + long-term momentum pick"],
                 "hold_recommendation": "6-12 weeks",
                 "hold_class": "position",
@@ -8080,16 +8151,22 @@ def generate_fundamental_picks(force: bool = False) -> dict:
             )
             return _existing["data"]
 
+    # ── Final selection: TOP 20 only (user requirement) ──────────────────────
+    # Everything above ranked/filtered up to 40; the STB page shows the strongest
+    # 20. Sorting already put the highest-confidence picks first, so this is a
+    # clean top-N slice — no scoring/calibration change.
+    top_picks = top_picks[:20]
+
     # ── Display enrichment: real fundamentals for the top picks (why-to-buy) ──
     # ADDITIVE ONLY — runs after all scoring/ranking/price gates are final, so it
-    # cannot influence which picks are selected or their confidence. Skipped on
-    # cold start (keeps the cold path fast); the 5-min cold-TTL re-scan enriches
-    # once the engine is warm. Fully fail-safe.
-    if not _is_cold_start:
-        try:
-            _enrich_stb_fundamentals(top_picks[:20])
-        except Exception as _enr_err:
-            logger.warning(f"STB fundamentals enrichment skipped (non-fatal): {_enr_err}")
+    # cannot influence which picks are selected or their confidence. Launched in a
+    # background daemon thread (cold OR warm start) so it NEVER blocks the STB
+    # response; it mutates these cached pick dicts in place, so the fundamentals
+    # surface on the next serve. Fully fail-safe.
+    try:
+        _launch_stb_enrichment(top_picks)
+    except Exception as _enr_err:
+        logger.warning(f"STB fundamentals enrichment not launched (non-fatal): {_enr_err}")
 
     # v142: expose full scan funnel so user can see how much of the universe was processed
     _tickers_attempted = len(quant_longs) + len(lastgood_stocks)

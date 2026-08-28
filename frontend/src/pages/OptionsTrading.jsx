@@ -224,6 +224,15 @@ function OrderTicket({ rec }) {
             <span className={isCall ? 'text-emerald-400' : 'text-rose-400'}>{primary.action}</span>
             {' '}{primary.contracts}× {rec.ticker} {primary.expiration_human} {px(primary.strike)} {primary.option_type}
           </div>
+          {/* Structure chips — surface EVERY way to trade this view (buy + */}
+          {/* collateralized sell) right in the compact header, so calls, puts, */}
+          {/* and sells are all visible at a glance without expanding the card. */}
+          <div className="flex items-center gap-1.5 flex-wrap mt-1">
+            {strategies.map((s, i) => {
+              const m = STRUCTURE_META[s.structure] || { label: s.title || s.structure, tone: 'neutral' }
+              return <Chip key={s.structure || i} tone={s.is_primary ? m.tone : 'neutral'}>{s.is_primary ? '★ ' : ''}{m.label}</Chip>
+            })}
+          </div>
           <div className="text-[11px] text-neutral-500 mt-0.5">
             underlying {px(rec.underlying_price)} · {isNum(primary.dte) ? primary.dte + ' DTE' : '—'} · limit ≈ {px(primary.est_premium_per_share)}/sh · BE {px(primary.breakeven)} · {strategies.length} way{strategies.length !== 1 ? 's' : ''}
           </div>
@@ -484,6 +493,16 @@ export default function OptionsTrading() {
   const actionable = [...actionableRaw].sort((SORTS[sortBy] || SORTS.opportunity).fn)
   const callCount = actionable.filter(r => r.option_type === 'CALL').length
   const putCount = actionable.filter(r => r.option_type === 'PUT').length
+  // Count every structure offered across all actionable recs so the four
+  // trade types (Buy Call / Buy Put / Sell Put / Sell Call) are visibly
+  // represented — proof the engine is diversified, not calls-only.
+  const structureCounts = { LONG_CALL: 0, LONG_PUT: 0, CASH_SECURED_PUT: 0, COVERED_CALL: 0 }
+  for (const r of actionable) {
+    const strats = Array.isArray(r.strategies) && r.strategies.length ? r.strategies : [r]
+    for (const s of strats) {
+      if (s && s.structure && structureCounts[s.structure] != null) structureCounts[s.structure] += 1
+    }
+  }
   const shown = dirFilter === 'all'
     ? actionable
     : actionable.filter(r => r.option_type === (dirFilter === 'calls' ? 'CALL' : 'PUT'))
@@ -608,6 +627,17 @@ export default function OptionsTrading() {
                     </button>
                   ))}
                 </div>
+              </div>
+              {/* Structure diversity legend — shows all four trade types the */}
+              {/* engine is surfacing across the scan (each card carries a buy */}
+              {/* leg plus a collateralized-sell alternative). */}
+              <div className="flex items-center gap-2 flex-wrap mb-3 text-[11px] text-neutral-500">
+                <span className="uppercase tracking-widest font-bold text-neutral-500">Structures available</span>
+                <Chip tone="green">Buy Call {structureCounts.LONG_CALL}</Chip>
+                <Chip tone="red">Buy Put {structureCounts.LONG_PUT}</Chip>
+                <Chip tone="green">Sell Put · CSP {structureCounts.CASH_SECURED_PUT}</Chip>
+                <Chip tone="neutral">Sell Call · CC {structureCounts.COVERED_CALL}</Chip>
+                <span className="text-neutral-600">· each card expands to every way to trade the view</span>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {shown.map(r => (
