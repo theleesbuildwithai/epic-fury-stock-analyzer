@@ -237,6 +237,110 @@ function PickSummaryCard({ pick, side }) {
   )
 }
 
+// ─── Why-to-buy evidence panel (detail page only) ─────────────────────────────
+// Turns the STB pick's real fundamentals + momentum + risk into a grouped,
+// plain-English case so the user can SEE why to buy, not just be told to.
+// Every metric is optional: shows "—" with a neutral note when unavailable.
+// Palette discipline: green = favorable/bullish, red = unfavorable/bearish,
+// everything else white/neutral.
+function num1(v, suffix = '') {
+  return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(1) + suffix
+}
+function num2(v, suffix = '') {
+  return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(2) + suffix
+}
+
+function MetricRow({ label, value, tone = 'neutral', note }) {
+  const valCol = tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white'
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-1.5 border-b border-neutral-800/50 last:border-0">
+      <span className="text-[11px] uppercase tracking-wider text-neutral-500 shrink-0">{label}</span>
+      <div className="text-right min-w-0">
+        <span className={`text-sm font-mono font-bold ${valCol}`}>{value}</span>
+        {note && <div className="text-[10px] text-neutral-500 leading-tight">{note}</div>}
+      </div>
+    </div>
+  )
+}
+
+function Group({ title, children }) {
+  return (
+    <div className="bg-neutral-900/50 border border-neutral-800 rounded-lg px-4 py-3">
+      <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-400 mb-2">{title}</div>
+      {children}
+    </div>
+  )
+}
+
+function WhyToBuyPanel({ pick }) {
+  if (!pick) return null
+  const n = (v) => (v == null || isNaN(v)) ? null : Number(v)
+  const pe = n(pick.pe), fpe = n(pick.fwd_pe), peg = n(pick.peg_ratio)
+  const roe = n(pick.roe_pct), margin = n(pick.profit_margin_pct), de = n(pick.debt_equity)
+  const rev = n(pick.revenue_growth_pct), eps = n(pick.earnings_growth_pct)
+  const mom = n(pick.momentum_12m_pct) ?? n(pick.momentum_pct)
+  const vol = n(pick.volatility_60d_pct)
+  const rr = n(pick.reward_risk_ratio)
+
+  // Nothing to show if the enrichment + risk fields are all missing.
+  const hasFund = [pe, fpe, peg, roe, margin, de, rev, eps].some(v => v != null)
+  const hasMom = mom != null || vol != null
+  if (!hasFund && !hasMom && rr == null) return null
+
+  // valuation
+  const peTone = pe == null ? 'neutral' : pe <= 20 ? 'good' : 'neutral'
+  const pegTone = peg == null ? 'neutral' : (peg > 0 && peg <= 1.5) ? 'good' : 'neutral'
+  const growsEarn = (fpe != null && pe != null && fpe > 0 && pe > 0 && fpe < pe)
+
+  return (
+    <div className="bg-neutral-900/30 border border-neutral-700/50 rounded-xl p-6 mb-6">
+      <div className="mb-4">
+        <h3 className="text-lg font-black text-white">Why to buy — the evidence</h3>
+        <p className="text-xs text-neutral-500 mt-0.5">
+          Fundamentals, growth, trend and risk behind the model call. Sourced from live financials;
+          blanks show where data is unavailable.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <Group title="Valuation">
+          <MetricRow label="P/E (ttm)" value={num1(pe)} tone={peTone}
+            note={pe == null ? 'not available' : pe <= 20 ? 'reasonably valued' : pe <= 35 ? 'fair valuation' : 'premium valuation'} />
+          <MetricRow label="Forward P/E" value={num1(fpe)} tone={growsEarn ? 'good' : 'neutral'}
+            note={fpe == null ? 'not available' : growsEarn ? 'earnings expected to grow' : 'vs trailing P/E'} />
+          <MetricRow label="PEG" value={num2(peg)} tone={pegTone}
+            note={peg == null ? 'not available' : (peg > 0 && peg <= 1) ? 'growth cheaply priced' : (peg <= 1.5) ? 'growth reasonably priced' : 'growth fully priced'} />
+        </Group>
+
+        <Group title="Quality">
+          <MetricRow label="ROE" value={num1(roe, '%')} tone={roe == null ? 'neutral' : roe >= 15 ? 'good' : 'neutral'}
+            note={roe == null ? 'not available' : roe >= 15 ? 'efficient capital returns' : 'return on equity'} />
+          <MetricRow label="Profit margin" value={num1(margin, '%')} tone={margin == null ? 'neutral' : margin >= 15 ? 'good' : 'neutral'}
+            note={margin == null ? 'not available' : margin >= 15 ? 'strong pricing power' : 'net margin'} />
+          <MetricRow label="Debt / equity" value={num2(de)} tone={de == null ? 'neutral' : de <= 1 ? 'good' : de > 2 ? 'bad' : 'neutral'}
+            note={de == null ? 'not available' : de <= 1 ? 'solid balance sheet' : de > 2 ? 'elevated leverage' : 'moderate leverage'} />
+        </Group>
+
+        <Group title="Growth">
+          <MetricRow label="Revenue growth" value={num1(rev, '%')} tone={rev == null ? 'neutral' : rev > 0 ? 'good' : 'bad'}
+            note={rev == null ? 'not available' : rev >= 8 ? 'expanding top line (recent qtr)' : rev > 0 ? 'modest growth (recent qtr)' : 'contracting (recent qtr)'} />
+          <MetricRow label="EPS growth" value={num1(eps, '%')} tone={eps == null ? 'neutral' : eps > 0 ? 'good' : 'bad'}
+            note={eps == null ? 'not available' : eps >= 10 ? 'earnings accelerating (recent qtr)' : eps > 0 ? 'earnings rising (recent qtr)' : 'earnings falling (recent qtr)'} />
+        </Group>
+
+        <Group title="Trend & risk">
+          <MetricRow label="12m momentum" value={num1(mom, '%')} tone={mom == null ? 'neutral' : mom > 0 ? 'good' : 'bad'}
+            note={mom == null ? 'not available' : mom >= 20 ? 'strong sustained uptrend' : mom > 0 ? 'positive trend' : 'downtrend'} />
+          <MetricRow label="60d volatility" value={num1(vol, '%')} tone={vol == null ? 'neutral' : vol <= 25 ? 'good' : 'neutral'}
+            note={vol == null ? 'not available' : vol <= 25 ? 'stable — lower drawdown risk' : vol <= 50 ? 'moderate volatility' : 'high volatility'} />
+          <MetricRow label="Reward / risk" value={rr == null ? '—' : num2(rr, 'x')} tone={rr == null ? 'neutral' : rr >= 2 ? 'good' : 'neutral'}
+            note={rr == null ? 'not available' : rr >= 2 ? 'meets 2x minimum' : 'below 2x target'} />
+        </Group>
+      </div>
+    </div>
+  )
+}
+
 export default function SymbolDetail() {
   const { ticker } = useParams()
   const [params] = useSearchParams()
@@ -343,6 +447,9 @@ export default function SymbolDetail() {
       )}
 
       {pick && !loading && <PickSummaryCard pick={pick} side={side} />}
+
+      {/* Why-to-buy evidence — detail page only; keeps the STB list uncrowded */}
+      {pick && !loading && side === 'long' && <WhyToBuyPanel pick={pick} />}
 
       {!pick && analysis && !loading && (
         <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-lg px-4 py-3 text-sm text-neutral-300 mb-6">

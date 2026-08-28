@@ -307,6 +307,13 @@ def _fetch_finviz_snapshot(ticker: str) -> Optional[dict]:
             "fiftyTwoWeekLow": safe_num("52W Low"),
             "dividendYield": safe_num("Dividend %", "Div Yield"),
             "marketCap": safe_num("Market Cap"),
+            # Quality / valuation / growth metrics (percent values arrive % -stripped)
+            "peg": safe_num("PEG"),
+            "roe": safe_num("ROE"),
+            "revenue_growth": safe_num("Sales Q/Q", "Sales Q/Q "),
+            "earnings_growth": safe_num("EPS Q/Q", "EPS Q/Q "),
+            "profit_margins": safe_num("Profit Margin"),
+            "debt_equity": safe_num("Debt/Eq", "LT Debt/Eq"),
             "shortName": ticker.upper(),
             "_source": "finviz",
         }

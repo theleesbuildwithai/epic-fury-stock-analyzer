@@ -273,7 +273,11 @@ function OrderTicket({ rec }) {
 }
 
 // ─── Client-side cache (survives reloads so we ALWAYS show last-good picks) ────
-const CACHE_KEY = 'optionsTrading:v1'
+// v2: bumped to invalidate any pre-direction-fix cache (old caches could be
+// calls-only from before the interleave + call/put filter shipped). Bumping the
+// key forces every client to re-scan once on first load after deploy, so the
+// true bullish/bearish mix always shows instead of a stale calls-only snapshot.
+const CACHE_KEY = 'optionsTrading:v2'
 const CACHE_TTL = 30 * 60 * 1000   // 30 min — matches the backend anti-flap window
 const REQ_TIMEOUT = 12000          // per-request cap so one hung fetch can't stall the scan
 const REQ_RETRIES = 2              // attempts per ticker before giving up this pass

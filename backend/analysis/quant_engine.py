@@ -6910,6 +6910,105 @@ _COMPANY_NAMES: dict = {
 }
 
 
+# ── STB display-only fundamentals enrichment ────────────────────────────────
+# The Yahoo prefetch (yf.Ticker().info) is blocked in production, so the STB
+# picks arrive with pe/roe/growth/margin = None. This enricher fills those
+# DISPLAY fields for the top picks using the non-Yahoo finviz snapshot so the
+# detail page can show real "why to buy" evidence. It is strictly ADDITIVE:
+# it never changes scoring, ranking, confidence, or which picks are shown.
+# API-protection safety nets: 24h dedicated cache, hard cap per cycle, throttle
+# between live calls, and fully fail-safe (never raises, never blocks the STB).
+_STB_ENRICH_CACHE: dict = {}
+_STB_ENRICH_TTL = 86400        # 24h — fundamentals barely move intraday
+_STB_ENRICH_MAX = 20           # hard cap on live source calls per refresh cycle
+_STB_ENRICH_DELAY = 0.8        # seconds between live source calls (rate-limit safety)
+
+
+def _enrich_stb_fundamentals(picks: list) -> None:
+    """Fill display-only fundamental fields on the top STB picks via the
+    non-Yahoo finviz snapshot. Additive only, throttled, and fail-safe."""
+    if not picks:
+        return
+    import math as _m
+    try:
+        from analytics.multi_source_adapter import get_finviz_snapshot
+    except Exception:
+        return
+    now = time.time()
+    fetched = 0
+
+    def _fin(v):
+        try:
+            f = float(v)
+            return f if _m.isfinite(f) else None
+        except (TypeError, ValueError):
+            return None
+
+    for p in picks:
+        sym = p.get("ticker") or p.get("symbol") or ""
+        if not sym:
+            continue
+        # Only fetch when the core display fields are actually missing.
+        if not any(p.get(k) is None for k in
+                   ("pe", "roe_pct", "revenue_growth_pct", "profit_margin_pct")):
+            continue
+
+        snap = None
+        _c = _STB_ENRICH_CACHE.get(sym)
+        if _c and (now - _c["time"]) < _STB_ENRICH_TTL:
+            snap = _c["data"]
+        elif fetched < _STB_ENRICH_MAX:
+            if fetched > 0:
+                time.sleep(_STB_ENRICH_DELAY)   # throttle live source calls
+            try:
+                snap = get_finviz_snapshot(sym)  # 12s internal timeout, no key
+            except Exception:
+                snap = None
+            _STB_ENRICH_CACHE[sym] = {"data": snap, "time": now}
+            fetched += 1
+        if not isinstance(snap, dict):
+            continue
+
+        _fields = {
+            "pe": _fin(snap.get("trailingPE")),
+            "fwd_pe": _fin(snap.get("forwardPE")),
+            "peg_ratio": _fin(snap.get("peg")),
+            "roe_pct": _fin(snap.get("roe")),
+            "revenue_growth_pct": _fin(snap.get("revenue_growth")),
+            "earnings_growth_pct": _fin(snap.get("earnings_growth")),
+            "profit_margin_pct": _fin(snap.get("profit_margins")),
+            "debt_equity": _fin(snap.get("debt_equity")),
+        }
+        # Fill display fields only where currently None — never overwrite good data.
+        for k, v in _fields.items():
+            if p.get(k) is None and v is not None:
+                p[k] = v
+
+        # Evidence reasons from REAL numbers (surfaced first on the detail page).
+        _ev = []
+        _pe, _peg = _fields["pe"], _fields["peg_ratio"]
+        _roe, _rev = _fields["roe_pct"], _fields["revenue_growth_pct"]
+        _eps, _mgn = _fields["earnings_growth_pct"], _fields["profit_margin_pct"]
+        _de = _fields["debt_equity"]
+        if _roe is not None and _roe >= 15:
+            _ev.append(f"ROE {_roe:.0f}% — efficient capital returns")
+        if _rev is not None and _rev >= 8:
+            _ev.append(f"Revenue +{_rev:.0f}% (recent qtr)")
+        if _eps is not None and _eps >= 10:
+            _ev.append(f"EPS +{_eps:.0f}% (recent qtr)")
+        if _mgn is not None and _mgn >= 15:
+            _ev.append(f"Profit margin {_mgn:.0f}% — strong pricing power")
+        if _peg is not None and 0 < _peg <= 1.5:
+            _ev.append(f"PEG {_peg:.2f} — growth reasonably priced")
+        elif _pe is not None and 0 < _pe <= 25:
+            _ev.append(f"P/E {_pe:.0f} — fair valuation")
+        if _de is not None and _de <= 1.0:
+            _ev.append(f"Debt/equity {_de:.2f} — solid balance sheet")
+        if _ev:
+            _existing = list(p.get("reasons") or [])
+            p["reasons"] = (_ev + [r for r in _existing if r not in _ev])[:6]
+
+
 def generate_fundamental_picks(force: bool = False) -> dict:
     """
     Generate long-term picks for the STB page.
@@ -7980,6 +8079,17 @@ def generate_fundamental_picks(force: bool = False) -> dict:
                 f"rather than overwriting with bad data"
             )
             return _existing["data"]
+
+    # ── Display enrichment: real fundamentals for the top picks (why-to-buy) ──
+    # ADDITIVE ONLY — runs after all scoring/ranking/price gates are final, so it
+    # cannot influence which picks are selected or their confidence. Skipped on
+    # cold start (keeps the cold path fast); the 5-min cold-TTL re-scan enriches
+    # once the engine is warm. Fully fail-safe.
+    if not _is_cold_start:
+        try:
+            _enrich_stb_fundamentals(top_picks[:20])
+        except Exception as _enr_err:
+            logger.warning(f"STB fundamentals enrichment skipped (non-fatal): {_enr_err}")
 
     # v142: expose full scan funnel so user can see how much of the universe was processed
     _tickers_attempted = len(quant_longs) + len(lastgood_stocks)
