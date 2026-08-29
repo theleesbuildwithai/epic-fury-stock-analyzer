@@ -48,6 +48,9 @@ def _restore_all(frame):
 
 
 def run():
+    # CNBC is the first source in the real chain; stub it out so these tests
+    # exercise the intended source ordering hermetically (no live network).
+    msa.get_cnbc_historical = _none
     rng = np.random.default_rng(1)
     good = mkdf(list(360.0 + np.cumsum(rng.normal(0, 1, 120))))
     good_last = float(good["Close"].values[-1])

@@ -1105,6 +1105,84 @@ def _last_close_value(df) -> Optional[float]:
         return None
 
 
+# CNBC daily-bar ranges. yfinance/stooq history is IP-blocked from the App
+# Runner datacenter (returns wrong/garbage series → the scorer withholds), but
+# CNBC's chart API is reachable from AWS (same host family as the working CNBC
+# quote feed) and its last bar corroborates the live quote exactly. This is the
+# primary AWS-reachable history source. Approved source per project standards.
+_CNBC_RANGE = {
+    "5d": "1M", "1mo": "1M", "3mo": "3M", "6mo": "6M",
+    "1y": "1Y", "2y": "1Y", "5y": "5Y",
+}
+
+
+def _fetch_cnbc_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+    """Historical daily OHLCV from CNBC's public chart API. Reaches from AWS
+    where yfinance/stooq history is blocked. Never raises — returns None on any
+    failure so the caller falls through to the next source."""
+    import requests as _requests
+    try:
+        rng = _CNBC_RANGE.get(period, "1Y")
+        url = f"https://ts-api.cnbc.com/harmony/app/charts/{rng}.json"
+        headers = {
+            # CNBC blocks default Python user-agents (mirror the quote feed).
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.cnbc.com/",
+        }
+        resp = _requests.get(url, params={"symbol": ticker.upper()},
+                             headers=headers, timeout=9)
+        if resp.status_code != 200:
+            return None
+        bars = ((resp.json() or {}).get("barData") or {}).get("priceBars") or []
+        if len(bars) < 5:
+            return None
+        records = []
+        for b in bars:
+            try:
+                c = float(b.get("close") or 0)
+                if c <= 0:
+                    continue
+                ms = b.get("tradeTimeinMills")
+                dt = (pd.to_datetime(int(ms), unit="ms") if ms
+                      else pd.to_datetime(str(b.get("tradeTime"))[:8]))
+                records.append({
+                    "Date": dt,
+                    "Open": float(b.get("open") or c),
+                    "High": float(b.get("high") or c),
+                    "Low": float(b.get("low") or c),
+                    "Close": c,
+                    "Volume": int(float(b.get("volume") or 0)),
+                })
+            except (KeyError, ValueError, TypeError):
+                continue
+        if len(records) < 5:
+            return None
+        df = pd.DataFrame(records).set_index("Date").sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        # CNBC's ranges over-return (e.g. "1Y" gives ~500 bars/~2y). Trim to the
+        # requested window's trading-day count so the frame is a drop-in match for
+        # the yfinance period="1y" series the engine is calibrated on — same
+        # lookback → identical SMA/momentum, no calibration drift from the source
+        # swap. Keep a small buffer so SMA200 / 12-month momentum stay valid.
+        _cal_days = _PERIOD_DAYS.get(period, 365)
+        _target_rows = int(round(_cal_days * 252 / 365)) + 8
+        if len(df) > _target_rows:
+            df = df.tail(_target_rows)
+        logger.info(f"CNBC historical: {ticker} ({len(df)} rows)")
+        return df
+    except Exception as e:
+        logger.debug(f"CNBC historical failed for {ticker}: {e}")
+    return None
+
+
+def get_cnbc_historical(ticker: str, period: str = "6mo") -> Optional[pd.DataFrame]:
+    """AWS-reachable historical OHLCV from CNBC. No API key. Timeout-guarded."""
+    return _run_with_timeout(lambda: _fetch_cnbc_historical(ticker, period), timeout=11)
+
+
 def validate_ohlcv(df, trusted_px: Optional[float] = None,
                    ticker: str = "", tol: float = 0.30) -> bool:
     """
@@ -1185,8 +1263,10 @@ def get_historical_any_source(ticker: str, period: str = "6mo",
     passes validate_ohlcv (structural sanity + agreement with trusted_px when
     supplied). Returns None if nothing validates.
 
-    Chain: tiingo → alpha_vantage → fmp → twelve_data → polygon
-    All except Twelve Data and Polygon require optional env-var API keys.
+    Chain: cnbc → tiingo → alpha_vantage → fmp → twelve_data → polygon
+    CNBC needs no key and reaches from AWS (where yfinance/stooq history is
+    IP-blocked), so it leads the chain. The rest except Twelve Data and Polygon
+    require optional env-var API keys.
 
     trusted_px (optional): a live/trusted quote. When given, ONLY a frame whose
     recent body agrees with it (within `tol`) is returned — a source that
@@ -1200,6 +1280,7 @@ def get_historical_any_source(ticker: str, period: str = "6mo",
     per-ticker scorer's 8% body-corroboration net) can pass a smaller value.
     """
     _sources = (
+        ("cnbc", get_cnbc_historical),
         ("tiingo", get_tiingo_historical),
         ("alphavantage", get_alphavantage_historical),
         ("fmp", get_fmp_historical),
