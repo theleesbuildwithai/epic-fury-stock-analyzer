@@ -204,7 +204,7 @@ def main():
 
     # 3b. HOLD name with a clearly BEARISH composite -> tactical defined-risk PUT
     #     (watchlist stays hold-biased; the options desk takes the bearish read).
-    _reset(); _STATE["signal"] = "HOLD"; _STATE["score"] = -3.0; _STATE["conf"] = None
+    _reset(); _STATE["signal"] = "HOLD"; _STATE["score"] = -5.0; _STATE["conf"] = None
     _NEWS.update(sentiment="BEARISH", article_count=6)
     r = _build()
     check("HOLD + bearish score -> PUT actionable",

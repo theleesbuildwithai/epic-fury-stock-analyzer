@@ -6559,6 +6559,51 @@ def analyze_watchlist_stock(symbol: str) -> dict:
         except Exception as _news_e:
             logger.debug(f"[watchlist] news overlay skipped for {symbol}: {_news_e}")
 
+        # --- Quality / fundamentals overlay (why COST is a "good long-term stock") ---
+        # The base score is purely TECHNICAL, so a durable compounder in a mild
+        # pullback (COST: just under EMA50/SMA200) reads soft even though the
+        # BUSINESS is excellent. This overlay teaches the engine what Jackson
+        # already knows: a high-ROE, profitable, growing, reasonably-valued name
+        # deserves a bullish lean, while a deteriorating/over-levered one deserves a
+        # bearish one. It reads the SAME fundamentals STB already caches — a PURE
+        # cache read, ZERO API calls (obeys the API-protection rule) — is HARD-CAPPED
+        # at ±1.5 so it can CONFIRM or gently nudge across a tier boundary but can
+        # NEVER on its own flip a deep technical breakdown into a buy (capital
+        # preservation first). Fully fail-safe: no data / any error -> 0 tilt (exactly
+        # today's behavior), so it is calibration-neutral whenever fundamentals are cold.
+        quality_tilt = 0.0
+        try:
+            _fd = (_fundamentals_cache.get(symbol) or {}).get("value_data") or {}
+            _roe = _fd.get("roe")                 # percent
+            _pm = _fd.get("profit_margins")       # percent
+            _rg = _fd.get("revenue_growth")       # percent
+            _eg = _fd.get("earnings_growth")      # percent
+            _peg = _fd.get("peg_ratio")
+            _de = _fd.get("debt_equity")          # yfinance ratio (e.g. 154 = 1.54x)
+            # Only apply a quality lean when we actually have profitability data —
+            # otherwise there is no basis for a fundamental view and we stay neutral.
+            if isinstance(_roe, (int, float)) or isinstance(_pm, (int, float)):
+                _qt = 0.0
+                if isinstance(_roe, (int, float)):
+                    _qt += 0.4 if _roe > 20 else 0.2 if _roe > 12 else (-0.5 if _roe < 0 else 0.0)
+                if isinstance(_pm, (int, float)):
+                    _qt += 0.35 if _pm > 20 else 0.15 if _pm > 8 else (-0.5 if _pm < 0 else 0.0)
+                if isinstance(_rg, (int, float)):
+                    _qt += 0.3 if _rg > 12 else 0.15 if _rg > 3 else (-0.4 if _rg < -5 else (-0.2 if _rg < 0 else 0.0))
+                if isinstance(_eg, (int, float)):
+                    _qt += 0.2 if _eg > 12 else (-0.3 if _eg < -10 else (-0.15 if _eg < 0 else 0.0))
+                if isinstance(_peg, (int, float)) and _peg > 0:
+                    _qt += 0.2 if _peg < 1.2 else 0.1 if _peg < 2.0 else (-0.2 if _peg > 3.0 else 0.0)
+                if isinstance(_de, (int, float)) and _de > 0:
+                    _qt += -0.25 if _de > 250 else (-0.1 if _de > 150 else 0.0)
+                # Hard cap: quality confirms/nudges, never dominates the tape.
+                quality_tilt = max(-1.5, min(1.5, float(_qt)))
+                if np.isfinite(quality_tilt):
+                    score += quality_tilt
+        except Exception as _q_e:
+            logger.debug(f"[watchlist] quality overlay skipped for {symbol}: {_q_e}")
+            quality_tilt = 0.0
+
         # SAFETY NET 5: the score must be a finite number before it can drive a
         # directional call. A NaN/inf score (from any poisoned factor) would make
         # every comparison below False and silently emit HOLD — but make it an
@@ -6568,43 +6613,46 @@ def analyze_watchlist_stock(symbol: str) -> dict:
             return _withhold_signal("non-finite composite score", _trusted_px or price)
 
         # Direction and signal
-        # v59 calibration — HOLD-BIASED for a LONG-TERM holder. Jackson buys STB
-        # names and wants to hold them for MONTHS, only selling when there is a real,
-        # major problem — while a bullish read should readily CONFIRM the hold. So
-        # the tiers are ASYMMETRIC and generous on the long side:
-        #   STRONG BUY score>=3.5, BUY score>=1.0  (easier to earn a buy / strong buy)
-        #   SELL score<=-3.0, STRONG SELL score<=-4.5 (v60: the SELL bar is RAISED for
-        #   a months-long holder — a mild bearish lean like COST (-2.7: just below
-        #   EMA50/SMA200, -1.3% momentum) is NOISE for a quality name and stays HOLD;
-        #   we only exit on a CLEAR, deep bearish read. We do NOT sell into a dip).
-        # Confidence formulas are unchanged & continuous (a 1.0 BUY honestly prints
-        # ~67%, well below a STRONG's 89%+); the NET-8 governor below still only CAPS.
-        if score >= 3.5:
+        # v61 calibration — BUY-BIASED for a LONG-TERM (1–3yr) holder of QUALITY names.
+        # Jackson buys STB names and holds for months-to-years; a SELL should mean the
+        # stock is genuinely breaking down ("literally going to crash"), NOT a routine
+        # dip. So the tiers are ASYMMETRIC — generous on the long side, and the sell
+        # bar is DEEP — and they now score on top of the quality overlay above (a
+        # good business earns a bullish lean before the tape even votes):
+        #   STRONG BUY score>=3.0, BUY score>=0.5     (v61: easier to earn a buy)
+        #   SELL score<=-4.5, STRONG SELL score<=-6.0 (v61: DEEP breakdown only — a
+        #   quality name must be BOTH poor-quality AND technically broken to reach it.
+        #   The bar sits BELOW where a quality name in a normal downtrend lands even
+        #   with a COLD (empty) fundamentals cache — e.g. COST's raw technical ≈ -4.3
+        #   stays HOLD whether or not the quality overlay is warm — so we never sell a
+        #   quality name into a dip. That is the whole point of a multi-year hold).
+        # Confidence formulas are unchanged & continuous; the NET-8 governor below
+        # still only CAPS (never inflates).
+        if score >= 3.0:
             signal = "STRONG BUY"
             direction = "LONG"
-            confidence = min(94, 72 + score * 5)   # 3.5→89%, 4→92%, 5→97%→94%
-        elif score >= 1.0:
+            confidence = min(94, 72 + score * 5)   # 3.0→87%, 4→92%, 5→97%→94%
+        elif score >= 0.5:
             signal = "BUY"
             direction = "LONG"
-            confidence = min(87, 62 + score * 5)   # 1.0→67%, 1.5→69%, 2→72%, 3→77%
-        elif score <= -4.5:
+            confidence = min(87, 62 + score * 5)   # 0.5→64%, 1→67%, 2→72%, 3→77%
+        elif score <= -6.0:
             signal = "STRONG SELL"
             direction = "SHORT"
             confidence = min(94, 72 + abs(score) * 5)
-        elif score <= -3.0:
+        elif score <= -4.5:
             signal = "SELL"
             direction = "SHORT"
-            confidence = min(87, 62 + abs(score) * 5)   # -3.0→77%, -4→82%
+            confidence = min(87, 62 + abs(score) * 5)   # -4.5→85%, -5→87%
         else:
-            # HOLD band is intentionally WIDE on the downside (-3.0 < score < 1.0):
-            # a mild-to-moderate bearish lean is a HOLD for a months-long holder, not a
-            # sell (v60: COST at -2.7 now stays HOLD, not SELL). Confidence sits in a
-            # tight, modest 45–50 band (a HOLD is a low-conviction "just keep holding"),
-            # graded just enough to read distinctly and stay clear of the withhold
-            # sentinel (40).
+            # HOLD band is intentionally WIDE on the downside (-4.5 < score < 0.5):
+            # a mild-to-moderate bearish lean is a HOLD for a multi-year holder, not a
+            # sell (COST stays HOLD, not SELL). Confidence sits in a tight, modest
+            # 45–53 band (a HOLD is a low-conviction "just keep holding"), graded just
+            # enough to read distinctly and stay clear of the withhold sentinel (40).
             signal = "HOLD"
             direction = "NEUTRAL"
-            confidence = int(round(45 + abs(score) * 1.7))   # 0→45 … -2.7→50 … -3.0→50
+            confidence = int(round(45 + abs(score) * 1.7))   # 0→45 … -3→50 … -4.5→53
 
         # Regime adjustment — GENTLE, not a kill shot
         # OVERHAUL: was 0.7x (30% penalty) — now ±10% max

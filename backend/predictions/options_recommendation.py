@@ -40,7 +40,10 @@ _CONF_FLOOR = 55            # minimum confidence for any directional options tra
 _PRICE_DISAGREE_TOL = 0.08  # analysis-vs-trusted underlying disagreement → withhold
 _STALE_REUSE_TTL = 20 * 60  # seconds a last-good rec may be reused on transient fail
 _STALE_PX_TOL = 0.05        # underlying must still be within 5% to reuse a stale rec
-_OPT_PUT_SCORE = -3.0       # HOLD name this bearish → tactical defined-risk put.
+_OPT_PUT_SCORE = -4.5       # HOLD name this bearish → tactical defined-risk put.
+                            # Aligned to the v61 watchlist SELL bar (-4.5) so the
+                            # options desk is never MORE bearish than the equity call
+                            # (a name the engine still holds never surfaces a put).
                             # v60: aligned to the watchlist SELL bar (score ≤ -3.0) so
                             # options never turn bearish on a name the equity call still
                             # HOLDs. A mild lean (e.g. COST ~ -2.5) stays HOLD on BOTH the
@@ -127,7 +130,7 @@ def _directional_view(symbol: str):
     deliberately HOLD-biased (it won't tell you to sell a good name you hold), which
     means bearish puts would almost never surface. To keep the options desk tactical
     — and SYMMETRIC with the call side, which fires on the BUY label at composite
-    score ≥ +1.0 — a HOLD name whose composite score is clearly bearish
+    score ≥ +0.5 — a HOLD name whose composite score is clearly bearish
     (≤ _OPT_PUT_SCORE) is mapped to a defined-risk put and given a confidence
     synthesized from the SAME magnitude formula the engine uses for a real SELL, so
     the downstream conviction / fundamental / news gates all still apply. This never
