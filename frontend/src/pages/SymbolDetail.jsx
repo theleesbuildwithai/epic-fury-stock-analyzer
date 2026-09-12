@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import AnalysisDashboard from '../components/AnalysisDashboard'
+import QuantAnalytics from '../components/QuantAnalytics'
 import { addPickToWatchlist } from '../lib/watchlist'
 
 // ─── Quant HF Signal Card ─────────────────────────────────────────────────────
@@ -471,6 +472,14 @@ export default function SymbolDetail() {
       {analysis && !loading && (
         <div className="mt-4">
           <AnalysisDashboard data={analysis} />
+        </div>
+      )}
+
+      {/* Quant Analytics — advanced multi-panel section, analyze page only.
+          Self-contained + fail-isolated; renders nothing on insufficient data. */}
+      {analysis && !loading && (
+        <div className="mt-4">
+          <QuantAnalytics analysis={analysis} ticker={ticker} pick={pick} />
         </div>
       )}
     </div>

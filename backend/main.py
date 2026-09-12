@@ -5134,6 +5134,182 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
         }
 
 
+@app.get("/api/analyze-extras/{ticker}")
+def analyze_extras(request: Request, ticker: str):
+    """Optional analyze-page extras: earnings calendar + reaction history.
+
+    FAIL-ISOLATED BY DESIGN. Consumed only by the Quant Analytics section on
+    the analyze page; a failure here must NEVER break /api/analyze or any page.
+    Always returns HTTP 200 with a well-formed body — worst case
+    {"ticker": ..., "earnings": null}. Never raises.
+
+    earnings shape (all optional):
+      { "next_date": "YYYY-MM-DD" | null,
+        "days_until": int | null,
+        "history": [ {"date": "YYYY-MM-DD", "surprise_pct": float | null}, ... ] }
+
+    Multi-layer: in-memory cache -> persistent (date-keyed, S3-synced) cache ->
+    live yfinance (earnings_dates for past+future, calendar fallback for next).
+    """
+    # Rate-limit + validation are best-effort; never let them 500 this route.
+    try:
+        check_rate_limit(request.client.host)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    try:
+        clean_ticker = validate_ticker(ticker)
+    except HTTPException:
+        raise
+    except Exception:
+        return {"ticker": (ticker or "")[:10].upper(), "earnings": None}
+
+    import time as _t_ex
+    import json as _json_ex
+    from datetime import datetime as _dt_ex
+
+    today_key = _dt_ex.utcnow().strftime("%Y-%m-%d")
+    cache_key = f"extras:{clean_ticker}"
+    persist_key = f"analyze_extras:{clean_ticker}:{today_key}"
+
+    # Layer 1: in-memory (reuse the analyze cache dict; 24h TTL).
+    try:
+        cached = _analyze_cache.get(cache_key)
+        if cached and (_t_ex.time() - cached["ts"]) < _ANALYZE_CACHE_TTL:
+            return dict(cached["data"])
+    except Exception:
+        pass
+
+    # Layer 2: persistent date-keyed cache (stable across restarts/deploys).
+    try:
+        from predictions.models import get_trading_state as _gts_ex
+        raw = _gts_ex(persist_key, "")
+        if raw:
+            stored = _json_ex.loads(raw)
+            try:
+                _analyze_cache[cache_key] = {"data": stored, "ts": _t_ex.time()}
+            except Exception:
+                pass
+            return dict(stored)
+    except Exception:
+        pass
+
+    # Layer 3: live compute. Everything below is soft — any failure -> earnings None.
+    earnings = None
+    try:
+        from predictions.earnings_drift import _fetch_earnings_dates
+
+        # Past reaction history (already filters to past + valid surprise, never raises).
+        history = []
+        try:
+            for ev in (_fetch_earnings_dates(clean_ticker, lookback_quarters=8) or []):
+                try:
+                    d = str(ev.get("date"))
+                    sp = ev.get("surprise_pct")
+                    sp = float(sp) if sp is not None and sp == sp else None
+                    if d and d != "None":
+                        history.append({"date": d, "surprise_pct": sp})
+                except Exception:
+                    continue
+        except Exception:
+            history = []
+
+        # Next scheduled earnings date (future). yfinance earnings_dates includes
+        # future rows; fall back to .calendar. Threaded with a hard timeout so a
+        # slow/hung Yahoo call can never block the request.
+        next_date = None
+        try:
+            import yfinance as yf
+            import threading as _ex_thr
+            box = [None]
+
+            def _pull(_t=clean_ticker, _b=box):
+                try:
+                    tk = yf.Ticker(_t)
+                    cand = []
+                    try:
+                        df = tk.earnings_dates
+                        if df is not None and not df.empty:
+                            for idx in df.index:
+                                dt = idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx
+                                cand.append(dt)
+                    except Exception:
+                        pass
+                    try:
+                        cal = tk.calendar
+                        ed = None
+                        if isinstance(cal, dict):
+                            ed = cal.get("Earnings Date")
+                        elif cal is not None and hasattr(cal, "loc"):
+                            try:
+                                ed = cal.loc["Earnings Date"]
+                            except Exception:
+                                ed = None
+                        if ed is not None:
+                            seq = ed if isinstance(ed, (list, tuple)) else [ed]
+                            for x in seq:
+                                try:
+                                    cand.append(x.to_pydatetime() if hasattr(x, "to_pydatetime") else x)
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+                    _b[0] = cand
+                except Exception:
+                    _b[0] = None
+
+            th = _ex_thr.Thread(target=_pull, daemon=True)
+            th.start()
+            th.join(timeout=9)
+
+            cand = box[0] or []
+            now = _dt_ex.now()
+            future = []
+            for dt in cand:
+                try:
+                    naive = dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+                    if naive >= now:
+                        future.append(naive)
+                except Exception:
+                    continue
+            if future:
+                nd = min(future)
+                next_date = nd.strftime("%Y-%m-%d")
+        except Exception:
+            next_date = None
+
+        days_until = None
+        if next_date:
+            try:
+                delta = (_dt_ex.strptime(next_date, "%Y-%m-%d") - _dt_ex.now()).days
+                days_until = int(delta) if delta >= 0 else None
+            except Exception:
+                days_until = None
+
+        if history or next_date:
+            earnings = {"next_date": next_date, "days_until": days_until, "history": history}
+    except Exception as _ex_err:
+        logger.debug(f"analyze_extras {clean_ticker} soft-fail: {_ex_err}")
+        earnings = None
+
+    result = {"ticker": clean_ticker, "earnings": earnings}
+
+    # Persist positive results (date-keyed) so we don't re-hit Yahoo all day.
+    try:
+        _analyze_cache[cache_key] = {"data": result, "ts": _t_ex.time()}
+    except Exception:
+        pass
+    if earnings is not None:
+        try:
+            from predictions.models import set_trading_state as _sts_ex
+            _sts_ex(persist_key, _json_ex.dumps(result))
+        except Exception:
+            pass
+
+    return result
+
+
 @app.get("/api/quote/{ticker}")
 def get_quote(request: Request, ticker: str):
     """Get current quote and basic info for a stock.  BULLETPROOF —
