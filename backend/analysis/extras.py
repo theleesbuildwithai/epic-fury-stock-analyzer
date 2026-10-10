@@ -1605,6 +1605,11 @@ def get_daily_summary(watchlist_tickers=None):
             # ticker set so any ordering of the same watchlist shares one entry.
             _wl_key = "daily_summary_wl:" + ",".join(sorted(set(wl_tickers)))
             wl_summary = _get_cached(_wl_key, lambda: _get_watchlist_summary(wl_tickers), ttl=300)
+            # Never let a total failure stick for the full TTL. Caching [] would
+            # blank the panel for five minutes on one bad fetch; drop the entry
+            # so the next request retries instead.
+            if not wl_summary:
+                _extras_cache.pop(_wl_key, None)
             summary = dict(summary)  # copy so we don't mutate cache
             summary["watchlist_summary"] = wl_summary
 
@@ -1612,8 +1617,21 @@ def get_daily_summary(watchlist_tickers=None):
 
 
 def _get_watchlist_summary(tickers):
-    """Get quick summary for user's watchlist stocks."""
+    """Get quick summary for user's watchlist stocks.
+
+    2026-10-10 FIX: this leg used to return [] whenever the Yahoo bulk
+    download failed, which it does reliably in production — the whole
+    watchlist panel on /daily-summary was permanently empty while the
+    movers leg right above it rendered fine. The difference was that the
+    movers leg has a CNBC fallback and this one did not. Now it does.
+
+    The fallback is quote-only, so week/month change and RSI come back
+    None for those names. That is the honest answer: showing a price and
+    a day move with blank derived fields is correct, whereas computing a
+    1-month return off a single quote would be a fabricated number.
+    """
     results = []
+    df = None
     _throttle()
     try:
         import threading as _wl_thr
@@ -1624,15 +1642,13 @@ def _get_watchlist_summary(tickers):
             ), daemon=True)
         _wl_t.start(); _wl_t.join(timeout=10)
         df = _wl_r[0]
-        if df is None:
-            return []
     except Exception:
-        return []
+        df = None
 
-    if df is None or df.empty:
-        return []
+    if df is not None and getattr(df, "empty", True):
+        df = None
 
-    for symbol in tickers:
+    for symbol in ([] if df is None else tickers):
         try:
             if isinstance(df.columns, pd.MultiIndex):
                 if symbol not in df.columns.get_level_values(0):
@@ -1689,5 +1705,42 @@ def _get_watchlist_summary(tickers):
             })
         except Exception:
             continue
+
+    # CNBC fallback for any name Yahoo did not return (same approved source
+    # and same pattern as the movers leg above).
+    have = {r["symbol"] for r in results}
+    missing = [t for t in tickers if t not in have]
+    if missing:
+        try:
+            cnbc_request = [YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s) for s in missing]
+            cnbc_to_yahoo = {YAHOO_TO_CNBC_SYMBOL_MAP.get(s, s): s for s in missing}
+            cnbc_data = cnbc_quote_batch(cnbc_request)
+            for cnbc_sym, val in (cnbc_data or {}).items():
+                try:
+                    yahoo_sym = cnbc_to_yahoo.get(cnbc_sym, cnbc_sym)
+                    price = float(val.get("price") or 0)
+                    if price <= 0:
+                        continue
+                    day_change = float(val.get("change_pct") or 0)
+                    if day_change > 2:
+                        signal = "Strong Day - Monitor"
+                    elif day_change < -2:
+                        signal = "Down Day - Watch Support"
+                    else:
+                        signal = "Neutral - Hold"
+                    results.append({
+                        "symbol": yahoo_sym,
+                        "price": round(price, 2),
+                        "day_change_pct": round(day_change, 2),
+                        "week_change_pct": None,
+                        "month_change_pct": None,
+                        "rsi": None,
+                        "signal": signal,
+                        "quote_only": True,
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            pass  # CNBC fallback failure is non-fatal
 
     return results

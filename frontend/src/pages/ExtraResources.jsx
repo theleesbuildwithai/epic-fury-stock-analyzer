@@ -62,6 +62,25 @@ function fmtDate(iso) {
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
 }
 
+// The endpoint serves its last-known payload when the cache has expired and a
+// background refresh is still running, so a response can legitimately be days
+// old. Past-dated rows are dropped elsewhere; the danger is the leftover empty
+// table reading as "the calendar is clear" when it only means "we do not know".
+const STALE_HOURS = 24
+
+function payloadAgeHours(iso) {
+  if (typeof iso !== 'string') return null
+  // The backend emits a naive datetime.now().isoformat(); the container runs
+  // UTC, so a stamp with no offset must be read as UTC. Only inspect the time
+  // portion for an offset — the date portion always contains hyphens.
+  const timePart = iso.slice(11)
+  const hasZone = /[Zz]$/.test(iso) || /[+\-]\d{2}:?\d{2}$/.test(timePart)
+  const t = Date.parse(hasZone ? iso : iso + 'Z')
+  if (!Number.isFinite(t)) return null
+  const h = (Date.now() - t) / 3600000
+  return h >= 0 ? h : 0
+}
+
 function getWatchlistSet() {
   try {
     const raw = localStorage.getItem('sentinel_quant_watchlist')
@@ -125,6 +144,10 @@ function EarningsCalendar({ data, loading, onRetry }) {
   const owned = rows.filter(e => e._owned)
   const thisWeek = rows.filter(e => e._d <= 7)
 
+  const ageH = payloadAgeHours(data?.generated_at)
+  const warming = data?.cache_status === 'warming'
+  const stale = warming || (isNum(ageH) && ageH > STALE_HOURS)
+
   return (
     <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60 flex items-start justify-between gap-3 flex-wrap">
@@ -169,14 +192,31 @@ function EarningsCalendar({ data, loading, onRetry }) {
         </div>
       </div>
 
+      {stale && (
+        <div className="px-4 py-2 border-b border-neutral-800/60 bg-neutral-900/60 flex items-center justify-between gap-3 flex-wrap">
+          <p className="text-[11px] text-neutral-300">
+            {warming
+              ? 'Calendar is rebuilding server-side. This panel will fill in on its own within a minute.'
+              : `Calendar data is ${isNum(ageH) ? (ageH < 48 ? Math.round(ageH) + 'h' : Math.round(ageH / 24) + 'd') : 'significantly'} old and a refresh is running. Treat an empty table as unknown, not as clear.`}
+          </p>
+          <button onClick={onRetry} className="text-[11px] underline text-neutral-400 hover:text-white shrink-0">
+            Refresh now
+          </button>
+        </div>
+      )}
+
       {loading && !rows.length ? (
         <div className="px-4 py-8 text-center text-sm text-neutral-500">Loading the calendar…</div>
       ) : !rows.length ? (
         <div className="px-4 py-6 text-center">
-          <p className="text-neutral-300 text-sm font-bold">No bellwether earnings in the next 14 days.</p>
+          <p className="text-neutral-300 text-sm font-bold">
+            {stale ? 'Calendar unavailable — no confirmed dates to show.' : 'No bellwether earnings in the next 14 days.'}
+          </p>
           <p className="text-neutral-500 text-xs mt-1">
-            Either the window is genuinely clear or the upstream calendar returned nothing — no date is inferred
-            either way. Per-ticker earnings dates still gate every options recommendation independently.
+            {stale
+              ? 'This is missing data, not an all-clear. Do not read it as a clear window.'
+              : 'Either the window is genuinely clear or the upstream calendar returned nothing — no date is inferred either way.'}{' '}
+            Per-ticker earnings dates still gate every options recommendation independently.
           </p>
           <button onClick={onRetry} className="mt-2 text-xs underline text-neutral-400 hover:text-white">Retry</button>
         </div>
@@ -219,11 +259,13 @@ async function fetchJSON(url, timeout = REQ_TIMEOUT) {
   } catch { return null } finally { clearTimeout(timer) }
 }
 
-// On a cold cache the endpoint returns cache_status "warming" with an empty
-// list and kicks off a background refresh that can take ~45s. Without a
-// bounded retry the calendar would stay blank until a manual reload.
-const WARM_RETRIES = 4
-const WARM_RETRY_MS = 12000
+// On a cold or expired cache the endpoint answers immediately — either with
+// cache_status "warming" and an empty list, or with its last-known payload,
+// which can be days old — and kicks off a background rebuild that takes a
+// couple of minutes. Both cases need a bounded retry, otherwise the calendar
+// shows nothing (or stale rows that get filtered to nothing) until a reload.
+const WARM_RETRIES = 6
+const WARM_RETRY_MS = 20000
 
 export default function ExtraResources() {
   const [earnings, setEarnings] = useState(null)
@@ -239,7 +281,9 @@ export default function ExtraResources() {
     if (j) setEarnings(j)
     setLoading(false)
     inFlight.current = false
-    if (j?.cache_status === 'warming' && warmTries.current < WARM_RETRIES) {
+    const age = payloadAgeHours(j?.generated_at)
+    const needsRefresh = j?.cache_status === 'warming' || (isNum(age) && age > STALE_HOURS)
+    if (needsRefresh && warmTries.current < WARM_RETRIES) {
       warmTries.current += 1
       warmTimer.current = setTimeout(load, WARM_RETRY_MS)
     }
