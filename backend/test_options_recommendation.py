@@ -122,6 +122,34 @@ def _fake_next_earnings_days(symbol):
     return _EARN["days"]
 
 
+# Entry-timing read. `grade=None` models the real-world cache miss (no cached
+# close history for the name) -> the layer must behave as if there is no read.
+_TIMING = {"grade": None, "score": 70.0, "ok": True}
+
+
+def _fake_timing_read(symbol, ref_px, earn_days):
+    g = _TIMING["grade"]
+    if g is None:
+        return None
+    if not _TIMING["ok"]:
+        return {"ok": False, "reason": "price_mismatch", "grade": "UNRATED",
+                "timing_score": None, "entry_plan": None, "score_tilt": 0.0,
+                "conf_tilt": 0, "signals": [], "grade_caps": []}
+    return {
+        "ok": True, "reason": "", "grade": g, "raw_grade": g,
+        "timing_score": _TIMING["score"], "grade_caps": [], "signals": [],
+        "bull_count": 8, "bear_count": 1, "coverage": 1.0,
+        "extension_atr": 0.8, "near_term_risk_pct": 1.9,
+        "entry_plan": {"ideal_entry": 99.5, "entry_zone_low": 98.0,
+                       "entry_zone_high": 100.0, "structural_stop": 95.0,
+                       "stop_pct": 5.0, "size_factor": 1.0, "note": "n/a"},
+        "score_tilt": 5.0, "conf_tilt": 3,
+        "event_risk": {"level": "LOW", "points": 0, "conf_penalty": 0, "items": []},
+        "integrity": {"ok": True, "reason": "", "divergence_pct": 0.0},
+        "summary": "test read",
+    }
+
+
 # ── Wire the fakes onto the real modules the layer imports lazily ────────────
 q.analyze_watchlist_stock = _fake_analyze
 q.get_cross_asset_signals = _fake_cas
@@ -132,6 +160,7 @@ oe.fetch_option_chain = _fake_fetch_chain
 oe.select_expiration = _fake_select_expiration
 oe.select_strike = _fake_select_strike
 orx._next_earnings_days = _fake_next_earnings_days  # zero-API earnings source (deterministic)
+orx._timing_read = _fake_timing_read                # zero-API entry-timing source
 
 
 def _reset():
@@ -146,6 +175,7 @@ def _reset():
     _CHAIN["empty"] = False
     _EARN["days"] = None
     _PREMIUM["value"] = 5.00
+    _TIMING.update(grade=None, score=70.0, ok=True)
     orx._last_good_rec.clear()
 
 
@@ -286,8 +316,11 @@ def main():
           (r.get("stb_context") or {}).get("in_stb_longs") is True
           and (r.get("stb_context") or {}).get("revenue_growth_pct") == 20,
           f"stb={r.get('stb_context')}")
+    # Denominator is 6 on the bullish side: technical, fundamental, news, macro,
+    # STB-long and entry timing. Timing is unavailable in this harness unless the
+    # fake read is installed, so it correctly does NOT count as a confirmation.
     check("signal confluence counts all confirmations",
-          r.get("signal_confluence") == "5/5" and "STB-long" in (r.get("confirmations") or []),
+          r.get("signal_confluence") == "5/6" and "STB-long" in (r.get("confirmations") or []),
           f"confluence={r.get('signal_confluence')} confirms={r.get('confirmations')}")
 
     # 10b. Multi-strategy: BUY -> [LONG_CALL primary, CASH_SECURED_PUT alt].
@@ -447,6 +480,183 @@ def main():
     _reset(); _STATE["signal"] = "HOLD"
     r = _build()
     check("withheld rec is NaN/inf-clean", _all_finite(r))
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 14. ENTRY TIMING + ALL-FOUR-STRUCTURE SCORING
+    # ════════════════════════════════════════════════════════════════════════
+
+    # 14a. All four structures are always offered (both legs of the chain are
+    #      already selected, so the full menu costs nothing extra).
+    _reset()
+    r = _build()
+    structs = {s.get("structure") for s in (r.get("strategies") or [])}
+    check("all four structures offered on a BUY",
+          structs == {"LONG_CALL", "LONG_PUT", "CASH_SECURED_PUT", "COVERED_CALL"},
+          f"structs={sorted(structs)}")
+    _reset(); _STATE["signal"] = "SELL"; _NEWS["sentiment"] = "BEARISH"
+    r = _build()
+    structs = {s.get("structure") for s in (r.get("strategies") or [])}
+    check("all four structures offered on a SELL",
+          structs == {"LONG_CALL", "LONG_PUT", "CASH_SECURED_PUT", "COVERED_CALL"},
+          f"structs={sorted(structs)}")
+
+    # 14b. Every structure carries its OWN score/tier, and alignment is honest:
+    #      on a bullish read only the two up-structures are flagged aligned.
+    _reset()
+    r = _build()
+    strats = r.get("strategies") or []
+    check("every structure scored 0-100 with a tier",
+          all(isinstance(s.get("structure_score"), int)
+              and 0 <= s["structure_score"] <= 100
+              and s.get("structure_tier") in ("PRIME", "STRONG", "MODERATE", "WEAK")
+              for s in strats),
+          f"scores={[(s['structure'], s.get('structure_score'), s.get('structure_tier')) for s in strats]}")
+    aligned = {s["structure"] for s in strats if s.get("is_aligned")}
+    check("bullish read marks only the up-structures aligned",
+          aligned == {"LONG_CALL", "CASH_SECURED_PUT"}, f"aligned={sorted(aligned)}")
+    check("primary is the long call on a BUY",
+          [s["structure"] for s in strats if s.get("is_primary")] == ["LONG_CALL"],
+          f"primary={[s['structure'] for s in strats if s.get('is_primary')]}")
+    check("counter-view structures score below the desk call",
+          max((s["structure_score"] for s in strats if s.get("is_aligned")), default=0)
+          > max((s["structure_score"] for s in strats if not s.get("is_aligned")), default=0),
+          f"scores={[(s['structure'], s['structure_score']) for s in strats]}")
+    check("strategies sorted best-structure-first",
+          all(strats[i]["structure_score"] >= strats[i + 1]["structure_score"]
+              for i in range(len(strats) - 1)),
+          f"order={[(s['structure'], s['structure_score']) for s in strats]}")
+    check("best_structure mirrors the top-scored strategy",
+          r.get("best_structure") == strats[0]["structure"]
+          and r.get("best_structure_score") == strats[0]["structure_score"],
+          f"best={r.get('best_structure')} top={strats[0]['structure']}")
+
+    # 14c. Bearish read flips alignment to the down-structures.
+    _reset(); _STATE["signal"] = "SELL"; _NEWS["sentiment"] = "BEARISH"
+    r = _build()
+    aligned = {s["structure"] for s in (r.get("strategies") or []) if s.get("is_aligned")}
+    check("bearish read marks only the down-structures aligned",
+          aligned == {"LONG_PUT", "COVERED_CALL"}, f"aligned={sorted(aligned)}")
+
+    # 14d. HARD timing conflict: a call into an AVOID tape is withheld outright,
+    #      no matter how confident the directional signal is. This is the single
+    #      most important new gate — paying premium against the tape.
+    _reset(); _STATE["conf"] = 95; _STATE["score"] = 6.0; _TIMING["grade"] = "AVOID"
+    r = _build()
+    check("AVOID tape withholds a long CALL even at max conviction",
+          r.get("actionable") is False and "tape" in (r.get("reason") or "").lower(),
+          f"actionable={r.get('actionable')} reason={r.get('reason')}")
+    check("hard-conflict withhold still surfaces the timing read",
+          (r.get("entry_timing") or {}).get("grade") == "AVOID"
+          and r.get("timing_alignment") == "CONFLICTS",
+          f"timing={r.get('timing_alignment')}")
+
+    # 14e. HARD timing conflict, mirror case: a put into a BUY_NOW tape.
+    _reset(); _STATE["signal"] = "SELL"; _NEWS["sentiment"] = "BEARISH"
+    _STATE["conf"] = 95; _STATE["score"] = -6.0; _TIMING["grade"] = "BUY_NOW"
+    r = _build()
+    check("BUY_NOW tape withholds a long PUT even at max conviction",
+          r.get("actionable") is False and "tape" in (r.get("reason") or "").lower(),
+          f"actionable={r.get('actionable')} reason={r.get('reason')}")
+
+    # 14f. SOFT conflict (WAIT tape for a call) only vetoes a MARGINAL signal —
+    #      a strong signal survives with a caution, mirroring the other gates.
+    _reset(); _STATE["conf"] = 58; _STATE["score"] = 1.5; _TIMING["grade"] = "WAIT"
+    _NEWS.update(sentiment="NEUTRAL", article_count=0)
+    r = _build()
+    check("WAIT tape + marginal conviction withholds",
+          r.get("actionable") is False and "poor" in (r.get("reason") or "").lower(),
+          f"actionable={r.get('actionable')} reason={r.get('reason')}")
+    _reset(); _STATE["conf"] = 90; _STATE["score"] = 5.5; _TIMING["grade"] = "WAIT"
+    r = _build()
+    check("WAIT tape + strong conviction stays actionable with a caution",
+          r.get("actionable") is True and r.get("timing_alignment") == "CONFLICTS"
+          and any("short-term tape does not support" in d
+                  for d in (r.get("risk_disclosures") or [])),
+          f"actionable={r.get('actionable')} align={r.get('timing_alignment')}")
+
+    # 14g. Supporting tape adds a confirmation, lifts the score, and names the
+    #      technical invalidation level so the option is not held to zero.
+    _reset(); _TIMING["grade"] = "BUY_NOW"
+    r_sup = _build()
+    _reset(); _TIMING["grade"] = None
+    r_none = _build()
+    check("supporting tape counts as a confluence confirmation",
+          "timing" in (r_sup.get("confirmations") or [])
+          and r_sup.get("signal_confluence") == "6/6"
+          and "timing" not in (r_none.get("confirmations") or []),
+          f"sup={r_sup.get('signal_confluence')} none={r_none.get('signal_confluence')}")
+    check("supporting tape lifts the opportunity score",
+          r_sup.get("opportunity_score") > r_none.get("opportunity_score"),
+          f"sup={r_sup.get('opportunity_score')} none={r_none.get('opportunity_score')}")
+    check("supporting tape surfaces the technical invalidation level",
+          any("technical invalidation" in d.lower() for d in (r_sup.get("risk_disclosures") or [])),
+          f"disclosures={r_sup.get('risk_disclosures')}")
+
+    # 14h. Timing fit is structure-specific — this is the whole point of scoring
+    #      each structure separately. On a BUY_NOW tape the long call must beat
+    #      the covered call (which caps the very move the tape is predicting);
+    #      on a WAIT tape that ordering must reverse.
+    _reset(); _TIMING["grade"] = "BUY_NOW"
+    r = _build()
+    fits = {s["structure"]: s.get("timing_fit") for s in (r.get("strategies") or [])}
+    check("BUY_NOW tape: long call fits better than covered call",
+          fits.get("LONG_CALL", 0) > fits.get("COVERED_CALL", 99), f"fits={fits}")
+    check("BUY_NOW tape: long put is the worst fit",
+          fits.get("LONG_PUT", 99) == min(fits.values()), f"fits={fits}")
+    _reset(); _TIMING["grade"] = "WAIT"; _STATE["conf"] = 90; _STATE["score"] = 5.5
+    r = _build()
+    fits = {s["structure"]: s.get("timing_fit") for s in (r.get("strategies") or [])}
+    check("WAIT tape: covered call fits better than long call",
+          fits.get("COVERED_CALL", 0) > fits.get("LONG_CALL", 99), f"fits={fits}")
+
+    # 14i. Short premium prefers RICH vol; long premium prefers CHEAP vol. The
+    #      two must move in OPPOSITE directions as IV rises, or the desk would
+    #      be ranking premium sales with the buyer's formula.
+    _reset(); _TIMING["grade"] = "ACCUMULATE"
+    _base_strike = _fake_select_strike
+
+    def _iv_strike(iv):
+        def f(chain, px, opt_type, conf, score):
+            p = _base_strike(chain, px, opt_type, conf, score)
+            if p:
+                p["iv"] = iv
+            return p
+        return f
+
+    try:
+        oe.select_strike = _iv_strike(0.18)            # LOW IV
+        low = {s["structure"]: s["structure_score"] for s in (_build().get("strategies") or [])}
+        orx._last_good_rec.clear()
+        oe.select_strike = _iv_strike(0.70)            # ELEVATED IV
+        high = {s["structure"]: s["structure_score"] for s in (_build().get("strategies") or [])}
+    finally:
+        oe.select_strike = _base_strike
+    check("rich IV scores the cash-secured put HIGHER",
+          high.get("CASH_SECURED_PUT", 0) > low.get("CASH_SECURED_PUT", 99),
+          f"low={low.get('CASH_SECURED_PUT')} high={high.get('CASH_SECURED_PUT')}")
+    check("rich IV scores the long call LOWER",
+          high.get("LONG_CALL", 99) < low.get("LONG_CALL", 0),
+          f"low={low.get('LONG_CALL')} high={high.get('LONG_CALL')}")
+
+    # 14j. Price-integrity failure (cached series disagrees with the live quote)
+    #      must behave exactly like NO read: never rewarded, never punished.
+    _reset(); _TIMING.update(grade="BUY_NOW", ok=False)
+    r = _build()
+    check("unverified timing read is treated as neutral, not bullish",
+          r.get("actionable") is True and r.get("timing_alignment") == "NEUTRAL"
+          and "timing" not in (r.get("confirmations") or []),
+          f"align={r.get('timing_alignment')} confirms={r.get('confirmations')}")
+
+    # 14k. The timing layer never makes the payload unsafe to render.
+    for g in ("BUY_NOW", "ACCUMULATE", "WAIT", "AVOID", None):
+        _reset(); _TIMING["grade"] = g; _STATE["conf"] = 90; _STATE["score"] = 5.5
+        rr = _build()
+        if not _all_finite(rr):
+            check(f"timing payload NaN-clean (grade={g})", False)
+            break
+    else:
+        check("timing payload NaN/inf-clean across every grade", True)
+    _reset()
 
     print("\n" + ("ALL TESTS PASSED" if not _failures else f"FAILURES: {_failures}"))
     return 0 if not _failures else 1

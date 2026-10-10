@@ -19,11 +19,39 @@ class CardBoundary extends Component {
 }
 
 // ─── Strategy metadata (buy + collateralized-sell, never naked) ───────────────
+// `bar` is the distribution-bar swatch. Palette discipline: bullish structures
+// are green shades, bearish are red, the neutral-outlook covered call is grey.
 const STRUCTURE_META = {
-  LONG_CALL:        { label: 'Buy Call',        kind: 'BUY',  tone: 'green', outlookTxt: 'Bullish · leveraged' },
-  LONG_PUT:         { label: 'Buy Put',         kind: 'BUY',  tone: 'red',   outlookTxt: 'Bearish · leveraged' },
-  CASH_SECURED_PUT: { label: 'Sell Put (CSP)',  kind: 'SELL', tone: 'green', outlookTxt: 'Bullish/neutral · income' },
-  COVERED_CALL:     { label: 'Sell Call (CC)',  kind: 'SELL', tone: 'neutral', outlookTxt: 'Neutral/mild-bearish · income' },
+  LONG_CALL:        { label: 'Buy Call',        short: 'Buy Call',  kind: 'BUY',  tone: 'green', bar: 'bg-emerald-500', outlookTxt: 'Bullish · leveraged' },
+  LONG_PUT:         { label: 'Buy Put',         short: 'Buy Put',   kind: 'BUY',  tone: 'red',   bar: 'bg-rose-500',    outlookTxt: 'Bearish · leveraged' },
+  CASH_SECURED_PUT: { label: 'Sell Put (CSP)',  short: 'Sell Put',  kind: 'SELL', tone: 'green', bar: 'bg-emerald-700', outlookTxt: 'Bullish/neutral · income' },
+  COVERED_CALL:     { label: 'Sell Call (CC)',  short: 'Sell Call', kind: 'SELL', tone: 'neutral', bar: 'bg-neutral-400', outlookTxt: 'Neutral/mild-bearish · income' },
+}
+// Bucket order for the desk: the two premium-buying trades first (that is what
+// most people are looking for), then the two collateralized income trades.
+const DESK_ORDER = ['LONG_CALL', 'LONG_PUT', 'CASH_SECURED_PUT', 'COVERED_CALL']
+
+// ─── Entry-timing grade metadata (mirrors Symbols-to-Buy) ─────────────────────
+const TIMING_META = {
+  BUY_NOW:    { label: 'Buy Now',    text: 'text-emerald-400', bar: 'bg-emerald-500', cls: 'text-emerald-400 border-emerald-600/50 bg-emerald-600/10' },
+  ACCUMULATE: { label: 'Accumulate', text: 'text-white',       bar: 'bg-white',       cls: 'text-white border-neutral-500/60 bg-neutral-700/30' },
+  WAIT:       { label: 'Wait',       text: 'text-neutral-300', bar: 'bg-neutral-500', cls: 'text-neutral-300 border-neutral-600/50 bg-neutral-800/50' },
+  AVOID:      { label: 'Avoid',      text: 'text-rose-400',    bar: 'bg-rose-500',    cls: 'text-rose-400 border-rose-600/50 bg-rose-600/10' },
+  UNRATED:    { label: 'Unrated',    text: 'text-neutral-500', bar: 'bg-neutral-700', cls: 'text-neutral-500 border-neutral-700 bg-neutral-900/60' },
+}
+const timingMeta = (g) => TIMING_META[g] || TIMING_META.UNRATED
+const TIMING_GRADES = ['BUY_NOW', 'ACCUMULATE', 'WAIT', 'AVOID']
+const alignText = (a) => a === 'SUPPORTS' ? 'text-emerald-400' : a === 'CONFLICTS' ? 'text-rose-400' : 'text-neutral-400'
+const tierText = (t) => t === 'PRIME' ? 'text-emerald-400' : t === 'STRONG' ? 'text-white' : t === 'WEAK' ? 'text-neutral-500' : 'text-neutral-300'
+
+function TimingChip({ t }) {
+  if (!t || typeof t !== 'object') return null
+  const m = timingMeta(t.ok === false ? 'UNRATED' : t.grade)
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold ${m.cls}`}>
+      {m.label}{isNum(t.timing_score) ? ` ${Math.round(t.timing_score)}` : ''}
+    </span>
+  )
 }
 
 // OPTIONS TRADING — actionable, defined-risk options recommendations.
@@ -98,7 +126,10 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
             <Chip tone={meta.tone}>{meta.label}</Chip>
             <Chip tone={netTone}>{strat.net_type}</Chip>
             <Chip tone={strat.risk_type === 'DEFINED' ? 'green' : 'amber'}>{strat.risk_type === 'DEFINED' ? 'DEFINED RISK' : 'COLLATERALIZED'}</Chip>
-            {strat.is_primary && <Chip tone="blue">PRIMARY</Chip>}
+            {isNum(strat.structure_score) && (
+              <Chip tone={strat.is_aligned ? 'blue' : 'neutral'}>{strat.structure_tier || 'SCORE'} {Math.round(strat.structure_score)}</Chip>
+            )}
+            {strat.role && <Chip tone="neutral">{strat.role}</Chip>}
           </div>
           <div className="text-sm font-bold text-neutral-100 font-mono leading-tight truncate">
             <span className={isBuy ? 'text-emerald-400' : 'text-neutral-200'}>{strat.action}</span>
@@ -178,6 +209,301 @@ function StrategyBlock({ strat, ticker, underlying, defaultOpen }) {
   )
 }
 
+// ─── Entry-timing detail (same engine Symbols-to-Buy uses) ────────────────────
+// Direction tells you WHICH way to trade. Timing tells you whether today is a
+// defensible price to pay for it. On a long option that distinction is the whole
+// trade: theta charges rent daily, so a correct view bought into a hostile tape
+// still loses money. Scored on validated price history only — no extra requests.
+function TimingBlock({ t, alignment, reason }) {
+  if (!t || typeof t !== 'object') {
+    return (
+      <div className="bg-neutral-950/40 border border-neutral-800/60 rounded-lg px-3 py-2.5">
+        <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-1">Entry timing</div>
+        <p className="text-[11px] text-neutral-500">
+          No verified short-term timing read on this name — the ticket is graded on direction, conviction and
+          option economics alone. Treated as neutral: never rewarded, never penalised.
+        </p>
+      </div>
+    )
+  }
+  const m = timingMeta(t.ok === false ? 'UNRATED' : t.grade)
+  const plan = t.entry_plan || {}
+  const ev = t.event_risk || {}
+  const caps = Array.isArray(t.grade_caps) ? t.grade_caps : []
+  const signals = (Array.isArray(t.signals) ? t.signals : [])
+    .filter(s => s && isNum(s.score))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 6)
+
+  return (
+    <div className="bg-neutral-950/40 border border-neutral-800/60 rounded-lg px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+        <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Entry timing</div>
+        <div className="flex items-center gap-1.5">
+          <TimingChip t={t} />
+          {alignment && (
+            <span className={`text-[10px] font-bold uppercase tracking-wider ${alignText(alignment)}`}>
+              {alignment === 'SUPPORTS' ? 'tape agrees' : alignment === 'CONFLICTS' ? 'tape disagrees' : 'tape neutral'}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {t.ok === false ? (
+        <p className="text-[11px] text-neutral-500">
+          {t.reason === 'price_mismatch'
+            ? 'Timing withheld: the cached price history disagrees with the live quote by more than 5%. A timing score computed on the wrong series would be confident, specific and false, so it is suppressed rather than guessed.'
+            : (t.summary || 'No verified short-term timing read available — treated as neutral.')}
+        </p>
+      ) : (
+        <>
+          <p className="text-[11px] text-neutral-300 leading-relaxed">{t.summary || reason}</p>
+          {reason && t.summary && <p className="text-[10px] text-neutral-500 mt-0.5">{reason}</p>}
+          {caps.length > 0 && (
+            <p className="text-[10px] text-rose-300/80 mt-1">Grade capped: {caps.join(' · ')}</p>
+          )}
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">
+            <Stat label="Entry zone" value={isNum(plan.entry_zone_low) ? `${px(plan.entry_zone_low)}–${px(plan.entry_zone_high)}` : '—'} />
+            <Stat label="Ideal entry" value={px(plan.ideal_entry)} />
+            <Stat label="Thesis invalid below" value={px(plan.structural_stop)} accent="text-rose-400" />
+            <Stat label="1-ATR adverse move" value={isNum(t.near_term_risk_pct) ? pctPos(t.near_term_risk_pct) : '—'} />
+          </div>
+
+          {signals.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-600 mb-1">Weakest signals first</div>
+              <div className="space-y-1">
+                {signals.map((s, i) => (
+                  <div key={s.name || i} className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-500 w-28 shrink-0 truncate">{s.label || s.name}</span>
+                    <span className="flex-1 h-1 bg-neutral-800 rounded-full overflow-hidden">
+                      <span
+                        className={`block h-full ${s.state === 'BULL' ? 'bg-emerald-500' : s.state === 'BEAR' ? 'bg-rose-500' : 'bg-neutral-500'}`}
+                        style={{ width: `${Math.max(0, Math.min(100, s.score))}%` }}
+                      />
+                    </span>
+                    <span className="text-[10px] font-mono text-neutral-400 w-7 text-right shrink-0">{Math.round(s.score)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {Array.isArray(ev.items) && ev.items.length > 0 && (
+            <p className="text-[10px] text-neutral-500 mt-2">
+              <span className="font-bold text-neutral-400">Event watch ({String(ev.level || 'LOW').toLowerCase()}):</span>{' '}
+              {ev.items.filter(x => typeof x === 'string').join(' · ')}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Trade Today ──────────────────────────────────────────────────────────────
+// The decisive answer to "what do I actually trade?", split into the four
+// structures: buy a call, buy a put, sell a put, sell a call.
+//
+// A row appears only when BOTH hold:
+//   1. the structure agrees with the engine's directional read (is_aligned), so
+//      a counter-view income trade can never masquerade as the desk's call, and
+//   2. its per-structure score clears DESK_MIN_SCORE.
+// Per-structure scoring matters because buying and selling premium have OPPOSITE
+// preferences on implied vol, on theta and on where the tape is — ranking a
+// cash-secured put with the long-call formula recommends the wrong trade.
+// An empty bucket is a real answer, not a failure.
+const DESK_MIN_SCORE = 55          // STRONG or better
+const DESK_ROWS_PER_BUCKET = 5
+
+function deskBuckets(recs) {
+  const buckets = { LONG_CALL: [], LONG_PUT: [], CASH_SECURED_PUT: [], COVERED_CALL: [] }
+  let considered = 0
+  for (const r of recs || []) {
+    const strats = Array.isArray(r?.strategies) ? r.strategies : []
+    for (const s of strats) {
+      if (!s || !buckets[s.structure]) continue
+      considered += 1
+      if (!s.is_aligned) continue
+      if (!isNum(s.structure_score) || s.structure_score < DESK_MIN_SCORE) continue
+      buckets[s.structure].push({ rec: r, s })
+    }
+  }
+  for (const k of DESK_ORDER) buckets[k].sort((a, b) => b.s.structure_score - a.s.structure_score)
+  return { buckets, considered }
+}
+
+function DeskRow({ rec, s }) {
+  const credit = s.net_type === 'CREDIT'
+  return (
+    <div className="grid grid-cols-12 gap-2 px-4 py-2.5 border-b border-neutral-800/40 items-center text-xs hover:bg-neutral-800/20">
+      <div className="col-span-3 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className="font-bold text-base text-white truncate">{rec.ticker}</span>
+          <span className={`text-[9px] font-bold uppercase tracking-wider ${tierText(s.structure_tier)}`}>{s.structure_tier}</span>
+        </div>
+        <div className="text-[10px] text-neutral-600 truncate">
+          {px(rec.underlying_price)} spot · {isNum(rec.confidence) ? `conf ${rec.confidence}%` : '—'}
+        </div>
+      </div>
+      <div className="col-span-3 min-w-0">
+        <div className="font-mono text-[11px] text-neutral-200 truncate">
+          {s.contracts}× {s.expiration_human} {px(s.strike)} {s.option_type}
+        </div>
+        <div className="text-[10px] text-neutral-600 truncate">
+          {isNum(s.dte) ? `${s.dte} DTE` : '—'} · limit ≈ {px(s.est_premium_per_share)}/sh
+        </div>
+      </div>
+      <div className="col-span-2 text-right font-mono">
+        <div className={credit ? 'text-emerald-400' : 'text-white'}>
+          {credit ? money(s.net_credit) : money(s.net_debit)}
+        </div>
+        <div className="text-[9px] text-neutral-600">{credit ? 'credit in' : 'cash out'}</div>
+      </div>
+      <div className="col-span-2 text-right font-mono">
+        <div className="text-rose-300/80">{money(s.max_loss)}</div>
+        <div className="text-[9px] text-neutral-600">max loss</div>
+      </div>
+      <div className="col-span-1 text-right font-mono">
+        <div className="text-neutral-200">{px(s.breakeven)}</div>
+        <div className="text-[9px] text-neutral-600">B/E</div>
+      </div>
+      <div className="col-span-1 text-right font-mono">
+        <div className={tierText(s.structure_tier)}>{Math.round(s.structure_score)}</div>
+        <div className="text-[9px] text-neutral-600">{timingMeta(s.timing_grade).label === 'Unrated' ? 'score' : timingMeta(s.timing_grade).label.toLowerCase()}</div>
+      </div>
+    </div>
+  )
+}
+
+function DeskBucket({ structure, rows, considered }) {
+  const m = STRUCTURE_META[structure]
+  const count = rows.length
+  return (
+    <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-sm shrink-0 ${m.bar}`} />
+            <h3 className="text-sm font-bold text-white">{m.label}</h3>
+          </div>
+          <p className="text-[11px] text-neutral-500 mt-0.5">{m.outlookTxt} · {m.kind === 'BUY' ? 'defined risk, max loss = premium' : 'collateralized, never naked'}</p>
+        </div>
+        <div className="text-right shrink-0">
+          <div className={`text-xl font-bold font-mono ${count ? (m.tone === 'red' ? 'text-rose-400' : m.tone === 'green' ? 'text-emerald-400' : 'text-white') : 'text-neutral-600'}`}>{count}</div>
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">qualified</div>
+        </div>
+      </div>
+      {count === 0 ? (
+        <div className="px-4 py-4">
+          <p className="text-[12px] text-neutral-400 font-bold">Nothing qualifies.</p>
+          <p className="text-[10px] text-neutral-600 mt-1 leading-snug">
+            {considered
+              ? `No ${m.label.toLowerCase()} in the current scan both agrees with its directional read and scores ${DESK_MIN_SCORE}+ for this structure. `
+              : 'Scan has not produced a graded structure for this leg yet. '}
+            Forcing the trade anyway means paying premium for a setup the engine does not rate.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60 text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+            <div className="col-span-3">Ticker</div>
+            <div className="col-span-3">Contract</div>
+            <div className="col-span-2 text-right">Net</div>
+            <div className="col-span-2 text-right">Risk</div>
+            <div className="col-span-1 text-right">B/E</div>
+            <div className="col-span-1 text-right">Score</div>
+          </div>
+          {rows.slice(0, DESK_ROWS_PER_BUCKET).map(({ rec, s }) => (
+            <DeskRow key={rec.ticker} rec={rec} s={s} />
+          ))}
+          {count > DESK_ROWS_PER_BUCKET && (
+            <div className="px-4 py-2 text-[10px] text-neutral-600">
+              + {count - DESK_ROWS_PER_BUCKET} more below the top {DESK_ROWS_PER_BUCKET} — see the full tickets.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function TradeToday({ recs }) {
+  const { buckets, considered } = deskBuckets(recs)
+  const total = DESK_ORDER.reduce((n, k) => n + buckets[k].length, 0)
+  const filled = DESK_ORDER.filter(k => buckets[k].length > 0).length
+  const best = DESK_ORDER
+    .map(k => buckets[k][0])
+    .filter(Boolean)
+    .sort((a, b) => b.s.structure_score - a.s.structure_score)[0]
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">Trade Today</h2>
+            <p className="text-xs text-neutral-500 mt-0.5">
+              The four ways to express a view — buy a call, buy a put, sell a put, sell a call — each ranked by a
+              score built for that structure, not a blended one. Buying and selling premium want opposite implied
+              vol, opposite theta and opposite tape.
+            </p>
+          </div>
+          <div className="text-right shrink-0">
+            <div className={`text-2xl font-bold font-mono ${total ? 'text-emerald-400' : 'text-rose-400'}`}>{total}</div>
+            <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Qualified trades</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 divide-x divide-neutral-800/60">
+          {DESK_ORDER.map(k => {
+            const m = STRUCTURE_META[k]
+            const n = buckets[k].length
+            return (
+              <div key={k} className="px-4 py-3">
+                <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">{m.short}</div>
+                <div className={`text-2xl font-bold font-mono ${n ? (m.tone === 'red' ? 'text-rose-400' : m.tone === 'green' ? 'text-emerald-400' : 'text-white') : 'text-neutral-600'}`}>{n}</div>
+                <div className="text-[10px] text-neutral-600 mt-0.5">
+                  {n ? `top score ${Math.round(buckets[k][0].s.structure_score)} · ${buckets[k][0].rec.ticker}` : 'no qualifying setup'}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        <div className="px-4 py-3 border-t border-neutral-800/60">
+          <div className="flex h-2 rounded-full overflow-hidden bg-neutral-800 mb-2">
+            {total > 0 && DESK_ORDER.map(k => buckets[k].length > 0 && (
+              <div key={k} className={STRUCTURE_META[k].bar} style={{ width: `${buckets[k].length / total * 100}%` }} />
+            ))}
+          </div>
+          <div className="text-[10px] text-neutral-600 leading-snug">
+            {total === 0 ? (
+              <span className="text-rose-300/90 font-bold">
+                No structure clears the bar right now. {considered} candidate legs were scored and none combined an
+                aligned directional read with a {DESK_MIN_SCORE}+ structure score. Holding cash and paying no premium is the position.
+              </span>
+            ) : (
+              <>
+                {filled} of 4 structures have a qualifying trade · {considered} candidate legs scored ·
+                {best ? ` desk's single best read: ${STRUCTURE_META[best.s.structure].label} on ${best.rec.ticker} at ${Math.round(best.s.structure_score)}` : ''}.
+                {' '}Qualified = structure agrees with its directional read AND scores ≥ {DESK_MIN_SCORE}. Work limit orders — do not pay the market.
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {DESK_ORDER.map(k => (
+          <CardBoundary key={k} ticker={STRUCTURE_META[k].label}>
+            <DeskBucket structure={k} rows={buckets[k]} considered={considered} />
+          </CardBoundary>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ─── The order ticket card ────────────────────────────────────────────────────
 // Compact by default: one glance = ticker, the trade, cost, max loss. Click the
 // card to reveal the full detail (rationale, all analytics chips, every strategy
@@ -216,6 +542,7 @@ function OrderTicket({ rec }) {
             <Chip tone={dirTone}>{isCall ? '▲ BULLISH' : '▼ BEARISH'}</Chip>
             {isNum(rec.opportunity_score) && <Chip tone="blue">{rec.opportunity_tier || 'SCORE'} {rec.opportunity_score}</Chip>}
             {isNum(rec.confidence) && <Chip tone="blue">conf {rec.confidence}%</Chip>}
+            <TimingChip t={rec.entry_timing} />
             {stb.in_stb_longs && <Chip tone="green">★ STB</Chip>}
             {isNum(rec.earnings?.next_earnings_days) && <Chip tone="amber">⚠ earnings {rec.earnings.next_earnings_days}d</Chip>}
             {rec.stale_reused && <Chip tone="amber">stale</Chip>}
@@ -230,7 +557,11 @@ function OrderTicket({ rec }) {
           <div className="flex items-center gap-1.5 flex-wrap mt-1">
             {strategies.map((s, i) => {
               const m = STRUCTURE_META[s.structure] || { label: s.title || s.structure, tone: 'neutral' }
-              return <Chip key={s.structure || i} tone={s.is_primary ? m.tone : 'neutral'}>{s.is_primary ? '★ ' : ''}{m.label}</Chip>
+              return (
+                <Chip key={s.structure || i} tone={s.is_aligned ? m.tone : 'neutral'}>
+                  {s.is_primary ? '★ ' : ''}{m.label}{isNum(s.structure_score) ? ` ${Math.round(s.structure_score)}` : ''}
+                </Chip>
+              )
             })}
           </div>
           <div className="text-[11px] text-neutral-500 mt-0.5">
@@ -266,11 +597,12 @@ function OrderTicket({ rec }) {
               {isNum(stb.roe_pct) && <Chip>ROE {stb.roe_pct.toFixed(0)}%</Chip>}
               {isNum(stb.peg_ratio) && <Chip>PEG {stb.peg_ratio.toFixed(2)}</Chip>}
             </div>
+            <TimingBlock t={rec.entry_timing} alignment={rec.timing_alignment} reason={rec.timing_reason} />
           </div>
 
           {/* Strategies — buy + collateralized-sell */}
           <div className="px-5 py-4 space-y-3">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Ways to trade this view</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Ways to trade this view · ranked per structure</div>
             {strategies.map((s, i) => (
               <StrategyBlock key={s.structure || i} strat={s} ticker={rec.ticker} underlying={rec.underlying_price} defaultOpen={i === 0} />
             ))}
@@ -501,8 +833,11 @@ export default function OptionsTrading() {
   const primaryOf = (r) => (Array.isArray(r.strategies) && r.strategies.find(s => s.is_primary)) || (r.strategies && r.strategies[0]) || r
   const costOf = (r) => { const p = primaryOf(r); return isNum(p.net_debit) ? p.net_debit : (isNum(r.est_total_cost) ? r.est_total_cost : Infinity) }
   const beProxOf = (r) => { const m = r.options_analytics?.breakeven_move_pct; return isNum(m) ? Math.abs(m) : Infinity }
+  const timingOf = (r) => { const t = r.entry_timing; return (t && t.ok && isNum(t.timing_score)) ? t.timing_score : -1 }
   const SORTS = {
     opportunity: { label: 'Opportunity', fn: (a, b) => (b.opportunity_score ?? -1) - (a.opportunity_score ?? -1) },
+    structure:   { label: 'Best structure', fn: (a, b) => (b.best_structure_score ?? -1) - (a.best_structure_score ?? -1) },
+    timing:      { label: 'Entry timing', fn: (a, b) => timingOf(b) - timingOf(a) },
     conviction:  { label: 'Conviction',  fn: (a, b) => (b.confidence ?? -1) - (a.confidence ?? -1) },
     cost:        { label: 'Cost (low→high)', fn: (a, b) => costOf(a) - costOf(b) },
     breakeven:   { label: 'Breakeven proximity', fn: (a, b) => beProxOf(a) - beProxOf(b) },
@@ -510,16 +845,6 @@ export default function OptionsTrading() {
   const actionable = [...actionableRaw].sort((SORTS[sortBy] || SORTS.opportunity).fn)
   const callCount = actionable.filter(r => r.option_type === 'CALL').length
   const putCount = actionable.filter(r => r.option_type === 'PUT').length
-  // Count every structure offered across all actionable recs so the four
-  // trade types (Buy Call / Buy Put / Sell Put / Sell Call) are visibly
-  // represented — proof the engine is diversified, not calls-only.
-  const structureCounts = { LONG_CALL: 0, LONG_PUT: 0, CASH_SECURED_PUT: 0, COVERED_CALL: 0 }
-  for (const r of actionable) {
-    const strats = Array.isArray(r.strategies) && r.strategies.length ? r.strategies : [r]
-    for (const s of strats) {
-      if (s && s.structure && structureCounts[s.structure] != null) structureCounts[s.structure] += 1
-    }
-  }
   const shown = dirFilter === 'all'
     ? actionable
     : actionable.filter(r => r.option_type === (dirFilter === 'calls' ? 'CALL' : 'PUT'))
@@ -533,7 +858,7 @@ export default function OptionsTrading() {
           <div>
             <h1 className="text-3xl font-black text-white tracking-tight">Options Trading</h1>
             <p className="text-sm text-neutral-400 mt-1">
-              Defined-risk long and collateralized-sell structures · directional calls and puts across the Symbols-to-Buy set and broad S&amp;P universe · technical, fundamental, news, macro-regime, and implied-volatility analytics · recommendation only
+              Buy calls, buy puts, sell cash-secured puts, sell covered calls — each scored on its own terms, because buying and selling premium want opposite implied vol, opposite theta and opposite tape. Direction from the technical, fundamental, news and macro stack; entry graded by the same 14-signal timing engine Symbols-to-Buy uses. Recommendation only.
             </p>
           </div>
           <div className="text-right">
@@ -574,7 +899,7 @@ export default function OptionsTrading() {
           <span className="text-neutral-600">·</span>
           <span>No naked short premium</span>
           <span className="text-neutral-600">·</span>
-          <span>Withholds on low conviction, thin liquidity, or price disagreement</span>
+          <span>Withholds on low conviction, thin liquidity, price disagreement, earnings IV-crush windows, or a tape that fights the trade</span>
           <span className="text-neutral-600">·</span>
           <span>Recommendation only — never auto-executes</span>
         </div>
@@ -609,10 +934,13 @@ export default function OptionsTrading() {
 
       {(!loading || ordered.length > 0) && (
         <div className="space-y-6">
+          {/* The decisive desk — what to trade, split by structure. */}
+          {actionable.length > 0 && <TradeToday recs={actionable} />}
+
           {actionable.length > 0 && (
             <div>
               <div className="flex items-center gap-2 mb-3 flex-wrap">
-                <h2 className="text-lg font-bold text-white">Actionable trades</h2>
+                <h2 className="text-lg font-bold text-white">Full order tickets</h2>
                 <span className="text-xs text-neutral-500">{shown.length} of {actionable.length}</span>
                 <button
                   onClick={() => setDirFilter('all')}
@@ -644,17 +972,6 @@ export default function OptionsTrading() {
                     </button>
                   ))}
                 </div>
-              </div>
-              {/* Structure diversity legend — shows all four trade types the */}
-              {/* engine is surfacing across the scan (each card carries a buy */}
-              {/* leg plus a collateralized-sell alternative). */}
-              <div className="flex items-center gap-2 flex-wrap mb-3 text-[11px] text-neutral-500">
-                <span className="uppercase tracking-widest font-bold text-neutral-500">Structures available</span>
-                <Chip tone="green">Buy Call {structureCounts.LONG_CALL}</Chip>
-                <Chip tone="red">Buy Put {structureCounts.LONG_PUT}</Chip>
-                <Chip tone="green">Sell Put · CSP {structureCounts.CASH_SECURED_PUT}</Chip>
-                <Chip tone="neutral">Sell Call · CC {structureCounts.COVERED_CALL}</Chip>
-                <span className="text-neutral-600">· each card expands to every way to trade the view</span>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {shown.map(r => (

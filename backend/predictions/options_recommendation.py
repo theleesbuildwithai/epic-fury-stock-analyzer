@@ -402,7 +402,7 @@ def _opportunity_score(conf, abs_score, confirmations, want_bull, analytics: dic
             c += max(0.0, min(30.0, (float(conf) - _CONF_FLOOR) / (95.0 - _CONF_FLOOR) * 30.0))
         c += max(0.0, min(15.0, float(abs_score) / 6.0 * 15.0))
         # confluence (0-25): technical is always 1; each extra confirmation adds
-        max_conf = 5 if want_bull else 4
+        max_conf = 6 if want_bull else 5
         extra = max(0, int(confirmations) - 1)
         conflu = min(25.0, extra / max(1, (max_conf - 1)) * 25.0)
         # liquidity (0-15)
@@ -427,6 +427,235 @@ def _opportunity_score(conf, abs_score, confirmations, want_bull, analytics: dic
         return total, tier
     except Exception:
         return 50, "MODERATE"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY TIMING — the same graded read that gates Symbols-to-Buy entries.
+#
+# Why options need this MORE than equities do: a stock position can sit through
+# a six-week chop and still work. A long option cannot — theta charges rent
+# every day, so buying a call into a hostile tape loses money even when the
+# directional call eventually proves right. The timing engine prices that risk.
+#
+# ZERO NETWORK COST: compute_timing is pure arithmetic over close arrays already
+# resident in the quant engine's cache. No Yahoo request is ever issued here.
+# If a name is not cached we return None and the desk simply has no timing read
+# rather than spending the request budget (a rate-limited app is a broken app).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Points (out of 15) awarded to each structure for each entry-timing grade.
+# These are NOT the same curve: the four structures want different tapes.
+#   LONG_CALL        — peaks on a clean bullish entry; theta punishes chop.
+#   CASH_SECURED_PUT — peaks on a mild pullback; it is literally "get paid to
+#                      wait for a better price", and theta works FOR the seller.
+#   LONG_PUT         — peaks when the tape is hostile; it is the bearish leg.
+#   COVERED_CALL     — peaks on a stalled/extended tape. It is NOT a bear trade:
+#                      you still hold the shares, so an AVOID tape hurts you on
+#                      the stock far more than the premium cushions it.
+_TIMING_FIT = {
+    "LONG_CALL":        {"BUY_NOW": 15, "ACCUMULATE": 11, "WAIT": 3,  "AVOID": 0},
+    "CASH_SECURED_PUT": {"BUY_NOW": 13, "ACCUMULATE": 15, "WAIT": 8,  "AVOID": 2},
+    "LONG_PUT":         {"BUY_NOW": 0,  "ACCUMULATE": 3,  "WAIT": 10, "AVOID": 15},
+    "COVERED_CALL":     {"BUY_NOW": 5,  "ACCUMULATE": 9,  "WAIT": 15, "AVOID": 9},
+}
+_TIMING_FIT_UNRATED = 7         # no read → neutral, never rewarded or punished
+_TIMING_PRICE_TOL = 0.05        # cached series must match the live quote within 5%
+
+
+def _timing_read(symbol: str, ref_px, earn_days):
+    """Graded short-term entry read for `symbol`, or None when unavailable.
+
+    Uses the identical engine (and therefore the identical verdict) as the
+    Symbols-to-Buy entry grade, so the options desk and the equity desk can
+    never disagree about whether today is a defensible entry.
+
+    FAILS CLOSED on price corruption: `ref_px` is the multi-source-validated
+    live quote, and compute_timing withholds the grade entirely if the cached
+    close series disagrees with it. A timing score computed on the wrong series
+    is confident, specific and false — far worse than no score at all.
+    """
+    try:
+        import numpy as _np
+        from analysis.stb_timing import compute_timing as _ct
+        import analysis.quant_engine as _qe
+
+        def _closes(_sym):
+            _ent = (getattr(_qe, "_PRICE_DATA_LASTGOOD", None) or {}).get(_sym)
+            _df = _ent.get("df") if isinstance(_ent, dict) else _ent
+            if _df is None or "Close" not in getattr(_df, "columns", []):
+                return None
+            _s = _df["Close"].dropna()
+            return _np.asarray(_s.values, dtype=float) if len(_s) >= 60 else None
+
+        closes = _closes(symbol)
+        if closes is None:
+            return None
+
+        volumes = None
+        try:
+            _ent = (getattr(_qe, "_PRICE_DATA_LASTGOOD", None) or {}).get(symbol)
+            _df = _ent.get("df") if isinstance(_ent, dict) else _ent
+            if _df is not None and "Volume" in getattr(_df, "columns", []):
+                _v = _df["Volume"].dropna()
+                if len(_v) >= 60:
+                    volumes = _np.asarray(_v.values, dtype=float)
+        except Exception:
+            volumes = None
+
+        px_arg = None
+        try:
+            if ref_px is not None:
+                _p = float(ref_px)
+                if 0 < _p < 1_000_000:
+                    px_arg = _p
+        except Exception:
+            px_arg = None
+
+        ed = None
+        try:
+            if earn_days is not None and 0 <= int(earn_days) <= 400:
+                ed = int(earn_days)
+        except Exception:
+            ed = None
+
+        return _ct(closes, volumes=volumes, benchmark_closes=_closes("SPY"),
+                   sector=(getattr(_qe, "SECTOR_MAP", None) or {}).get(symbol),
+                   earnings_days=ed, expected_price=px_arg)
+    except Exception as e:
+        logger.debug(f"[options] timing read soft-fail for {symbol}: {e}")
+        return None
+
+
+def _timing_alignment(timing: dict, want_bull: bool):
+    """Does the short-term tape support the DIRECTION this ticket is taking?
+
+    Returns (alignment, reason, hard_conflict).
+      SUPPORTS  — tape is behind the trade
+      NEUTRAL   — no read, or the tape is indifferent
+      CONFLICTS — tape is against the trade
+    `hard_conflict` is True only for the two unambiguous cases: buying a call
+    into an AVOID tape, or buying a put into a clean BUY_NOW tape. Those are
+    paying premium to fight the market, and are withheld outright.
+    """
+    if not isinstance(timing, dict) or not timing.get("ok"):
+        return "NEUTRAL", "no verified short-term timing read", False
+    grade = timing.get("grade")
+    score = timing.get("timing_score")
+    blurb = f"entry timing {str(grade).replace('_', ' ').lower()}"
+    if isinstance(score, (int, float)):
+        blurb += f" ({score:.0f}/100)"
+    if want_bull:
+        if grade == "BUY_NOW":
+            return "SUPPORTS", blurb + " — clean bullish entry", False
+        if grade == "ACCUMULATE":
+            return "SUPPORTS", blurb + " — acceptable bullish entry", False
+        if grade == "WAIT":
+            return "CONFLICTS", blurb + " — technically poor entry for long premium", False
+        if grade == "AVOID":
+            return "CONFLICTS", blurb + " — hostile tape", True
+    else:
+        if grade == "AVOID":
+            return "SUPPORTS", blurb + " — tape is breaking down", False
+        if grade == "WAIT":
+            return "SUPPORTS", blurb + " — tape is stalling", False
+        if grade == "ACCUMULATE":
+            return "CONFLICTS", blurb + " — tape is still constructive", False
+        if grade == "BUY_NOW":
+            return "CONFLICTS", blurb + " — tape is strongly bid", True
+    return "NEUTRAL", blurb, False
+
+
+def _structure_score(structure: str, strat: dict, conf, abs_score, confirmations,
+                     want_bull: bool, timing: dict, earn_days):
+    """Score ONE structure 0-100 on its OWN merits, plus a tier.
+
+    A single blended "opportunity" number cannot rank four structures: buying
+    premium and selling premium have OPPOSITE preferences on implied vol, on
+    time decay and on where the tape is. Ranking a cash-secured put with the
+    long-call formula systematically recommends the wrong trade. So each
+    structure is scored against what actually makes IT profitable.
+
+    Components (100 total):
+      conviction    0-32  how strong the directional read is
+      confluence    0-20  independent confirmations behind that read
+      liquidity     0-13  can you get filled near the mid
+      timing fit    0-15  does today's tape suit THIS structure (table above)
+      structure edge 0-20 the economics that decide THIS structure's P&L
+    """
+    try:
+        is_short = bool(strat.get("is_collateralized_short"))
+        # Direction this structure actually wants the stock to do.
+        wants_up = structure in ("LONG_CALL", "CASH_SECURED_PUT")
+
+        # ── conviction 0-32 ──
+        c = 0.0
+        if isinstance(conf, (int, float)):
+            c += max(0.0, min(20.0, (float(conf) - _CONF_FLOOR) / (95.0 - _CONF_FLOOR) * 20.0))
+        c += max(0.0, min(12.0, float(abs_score) / 6.0 * 12.0))
+        # The engine's directional read favours one side. A structure that wants
+        # the opposite move only earns a fraction of the conviction points — it
+        # is an income/counter-view trade, not the desk's call.
+        if wants_up != want_bull:
+            c *= 0.45
+
+        # ── confluence 0-20 ──
+        max_conf = 6 if want_bull else 5
+        extra = max(0, int(confirmations) - 1)
+        conflu = min(20.0, extra / max(1, (max_conf - 1)) * 20.0)
+        if wants_up != want_bull:
+            conflu *= 0.45
+
+        # ── liquidity 0-13 ──
+        lq = {"GOOD": 13.0, "FAIR": 7.0, "THIN": 1.0}.get(strat.get("liquidity_quality"), 4.0)
+
+        # ── timing fit 0-15 ──
+        grade = (timing or {}).get("grade") if isinstance(timing, dict) and (timing or {}).get("ok") else None
+        fit = _TIMING_FIT.get(structure, {}).get(grade, _TIMING_FIT_UNRATED) \
+            if grade else _TIMING_FIT_UNRATED
+
+        # ── structure edge 0-20 ──
+        edge = 0.0
+        iv_env = strat.get("iv_environment")
+        prob_itm = strat.get("prob_itm_est_pct")
+        exp_move_pct = strat.get("expected_move_pct")
+        be_move_pct = strat.get("breakeven_move_pct")
+        if is_short:
+            # Selling premium: you want RICH vol, a strike the stock is unlikely
+            # to reach, and a cushion between spot and the short strike.
+            edge += {"ELEVATED": 10.0, "MODERATE": 6.0, "LOW": 1.0}.get(iv_env, 4.0)
+            if isinstance(prob_itm, (int, float)):
+                # Low probability of finishing ITM = the credit is likely kept.
+                edge += max(0.0, min(6.0, (60.0 - float(prob_itm)) / 40.0 * 6.0))
+            if isinstance(be_move_pct, (int, float)) and isinstance(exp_move_pct, (int, float)) \
+                    and exp_move_pct > 0:
+                # Cushion to breakeven measured in expected moves.
+                edge += max(0.0, min(4.0, abs(float(be_move_pct)) / float(exp_move_pct) * 4.0))
+        else:
+            # Buying premium: you want CHEAP vol and a breakeven the stock can
+            # realistically reach inside one expected move.
+            edge += {"LOW": 6.0, "MODERATE": 3.0, "ELEVATED": 0.0}.get(iv_env, 2.0)
+            if isinstance(be_move_pct, (int, float)) and isinstance(exp_move_pct, (int, float)) \
+                    and exp_move_pct > 0 and abs(float(be_move_pct)) <= float(exp_move_pct):
+                edge += 8.0
+            if isinstance(prob_itm, (int, float)):
+                edge += max(0.0, min(6.0, (float(prob_itm) - 25.0) / 40.0 * 6.0))
+            # Earnings inside the hold is a vol-crush tax on long premium only.
+            if earn_days is not None and 0 <= earn_days <= _EARN_WARN_DAYS:
+                edge -= 5.0
+
+        total = int(round(max(0.0, min(100.0, c + conflu + lq + fit + edge))))
+        if total >= 72:
+            tier = "PRIME"
+        elif total >= 55:
+            tier = "STRONG"
+        elif total >= 40:
+            tier = "MODERATE"
+        else:
+            tier = "WEAK"
+        return total, tier
+    except Exception as e:
+        logger.debug(f"[options] structure score failed {structure}: {e}")
+        return 40, "MODERATE"
 
 
 def _maybe_reuse_stale(symbol: str, ref_px, reason: str):
@@ -810,6 +1039,46 @@ def build_options_recommendation(symbol: str) -> dict:
                 fundamental_alignment=fundamental_alignment,
             )
 
+        # 4b-2) ENTRY TIMING. The equity signal says WHICH WAY. This says whether
+        #       the tape will pay you for it before theta does. A long option has
+        #       a hard clock on it, so a correct direction bought into a hostile
+        #       tape is still a losing trade. Zero API cost (cached closes only),
+        #       and the grade is withheld entirely if the cached series disagrees
+        #       with the trusted live quote.
+        timing = _timing_read(symbol, ref_px, earn_days)
+        timing_alignment, timing_reason, timing_hard_conflict = _timing_alignment(timing, want_bull)
+
+        # Timing gate. Two levels, both capital-preservation:
+        #   HARD  — buying a call into an AVOID tape, or a put into a BUY_NOW
+        #           tape. That is paying premium to fight the market. Withheld
+        #           outright regardless of how confident the signal is.
+        #   SOFT  — a merely poor entry only vetoes when conviction is also
+        #           marginal (same discipline as the fundamental / news gates).
+        if timing_hard_conflict:
+            return _withhold(
+                symbol,
+                f"Directional read is {signal} but the short-term tape disagrees "
+                f"({timing_reason}) — withholding the long "
+                f"{('call' if want_bull else 'put')}: paying premium against the tape "
+                f"loses money on theta even when the direction is eventually right.",
+                underlying_price=round(float(ref_px), 2), signal=signal, confidence=conf,
+                technical_analysis=technical, fundamental_analysis=fundamental,
+                fundamental_alignment=fundamental_alignment,
+                entry_timing=timing, timing_alignment=timing_alignment,
+            )
+        if (timing_alignment == "CONFLICTS" and conf < (_CONF_FLOOR + 10)
+                and abs_score < 4.0):
+            return _withhold(
+                symbol,
+                f"Technical signal ({signal}, conf {conf}%) is marginal and the entry is "
+                f"technically poor ({timing_reason}) — withholding rather than paying "
+                f"premium for a low-conviction trade with a bad entry.",
+                underlying_price=round(float(ref_px), 2), signal=signal, confidence=conf,
+                technical_analysis=technical, fundamental_analysis=fundamental,
+                fundamental_alignment=fundamental_alignment,
+                entry_timing=timing, timing_alignment=timing_alignment,
+            )
+
         # 4c) News / sentiment + macro-regime + STB awareness — the same context a
         #     desk (and our STB engine) checks before putting on the trade.
         news = _news_view(symbol)
@@ -852,7 +1121,9 @@ def build_options_recommendation(symbol: str) -> dict:
             confirmations += 1; confirm_bits.append("macro")
         if stb.get("in_stb_longs") and want_bull:
             confirmations += 1; confirm_bits.append("STB-long")
-        signal_confluence = f"{confirmations}/{4 + (1 if want_bull else 0)}"
+        if timing_alignment == "SUPPORTS":
+            confirmations += 1; confirm_bits.append("timing")
+        signal_confluence = f"{confirmations}/{5 + (1 if want_bull else 0)}"
 
         # 5) Fetch the option chain (throttled + thread-timeout guarded in the engine).
         from predictions.options_engine import fetch_option_chain, select_strike, select_expiration
@@ -957,6 +1228,7 @@ def build_options_recommendation(symbol: str) -> dict:
             f"{signal} (score {float(score):+.1f}, confidence {conf}%) in a {regime or 'NEUTRAL'} regime. "
             f"Technicals: {_tech_str}. Fundamentals {fundamental_alignment.lower()} ({f_reason}). "
             f"News {news_alignment.lower()} — {n_reason}. Macro ({regime_hf}) {regime_reason}. "
+            f"Entry timing {timing_alignment.lower()} — {timing_reason}. "
             f"Cross-signal confluence {signal_confluence} ({', '.join(confirm_bits)}).{_stb_note} "
             f"→ A {'bullish' if opt_type == 'call' else 'bearish'} defined-risk {opt_label.lower()} gives "
             f"leveraged exposure with loss capped at the premium paid."
@@ -1002,32 +1274,77 @@ def build_options_recommendation(symbol: str) -> dict:
         if liquidity_quality == "THIN":
             risk_disclosures.append(
                 "Liquidity is THIN (low volume/open interest) — expect wider fills; use a strict limit and small size.")
+        if timing_alignment == "CONFLICTS":
+            risk_disclosures.append(
+                f"CAUTION: the short-term tape does not support this direction ({timing_reason}) — "
+                f"the directional read may be right and the option still lose to time decay. "
+                f"Prefer the collateralized structures on this name, or wait for the entry to repair.")
+        elif timing_alignment == "SUPPORTS" and isinstance(timing, dict) and timing.get("entry_plan"):
+            _ep = timing["entry_plan"]
+            if _finite_pos(_ep.get("structural_stop")):
+                risk_disclosures.append(
+                    f"Underlying technical invalidation is ${_ep['structural_stop']:.2f} — if {symbol} "
+                    f"trades through it the directional thesis is broken; close the option rather "
+                    f"than holding it to expiry.")
 
-        # ── Multi-strategy: the leveraged long (primary) PLUS a collateralized
-        #    premium-selling alternative in the SAME direction. Bullish → long call +
-        #    cash-secured put; bearish → long put + covered call. We NEVER surface a
-        #    naked short (unlimited / full-strike risk) — only defined-risk or fully
-        #    collateralized structures reach the user.
-        strategies = []
-        primary_structure = "LONG_CALL" if opt_type == "call" else "LONG_PUT"
-        primary_strat = _build_strategy(primary_structure, symbol, pick, ref_px, contracts)
-        if primary_strat:
-            primary_strat["is_primary"] = True
-            strategies.append(primary_strat)
-
-        # Collateralized premium-selling alternative (same directional bias).
-        alt_structure = "CASH_SECURED_PUT" if want_bull else "COVERED_CALL"
-        alt_leg_type = "put" if want_bull else "call"
+        # ── ALL FOUR structures, every one scored on its own economics ─────────
+        #    Both legs of the chain are already selected, so the complete menu is
+        #    available at zero extra data cost:
+        #      call strike → LONG_CALL (buy call)  + COVERED_CALL (sell call)
+        #      put  strike → LONG_PUT  (buy put)   + CASH_SECURED_PUT (sell put)
+        #
+        #    We surface all four and label honestly. Two of them align with the
+        #    engine's directional read (`is_aligned`); the other two are income /
+        #    counter-view trades and are scored down accordingly so a put can
+        #    never masquerade as the desk's call on a bullish name.
+        #
+        #    We NEVER surface a naked short — every sell leg here is fully
+        #    collateralized (cash for the put, shares for the call).
+        call_pick = pick if opt_type == "call" else None
+        put_pick = pick if opt_type == "put" else None
+        other_leg = "put" if opt_type == "call" else "call"
         try:
-            alt_pick = select_strike(chain_for_strike, ref_px, alt_leg_type, conf, float(score or 0))
+            other_pick = select_strike(chain_for_strike, ref_px, other_leg, conf, float(score or 0))
         except Exception as _e:
-            logger.error(f"[options] alt strike select failed for {symbol}: {_e}")
-            alt_pick = None
-        if alt_pick:
-            alt_strat = _build_strategy(alt_structure, symbol, alt_pick, ref_px, contracts)
-            if alt_strat:
-                alt_strat["is_primary"] = False
-                strategies.append(alt_strat)
+            logger.error(f"[options] {other_leg} strike select failed for {symbol}: {_e}")
+            other_pick = None
+        if other_leg == "put":
+            put_pick = other_pick
+        else:
+            call_pick = other_pick
+
+        primary_structure = "LONG_CALL" if opt_type == "call" else "LONG_PUT"
+        _structure_legs = [
+            ("LONG_CALL", call_pick),
+            ("CASH_SECURED_PUT", put_pick),
+            ("LONG_PUT", put_pick),
+            ("COVERED_CALL", call_pick),
+        ]
+        strategies = []
+        for _struct, _leg_pick in _structure_legs:
+            if not _leg_pick:
+                continue
+            _s = _build_strategy(_struct, symbol, _leg_pick, ref_px, contracts)
+            if not _s:
+                continue
+            _wants_up = _struct in ("LONG_CALL", "CASH_SECURED_PUT")
+            _s["is_primary"] = (_struct == primary_structure)
+            _s["is_aligned"] = (_wants_up == want_bull)
+            _sc, _tier = _structure_score(_struct, _s, conf, abs_score, confirmations,
+                                          want_bull, timing, earn_days)
+            _s["structure_score"] = _sc
+            _s["structure_tier"] = _tier
+            _s["timing_grade"] = (timing or {}).get("grade") if isinstance(timing, dict) else None
+            _s["timing_fit"] = _TIMING_FIT.get(_struct, {}).get(_s["timing_grade"],
+                                                                _TIMING_FIT_UNRATED)
+            _s["role"] = ("Desk call" if _s["is_primary"]
+                          else ("Aligned income" if _s["is_aligned"] else "Counter-view income"))
+            strategies.append(_s)
+        # Best structure first so the UI's default read is the best available
+        # trade on this name, whichever of the four that happens to be.
+        strategies.sort(key=lambda s: (-(s.get("structure_score") or 0),
+                                       not s.get("is_primary")))
+        best_structure = strategies[0] if strategies else None
 
         options_analytics = {
             "expected_move": exp_move,
@@ -1040,6 +1357,14 @@ def build_options_recommendation(symbol: str) -> dict:
         }
         # Rank quality: one 0-100 opportunity score + tier (best-first sorting in UI).
         opp_score, opp_tier = _opportunity_score(conf, abs_score, confirmations, want_bull, options_analytics)
+        # Entry timing adjusts the name-level score, because the single most
+        # common way a correct options call loses money is a bad entry: the
+        # direction arrives after the contract has already decayed. Capped, and
+        # the penalty is deliberately larger than the reward — a bad entry is
+        # more reliably costly than a good entry is profitable.
+        _timing_adj = {"SUPPORTS": 8, "NEUTRAL": 0, "CONFLICTS": -14}.get(timing_alignment, 0)
+        opp_score = int(max(0, min(100, opp_score + _timing_adj)))
+        opp_tier = "PRIME" if opp_score >= 75 else ("STRONG" if opp_score >= 55 else "MODERATE")
 
         rec = {
             "ticker": symbol,
@@ -1093,6 +1418,13 @@ def build_options_recommendation(symbol: str) -> dict:
             "confirmations": confirm_bits,
             "opportunity_score": opp_score,
             "opportunity_tier": opp_tier,
+            # ── entry timing (same engine as the Symbols-to-Buy entry grade) ──
+            "entry_timing": timing,
+            "timing_alignment": timing_alignment,
+            "timing_reason": timing_reason,
+            "best_structure": (best_structure or {}).get("structure"),
+            "best_structure_score": (best_structure or {}).get("structure_score"),
+            "best_structure_tier": (best_structure or {}).get("structure_tier"),
             "earnings": earnings_block,
             "options_analytics": options_analytics,
             "safety": {
@@ -1100,6 +1432,8 @@ def build_options_recommendation(symbol: str) -> dict:
                 "defined_risk": True,
                 "auto_executes": False,
                 "conviction_gate": f"conf ≥ {_CONF_FLOOR}%",
+                "timing_gate": "long premium withheld when the tape opposes the direction",
+                "timing_price_verified": bool((timing or {}).get("ok")) if isinstance(timing, dict) else False,
                 "price_bounds_gate": f"${_MIN_UNDERLYING:g}–${_MAX_UNDERLYING:,.0f}",
                 "earnings_gate": f"long-debit withheld ≤ {_EARN_BLACKOUT_DAYS}d to earnings",
                 "premium_sanity_gate": True,
