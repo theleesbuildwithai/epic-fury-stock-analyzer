@@ -49,12 +49,17 @@ function scoreColor(s) {
 const ALLOC_PCT = 0.05
 const MAX_FUNDED = 10
 
-function calcAlloc(cash, price, rank) {
-  if (!cash || cash <= 0 || rank > MAX_FUNDED) return { dollars: 0, shares: 0, fund: false }
-  const dollars = cash * ALLOC_PCT
-  if (!price || price <= 0) return { dollars: Math.round(dollars), shares: null, fund: true }
+// Allocation is scaled by the technical entry grade so a poor entry is sized
+// down automatically rather than bought at full size. Missing timing data
+// means full size — absent data must never silently shrink a position.
+function calcAlloc(cash, price, rank, sizeFactor) {
+  if (!cash || cash <= 0 || rank > MAX_FUNDED) return { dollars: 0, shares: 0, fund: false, sf: 1 }
+  const sf = (typeof sizeFactor === 'number' && sizeFactor >= 0 && sizeFactor <= 1) ? sizeFactor : 1
+  if (sf === 0) return { dollars: 0, shares: 0, fund: false, sf: 0 }
+  const dollars = cash * ALLOC_PCT * sf
+  if (!price || price <= 0) return { dollars: Math.round(dollars), shares: null, fund: true, sf }
   const shares = Math.floor(dollars / price)
-  return { dollars: Math.round(shares * price), shares, fund: shares > 0 }
+  return { dollars: Math.round(shares * price), shares, fund: shares > 0, sf }
 }
 
 // ─── Regime constants (mirrors backend) ───────────────────────────────────────
@@ -119,11 +124,22 @@ function handleSortClick(col, sortCol, sortDir, setSortCol, setSortDir) {
   }
 }
 
+// Resolve a possibly-dotted sort key (e.g. "timing.timing_score") safely.
+function sortVal(obj, col) {
+  if (!col.includes('.')) return obj[col] ?? null
+  let cur = obj
+  for (const part of col.split('.')) {
+    if (cur == null || typeof cur !== 'object') return null
+    cur = cur[part]
+  }
+  return cur ?? null
+}
+
 function sortedPicks(picks, col, dir) {
   if (!col) return picks
   return [...picks].sort((a, b) => {
-    const va = a[col] ?? null
-    const vb = b[col] ?? null
+    const va = sortVal(a, col)
+    const vb = sortVal(b, col)
     // Nulls always last, regardless of direction
     if (va === null && vb === null) return 0
     if (va === null) return 1
@@ -147,9 +163,229 @@ function SortTh({ label, col, sortCol, sortDir, onSort, right = true }) {
   )
 }
 
+// ─── Technical analysis (entry timing) ────────────────────────────────────────
+// Fundamentals say WHAT to own. These say WHETHER today is a sane price to pay.
+// Palette discipline: emerald = bullish, rose = bearish, everything else neutral.
+const TIMING_GRADES = ['BUY_NOW', 'ACCUMULATE', 'WAIT', 'AVOID']
+
+const TIMING_META = {
+  BUY_NOW:    { label: 'Buy Now',    text: 'text-emerald-400', border: 'border-emerald-600/50', bg: 'bg-emerald-600/10', bar: 'bg-emerald-500' },
+  ACCUMULATE: { label: 'Accumulate', text: 'text-white',       border: 'border-neutral-500/60', bg: 'bg-neutral-700/30', bar: 'bg-neutral-300' },
+  WAIT:       { label: 'Wait',       text: 'text-neutral-400', border: 'border-neutral-700',    bg: 'bg-neutral-800/40', bar: 'bg-neutral-500' },
+  AVOID:      { label: 'Avoid',      text: 'text-rose-400',    border: 'border-rose-600/50',    bg: 'bg-rose-600/10',    bar: 'bg-rose-500' },
+  UNRATED:    { label: 'Unrated',    text: 'text-neutral-600', border: 'border-neutral-800',    bg: 'bg-neutral-900/40', bar: 'bg-neutral-700' },
+}
+
+const timingMeta = g => TIMING_META[g] || TIMING_META.UNRATED
+
+const EVENT_RISK_TEXT = {
+  HIGH: 'text-rose-400', ELEVATED: 'text-rose-300/80',
+  MODERATE: 'text-neutral-300', LOW: 'text-neutral-500',
+}
+
+const stateText = s => s === 'BULL' ? 'text-emerald-400' : s === 'BEAR' ? 'text-rose-400' : 'text-neutral-400'
+const stateBar  = s => s === 'BULL' ? 'bg-emerald-500'   : s === 'BEAR' ? 'bg-rose-500'   : 'bg-neutral-500'
+
+// Compact grade chip for the main row.
+function TimingChip({ t }) {
+  if (!t) return <span className="text-[9px] text-neutral-700">—</span>
+  const m = timingMeta(t.grade)
+  return (
+    <span className={`inline-block text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${m.text} ${m.border} ${m.bg}`}>
+      {m.label}{t.timing_score != null ? ` ${Math.round(t.timing_score)}` : ''}
+    </span>
+  )
+}
+
+// Portfolio-level read: how many picks are actually buyable at today's prices.
+function TimingSummary({ picks }) {
+  const rated = (picks || []).filter(p => p.timing && p.timing.ok)
+  if (!rated.length) return null
+
+  const counts = TIMING_GRADES.reduce((acc, g) => {
+    acc[g] = rated.filter(p => p.timing.grade === g).length
+    return acc
+  }, {})
+  const avg = rated.reduce((s, p) => s + (p.timing.timing_score || 0), 0) / rated.length
+  const risky = rated.filter(p => ['ELEVATED', 'HIGH'].includes(p.timing.event_risk?.level || 'LOW'))
+  const extended = rated.filter(p => (p.timing.extension_atr ?? 0) > 2.5)
+  const avgRisk = rated
+    .map(p => p.timing.near_term_risk_pct)
+    .filter(v => v != null)
+  const avgRiskPct = avgRisk.length ? avgRisk.reduce((s, v) => s + v, 0) / avgRisk.length : null
+  const ready = counts.BUY_NOW + counts.ACCUMULATE
+  const readyCol = ready === 0 ? 'text-rose-400'
+    : ready >= rated.length / 2 ? 'text-emerald-400' : 'text-white'
+
+  return (
+    <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60">
+        <h2 className="text-lg font-bold text-white">Technical Analysis — Entry Timing</h2>
+        <p className="text-xs text-neutral-500 mt-0.5">
+          Fundamentals decide what to own. These 14 signals decide whether today is a defensible price to pay.
+          Scored on validated price history only — no additional data requests.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 divide-x divide-neutral-800/60 border-b border-neutral-800/60">
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Buyable Today</div>
+          <div className={`text-2xl font-bold font-mono ${readyCol}`}>{ready}<span className="text-neutral-600 text-sm">/{rated.length}</span></div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">Buy Now or Accumulate grade</div>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Avg Timing Score</div>
+          <div className="text-2xl font-bold font-mono text-neutral-100">{avg.toFixed(0)}</div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">0–100 · 70+ is a clean entry</div>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Extended &gt; 2.5 ATR</div>
+          <div className={`text-2xl font-bold font-mono ${extended.length ? 'text-rose-400' : 'text-emerald-400'}`}>{extended.length}</div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">Stretched above the 20-day mean</div>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Event Risk Flagged</div>
+          <div className={`text-2xl font-bold font-mono ${risky.length ? 'text-rose-400' : 'text-emerald-400'}`}>{risky.length}</div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">
+            {avgRiskPct != null ? `Avg 1-ATR risk ${avgRiskPct.toFixed(1)}%` : 'Earnings, macro, seasonal'}
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 py-3">
+        <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-2">Grade Distribution</div>
+        <div className="flex h-2 rounded-full overflow-hidden bg-neutral-800 mb-2">
+          {TIMING_GRADES.map(g => counts[g] > 0 && (
+            <div key={g} className={timingMeta(g).bar} style={{ width: `${counts[g] / rated.length * 100}%` }} />
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {TIMING_GRADES.map(g => (
+            <div key={g} className="flex items-center gap-1.5">
+              <span className={`w-2 h-2 rounded-sm ${timingMeta(g).bar}`} />
+              <span className="text-[10px] text-neutral-400">{timingMeta(g).label}</span>
+              <span className={`text-[10px] font-mono font-bold ${timingMeta(g).text}`}>{counts[g]}</span>
+            </div>
+          ))}
+        </div>
+        {ready === 0 && (
+          <div className="mt-2 text-[11px] text-rose-300/90">
+            Nothing on this list is a clean entry right now. Holding cash is a position.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Per-pick detail: the full signal stack, the entry plan, and event risk.
+function TimingPanel({ t, stopLoss }) {
+  if (!t) return null
+  const m = timingMeta(t.grade)
+
+  if (!t.ok) {
+    return (
+      <div className="mt-3 pt-3 border-t border-neutral-800/60">
+        <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1">Entry Timing</div>
+        <div className="text-[11px] text-neutral-500">
+          {t.summary || 'No short-term timing read available.'}
+          {t.reason ? <span className="text-neutral-700"> ({t.reason})</span> : null}
+        </div>
+      </div>
+    )
+  }
+
+  const signals = Array.isArray(t.signals) ? t.signals : []
+  const plan = t.entry_plan
+  const ev = t.event_risk || {}
+  const caps = Array.isArray(t.grade_caps) ? t.grade_caps : []
+
+  return (
+    <div className="mt-3 pt-3 border-t border-neutral-800/60">
+      <div className="flex items-center flex-wrap gap-2 mb-2">
+        <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Entry Timing</span>
+        <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${m.text} ${m.border} ${m.bg}`}>
+          {m.label} · {Math.round(t.timing_score)}/100
+        </span>
+        <span className="text-[10px] text-emerald-400/80">{t.bull_count} bullish</span>
+        <span className="text-[10px] text-rose-400/80">{t.bear_count} bearish</span>
+        {t.near_term_risk_pct != null && (
+          <span className="text-[10px] text-neutral-500">1-ATR risk {t.near_term_risk_pct}%</span>
+        )}
+        {ev.level && ev.level !== 'LOW' && (
+          <span className={`text-[10px] font-bold ${EVENT_RISK_TEXT[ev.level] || 'text-neutral-400'}`}>
+            Event risk {ev.level.toLowerCase()}
+          </span>
+        )}
+      </div>
+
+      <p className="text-[11px] text-neutral-300 mb-2">{t.summary}</p>
+
+      {caps.length > 0 && (
+        <div className="mb-2 space-y-0.5">
+          {caps.map((c, i) => (
+            <div key={i} className="text-[10px] text-rose-300/90">Grade capped: {c}</div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid md:grid-cols-2 gap-4">
+        {/* Signal stack — worst first, because the weakest link sets the risk. */}
+        <div className="space-y-1">
+          {signals.map(s => (
+            <div key={s.name} className="flex items-center gap-2">
+              <span className="text-[9px] text-neutral-500 w-24 shrink-0 truncate capitalize">{s.label}</span>
+              <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden min-w-[40px]">
+                <div className={`h-full ${stateBar(s.state)}`} style={{ width: `${Math.max(2, Math.min(100, s.score))}%` }} />
+              </div>
+              <span className={`text-[9px] font-mono w-7 text-right shrink-0 ${stateText(s.state)}`}>{s.score}</span>
+              <span className="text-[9px] text-neutral-500 flex-1 truncate hidden lg:block" title={s.detail}>{s.detail}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Entry plan + event risk */}
+        <div>
+          {plan && (
+            <div className="bg-neutral-900/60 border border-neutral-800/60 rounded-lg px-3 py-2">
+              <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">Entry Plan</div>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+                <span className="text-neutral-500">Ideal entry</span>
+                <span className="font-mono text-neutral-100 text-right">{fmtPrice(plan.ideal_entry)}</span>
+                <span className="text-neutral-500">Entry zone</span>
+                <span className="font-mono text-neutral-300 text-right">{fmtPrice(plan.entry_zone_low)} – {fmtPrice(plan.entry_zone_high)}</span>
+                <span className="text-neutral-500">Technical invalidation</span>
+                <span className="font-mono text-rose-300/90 text-right">{fmtPrice(plan.structural_stop)} ({plan.stop_pct}%)</span>
+                <span className="text-neutral-500">Size factor</span>
+                <span className={`font-mono text-right font-bold ${plan.size_factor >= 1 ? 'text-emerald-400' : plan.size_factor <= 0 ? 'text-rose-400' : 'text-neutral-200'}`}>
+                  {(plan.size_factor * 100).toFixed(0)}%
+                </span>
+              </div>
+              <div className="text-[10px] text-neutral-400 mt-1.5 pt-1.5 border-t border-neutral-800/60">
+                {plan.note}
+                <span className="text-neutral-600"> The {fmtPrice(stopLoss)} position stop governs the trade; the level above is where the technical thesis breaks.</span>
+              </div>
+            </div>
+          )}
+          {Array.isArray(ev.items) && ev.items.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1">Event Watch</div>
+              <ul className="space-y-0.5">
+                {ev.items.map((it, i) => (
+                  <li key={i} className="text-[10px] text-neutral-400">· {it}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Pick Row ─────────────────────────────────────────────────────────────────
 function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
-  const alloc = calcAlloc(cash, p.entry_price, rank)
+  const alloc = calcAlloc(cash, p.entry_price, rank, p.timing?.entry_plan?.size_factor)
   const rrColor = !p.reward_risk_ratio ? 'text-neutral-500'
     : p.reward_risk_ratio >= 3 ? 'text-emerald-400'
     : p.reward_risk_ratio >= 2 ? 'text-neutral-300'
@@ -184,8 +420,11 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
         {/* Sector */}
         <div className="col-span-1 text-neutral-400 text-xs truncate">{p.sector || '—'}</div>
 
-        {/* Entry */}
-        <div className="col-span-1 text-right font-mono text-neutral-200 text-xs">{fmtPrice(p.entry_price)}</div>
+        {/* Entry + technical entry-timing grade */}
+        <div className="col-span-1 text-right">
+          <div className="font-mono text-neutral-200 text-xs">{fmtPrice(p.entry_price)}</div>
+          <div className="mt-0.5"><TimingChip t={p.timing} /></div>
+        </div>
 
         {/* Fund Score */}
         <div className={`col-span-1 text-right font-mono text-xs font-bold ${scoreColor(p.fundamental_score)}`}>
@@ -236,11 +475,16 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
           {!cash || cash <= 0 ? (
             <span className="text-neutral-600">—</span>
           ) : !alloc.fund ? (
-            <span className="text-neutral-600 text-[10px]">skip</span>
+            <span className={`text-[10px] ${alloc.sf === 0 ? 'text-rose-400 font-bold' : 'text-neutral-600'}`}>
+              {alloc.sf === 0 ? 'no entry' : 'skip'}
+            </span>
           ) : (
             <div>
               <div className="text-neutral-100 font-bold">{alloc.shares} sh</div>
               <div className="text-[10px] text-neutral-500">{fmtMoney(alloc.dollars)}</div>
+              {alloc.sf < 1 && (
+                <div className="text-[9px] text-neutral-500">{(alloc.sf * 100).toFixed(0)}% size · timing</div>
+              )}
             </div>
           )}
         </div>
@@ -264,6 +508,7 @@ function PickRow({ p, rank, cash, expanded, onToggle, qhfSig }) {
           ) : (
             <span className="text-xs text-neutral-600">No signal details available for this pick.</span>
           )}
+          <TimingPanel t={p.timing} stopLoss={p.stop_loss} />
           <QHFFactors sig={qhfSig} />
 
           {/* Buy this pick → carry entry/stop/target into the Watchlist sell engine */}
@@ -334,7 +579,7 @@ function PickTable({ picks, cash, quantSignals }) {
         <div>
           <h2 className="text-lg font-bold text-white">Long-Term Fundamental Picks</h2>
           <p className="text-xs text-neutral-500 mt-0.5">
-            {picks.length} picks · {sortCol ? `Sorted by ${sortCol.replace(/_/g, ' ')} ${sortDir}` : 'Ranked by fundamental score'} · Click row to expand signals · Click ticker to view detail
+            {picks.length} picks · {sortCol ? `Sorted by ${sortCol.replace(/[._]/g, ' ')} ${sortDir}` : 'Ranked by fundamental score'} · Click row to expand signals, entry plan and timing · Click ticker to view detail
           </p>
         </div>
         <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-300 border border-neutral-600/50 px-2 py-1 rounded">
@@ -346,7 +591,7 @@ function PickTable({ picks, cash, quantSignals }) {
       <div className="grid grid-cols-12 gap-1 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60">
         <div className="col-span-2 text-[10px] font-bold uppercase tracking-wider text-neutral-500">Ticker</div>
         <div className="col-span-1 text-[10px] font-bold uppercase tracking-wider text-neutral-500">Sector</div>
-        <SortTh label="Entry"   col="entry_price"        sortCol={sortCol} sortDir={sortDir} onSort={onSort} />
+        <SortTh label="Entry / Timing" col="timing.timing_score" sortCol={sortCol} sortDir={sortDir} onSort={onSort} />
         <SortTh label="Score"   col="fundamental_score"  sortCol={sortCol} sortDir={sortDir} onSort={onSort} />
         <SortTh label="Rev Gr"  col="revenue_growth_pct" sortCol={sortCol} sortDir={sortDir} onSort={onSort} />
         <SortTh label="Conf"    col="confidence"         sortCol={sortCol} sortDir={sortDir} onSort={onSort} />
@@ -397,7 +642,8 @@ function CashInput({ value, onChange }) {
       {value > 0 && (
         <div className="text-[11px] text-neutral-500">
           {(ALLOC_PCT * 100).toFixed(0)}% per pick · top {MAX_FUNDED} positions
-          · total deploy ≈ {fmtMoney(value * ALLOC_PCT * Math.min(MAX_FUNDED, 10))}
+          · max deploy ≈ {fmtMoney(value * ALLOC_PCT * Math.min(MAX_FUNDED, 10))}
+          · scaled down automatically on poor entry timing
         </div>
       )}
     </div>
@@ -686,8 +932,11 @@ export default function SymbolsToBuy() {
             <span><span className="font-bold text-neutral-400">ROE</span> = Return on equity</span>
             <span><span className="font-bold text-neutral-400">PEG</span> = Price/earnings-to-growth ({"<"}1.5 = good)</span>
             <span><span className="font-bold text-neutral-400">R:R</span> = Reward:risk ratio (3x+ = ideal)</span>
+            <span><span className="font-bold text-neutral-400">Timing</span> = short-term entry grade (Buy Now / Accumulate / Wait / Avoid)</span>
             <span><span className="font-bold text-neutral-400">Click any column header</span> to sort · <span className="font-bold text-neutral-400">Click row</span> to expand signals</span>
           </div>
+
+          <TimingSummary picks={data.long_picks} />
 
           <PickTable picks={data.long_picks} cash={cash} quantSignals={quantSignals} />
         </div>

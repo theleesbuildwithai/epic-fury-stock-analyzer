@@ -8324,6 +8324,7 @@ def api_symbols_to_buy(request: Request, force_refresh: bool = False):
                 "volatility_60d_pct": p.get("volatility_60d_pct"),
                 "momentum_pct": p.get("momentum_12m_pct"),
                 "hold_class": "position",
+                "timing": p.get("timing"),
                 "reasons": (p.get("reasons") or [])[:5],
                 "recommended_hold": "6-12 weeks · fundamentals-driven",
                 "no_day_trading": True,

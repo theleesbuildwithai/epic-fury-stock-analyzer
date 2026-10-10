@@ -8041,6 +8041,105 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     except Exception as _news_stb_err:
         logger.warning(f"STB news overlay skipped (non-fatal): {_news_stb_err}")
 
+    # ── Short-term entry-timing overlay (fundamentally good ≠ good entry) ────
+    # STB screens quality + 12-month momentum but had NO short-term entry read.
+    # That is how you own a good company and still lose money for six weeks:
+    # buying a name trading 3+ ATRs above its 20-day mean.
+    #
+    # analysis.stb_timing is PURE — it performs no network I/O whatsoever. It
+    # only scores the close arrays this function already fetched and validated,
+    # so it cannot add a single outbound request and cannot be rate-limited.
+    #
+    # It is also fail-CLOSED on price integrity: `expected_price` is the price
+    # that already survived STB's own multi-source validation. If the cached
+    # series disagrees with it by >5%, the series may be a yfinance MultiIndex
+    # scramble (one ticker's history under another's symbol) and the pick is
+    # left UNRATED with zero tilt. A timing score on the wrong series is
+    # confident, specific and false — strictly worse than no score.
+    #
+    # Tilts are hard-capped (score +/-10, confidence -6..+3) and never
+    # hard-drop a pick here; only an explicit AVOID grade gates a pick, and
+    # only while the picks floor is respected.
+    for _c in candidates:
+        _c["timing"] = None
+    try:
+        from analysis.stb_timing import compute_timing as _compute_timing
+
+        def _closes_for(_sym):
+            """Close array for a ticker from data already in memory. No I/O."""
+            _arr = lastgood_stocks.get(_sym)
+            if _arr is not None and len(_arr) >= 60:
+                return _np.asarray(_arr, dtype=float)
+            _ent = _PRICE_DATA_LASTGOOD.get(_sym)
+            _df = _ent.get("df") if isinstance(_ent, dict) else _ent
+            if _df is None or "Close" not in getattr(_df, "columns", []):
+                return None
+            _s = _df["Close"].dropna()
+            return _np.asarray(_s.values, dtype=float) if len(_s) >= 60 else None
+
+        def _volumes_for(_sym):
+            _ent = _PRICE_DATA_LASTGOOD.get(_sym)
+            _df = _ent.get("df") if isinstance(_ent, dict) else _ent
+            if _df is None or "Volume" not in getattr(_df, "columns", []):
+                return None
+            _s = _df["Volume"].dropna()
+            return _np.asarray(_s.values, dtype=float) if len(_s) >= 60 else None
+
+        _bench = _closes_for("SPY")
+        _timing_counts: dict = {}
+        for _c in candidates:
+            _sym_t = _c.get("ticker") or ""
+            if not _sym_t:
+                continue
+            _cl = _closes_for(_sym_t)
+            if _cl is None:
+                continue
+            _fd_t = _stb_fundamentals.get(_sym_t) or {}
+            _earn_ts_t = _fd_t.get("next_earnings_ts")
+            if _earn_ts_t:
+                _ned_t_raw = (_earn_ts_t - time.time()) / 86400.0
+                _ned_t = int(round(_ned_t_raw)) if _ned_t_raw >= 0 else None
+            else:
+                _ned_t = _fd_t.get("next_earnings_days")
+            _t = _compute_timing(
+                _cl,
+                volumes=_volumes_for(_sym_t),
+                benchmark_closes=_bench,
+                sector=_c.get("sector"),
+                news=_c.get("news"),
+                earnings_days=_ned_t,
+                expected_price=_c.get("price"),
+            )
+            _c["timing"] = _t
+            _timing_counts[_t.get("grade")] = _timing_counts.get(_t.get("grade"), 0) + 1
+            _tst = float(_t.get("score_tilt") or 0.0)
+            _tct = int(_t.get("conf_tilt") or 0)
+            if not _fm.isfinite(_tst):
+                _tst = 0.0
+            _c["fundamental_score"] = round(
+                max(0.0, float(_c.get("fundamental_score", 0.0)) + _tst), 1)
+            # Floor 72 mirrors the news overlay: timing re-ranks and can warn,
+            # but a single technical read never silently vetoes a strong long.
+            _c["confidence"] = max(72, min(95, int(_c.get("confidence", 75)) + _tct))
+            # Surface the technical read on the card so the user sees WHY.
+            if _t.get("grade") in ("AVOID", "WAIT"):
+                _rt = [f"Entry timing {_t['grade'].replace('_', ' ')}: "
+                       f"{(_t.get('signals') or [{}])[0].get('detail', 'poor short-term setup')}"] \
+                    + list(_c.get("reasons") or [])
+                _c["reasons"] = _rt[:5]
+            elif _t.get("grade") == "BUY_NOW":
+                _rt = list(_c.get("reasons") or [])
+                _rt.append("Entry timing clean — trend, extension and momentum align")
+                _c["reasons"] = _rt[:5]
+            for _evi in (_t.get("event_risk") or {}).get("items", [])[:1]:
+                _re = [f"Event risk: {_evi}"] + list(_c.get("reasons") or [])
+                _c["reasons"] = _re[:5]
+        if _timing_counts:
+            logger.info(f"STB TIMING: graded {sum(_timing_counts.values())} "
+                        f"candidates — {_timing_counts}")
+    except Exception as _timing_stb_err:
+        logger.warning(f"STB timing overlay skipped (non-fatal): {_timing_stb_err}")
+
     # v137: sort by confidence desc (user request), then score as tiebreaker
     candidates.sort(key=lambda x: (-x.get("confidence", 0), -x.get("fundamental_score", 0)))
 
@@ -8093,17 +8192,42 @@ def generate_fundamental_picks(force: bool = False) -> dict:
     # v135: enforce 70% confidence minimum — nothing below 70 shows in STB
     top_picks = [p for p in top_picks if p.get("confidence", 0) >= 70]
 
+    _STB_PICKS_FLOOR = 15
+
+    # ── AVOID gate: drop picks whose short-term technicals are hostile ───────
+    # An AVOID grade means the tape is actively working against an entry today.
+    # The pick may still be a good company — it is simply not a good buy now.
+    # Only applied while the picks floor holds, so a hostile tape across the
+    # whole market degrades the list gracefully instead of emptying it.
+    try:
+        _avoid = [p for p in top_picks
+                  if ((p.get("timing") or {}).get("grade") == "AVOID")]
+        if _avoid and (len(top_picks) - len(_avoid)) >= _STB_PICKS_FLOOR:
+            _avoid_syms = [p.get("ticker") for p in _avoid]
+            top_picks = [p for p in top_picks if p not in _avoid]
+            logger.info(f"STB TIMING AVOID-DROP: {len(_avoid)} picks removed "
+                        f"on hostile short-term technicals — {_avoid_syms}")
+        elif _avoid:
+            logger.info(f"STB TIMING: {len(_avoid)} AVOID picks retained — "
+                        f"dropping them would breach the {_STB_PICKS_FLOOR}-pick floor")
+    except Exception as _avoid_err:
+        logger.warning(f"STB timing AVOID gate skipped (non-fatal): {_avoid_err}")
+
     # ── Minimum picks floor — relax sector cap if result is thin ─────────
     # If the sector cap + correlation filter pruned us below 15 picks,
     # make a second pass over remaining candidates with the sector cap raised
     # to 8 (not unlimited — sector concentration is still a risk). This is a
     # pure safety net: it only fires when the first pass is unusually sparse
     # (thin market, many earnings blackouts, extreme regime filtering).
-    _STB_PICKS_FLOOR = 15
     if len(top_picks) < _STB_PICKS_FLOOR:
         _remaining = [c for c in candidates
                       if c.get("confidence", 0) >= 70
                       and c not in top_picks]
+        # Backfill with the best available entries first; AVOID-graded names are
+        # the last resort so the relaxed pass cannot undo the AVOID gate.
+        _remaining.sort(key=lambda c: (
+            ((c.get("timing") or {}).get("grade") == "AVOID"),
+            -c.get("confidence", 0), -c.get("fundamental_score", 0)))
         if _remaining:
             logger.warning(
                 f"STB PICKS FLOOR: only {len(top_picks)} picks after first pass — "
