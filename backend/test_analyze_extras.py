@@ -208,6 +208,93 @@ def main_test():
               r.status_code != 500 and "_raised" not in r.json(),
               f"status={r.status_code} body={r.json()}")
 
+    # ── 5. Entry-timing block ───────────────────────────────────────────────────
+    # Contract: `timing` is ALWAYS present as a key (null when unavailable), is
+    # computed fresh on every call (never served from the 24h earnings cache),
+    # and fails CLOSED when the cached series disagrees with the live price.
+    import numpy as _np
+    import pandas as _pd
+    import analysis.quant_engine as _qe
+
+    ed._fetch_earnings_dates = lambda t, lookback_quarters=8: []
+    fake_yf.Ticker = lambda t: _NoFutureTk()
+
+    _rng = _np.random.default_rng(11)
+    _closes = 100 * _np.exp(_np.cumsum(_rng.normal(0.0009, 0.011, 300)))
+    _spot = round(float(_closes[-1]), 2)
+    _frame = _pd.DataFrame({
+        "Close": _closes,
+        "Volume": _np.abs(_rng.normal(1e6, 2e5, 300)),
+    })
+    _saved_lastgood = _qe._PRICE_DATA_LASTGOOD
+    _qe._PRICE_DATA_LASTGOOD = {
+        "TIMED": {"df": _frame, "ts": datetime.utcnow()},
+        "SPY": {"df": _pd.DataFrame({"Close": _closes * 0.8}), "ts": datetime.utcnow()},
+    }
+    try:
+        # Uncached ticker -> timing key present but null (no network fallback).
+        _bust_cache("NOHIST")
+        b = call("NOHIST")
+        check("timing: key always present", "timing" in b, f"keys={list(b)}")
+        check("timing: null when no cached history", b.get("timing") is None,
+              f"timing={b.get('timing')}")
+
+        # Cached history + matching spot price -> a real graded read.
+        _bust_cache("TIMED")
+        b = main.analyze_extras(_FakeReq(), "TIMED", price=_spot)
+        t = b.get("timing")
+        check("timing: graded when history available",
+              isinstance(t, dict) and t.get("ok") is True, f"timing={t}")
+        if isinstance(t, dict):
+            check("timing: grade is a known label",
+                  t.get("grade") in ("BUY_NOW", "ACCUMULATE", "WAIT", "AVOID"),
+                  str(t.get("grade")))
+            check("timing: score in 0-100",
+                  isinstance(t.get("timing_score"), (int, float))
+                  and 0 <= t["timing_score"] <= 100, str(t.get("timing_score")))
+            check("timing: entry plan present",
+                  isinstance(t.get("entry_plan"), dict), str(t.get("entry_plan")))
+            check("timing: tilts bounded",
+                  -10.0 <= t.get("score_tilt", 0) <= 10.0
+                  and -6 <= t.get("conf_tilt", 0) <= 3,
+                  f"score_tilt={t.get('score_tilt')} conf_tilt={t.get('conf_tilt')}")
+        check("timing: body NaN/inf-clean", _all_finite(b))
+
+        # PRICE-CORRUPTION GATE: a spot price far from the cached series means
+        # the series may belong to another ticker. Must fail CLOSED, not guess.
+        b = main.analyze_extras(_FakeReq(), "TIMED", price=round(_spot * 0.4, 2))
+        t = b.get("timing")
+        check("timing: fails closed on price mismatch",
+              isinstance(t, dict) and t.get("ok") is False
+              and t.get("grade") == "UNRATED", f"timing={t}")
+        check("timing: mismatch yields zero tilt",
+              isinstance(t, dict) and t.get("score_tilt") == 0.0
+              and t.get("conf_tilt") == 0, f"timing={t}")
+
+        # NOT CACHED: a later call must re-grade against the NEW price, so a
+        # stale grade can never be served after the price has moved.
+        b2 = main.analyze_extras(_FakeReq(), "TIMED", price=_spot)
+        check("timing: recomputed per request (not cached with earnings)",
+              isinstance(b2.get("timing"), dict) and b2["timing"].get("ok") is True,
+              f"timing={b2.get('timing')}")
+
+        # Hostile price params must never raise and never produce NaN.
+        for bad in (0, -5, 10 ** 9, float("nan")):
+            try:
+                bb = main.analyze_extras(_FakeReq(), "TIMED", price=bad)
+                ok = ("timing" in bb) and _all_finite(bb)
+            except Exception:
+                ok = False
+            check(f"timing: hostile price {bad!r} handled", ok)
+
+        # No price supplied at all: still graded (integrity gate simply has
+        # nothing to cross-check against), never a crash.
+        bb = main.analyze_extras(_FakeReq(), "TIMED")
+        check("timing: works with no price param",
+              "timing" in bb and _all_finite(bb), f"timing={bb.get('timing')}")
+    finally:
+        _qe._PRICE_DATA_LASTGOOD = _saved_lastgood
+
     print("\n" + ("ALL TESTS PASSED" if not _failures else f"FAILURES: {_failures}"))
     return 0 if not _failures else 1
 

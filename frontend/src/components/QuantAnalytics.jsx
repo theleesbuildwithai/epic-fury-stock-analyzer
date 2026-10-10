@@ -478,6 +478,134 @@ function EarningsPanel({ chart, earnings }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// 10) ENTRY TIMING — the verdict panel
+// Reuses the SAME graded read the STB picks page uses (/api/analyze-extras
+// -> stb_timing.compute_timing), so the two pages can never disagree about
+// whether a name is a buyable entry today. Fails closed: if the backend could
+// not verify the price series against the spot shown on this page, the grade is
+// withheld and the panel says so rather than guessing.
+// ══════════════════════════════════════════════════════════════════════════════
+const TIMING_META = {
+  BUY_NOW: { label: 'BUY NOW', cls: 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10' },
+  ACCUMULATE: { label: 'ACCUMULATE', cls: 'text-white border-neutral-600 bg-neutral-800/60' },
+  WAIT: { label: 'WAIT', cls: 'text-neutral-300 border-neutral-700 bg-neutral-900/60' },
+  AVOID: { label: 'AVOID', cls: 'text-rose-400 border-rose-500/40 bg-rose-500/10' },
+  UNRATED: { label: 'UNRATED', cls: 'text-neutral-500 border-neutral-800 bg-neutral-900/60' },
+}
+const stateCls = (s) => s === 'BULL' ? 'text-emerald-400' : s === 'BEAR' ? 'text-rose-400' : 'text-neutral-400'
+const barCls = (s) => s === 'BULL' ? 'bg-emerald-500' : s === 'BEAR' ? 'bg-rose-500' : 'bg-neutral-500'
+
+function EntryTimingPanel({ t }) {
+  if (!t || typeof t !== 'object') return null
+  const grade = TIMING_META[t.grade] ? t.grade : 'UNRATED'
+  const meta = TIMING_META[grade]
+  const score = Number(t.timing_score)
+  const signals = Array.isArray(t.signals) ? t.signals.slice(0, 7) : []
+  const plan = t.entry_plan || null
+  const ev = t.event_risk || null
+  const caps = Array.isArray(t.grade_caps) ? t.grade_caps : []
+  const evItems = Array.isArray(ev?.items) ? ev.items.slice(0, 4) : []
+
+  return (
+    <Card
+      title="Entry timing"
+      subtitle="Short-term technical entry grade — 14 weighted signals, same engine that grades STB entries"
+      right={
+        <div className="text-right">
+          <div className={`inline-block px-2 py-0.5 rounded-md border text-[10px] font-black tracking-wider ${meta.cls}`}>
+            {meta.label}
+          </div>
+          <div className="text-[10px] text-neutral-500 mt-1 font-mono">
+            {Number.isFinite(score) ? `score ${score.toFixed(0)}/100` : 'no score'}
+          </div>
+        </div>
+      }
+    >
+      <p className="text-[11px] text-neutral-300 leading-snug mb-3">{t.summary || '—'}</p>
+
+      {t.ok === false && (
+        <p className="text-[11px] text-rose-400 leading-snug mb-3">
+          Grade withheld — {t.reason === 'price_mismatch'
+            ? 'cached price history disagrees with the live quote. A timing read on the wrong series would be confidently wrong.'
+            : 'insufficient verified price history.'}
+        </p>
+      )}
+
+      {caps.length > 0 && (
+        <div className="mb-3 space-y-1">
+          {caps.map((c, i) => (
+            <p key={i} className="text-[10px] text-rose-400 leading-snug">Grade capped: {c}</p>
+          ))}
+        </div>
+      )}
+
+      {signals.length > 0 && (
+        <div className="space-y-1.5 mb-3">
+          <div className="text-[9px] uppercase tracking-wider text-neutral-500">Weakest signals first</div>
+          {signals.map((s) => (
+            <div key={s.name} className="flex items-center gap-2">
+              <div className="w-[110px] shrink-0 text-[10px] text-neutral-400 truncate" title={s.detail}>{s.label}</div>
+              <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                <div className={`h-full ${barCls(s.state)}`}
+                  style={{ width: `${Math.max(0, Math.min(100, Number(s.score) || 0))}%` }} />
+              </div>
+              <div className={`w-8 shrink-0 text-right text-[10px] font-mono ${stateCls(s.state)}`}>{Number(s.score) || 0}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {plan && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3 text-center">
+          <div className="bg-neutral-900/60 border border-neutral-800 rounded-lg px-2 py-1.5">
+            <div className="text-[9px] uppercase tracking-wider text-neutral-500">Entry zone</div>
+            <div className="text-xs font-mono font-bold text-white">
+              {fmtMoney(plan.entry_zone_low)}–{fmtMoney(plan.entry_zone_high)}
+            </div>
+          </div>
+          <div className="bg-neutral-900/60 border border-neutral-800 rounded-lg px-2 py-1.5">
+            <div className="text-[9px] uppercase tracking-wider text-neutral-500">Ideal entry</div>
+            <div className="text-xs font-mono font-bold text-white">{fmtMoney(plan.ideal_entry)}</div>
+          </div>
+          <div className="bg-neutral-900/60 border border-neutral-800 rounded-lg px-2 py-1.5">
+            <div className="text-[9px] uppercase tracking-wider text-neutral-500">Technical invalidation</div>
+            <div className="text-xs font-mono font-bold text-rose-400">{fmtMoney(plan.structural_stop)}</div>
+          </div>
+          <div className="bg-neutral-900/60 border border-neutral-800 rounded-lg px-2 py-1.5">
+            <div className="text-[9px] uppercase tracking-wider text-neutral-500">Expected adverse move</div>
+            <div className="text-xs font-mono font-bold text-white">
+              {t.near_term_risk_pct == null ? '—' : fmtNum(t.near_term_risk_pct, 1) + '%'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {plan?.note && <p className="text-[10px] text-neutral-500 leading-snug mb-2">{plan.note}</p>}
+
+      {evItems.length > 0 && (
+        <div className="border-t border-neutral-800 pt-2">
+          <div className="text-[9px] uppercase tracking-wider text-neutral-500 mb-1">
+            Event watch — {String(ev.level || 'LOW').toLowerCase()}
+          </div>
+          <ul className="space-y-0.5">
+            {evItems.map((it, i) => (
+              <li key={i} className="text-[10px] text-neutral-400 leading-snug">· {it}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {Number.isFinite(Number(t.extension_atr)) && (
+        <p className="text-[10px] text-neutral-600 mt-2">
+          Price sits {fmtNum(t.extension_atr, 1)} ATR above its 20-day mean.
+          {Number(t.extension_atr) >= 2.5 ? ' Extended — chasing here pays the premium.' : ''}
+        </p>
+      )}
+    </Card>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // SECTION CONTAINER — fetches supporting data (fail-isolated) and lays out panels
 // ══════════════════════════════════════════════════════════════════════════════
 export default function QuantAnalytics({ analysis, ticker, pick }) {
@@ -485,15 +613,18 @@ export default function QuantAnalytics({ analysis, ticker, pick }) {
   const [rel, setRel] = useState(null)               // relative strength vs SPY
   const [sectorRel, setSectorRel] = useState(null)   // vs sector ETF
   const [earnings, setEarnings] = useState(null)     // extras earnings
+  const [timing, setTiming] = useState(null)         // extras entry-timing grade
   const [ready, setReady] = useState(false)
 
   const baseChart = analysis?.chart_data || []
   const info = analysis?.info || null
   const sector = info?.sector || null
+  const spot = Number(info?.current_price)
 
   useEffect(() => {
     let cancelled = false
-    setLongChart(null); setRel(null); setSectorRel(null); setEarnings(null); setReady(false)
+    setLongChart(null); setRel(null); setSectorRel(null); setEarnings(null)
+    setTiming(null); setReady(false)
     if (!ticker || !Array.isArray(baseChart) || baseChart.length < 30) { setReady(true); return }
 
     async function load() {
@@ -527,9 +658,14 @@ export default function QuantAnalytics({ analysis, ticker, pick }) {
         await sleep(250)
       }
 
-      // 4) Earnings extras (fully optional).
-      const ex = await safeJson(`/api/analyze-extras/${encodeURIComponent(ticker)}`)
+      // 4) Earnings + entry-timing extras (fully optional).
+      // The spot price is passed so the backend can verify its cached close
+      // series against what this page is actually showing. On a >5% divergence
+      // the grade is withheld rather than computed on a corrupted series.
+      const q = (Number.isFinite(spot) && spot > 0) ? `?price=${encodeURIComponent(spot)}` : ''
+      const ex = await safeJson(`/api/analyze-extras/${encodeURIComponent(ticker)}${q}`)
       if (!cancelled && ex && ex.earnings) setEarnings(ex.earnings)
+      if (!cancelled && ex && ex.timing) setTiming(ex.timing)
 
       if (!cancelled) setReady(true)
     }
@@ -552,6 +688,7 @@ export default function QuantAnalytics({ analysis, ticker, pick }) {
         <div className="h-px flex-1 bg-neutral-800" />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <PanelBoundary><EntryTimingPanel t={timing} /></PanelBoundary>
         <PanelBoundary><MonteCarloPanel closes={statCloses} targets={targets} /></PanelBoundary>
         <PanelBoundary><RelativeStrengthPanel rel={rel} sectorRel={sectorRel} /></PanelBoundary>
         <PanelBoundary><DistributionPanel closes={statCloses} /></PanelBoundary>

@@ -5134,8 +5134,80 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
         }
 
 
+def _extras_timing(clean_ticker: str, price=None, earnings_days=None):
+    """Entry-timing read for the analyze page. Returns None when unavailable.
+
+    Reuses the SAME tested engine that grades STB entries, so the analyze page
+    and the picks page can never disagree about whether a name is a good entry
+    today. Two pages giving different verdicts is worse than one verdict.
+
+    ZERO NETWORK COST: scores only the close history already resident in the
+    quant engine's in-memory cache. If a ticker is not cached this returns
+    None rather than fetching — the analyze page is not worth spending the
+    Yahoo request budget on, and a rate-limited app is a broken app.
+
+    MUST NOT BE CACHED by the caller: price moves intraday, so a stale
+    "BUY NOW" would be actively harmful. The computation is pure arithmetic.
+    """
+    try:
+        import analysis.quant_engine as _qe_t
+        import numpy as _np_t
+        from analysis.stb_timing import compute_timing as _ct
+
+        def _closes(_sym):
+            _ent = (_qe_t._PRICE_DATA_LASTGOOD or {}).get(_sym)
+            _df = _ent.get("df") if isinstance(_ent, dict) else _ent
+            if _df is None or "Close" not in getattr(_df, "columns", []):
+                return None
+            _s = _df["Close"].dropna()
+            return _np_t.asarray(_s.values, dtype=float) if len(_s) >= 60 else None
+
+        _cl = _closes(clean_ticker)
+        if _cl is None:
+            return None
+
+        _vol = None
+        _ent = (_qe_t._PRICE_DATA_LASTGOOD or {}).get(clean_ticker)
+        _df = _ent.get("df") if isinstance(_ent, dict) else _ent
+        if _df is not None and "Volume" in getattr(_df, "columns", []):
+            _vs = _df["Volume"].dropna()
+            if len(_vs) >= 60:
+                _vol = _np_t.asarray(_vs.values, dtype=float)
+
+        # The caller-supplied spot price arms the price-integrity gate: if the
+        # cached series disagrees with what the user is looking at by >5%, the
+        # engine returns UNRATED instead of grading another stock's history.
+        _px = None
+        try:
+            if price is not None:
+                _p = float(price)
+                if 0 < _p < 1_000_000:
+                    _px = _p
+        except Exception:
+            _px = None
+
+        _ed = None
+        try:
+            if earnings_days is not None:
+                _ed = int(earnings_days)
+        except Exception:
+            _ed = None
+
+        return _ct(
+            _cl,
+            volumes=_vol,
+            benchmark_closes=_closes("SPY"),
+            sector=(_qe_t.SECTOR_MAP or {}).get(clean_ticker),
+            earnings_days=_ed,
+            expected_price=_px,
+        )
+    except Exception as _t_err:
+        logger.debug(f"analyze_extras timing {clean_ticker} soft-fail: {_t_err}")
+        return None
+
+
 @app.get("/api/analyze-extras/{ticker}")
-def analyze_extras(request: Request, ticker: str):
+def analyze_extras(request: Request, ticker: str, price: float = None):
     """Optional analyze-page extras: earnings calendar + reaction history.
 
     FAIL-ISOLATED BY DESIGN. Consumed only by the Quant Analytics section on
@@ -5163,7 +5235,7 @@ def analyze_extras(request: Request, ticker: str):
     except HTTPException:
         raise
     except Exception:
-        return {"ticker": (ticker or "")[:10].upper(), "earnings": None}
+        return {"ticker": (ticker or "")[:10].upper(), "earnings": None, "timing": None}
 
     import time as _t_ex
     import json as _json_ex
@@ -5173,11 +5245,24 @@ def analyze_extras(request: Request, ticker: str):
     cache_key = f"extras:{clean_ticker}"
     persist_key = f"analyze_extras:{clean_ticker}:{today_key}"
 
+    def _finish(_payload):
+        """Attach a FRESH timing read to a (possibly cached) earnings payload.
+
+        Earnings dates are safe to cache for a day; an entry-timing grade is
+        not — it is a statement about today's price. Timing is therefore
+        computed on every request and deliberately never written to either
+        cache layer. Returns a copy so cached dicts are never mutated.
+        """
+        _out = dict(_payload or {})
+        _ed = (_out.get("earnings") or {}).get("days_until")
+        _out["timing"] = _extras_timing(clean_ticker, price=price, earnings_days=_ed)
+        return _out
+
     # Layer 1: in-memory (reuse the analyze cache dict; 24h TTL).
     try:
         cached = _analyze_cache.get(cache_key)
         if cached and (_t_ex.time() - cached["ts"]) < _ANALYZE_CACHE_TTL:
-            return dict(cached["data"])
+            return _finish(cached["data"])
     except Exception:
         pass
 
@@ -5191,7 +5276,7 @@ def analyze_extras(request: Request, ticker: str):
                 _analyze_cache[cache_key] = {"data": stored, "ts": _t_ex.time()}
             except Exception:
                 pass
-            return dict(stored)
+            return _finish(stored)
     except Exception:
         pass
 
@@ -5307,7 +5392,7 @@ def analyze_extras(request: Request, ticker: str):
         except Exception:
             pass
 
-    return result
+    return _finish(result)
 
 
 @app.get("/api/quote/{ticker}")

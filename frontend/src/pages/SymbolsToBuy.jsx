@@ -278,6 +278,146 @@ function TimingSummary({ picks }) {
   )
 }
 
+// ─── Buy Today ────────────────────────────────────────────────────────────────
+// The decisive answer to "what do I buy?". A name appears here only when the
+// fundamental case, the technical entry and the event calendar all agree.
+// Derived entirely from the payload already on screen — no extra requests.
+//
+// Two tiers, deliberately: BUY is the unambiguous set; SCALE IN is good enough
+// to start a position but not to take full size. Everything else is excluded on
+// purpose. An empty list is a real answer, not a failure.
+const CONVICTION_MIN_CONF = 75
+const SCALE_MIN_CONF = 72
+const SCALE_MIN_TIMING = 62
+
+function buyTodayTiers(picks) {
+  const rated = (picks || []).filter(p =>
+    p && p.timing && p.timing.ok === true && !((p.timing.grade_caps || []).length))
+
+  // Event risk is a veto, not a discount: ELEVATED/HIGH means a binary event
+  // lands inside the entry window, and a good chart does not survive a bad print.
+  const calmEvent = p => !['ELEVATED', 'HIGH'].includes(p.timing.event_risk?.level || 'LOW')
+  const rank = (a, b) =>
+    ((b.fundamental_score || 0) + (b.timing.timing_score || 0)) -
+    ((a.fundamental_score || 0) + (a.timing.timing_score || 0))
+
+  const buy = rated.filter(p =>
+    p.timing.grade === 'BUY_NOW' &&
+    calmEvent(p) &&
+    (p.confidence || 0) >= CONVICTION_MIN_CONF
+  ).sort(rank)
+
+  const buySet = new Set(buy.map(p => p.ticker))
+  const scale = rated.filter(p =>
+    !buySet.has(p.ticker) &&
+    ['BUY_NOW', 'ACCUMULATE'].includes(p.timing.grade) &&
+    (p.timing.timing_score || 0) >= SCALE_MIN_TIMING &&
+    (p.confidence || 0) >= SCALE_MIN_CONF
+  ).sort(rank)
+
+  return { buy, scale, ratedCount: rated.length }
+}
+
+function ConvictionRow({ p, tier }) {
+  const t = p.timing
+  const plan = t.entry_plan || {}
+  const accent = tier === 'BUY' ? 'text-emerald-400' : 'text-white'
+  return (
+    <div className="grid grid-cols-12 gap-2 px-4 py-2.5 border-b border-neutral-800/40 items-center text-xs hover:bg-neutral-800/20">
+      <div className="col-span-2 flex items-center gap-2 min-w-0">
+        <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 ${
+          tier === 'BUY'
+            ? 'text-emerald-400 border-emerald-600/50 bg-emerald-600/10'
+            : 'text-neutral-300 border-neutral-600/50 bg-neutral-700/30'
+        }`}>{tier === 'BUY' ? 'Buy' : 'Scale'}</span>
+        <Link
+          to={`/symbol/${p.ticker}?side=long`}
+          className={`font-bold text-base hover:underline truncate ${accent}`}
+        >{p.ticker}</Link>
+      </div>
+      <div className="col-span-2 text-neutral-500 text-[11px] truncate">{p.sector || '—'}</div>
+      <div className="col-span-2 text-right font-mono text-neutral-200">
+        {plan.entry_zone_low != null
+          ? `${fmtPrice(plan.entry_zone_low)}–${fmtPrice(plan.entry_zone_high)}`
+          : fmtPrice(p.entry_price)}
+        <div className="text-[9px] text-neutral-600">entry zone</div>
+      </div>
+      <div className="col-span-2 text-right font-mono">
+        <div className="text-rose-300/80">{fmtPrice(p.stop_loss)}</div>
+        <div className="text-emerald-300/80">{fmtPrice(p.target_price)}</div>
+      </div>
+      <div className="col-span-1 text-right font-mono text-neutral-200">
+        {t.timing_score != null ? Math.round(t.timing_score) : '—'}
+        <div className="text-[9px] text-neutral-600">timing</div>
+      </div>
+      <div className="col-span-1 text-right font-mono text-neutral-200">
+        {p.confidence != null ? p.confidence + '%' : '—'}
+        <div className="text-[9px] text-neutral-600">conf</div>
+      </div>
+      <div className="col-span-2 text-[10px] text-neutral-500 leading-tight">
+        {tier === 'BUY' ? 'Full size' : 'Partial size, add on weakness'}
+        {t.near_term_risk_pct != null && ` · 1-ATR risk ${t.near_term_risk_pct.toFixed(1)}%`}
+      </div>
+    </div>
+  )
+}
+
+function BuyToday({ picks }) {
+  const { buy, scale, ratedCount } = buyTodayTiers(picks)
+  if (!ratedCount) return null
+  const shown = [
+    ...buy.slice(0, 8).map(p => ({ p, tier: 'BUY' })),
+    ...scale.slice(0, 8).map(p => ({ p, tier: 'SCALE' })),
+  ]
+
+  return (
+    <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-white">Buy Today</h2>
+          <p className="text-xs text-neutral-500 mt-0.5">
+            Names where the fundamental case, the technical entry and the event calendar all agree.
+            Everything else on this page is a watch item, not a buy.
+          </p>
+        </div>
+        <div className="text-right shrink-0">
+          <div className={`text-2xl font-bold font-mono ${buy.length ? 'text-emerald-400' : 'text-rose-400'}`}>{buy.length}</div>
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Full size</div>
+        </div>
+      </div>
+
+      {shown.length === 0 ? (
+        <div className="px-4 py-5">
+          <p className="text-sm text-rose-300/90 font-bold">Nothing qualifies today.</p>
+          <p className="text-[11px] text-neutral-500 mt-1 leading-snug">
+            {ratedCount} picks were graded and none cleared the entry, confidence and event-risk bars
+            simultaneously. Forcing a trade into that is how a good watchlist becomes a bad month.
+            Cash is the position until a setup repairs.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60 text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+            <div className="col-span-2">Action / Ticker</div>
+            <div className="col-span-2">Sector</div>
+            <div className="col-span-2 text-right">Buy Between</div>
+            <div className="col-span-2 text-right">Stop / Target</div>
+            <div className="col-span-1 text-right">Timing</div>
+            <div className="col-span-1 text-right">Conf</div>
+            <div className="col-span-2">Sizing</div>
+          </div>
+          {shown.map(({ p, tier }) => <ConvictionRow key={p.ticker} p={p} tier={tier} />)}
+          <div className="px-4 py-2.5 text-[10px] text-neutral-600 leading-snug">
+            Buy = timing grade Buy Now, confidence ≥ {CONVICTION_MIN_CONF}%, no uncapped technical flaw, event risk low or moderate.
+            Scale = acceptable entry (timing ≥ {SCALE_MIN_TIMING}, confidence ≥ {SCALE_MIN_CONF}%) that does not justify full size.
+            Work limit orders inside the zone — do not pay the market.
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 // Per-pick detail: the full signal stack, the entry plan, and event risk.
 function TimingPanel({ t, stopLoss }) {
   if (!t) return null
@@ -917,6 +1057,8 @@ export default function SymbolsToBuy() {
 
       {data && data.ok !== false && !loading && (
         <div className="space-y-6">
+          <BuyToday picks={data.long_picks} />
+
           {data.guidance && (
             <div className="bg-neutral-900/50 border border-neutral-700/50 rounded-lg px-4 py-3 text-sm text-neutral-300">
               <span className="font-bold mr-2 text-white">Strategy:</span>{data.guidance}
