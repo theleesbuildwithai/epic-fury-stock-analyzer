@@ -1598,7 +1598,13 @@ def get_daily_summary(watchlist_tickers=None):
     if watchlist_tickers:
         wl_tickers = [t.strip().upper() for t in watchlist_tickers.split(",") if t.strip()]
         if wl_tickers:
-            wl_summary = _get_watchlist_summary(wl_tickers)
+            # Cache the watchlist leg on the same 5-minute clock as the movers leg.
+            # Without this the movers were cached but EVERY request still fired a
+            # fresh yf.download for the watchlist — a page left open auto-refreshing
+            # was a standing Yahoo rate-limit risk. Key on the deduplicated, sorted
+            # ticker set so any ordering of the same watchlist shares one entry.
+            _wl_key = "daily_summary_wl:" + ",".join(sorted(set(wl_tickers)))
+            wl_summary = _get_cached(_wl_key, lambda: _get_watchlist_summary(wl_tickers), ttl=300)
             summary = dict(summary)  # copy so we don't mutate cache
             summary["watchlist_summary"] = wl_summary
 

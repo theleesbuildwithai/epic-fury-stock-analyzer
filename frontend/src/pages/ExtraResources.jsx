@@ -1,195 +1,287 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useMemo, Component } from 'react'
+import { Link } from 'react-router-dom'
 import CompoundInterestCalc from '../components/CompoundInterestCalc'
 import SectorHeatmap from '../components/SectorHeatmap'
 
+// EXTRA RESOURCES — event risk and tools.
+//
+// This page used to re-render the market-sentiment panel and headline list that
+// the News page already owns. That duplication cost a second /api/market-news
+// request on every visit and told you nothing new, so it is gone: News owns the
+// wires, this page owns the calendar.
+//
+// What is left is the part that actually changes decisions. An earnings date is
+// a binary event with a known timestamp — the one risk on the board you can see
+// coming and simply choose not to stand in front of. The options engine already
+// refuses to sell you a long call inside three days of a print because implied
+// vol collapses after the report and a directionally-correct option still
+// loses. This page surfaces that same window before you get there, using the
+// same thresholds.
+//
+// One cached request (6-hour TTL server-side). Watchlist cross-reference is
+// read from localStorage — no extra calls.
+
+class PanelBoundary extends Component {
+  constructor(props) { super(props); this.state = { failed: false } }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(e) { try { console.error('Resources panel error:', e) } catch {} }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl px-4 py-3 text-xs text-neutral-500">
+          {this.props.label || 'Panel'} could not be rendered safely; excluded.
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
+
+// Thresholds mirror backend/predictions/options_recommendation.py exactly.
+// If those constants change, change these — a calendar that disagrees with the
+// engine gating the trades is worse than no calendar.
+const EARN_BLACKOUT_DAYS = 3
+const EARN_WARN_DAYS = 21
+
+function daysUntil(iso) {
+  if (typeof iso !== 'string') return null
+  const parts = iso.slice(0, 10).split('-').map(Number)
+  if (parts.length !== 3 || !parts.every(Number.isFinite)) return null
+  const d = new Date(parts[0], parts[1] - 1, parts[2]); d.setHours(0, 0, 0, 0)
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const n = Math.round((d - today) / 86400000)
+  return Number.isFinite(n) ? n : null
+}
+
+function fmtDate(iso) {
+  const parts = typeof iso === 'string' ? iso.slice(0, 10).split('-').map(Number) : []
+  if (parts.length !== 3 || !parts.every(Number.isFinite)) return iso || '—'
+  const d = new Date(parts[0], parts[1] - 1, parts[2])
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+function getWatchlistSet() {
+  try {
+    const raw = localStorage.getItem('sentinel_quant_watchlist')
+    if (!raw) return new Set()
+    const list = JSON.parse(raw)
+    if (!Array.isArray(list)) return new Set()
+    return new Set(list.map(s => s && typeof s.ticker === 'string' ? s.ticker.toUpperCase().trim() : null).filter(Boolean))
+  } catch { return new Set() }
+}
+
+// ─── Earnings calendar ────────────────────────────────────────────────────────
+function EarningsRow({ e, owned }) {
+  const d = daysUntil(e.date)
+  const blackout = isNum(d) && d <= EARN_BLACKOUT_DAYS
+  const warn = isNum(d) && d > EARN_BLACKOUT_DAYS && d <= EARN_WARN_DAYS
+  return (
+    <div className="grid grid-cols-12 gap-2 px-4 py-2.5 border-b border-neutral-800/40 last:border-b-0 items-center text-xs hover:bg-neutral-800/20">
+      <div className="col-span-3 flex items-center gap-1.5 min-w-0">
+        {owned && <span className="w-1 h-4 bg-white rounded-full shrink-0" title="On your watchlist" />}
+        <Link to={`/symbol/${encodeURIComponent(e.symbol || '')}`} className="font-mono font-bold text-sm text-white hover:underline truncate">
+          {e.symbol || '—'}
+        </Link>
+      </div>
+      <div className="col-span-3 text-[11px] text-neutral-500 truncate">{e.name || ''}</div>
+      <div className="col-span-2 text-neutral-200 font-mono text-[11px]">{fmtDate(e.date)}</div>
+      <div className={`col-span-1 text-right font-mono font-bold ${blackout ? 'text-rose-400' : warn ? 'text-neutral-200' : 'text-neutral-400'}`}>
+        {isNum(d) ? (d === 0 ? 'today' : `${d}d`) : '—'}
+      </div>
+      <div className="col-span-1 text-right font-mono text-neutral-300">
+        {isNum(e.eps_estimate) ? '$' + e.eps_estimate.toFixed(2) : '—'}
+      </div>
+      <div className="col-span-2 text-right">
+        {blackout ? (
+          <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border text-rose-400 border-rose-600/50 bg-rose-600/10">
+            No long premium
+          </span>
+        ) : warn ? (
+          <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border text-neutral-300 border-neutral-600/50 bg-neutral-800/50">
+            Size down
+          </span>
+        ) : (
+          <span className="text-[9px] text-neutral-600">clear</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function EarningsCalendar({ data, loading, onRetry }) {
+  const watchlist = useMemo(() => getWatchlistSet(), [])
+  const rows = useMemo(() => {
+    const list = Array.isArray(data?.earnings) ? data.earnings : []
+    return list
+      .filter(e => e && typeof e.symbol === 'string')
+      .map(e => ({ ...e, _d: daysUntil(e.date), _owned: watchlist.has(String(e.symbol).toUpperCase()) }))
+      .filter(e => isNum(e._d) && e._d >= 0)
+      .sort((a, b) => a._d - b._d)
+  }, [data, watchlist])
+
+  const blackout = rows.filter(e => e._d <= EARN_BLACKOUT_DAYS)
+  const owned = rows.filter(e => e._owned)
+  const thisWeek = rows.filter(e => e._d <= 7)
+
+  return (
+    <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-lg font-bold text-white">Event Risk — Earnings</h2>
+          <p className="text-xs text-neutral-500 mt-0.5">
+            The only major risk on the board with a known timestamp. A good chart does not survive a bad print,
+            and implied vol collapses the morning after — which is why the options engine withholds long premium
+            inside {EARN_BLACKOUT_DAYS} days of a report.
+          </p>
+        </div>
+        <div className="text-right shrink-0">
+          <div className={`text-2xl font-bold font-mono ${blackout.length ? 'text-rose-400' : 'text-emerald-400'}`}>{blackout.length}</div>
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">In blackout</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 divide-x divide-neutral-800/60 border-b border-neutral-800/60">
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Reporting ≤ 14d</div>
+          <div className="text-2xl font-bold font-mono text-neutral-100">{rows.length}</div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">of {data?.stocks_checked ?? '—'} tracked bellwethers</div>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Next 7 Days</div>
+          <div className={`text-2xl font-bold font-mono ${thisWeek.length ? 'text-white' : 'text-neutral-600'}`}>{thisWeek.length}</div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">Inside most option expiries</div>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">On Your Watchlist</div>
+          <div className={`text-2xl font-bold font-mono ${owned.length ? 'text-white' : 'text-neutral-600'}`}>{owned.length}</div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">
+            {owned.length ? owned.slice(0, 3).map(e => e.symbol).join(', ') : 'None of your names report'}
+          </div>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Soonest</div>
+          <div className="text-2xl font-bold font-mono text-neutral-100">
+            {rows.length ? (rows[0]._d === 0 ? 'Today' : rows[0]._d + 'd') : '—'}
+          </div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">{rows.length ? rows[0].symbol : 'Calendar clear'}</div>
+        </div>
+      </div>
+
+      {loading && !rows.length ? (
+        <div className="px-4 py-8 text-center text-sm text-neutral-500">Loading the calendar…</div>
+      ) : !rows.length ? (
+        <div className="px-4 py-6 text-center">
+          <p className="text-neutral-300 text-sm font-bold">No bellwether earnings in the next 14 days.</p>
+          <p className="text-neutral-500 text-xs mt-1">
+            Either the window is genuinely clear or the upstream calendar returned nothing — no date is inferred
+            either way. Per-ticker earnings dates still gate every options recommendation independently.
+          </p>
+          <button onClick={onRetry} className="mt-2 text-xs underline text-neutral-400 hover:text-white">Retry</button>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-neutral-900/60 border-b border-neutral-800/60 text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+            <div className="col-span-3">Symbol</div>
+            <div className="col-span-3">Company</div>
+            <div className="col-span-2">Reports</div>
+            <div className="col-span-1 text-right">In</div>
+            <div className="col-span-1 text-right">EPS Est</div>
+            <div className="col-span-2 text-right">Options Stance</div>
+          </div>
+          {rows.map((e, i) => <EarningsRow key={`${e.symbol}-${i}`} e={e} owned={e._owned} />)}
+          <div className="px-4 py-2.5 text-[10px] text-neutral-600 leading-snug">
+            "No long premium" = reports within {EARN_BLACKOUT_DAYS} days; the engine will not open a long call or put
+            on these because the post-report vol crush can lose money on a correct directional call.
+            "Size down" = reports within {EARN_WARN_DAYS} days; tradeable, but implied vol is already bid and the
+            position carries a binary event. Selling premium is the structure that benefits from this, not buying it.
+            A white bar marks a name on your watchlist. Dates are estimates from the exchange calendar and do move —
+            confirm with the company before putting risk on.
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+const REQ_TIMEOUT = 20000
+
+async function fetchJSON(url, timeout = REQ_TIMEOUT) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeout)
+  try {
+    const r = await fetch(url, { signal: ctrl.signal })
+    if (!r.ok) return null
+    const j = await r.json()
+    return (j && typeof j === 'object') ? j : null
+  } catch { return null } finally { clearTimeout(timer) }
+}
+
+// On a cold cache the endpoint returns cache_status "warming" with an empty
+// list and kicks off a background refresh that can take ~45s. Without a
+// bounded retry the calendar would stay blank until a manual reload.
+const WARM_RETRIES = 4
+const WARM_RETRY_MS = 12000
+
 export default function ExtraResources() {
   const [earnings, setEarnings] = useState(null)
-  const [news, setNews] = useState(null)
-  const [loadingEarnings, setLoadingEarnings] = useState(true)
-  const [loadingNews, setLoadingNews] = useState(true)
+  const [loading, setLoading] = useState(true)
+  const inFlight = useRef(false)
+  const warmTimer = useRef(null)
+  const warmTries = useRef(0)
 
-  useEffect(() => {
-    const fetchEarnings = async () => {
-      try {
-        const res = await fetch('/api/earnings-calendar')
-        const data = await res.json()
-        setEarnings(data)
-      } catch {
-        setEarnings({ earnings: [], error: 'Failed to load earnings' })
-      } finally {
-        setLoadingEarnings(false)
-      }
+  async function load() {
+    if (inFlight.current) return
+    inFlight.current = true
+    const j = await fetchJSON('/api/earnings-calendar')
+    if (j) setEarnings(j)
+    setLoading(false)
+    inFlight.current = false
+    if (j?.cache_status === 'warming' && warmTries.current < WARM_RETRIES) {
+      warmTries.current += 1
+      warmTimer.current = setTimeout(load, WARM_RETRY_MS)
     }
-
-    const fetchNews = async () => {
-      try {
-        const res = await fetch('/api/market-news')
-        const data = await res.json()
-        setNews(data)
-      } catch {
-        setNews(null)
-      } finally {
-        setLoadingNews(false)
-      }
-    }
-
-    fetchEarnings()
-    fetchNews()
-  }, [])
-
-  const sentimentColor = (score) => {
-    if (score > 0.1) return 'text-green-500'
-    if (score < -0.1) return 'text-red-500'
-    return 'text-neutral-400'
   }
+
+  // Single fetch on mount (plus the cold-start retries above). The backend
+  // caches this for six hours, so steady-state polling has cost and no benefit.
+  useEffect(() => {
+    load()
+    return () => { if (warmTimer.current) clearTimeout(warmTimer.current) }
+  }, [])
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <h1 className="text-4xl font-bold mb-2"><span className="text-gradient">Extra</span> <span className="text-white">Resources</span></h1>
-        <p className="text-neutral-400">
-          Market news sentiment, sector heatmap, earnings calendar, and tools.
+      <div className="mb-6">
+        <h1 className="text-3xl font-black text-white tracking-tight">Resources</h1>
+        <p className="text-sm text-neutral-400 mt-1">
+          Sector rotation, the earnings event calendar, and a compounding model. For headline sentiment and the
+          macro wire read, see <Link to="/news" className="text-white underline hover:text-neutral-300">News</Link> —
+          it is not duplicated here.
         </p>
       </div>
 
-      {/* Sector Heatmap */}
-      <SectorHeatmap />
+      <div className="space-y-6">
+        <PanelBoundary label="Sector heatmap"><SectorHeatmap /></PanelBoundary>
 
-      {/* Market Sentiment Summary */}
-      {news?.market_sentiment && (
-        <div className="bg-black border border-neutral-700 rounded-xl p-5 mb-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-bold text-white mb-1">Market Sentiment</h2>
-              <p className="text-neutral-500 text-sm">Based on {news.market_sentiment.total_analyzed} headlines from Yahoo Finance, CNN, CNBC</p>
-            </div>
-            <div className="text-right">
-              <span className={`text-2xl font-bold ${
-                news.market_sentiment.label.includes('Bullish') ? 'text-green-500' :
-                news.market_sentiment.label.includes('Bearish') ? 'text-red-500' : 'text-neutral-300'
-              }`}>
-                {news.market_sentiment.label}
-              </span>
-              <div className="flex items-center gap-3 mt-1">
-                <span className="text-green-500 text-xs">{news.market_sentiment.bullish_pct}% Bullish</span>
-                <span className="text-neutral-500 text-xs">|</span>
-                <span className="text-red-500 text-xs">{news.market_sentiment.bearish_pct}% Bearish</span>
-              </div>
-            </div>
-          </div>
+        <PanelBoundary label="Earnings calendar">
+          <EarningsCalendar
+            data={earnings}
+            loading={loading}
+            onRetry={() => { warmTries.current = 0; load() }}
+          />
+        </PanelBoundary>
 
-          {/* Macro Events */}
-          {news.macro_events && news.macro_events.length > 0 && (
-            <div className="mt-4 pt-4 border-t border-neutral-800">
-              <p className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Current Events & Macro Factors</p>
-              <div className="space-y-1.5">
-                {news.macro_events.slice(0, 5).map((event, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <span className={`w-1.5 h-1.5 rounded-full ${
-                      event.sentiment > 0 ? 'bg-green-500' : event.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-500'
-                    }`}></span>
-                    {event.link ? (
-                      <a href={event.link} target="_blank" rel="noopener noreferrer" className="text-neutral-300 text-sm truncate hover:text-white transition-colors">{event.title}</a>
-                    ) : (
-                      <span className="text-neutral-300 text-sm truncate">{event.title}</span>
-                    )}
-                    <span className="text-neutral-600 text-xs shrink-0">{event.source}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+        <PanelBoundary label="Compounding model"><CompoundInterestCalc /></PanelBoundary>
 
-      {/* Latest Headlines */}
-      {news?.headlines && news.headlines.length > 0 && (
-        <div className="bg-black border border-neutral-700 rounded-xl p-6 mb-8">
-          <h2 className="text-xl font-bold text-white mb-4">Latest Market News</h2>
-          <div className="space-y-2">
-            {news.headlines.slice(0, 12).map((h, i) => (
-              <a key={i} href={h.link || '#'} target="_blank" rel="noopener noreferrer"
-                 className="flex items-center justify-between py-2 border-b border-neutral-900 hover:bg-neutral-900/50 transition-colors px-1 rounded">
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${
-                    h.sentiment > 0 ? 'bg-green-500' : h.sentiment < 0 ? 'bg-red-500' : 'bg-neutral-600'
-                  }`}></span>
-                  <span className="text-neutral-300 text-sm truncate hover:text-white">{h.title}</span>
-                </div>
-                <div className="flex items-center gap-3 shrink-0 ml-3">
-                  <span className={`text-xs font-mono ${sentimentColor(h.sentiment)}`}>
-                    {h.sentiment > 0 ? '+' : ''}{h.sentiment}
-                  </span>
-                  <span className="text-neutral-600 text-xs w-20 text-right">{h.source}</span>
-                </div>
-              </a>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Earnings Calendar */}
-      <div className="bg-black border border-neutral-700 rounded-xl p-6">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h2 className="text-xl font-bold text-white">Upcoming Earnings</h2>
-            <p className="text-neutral-500 text-sm mt-1">
-              Major companies reporting earnings in the next 14 days
-            </p>
-          </div>
-          {earnings?.week_start && (
-            <span className="text-neutral-600 text-xs">
-              {earnings.week_start} to {earnings.week_end}
-            </span>
-          )}
-        </div>
-
-        {loadingEarnings ? (
-          <div className="text-center py-12">
-            <div className="inline-block w-8 h-8 border-2 border-neutral-700 border-t-white rounded-full animate-spin"></div>
-            <p className="text-neutral-500 mt-3">Loading earnings calendar...</p>
-          </div>
-        ) : earnings?.earnings?.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {earnings.earnings.map((e) => (
-              <div key={e.symbol} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 hover:border-neutral-600 transition-colors">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-white font-mono font-bold text-lg">{e.symbol}</span>
-                  <span className="text-neutral-400 text-sm">{e.day_of_week}</span>
-                </div>
-                {e.name && <p className="text-neutral-400 text-xs mb-1">{e.name}</p>}
-                <p className="text-neutral-500 text-sm mb-3">{e.date}</p>
-                <div className="space-y-1">
-                  {e.eps_estimate && (
-                    <div className="flex justify-between">
-                      <span className="text-neutral-500 text-xs">EPS Estimate</span>
-                      <span className="text-white text-xs font-mono">${e.eps_estimate}</span>
-                    </div>
-                  )}
-                  {!e.eps_estimate && (
-                    <span className="text-neutral-600 text-xs">Estimates pending</span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-8">
-            <p className="text-neutral-400 mb-2">No major earnings scheduled this week.</p>
-            <p className="text-neutral-600 text-sm">Check back during earnings season.</p>
-          </div>
-        )}
+        <p className="text-[10px] text-neutral-600 leading-snug">
+          Calendar data from the Yahoo Finance exchange calendar, cached six hours server-side and fetched once per
+          page load. Earnings dates are company estimates and are frequently revised — this page is a planning tool,
+          not a confirmation. Not financial advice.
+        </p>
       </div>
-
-      {/* Compound Interest Calculator */}
-      <div className="mb-8">
-        <CompoundInterestCalc />
-      </div>
-
-      <p className="text-neutral-600 text-xs mt-6 text-center italic">
-        Data from Yahoo Finance, CNN, CNBC. Analysis uses EMA crossovers, RSI, MACD, pivot points, and news sentiment.
-        NOT financial advice. Always do your own research before investing.
-      </p>
     </div>
   )
 }
