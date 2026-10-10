@@ -1616,6 +1616,62 @@ def get_daily_summary(watchlist_tickers=None):
     return summary
 
 
+# Reject the cached series outright if its last close is this far from the
+# live quote. The documented cache-corruption mode is a column scramble that
+# returns a DIFFERENT stock's series (GOOGL $337 read as $226, COST $952 as
+# $37) — those are 30-96% off. A 30% band clears real multi-day moves while
+# still refusing to compute an RSI off another company's prices.
+_LASTGOOD_MAX_DIVERGENCE = 0.30
+_LASTGOOD_MIN_BARS = 16  # 15 deltas for the 14-period RSI
+
+
+def _lastgood_derived(symbol, live_price):
+    """Week/month change and RSI from the warm last-good OHLC cache.
+
+    Returns a dict of Nones if there is no usable history. Never raises and
+    never performs network I/O — it only reads a cache another engine fills.
+    The live quote is used as the latest observation, so the returns are
+    anchored to the current price rather than to a possibly stale last close.
+    """
+    blank = {"week_change_pct": None, "month_change_pct": None, "rsi": None}
+    try:
+        import analysis.quant_engine as _qe
+        ent = (getattr(_qe, "_PRICE_DATA_LASTGOOD", None) or {}).get(symbol)
+        df = ent.get("df") if isinstance(ent, dict) else ent
+        if df is None or "Close" not in getattr(df, "columns", []):
+            return blank
+        closes = df["Close"].dropna().values.astype(float)
+        closes = closes[np.isfinite(closes) & (closes > 0)]
+        if len(closes) < _LASTGOOD_MIN_BARS:
+            return blank
+
+        # Integrity gate: a cached series for the wrong ticker must not be used.
+        if abs(closes[-1] - live_price) / live_price > _LASTGOOD_MAX_DIVERGENCE:
+            return blank
+
+        # Append the live quote as the newest observation.
+        series = np.append(closes, float(live_price))
+        week = ((series[-1] / series[-6]) - 1) * 100 if len(series) >= 6 else None
+        month = ((series[-1] / series[-22]) - 1) * 100 if len(series) >= 22 else None
+
+        deltas = np.diff(series[-15:])
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        avg_gain = float(np.mean(gains))
+        avg_loss = float(np.mean(losses))
+        rs = avg_gain / avg_loss if avg_loss > 0 else 100
+        rsi = 100 - (100 / (1 + rs))
+
+        out = {
+            "week_change_pct": round(week, 2) if week is not None and np.isfinite(week) else None,
+            "month_change_pct": round(month, 2) if month is not None and np.isfinite(month) else None,
+            "rsi": round(rsi, 1) if np.isfinite(rsi) else None,
+        }
+        return out
+    except Exception:
+        return blank
+
+
 def _get_watchlist_summary(tickers):
     """Get quick summary for user's watchlist stocks.
 
@@ -1708,6 +1764,13 @@ def _get_watchlist_summary(tickers):
 
     # CNBC fallback for any name Yahoo did not return (same approved source
     # and same pattern as the movers leg above).
+    #
+    # The fallback quote carries no history, so week/month change and RSI would
+    # be blank for every name — and in production Yahoo's bulk download fails
+    # for ALL of them, which left the whole "needs attention" sort dead. Those
+    # derived fields are recovered from the warm last-good OHLC cache that the
+    # scan engine already maintains (S3-persisted, so warm after a redeploy).
+    # Zero additional network calls.
     have = {r["symbol"] for r in results}
     missing = [t for t in tickers if t not in have]
     if missing:
@@ -1722,7 +1785,13 @@ def _get_watchlist_summary(tickers):
                     if price <= 0:
                         continue
                     day_change = float(val.get("change_pct") or 0)
-                    if day_change > 2:
+                    hist = _lastgood_derived(yahoo_sym, price)
+                    rsi = hist.get("rsi")
+                    if rsi is not None and rsi < 30:
+                        signal = "Oversold - Consider Buying"
+                    elif rsi is not None and rsi > 70:
+                        signal = "Overbought - Consider Selling"
+                    elif day_change > 2:
                         signal = "Strong Day - Monitor"
                     elif day_change < -2:
                         signal = "Down Day - Watch Support"
@@ -1732,9 +1801,9 @@ def _get_watchlist_summary(tickers):
                         "symbol": yahoo_sym,
                         "price": round(price, 2),
                         "day_change_pct": round(day_change, 2),
-                        "week_change_pct": None,
-                        "month_change_pct": None,
-                        "rsi": None,
+                        "week_change_pct": hist.get("week_change_pct"),
+                        "month_change_pct": hist.get("month_change_pct"),
+                        "rsi": rsi,
                         "signal": signal,
                         "quote_only": True,
                     })

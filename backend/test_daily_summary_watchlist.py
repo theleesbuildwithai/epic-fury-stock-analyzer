@@ -69,6 +69,57 @@ def main_test():
     check("fallback derives a signal from the day move",
           rows[0]["signal"] == "Strong Day - Monitor", rows[0]["signal"])
 
+    # --- History recovered from the warm last-good cache -------------------
+    # A quote carries no history, so without this the "needs attention" sort
+    # (RSI extremes) is dead for every name whenever Yahoo's bulk call fails,
+    # which in production is always.
+    import numpy as np
+    import pandas as pd
+    import analysis.quant_engine as qe
+
+    saved_lastgood = qe._PRICE_DATA_LASTGOOD
+    try:
+        # A clean 40-bar uptrend ending near 100.
+        up = np.linspace(80.0, 99.0, 40)
+        qe._PRICE_DATA_LASTGOOD = {
+            "AAPL": {"df": pd.DataFrame({"Close": up})},
+            "SCRAMBLED": {"df": pd.DataFrame({"Close": up * 0.3})},  # wrong ticker's series
+            "SHORT": {"df": pd.DataFrame({"Close": up[:5]})},        # not enough bars
+        }
+
+        d = ex._lastgood_derived("AAPL", 100.0)
+        check("lastgood: RSI recovered from warm cache",
+              isinstance(d["rsi"], float) and 0 <= d["rsi"] <= 100, d["rsi"])
+        check("lastgood: uptrend reads overbought",
+              d["rsi"] > 70, d["rsi"])
+        check("lastgood: week/month change computed",
+              isinstance(d["week_change_pct"], float)
+              and isinstance(d["month_change_pct"], float), d)
+        check("lastgood: returns anchored to the LIVE price, not the last close",
+              d["week_change_pct"] > 0 and d["month_change_pct"] > 0, d)
+
+        check("lastgood: scrambled series rejected by integrity gate",
+              ex._lastgood_derived("SCRAMBLED", 100.0)
+              == {"week_change_pct": None, "month_change_pct": None, "rsi": None})
+        check("lastgood: too few bars -> no derived fields",
+              ex._lastgood_derived("SHORT", 100.0)["rsi"] is None)
+        check("lastgood: unknown ticker -> no derived fields",
+              ex._lastgood_derived("NOPE", 100.0)["rsi"] is None)
+
+        # End to end: Yahoo dead, CNBC alive, history filled from the cache.
+        ex.cnbc_quote_batch = lambda syms: {s: {"price": 100.0, "change_pct": 0.4} for s in syms}
+        rows2 = ex._get_watchlist_summary(["AAPL", "NOPE"])
+        by = {r["symbol"]: r for r in rows2}
+        check("fallback + warm cache -> AAPL row has RSI",
+              by.get("AAPL", {}).get("rsi") is not None, by.get("AAPL"))
+        check("fallback with no cached history -> fields stay None, row still shown",
+              "NOPE" in by and by["NOPE"]["rsi"] is None, by.get("NOPE"))
+        check("RSI extreme overrides the day-move signal",
+              by["AAPL"]["signal"] == "Overbought - Consider Selling",
+              by["AAPL"]["signal"])
+    finally:
+        qe._PRICE_DATA_LASTGOOD = saved_lastgood
+
     # --- Both sources dead -------------------------------------------------
     ex.cnbc_quote_batch = lambda syms: {}
     check("both sources dead -> [] and never a guessed row",
