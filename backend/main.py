@@ -5702,7 +5702,21 @@ def market_news(request: Request):
     """Get latest market news with sentiment analysis from Yahoo Finance, CNN, CNBC."""
     check_rate_limit(request.client.host)
     try:
-        return get_market_news()
+        news = get_market_news()
+        # Site-wide autonomous stance: pure arithmetic over the SAME cached
+        # news/geo reads — zero extra requests. Fail-safe: a stance failure
+        # never blocks the news payload itself.
+        try:
+            from analysis.decision_engine import market_decision as _md
+            news = dict(news)  # copy — never mutate the news cache entry
+            news["market_stance"] = _md(
+                market_sentiment=news.get("market_sentiment"),
+                geo=assess_geopolitical_risk(),
+                tariff=assess_tariff_risk(),
+            )
+        except Exception as _mse:
+            logger.debug(f"market stance soft-fail: {_mse}")
+        return news
     except Exception as e:
         logger.error(f"News error: {e}")
         return {"headlines": []}

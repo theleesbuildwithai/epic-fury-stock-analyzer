@@ -15,7 +15,9 @@ const DailySummary      = lazy(() => import('./pages/DailySummary'))
 // QUANT HF PAGE — hidden; restore by uncommenting the lazy import and route below
 // const QuantDashboard = lazy(() => import('./pages/QuantDashboard'))
 const SymbolsToBuy      = lazy(() => import('./pages/SymbolsToBuy'))
-const OptionsTrading    = lazy(() => import('./pages/OptionsTrading'))
+// OPTIONS PAGE — hidden (code preserved in pages/OptionsTrading.jsx); restore by
+// uncommenting the lazy import, the /options route below, and the Navbar link.
+// const OptionsTrading = lazy(() => import('./pages/OptionsTrading'))
 const SymbolDetail      = lazy(() => import('./pages/SymbolDetail'))
 const SystemIntelligence = lazy(() => import('./pages/SystemIntelligence'))
 
@@ -46,7 +48,9 @@ export default function App() {
           <Route path="/quant" element={<QuantDashboard />} />
           */}
           <Route path="/symbols-to-buy" element={<SymbolsToBuy />} />
+          {/* OPTIONS ROUTE — hidden; restore by uncommenting and re-enabling import above
           <Route path="/options" element={<OptionsTrading />} />
+          */}
           <Route path="/symbol/:ticker" element={<SymbolDetail />} />
           <Route path="/system-intelligence" element={<SystemIntelligence />} />
           {/* Catch-all: any unknown/removed route (e.g. old /ibkr) redirects

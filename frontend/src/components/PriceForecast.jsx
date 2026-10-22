@@ -1,9 +1,21 @@
 import { useState } from 'react'
 
+// Per-timeframe edge verdict: the decisive read of each probability.
+// ≥55% up = EDGE UP (green), ≤45% = EDGE DOWN (red), between = NO EDGE.
+function edgeOf(probUp) {
+  const p = Number(probUp)
+  if (!isFinite(p)) return null
+  if (p >= 55) return { label: 'EDGE UP', cls: 'bg-green-500/15 border-green-500/40 text-green-400' }
+  if (p <= 45) return { label: 'EDGE DOWN', cls: 'bg-red-500/15 border-red-500/40 text-red-400' }
+  return { label: 'NO EDGE', cls: 'bg-white/5 border-neutral-700 text-neutral-400' }
+}
+
 export default function PriceForecast({ forecast }) {
   if (!forecast || forecast.error || !forecast.forecasts?.length) return null
 
-  const { current_price, annualized_volatility, recent_volatility, forecasts, data_points_used } = forecast
+  const { current_price, annualized_volatility, recent_volatility, forecasts, data_points_used, adjustments } = forecast
+  const tilt = Number(adjustments?.sentiment_tilt) || 0
+  const evRisk = Number(adjustments?.event_risk) || 0
 
   // Group timeframes: Short-term (7, 14, 30) and Long-term (60, 90, 180)
   const [activeTab, setActiveTab] = useState(0)
@@ -34,9 +46,28 @@ export default function PriceForecast({ forecast }) {
           <span className="text-neutral-500 text-xs font-mono">{data_points_used}d data</span>
         </div>
       </div>
-      <p className="text-neutral-500 text-sm mb-5">
+      <p className="text-neutral-500 text-sm mb-2">
         Current: <span className="text-white font-mono font-semibold">${current_price}</span> · Select a timeframe below
       </p>
+
+      {/* News/geo overlay state — shows WHAT the model is factoring in */}
+      {(tilt !== 0 || evRisk > 0) && (
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          {tilt !== 0 && (
+            <span className={`text-[10px] font-bold px-2 py-1 rounded border ${
+              tilt > 0 ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                       : 'bg-red-500/10 border-red-500/30 text-red-400'
+            }`}>
+              NEWS TILT {tilt > 0 ? '+' : ''}{tilt.toFixed(2)}
+            </span>
+          )}
+          {evRisk > 0 && (
+            <span className="text-[10px] font-bold px-2 py-1 rounded border bg-red-500/10 border-red-500/30 text-red-400">
+              EVENT RISK {Math.round(evRisk * 100)}% — wider range, probabilities pulled toward 50/50
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Timeframe tabs */}
       <div className="flex flex-wrap gap-2 mb-6">
@@ -59,9 +90,16 @@ export default function PriceForecast({ forecast }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         {/* Left: Up/Down probability */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-5">
-          <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-neutral-500 mb-4">
-            Probability in {active.timeframe}
-          </p>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-neutral-500">
+              Probability in {active.timeframe}
+            </p>
+            {edgeOf(active.prob_up) && (
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${edgeOf(active.prob_up).cls}`}>
+                {edgeOf(active.prob_up).label}
+              </span>
+            )}
+          </div>
 
           <div className="space-y-5">
             <div>
@@ -204,7 +242,8 @@ export default function PriceForecast({ forecast }) {
       </div>
 
       <p className="text-neutral-600 text-xs mt-4 italic">
-        Probabilities use log-normal distribution with trend decay, mean reversion, and dual volatility.
+        Probabilities use log-normal distribution with trend decay, mean reversion, and dual volatility,
+        tilted by live news sentiment and widened by geopolitical event risk.
         Short-term forecasts weight recent market conditions; long-term forecasts blend toward historical averages.
         Based on real Yahoo Finance data. Not financial advice.
       </p>

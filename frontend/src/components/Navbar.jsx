@@ -88,6 +88,8 @@ export default function Navbar() {
             >
               Symbols to Buy
             </Link>
+            {/* OPTIONS NAV LINK — hidden; code preserved in pages/OptionsTrading.jsx.
+                Restore by uncommenting here plus the route/import in App.jsx.
             <Link
               to="/options"
               className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${
@@ -98,6 +100,7 @@ export default function Navbar() {
             >
               Options
             </Link>
+            */}
           </div>
         </div>
       </div>

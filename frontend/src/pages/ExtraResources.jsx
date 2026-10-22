@@ -192,6 +192,24 @@ function EarningsCalendar({ data, loading, onRetry }) {
         </div>
       </div>
 
+      {/* System decision — the autonomous event-risk read, from data above */}
+      {!loading && (rows.length > 0 || !stale) && (
+        <div className={`mx-4 mt-3 mb-1 px-3 py-2 rounded-lg border text-xs font-semibold ${
+          owned.some(e => e._d <= EARN_BLACKOUT_DAYS)
+            ? 'bg-rose-950/25 border-rose-700/40 text-rose-300'
+            : blackout.length > 0
+              ? 'bg-neutral-900/60 border-neutral-700 text-neutral-200'
+              : 'bg-emerald-950/20 border-emerald-800/40 text-emerald-300'
+        }`}>
+          <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 block mb-0.5">System Decision</span>
+          {owned.some(e => e._d <= EARN_BLACKOUT_DAYS)
+            ? `EVENT RISK ON YOUR BOOK — ${owned.filter(e => e._d <= EARN_BLACKOUT_DAYS).map(e => e.symbol).join(', ')} report(s) within ${EARN_BLACKOUT_DAYS} days. No adds into the print.`
+            : blackout.length > 0
+              ? `${blackout.length} bellwether${blackout.length > 1 ? 's' : ''} in blackout — expect index-level noise around those prints; your names are clear.`
+              : 'WINDOW CLEAR — no bellwether reports inside the blackout window. Event risk is not the constraint today.'}
+        </div>
+      )}
+
       {stale && (
         <div className="px-4 py-2 border-b border-neutral-800/60 bg-neutral-900/60 flex items-center justify-between gap-3 flex-wrap">
           <p className="text-[11px] text-neutral-300">

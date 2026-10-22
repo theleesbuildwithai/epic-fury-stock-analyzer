@@ -437,6 +437,21 @@ export default function Watchlist() {
             Add a pick with its stop &amp; target · get automatic BUY / SELL signals · QHF wired in
           </p>
         </div>
+        {/* Book-level system decision — the one-line autonomous read of the book */}
+        {watchlist.length > 0 && (
+          <div className={`px-4 py-2.5 rounded-xl border text-sm font-semibold ${
+            sellNow.length > 0 ? 'bg-rose-950/25 border-rose-700/40 text-rose-300'
+            : actionable.length > 0 ? 'bg-neutral-900/60 border-neutral-700 text-neutral-200'
+            : 'bg-emerald-950/20 border-emerald-800/40 text-emerald-300'
+          }`}>
+            <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 block mb-0.5">System Decision</span>
+            {sellNow.length > 0
+              ? `EXIT ${sellNow.length} flagged name${sellNow.length > 1 ? 's' : ''} — stops, targets or bearish flips triggered below.`
+              : actionable.length > 0
+                ? `${actionable.length} name${actionable.length > 1 ? 's' : ''} need attention — review the alerts below.`
+                : 'BOOK IS CLEAN — no stops hit, no targets hit, no bearish flips. Hold.'}
+          </div>
+        )}
       </div>
 
       {/* Add holding form */}

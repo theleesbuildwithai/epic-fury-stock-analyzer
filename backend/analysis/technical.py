@@ -441,7 +441,9 @@ def calculate_hold_duration(prices: list, rsi_values: list, trend: dict, forecas
     }
 
 
-def calculate_price_forecast(prices: list, trend: dict) -> dict:
+def calculate_price_forecast(prices: list, trend: dict,
+                             sentiment_tilt: float = None,
+                             event_risk: float = None) -> dict:
     """
     Price Forecast — uses historical volatility and statistical modeling
     to estimate the probability of a stock moving up or down over
@@ -451,9 +453,30 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
     - Trend decay: short-term trend bias fades over longer horizons
     - Mean reversion: long-term drift blends toward historical market average
     - Dual volatility: recent vol for short-term, full-history vol for long-term
+
+    News / geopolitical awareness (Phase D):
+    - sentiment_tilt (-1..1): bounded drift adjustment from the news scanners.
+      Capped at ±0.04 recent daily sigma per day and decayed with the same
+      horizon decay as the price trend (<5 probability points at 30 days) —
+      headlines move next week, not next year.
+    - event_risk (0..1): geopolitical/political event risk widens the
+      distribution (up to +15% sigma). More uncertainty = wider cones and
+      probabilities pulled toward 50/50, never a directional thumb on the
+      scale. Both default to None (= off) so behavior is unchanged for
+      callers that don't pass them.
     """
     if len(prices) < 60:
         return {"error": "Need at least 60 days of data for reliable forecasts"}
+
+    # Sanitize overlay inputs — garbage in must not move the math.
+    try:
+        tilt = max(-1.0, min(1.0, float(sentiment_tilt)))
+    except (TypeError, ValueError):
+        tilt = 0.0
+    try:
+        ev_risk = max(0.0, min(1.0, float(event_risk)))
+    except (TypeError, ValueError):
+        ev_risk = 0.0
 
     current_price = prices[-1]
 
@@ -505,6 +528,14 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
         trend_decay = np.exp(-0.025 * days)
         trend_adjustment = trend_base * trend_decay
 
+        # --- News/geo sentiment tilt: bounded, horizon-decayed drift ---
+        # At most ±0.04 recent daily sigma per day. The shift compounds with
+        # horizon (days/sqrt(days) in z-space), so 0.04 keeps a full-strength
+        # tilt under ~5 probability points at 30 days — enough to break a
+        # coin-flip, never enough to overpower price action.
+        sentiment_adjustment = tilt * daily_std_recent * 0.04 * trend_decay
+        trend_adjustment += sentiment_adjustment
+
         # --- Mean reversion: blend stock's mean toward market average ---
         # Short-term (<=14d): 100% stock's own mean
         # Long-term (180d): ~60% market average, 40% stock's own mean
@@ -518,6 +549,11 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
         # Long-term (180d): 30% recent, 70% full
         recent_weight = max(0.3, 1.0 - (days / 250))
         blended_std = recent_weight * daily_std_recent + (1 - recent_weight) * daily_std_full
+
+        # --- Event-risk widening: geopolitical uncertainty = wider cone ---
+        # Widening sigma pulls every probability toward 50/50 and spreads the
+        # bull/bear targets — honest "we know less right now", not a direction.
+        blended_std *= (1.0 + 0.15 * ev_risk)
 
         # Scale mean and std to the timeframe
         tf_mean = adjusted_mean * days
@@ -584,6 +620,10 @@ def calculate_price_forecast(prices: list, trend: dict) -> dict:
         "daily_avg_return": round(daily_mean_full * 100, 4),
         "trend_bias": trend_dir,
         "data_points_used": len(log_returns),
+        "adjustments": {
+            "sentiment_tilt": round(tilt, 3),
+            "event_risk": round(ev_risk, 3),
+        },
         "forecasts": forecasts,
     }
 

@@ -73,6 +73,45 @@ function Chip({ children, tone = 'neutral' }) {
 // Headline sentiment is a weak, fast signal. It is useful for confirming or
 // questioning a position you already hold — it is not a reason to open one.
 // Scored on recency-weighted keyword analysis across four approved wires.
+// ─── System stance ────────────────────────────────────────────────────────────
+// The autonomous site-wide verdict from the backend decision engine. Falls back
+// to a client-side derivation from the tape when an older cached payload lacks
+// the field — the strip never renders a stance it cannot justify.
+function SystemStance({ news }) {
+  let stance = news?.market_stance
+  if (!stance || !stance.stance) {
+    const s = Number(news?.market_sentiment?.score)
+    if (!isFinite(s)) return null
+    stance = s >= 0.1
+      ? { stance: 'RISK_ON', notes: [], instruction: 'Favor long exposure. Lean into the strongest technical setups; the tape supports risk.' }
+      : s <= -0.1
+        ? { stance: 'RISK_OFF', notes: [], instruction: 'Defense first. No new longs into weakness; tighten stops until the tape clears.' }
+        : { stance: 'NEUTRAL', notes: [], instruction: 'Mixed tape. Trade single-name setups only — no market-direction bets.' }
+  }
+  const on = stance.stance === 'RISK_ON'
+  const off = stance.stance === 'RISK_OFF'
+  const cls = on
+    ? 'bg-emerald-950/25 border-emerald-700/40 text-emerald-300'
+    : off
+      ? 'bg-rose-950/25 border-rose-700/40 text-rose-300'
+      : 'bg-neutral-900/40 border-neutral-700 text-neutral-200'
+  return (
+    <div className={`border rounded-xl px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 ${cls}`}>
+      <div>
+        <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 block">System Decision</span>
+        <span className="text-xl font-black">{stance.stance.replace('_', ' ')}</span>
+      </div>
+      <div className="h-8 w-px bg-neutral-800 hidden sm:block" />
+      <div className="flex-1 min-w-[220px]">
+        <p className="text-sm text-neutral-300">{stance.instruction}</p>
+        {Array.isArray(stance.notes) && stance.notes.length > 0 && (
+          <p className="text-[10px] text-neutral-500 mt-0.5">{stance.notes.join(' · ')}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function TapeRead({ news }) {
   const ms = news?.market_sentiment || {}
   const heads = Array.isArray(news?.headlines) ? news.headlines : []
@@ -457,6 +496,8 @@ export default function News() {
         </div>
       ) : (
         <div className="space-y-6">
+          <PanelBoundary label="System Stance"><SystemStance news={news} /></PanelBoundary>
+
           <PanelBoundary label="Tape Read"><TapeRead news={news} /></PanelBoundary>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

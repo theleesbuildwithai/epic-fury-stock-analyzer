@@ -140,16 +140,10 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     fibonacci = calculate_fibonacci_levels(closes)
     ichimoku = calculate_ichimoku(highs, lows, closes)
 
-    # 4. Calculate price forecast with probabilities
-    forecast = calculate_price_forecast(closes, trend)
-
-    # 5. Generate the prediction signal (now includes fundamentals awareness)
-    signal = generate_signal(closes, rsi, macd, trend, volume_analysis)
-
-    # 6. Hold duration recommendation
-    hold_duration = calculate_hold_duration(closes, rsi, trend, forecast)
-
-    # 7. News sentiment (current events, macro factors)
+    # 4. News + geopolitical/political scan BEFORE the forecast, so the
+    # probability model can see the tape. All reads come from the shared
+    # news cache (one RSS sweep per TTL across the whole app) — fail-safe
+    # to neutral so a feed outage can never break the analysis.
     try:
         news_sentiment = get_stock_sentiment(
             ticker,
@@ -157,6 +151,56 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
         )
     except Exception:
         news_sentiment = {"stock_sentiment": 0, "market_sentiment": {"label": "Unavailable"}}
+    try:
+        from analysis.news_sentiment import assess_geopolitical_risk, assess_tariff_risk
+        geo_risk = assess_geopolitical_risk()
+        tariff_risk = assess_tariff_risk()
+    except Exception:
+        geo_risk, tariff_risk = {}, {}
+
+    # Sentiment tilt: stock-specific headlines dominate, market tape seasons.
+    # Bounded to [-1, 1]; the forecast model then caps the drift effect at
+    # ±0.10 daily sigma so news can nudge but never fabricate a trend.
+    try:
+        _stock_s = float(news_sentiment.get("stock_sentiment") or 0.0)
+        _mkt_s = float((news_sentiment.get("market_sentiment") or {}).get("score") or 0.0)
+        sentiment_tilt = max(-1.0, min(1.0, 0.6 * _stock_s + 0.4 * _mkt_s))
+    except Exception:
+        sentiment_tilt = 0.0
+    _geo_level = (geo_risk.get("risk_level") or "LOW").upper()
+    event_risk = {"CRITICAL": 1.0, "ELEVATED": 0.5}.get(_geo_level, 0.0)
+    if (tariff_risk.get("tariff_direction") or "").upper() == "ESCALATING":
+        event_risk = min(1.0, event_risk + 0.3)
+
+    # 5. Price forecast with probabilities — now news/geo aware
+    forecast = calculate_price_forecast(
+        closes, trend,
+        sentiment_tilt=sentiment_tilt,
+        event_risk=event_risk,
+    )
+
+    # 6. Generate the prediction signal (technical + news confirmation)
+    signal = generate_signal(closes, rsi, macd, trend, volume_analysis,
+                             news_sentiment=news_sentiment)
+
+    # 7. Hold duration recommendation
+    hold_duration = calculate_hold_duration(closes, rsi, trend, forecast)
+
+    # 8. Autonomous decision — the single "what to do" verdict combining
+    # technicals, forecast edge, news, geopolitics and fundamentals.
+    # Pure arithmetic over data already in hand; fail-safe to None.
+    try:
+        from analysis.decision_engine import make_decision
+        decision = make_decision(
+            info=info,
+            signal=signal,
+            forecast=forecast,
+            news_sentiment=news_sentiment,
+            geo=geo_risk,
+            tariff=tariff_risk,
+        )
+    except Exception:
+        decision = None
 
     # Build the chart data (dates + prices + indicators aligned)
     chart_data = []
@@ -184,6 +228,14 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
         "info": info,
         "_data_drift": data_drift_info,
         "signal": signal,
+        "decision": decision,
+        "geo_risk": {
+            "risk_level": geo_risk.get("risk_level", "LOW"),
+            "risk_score": geo_risk.get("risk_score", 0),
+            "active_hotspots": geo_risk.get("active_hotspots", [])[:5],
+            "ceasefire_detected": geo_risk.get("ceasefire_detected", False),
+            "tariff_direction": tariff_risk.get("tariff_direction", "QUIET"),
+        },
         "forecast": forecast,
         "trend": trend,
         "risk": risk,
@@ -223,10 +275,12 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     }
 
 
-def generate_signal(closes, rsi, macd, trend, volume_analysis) -> dict:
+def generate_signal(closes, rsi, macd, trend, volume_analysis,
+                    news_sentiment=None) -> dict:
     """
     Generates a buy/sell/hold signal using multi-factor analysis.
-    Combines technical (EMA, RSI, MACD, pivot points) with trend and volume.
+    Combines technical (EMA, RSI, MACD, pivot points) with trend, volume,
+    and — when supplied — stock-specific news tone as a confirming factor.
     """
     import pandas as pd
     import numpy as np
@@ -325,6 +379,20 @@ def generate_signal(closes, rsi, macd, trend, volume_analysis) -> dict:
         reasons.append("Rising volume supports uptrend")
     elif vol_trend == "decreasing" and score > 0:
         reasons.append("Warning: declining volume in uptrend")
+
+    # --- Factor 6: News confirmation (bounded to ±1) ---
+    # Stock-specific headline tone can confirm — never create — a signal.
+    # |sentiment| must clear 0.25 so neutral chatter stays out of the score.
+    try:
+        _news_s = float((news_sentiment or {}).get("stock_sentiment") or 0.0)
+    except (TypeError, ValueError):
+        _news_s = 0.0
+    if _news_s >= 0.25:
+        score += 1
+        reasons.append(f"Stock-specific news tone positive ({_news_s:+.2f})")
+    elif _news_s <= -0.25:
+        score -= 1
+        reasons.append(f"Stock-specific news tone negative ({_news_s:+.2f})")
 
     # --- Determine final signal ---
     # WIDER DEAD ZONE: score in [-2, +2] = Hold, not Buy/Sell. Previously

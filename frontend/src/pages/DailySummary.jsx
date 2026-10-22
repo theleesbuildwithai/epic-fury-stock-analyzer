@@ -75,6 +75,17 @@ function SessionRead({ data }) {
     : advPct > decPct ? 'Mildly positive breadth — narrow leadership, treat rallies as fragile'
     : 'Mildly negative breadth — rallies are being sold'
 
+  // Autonomous session decision — the explicit "so what do I do" line,
+  // derived from breadth + dispersion already computed above. No new data.
+  const sessionDecision = total === 0 ? null
+    : advPct >= 65
+      ? { tone: 'bull', text: 'ADD ON STRENGTH — broad advance; favor the leaders on the Symbols to Buy list.' }
+    : decPct >= 65
+      ? { tone: 'bear', text: 'NO NEW LONGS — broad decline; let the tape stabilize before deploying.' }
+    : isNum(dispersion) && dispersion > 10
+      ? { tone: 'neutral', text: 'PICK, DON\'T CHASE — wide dispersion; single-name selection pays, index bets do not.' }
+      : { tone: 'neutral', text: 'STAND PAT — no breadth edge and names are moving together; hold existing exposure.' }
+
   return (
     <div className="bg-neutral-900/40 border border-neutral-800/60 rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-neutral-800/60 bg-neutral-900/60">
@@ -140,6 +151,16 @@ function SessionRead({ data }) {
         </div>
         {breadthRead && <p className="text-[11px] text-neutral-400">{breadthRead}.</p>}
         {dispersionRead && <p className="text-[11px] text-neutral-500 mt-0.5">{dispersionRead}.</p>}
+        {sessionDecision && (
+          <div className={`mt-3 px-3 py-2 rounded-lg border text-xs font-semibold ${
+            sessionDecision.tone === 'bull' ? 'bg-emerald-950/25 border-emerald-700/40 text-emerald-300'
+            : sessionDecision.tone === 'bear' ? 'bg-rose-950/25 border-rose-700/40 text-rose-300'
+            : 'bg-neutral-900/60 border-neutral-700 text-neutral-200'
+          }`}>
+            <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-500 block mb-0.5">System Decision</span>
+            {sessionDecision.text}
+          </div>
+        )}
       </div>
     </div>
   )
