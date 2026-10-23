@@ -129,6 +129,23 @@ d_withheld = make_decision(info=bull_info, signal={"score": 8, "direction": "Str
                            timing={"ok": False, "grade": "AVOID"})
 check("1r withheld timing ignored", d_withheld["action"] == "BUY", f"got {d_withheld['action']}")
 
+# 1s. Disagreement guard: split components (bullish chart, CRITICAL world)
+# must be flagged and carry less conviction than the aligned bull case.
+d_agree = make_decision(info=bull_info, signal={"score": 8, "direction": "Strong Buy"},
+                        forecast=bull_forecast, news_sentiment=bull_news,
+                        geo={"risk_level": "LOW"}, tariff={"tariff_direction": "QUIET"})
+d_split = make_decision(info=bull_info, signal={"score": 8, "direction": "Strong Buy"},
+                        forecast=bull_forecast, news_sentiment=bull_news,
+                        geo={"risk_level": "CRITICAL"}, tariff={"tariff_direction": "QUIET"})
+check("1s split evidence flagged", any("Evidence split" in r for r in d_split["risks"]),
+      f"risks {d_split['risks']}")
+check("1t split conviction < aligned conviction",
+      d_split["conviction"] < d_agree["conviction"],
+      f"{d_split['conviction']} vs {d_agree['conviction']}")
+check("1u aligned case not flagged", not any("Evidence split" in r for r in d_agree["risks"]),
+      f"risks {d_agree['risks']}")
+check("1v split conviction still bounded", 5 <= d_split["conviction"] <= 97)
+
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n[2] decision_engine.market_decision")
 

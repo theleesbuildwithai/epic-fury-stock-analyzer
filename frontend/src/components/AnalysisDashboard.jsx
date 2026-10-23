@@ -129,6 +129,22 @@ export default function AnalysisDashboard({ data, quantSignal }) {
     setOnWatchlist(false)
   }
 
+  // ONE PAGE, ONE VERDICT. When the decision engine produced a composite call,
+  // every headline on this page speaks with that word — the technical signal
+  // never gets to print "Strong Buy" next to a composite HOLD. Technical-only
+  // wording is used only as a fallback when the engine withheld a verdict.
+  const verdict = data.decision?.ok ? data.decision.action : null
+  const verdictBull = verdict === 'BUY' || verdict === 'ACCUMULATE'
+  const verdictBear = verdict === 'REDUCE' || verdict === 'AVOID'
+  // Short entry-box guidance per action — matches the engine's instruction.
+  const verdictEntry = {
+    BUY: 'Enter at current levels',
+    ACCUMULATE: 'Scale in on weakness',
+    HOLD: 'Do not add here',
+    REDUCE: 'Trim into strength',
+    AVOID: 'Stand aside — no entry',
+  }[verdict]
+
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
       {/* System Decision — the autonomous verdict combining every scanner */}
@@ -150,25 +166,30 @@ export default function AnalysisDashboard({ data, quantSignal }) {
       {/* Hold Duration & Action Recommendation */}
       {data.hold_duration && (
         <div className={`bg-black rounded-xl p-6 border border-neutral-700 ${
-          data.signal?.direction?.includes('Buy') ? 'card-accent-green' :
-          data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
+          verdict ? (verdictBull ? 'card-accent-green' : verdictBear ? 'card-accent-red' : 'card-accent-top')
+                  : data.signal?.direction?.includes('Buy') ? 'card-accent-green'
+                  : data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
         }`}>
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-neutral-500 mb-1">Investment Action</p>
               <div className="flex items-center gap-4">
                 <span className={`text-4xl font-black ${
-                  data.signal?.direction?.includes('Buy') ? 'text-gradient-green' :
-                  data.signal?.direction?.includes('Sell') ? 'text-gradient-red' : 'text-neutral-300'
+                  verdict ? (verdictBull ? 'text-gradient-green' : verdictBear ? 'text-gradient-red' : 'text-neutral-300')
+                          : data.signal?.direction?.includes('Buy') ? 'text-gradient-green'
+                          : data.signal?.direction?.includes('Sell') ? 'text-gradient-red' : 'text-neutral-300'
                 }`}>
-                  {data.signal?.direction || 'N/A'}
+                  {verdict || data.signal?.direction || 'N/A'}
                 </span>
                 <div className="h-8 w-px bg-neutral-800" />
                 <div>
-                  <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Confidence</p>
-                  <p className="text-white font-mono font-bold">{data.signal?.confidence ?? 0}%</p>
+                  <p className="text-neutral-500 text-[10px] uppercase tracking-wider">{verdict ? 'Conviction' : 'Confidence'}</p>
+                  <p className="text-white font-mono font-bold">{verdict ? (data.decision?.conviction ?? 0) : (data.signal?.confidence ?? 0)}%</p>
                 </div>
               </div>
+              {verdict && (
+                <p className="text-neutral-400 text-sm mt-2 max-w-xl">{data.decision?.instruction}</p>
+              )}
             </div>
             <div className="flex items-center gap-6">
               <div className="text-center bg-neutral-900/50 rounded-lg px-5 py-3 border border-neutral-800/50">
@@ -178,7 +199,7 @@ export default function AnalysisDashboard({ data, quantSignal }) {
               </div>
               <div className="text-center bg-neutral-900/50 rounded-lg px-5 py-3 border border-neutral-800/50">
                 <p className="text-neutral-500 text-[10px] uppercase tracking-wider">Entry</p>
-                <p className="text-white font-medium text-sm">{data.hold_duration.entry_guidance}</p>
+                <p className="text-white font-medium text-sm">{verdictEntry || data.hold_duration.entry_guidance}</p>
               </div>
             </div>
           </div>
@@ -372,14 +393,17 @@ export default function AnalysisDashboard({ data, quantSignal }) {
       {/* Signal Reasoning */}
       {data.signal?.reasons && data.signal.reasons.length > 0 && (
         <div className={`bg-black rounded-xl p-6 border border-neutral-700 ${
-          data.signal?.direction?.includes('Buy') ? 'card-accent-green' :
-          data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
+          verdict ? (verdictBull ? 'card-accent-green' : verdictBear ? 'card-accent-red' : 'card-accent-top')
+                  : data.signal?.direction?.includes('Buy') ? 'card-accent-green'
+                  : data.signal?.direction?.includes('Sell') ? 'card-accent-red' : 'card-accent-top'
         }`}>
           <h2 className="text-xl font-semibold text-white mb-3">
             Why <span className={
-              data.signal.direction?.includes('Buy') ? 'text-green-400' :
-              data.signal.direction?.includes('Sell') ? 'text-red-400' : 'text-white'
-            }>{data.signal.direction}</span>?
+              verdict ? (verdictBull ? 'text-green-400' : verdictBear ? 'text-red-400' : 'text-white')
+                      : data.signal.direction?.includes('Buy') ? 'text-green-400'
+                      : data.signal.direction?.includes('Sell') ? 'text-red-400' : 'text-white'
+            }>{verdict || data.signal.direction}</span>?
+            <span className="text-neutral-500 text-sm font-normal ml-2">Technical evidence</span>
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {data.signal.reasons.map((r, i) => {

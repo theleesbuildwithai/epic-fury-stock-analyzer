@@ -305,6 +305,14 @@ def make_decision(info=None, signal=None, forecast=None, news_sentiment=None,
     same_side = sum(1 for c in comp_scores
                     if (c - 50) * (composite - 50) > 0 and abs(c - 50) >= 3)
     conviction = _clamp(round(abs(composite - 50) * 2.2 + same_side * 6), 5, 97)
+    # Disagreement guard — accuracy means never being confidently wrong.
+    # When the components span a wide range (the chart says one thing, the
+    # world says another), the composite is a coin toss dressed up as a
+    # number: cut conviction and say so out loud.
+    spread = max(comp_scores) - min(comp_scores)
+    if spread >= 45:
+        conviction = _clamp(round(conviction * 0.65), 5, 97)
+        risks.append(f"Evidence split — component scores span {spread:.0f} points; conviction reduced")
 
     return {
         "ok": True,
