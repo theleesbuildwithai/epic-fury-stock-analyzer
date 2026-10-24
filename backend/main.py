@@ -5046,6 +5046,21 @@ def analyze_stock(request: Request, ticker: str, period: str = "1y"):
                 ),
                 "_degraded": True,
             }
+        # VERDICT LEDGER — record today's decision and score matured past
+        # verdicts for this ticker using the history we already fetched.
+        # Zero extra requests; a ledger failure never breaks the response.
+        try:
+            from predictions.verdict_ledger import record_verdict, score_pending
+            if isinstance(report, dict) and not report.get("_degraded"):
+                record_verdict(
+                    clean_ticker,
+                    report.get("decision"),
+                    forecast=report.get("forecast"),
+                    price=(report.get("latest") or {}).get("price"),
+                )
+                score_pending(clean_ticker, report.get("chart_data") or [])
+        except Exception as _vle:
+            logger.debug(f"verdict ledger non-fatal: {_vle}")
         # Write to BOTH layers
         try:
             _analyze_cache[cache_key] = {"data": report, "ts": _t_an.time()}
@@ -5695,6 +5710,20 @@ def earnings_calendar(request: Request):
         "cache_status": "warming",
         "message": "Earnings calendar warming up — refresh in a few seconds",
     }
+
+
+@app.get("/api/decision-accuracy")
+def decision_accuracy(request: Request):
+    """Measured accuracy of the System Decision engine: hit rate by action and
+    forecast-probability calibration, scored from the verdict ledger. Read-only
+    over SQLite — zero upstream requests."""
+    check_rate_limit(request.client.host)
+    try:
+        from predictions.verdict_ledger import accuracy_summary
+        return accuracy_summary()
+    except Exception as e:
+        logger.debug(f"decision-accuracy failed (non-fatal): {e}")
+        return {"ok": False, "error": "accuracy summary unavailable"}
 
 
 @app.get("/api/market-news")

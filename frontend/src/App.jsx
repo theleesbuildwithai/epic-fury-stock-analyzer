@@ -20,6 +20,7 @@ const SymbolsToBuy      = lazy(() => import('./pages/SymbolsToBuy'))
 // const OptionsTrading = lazy(() => import('./pages/OptionsTrading'))
 const SymbolDetail      = lazy(() => import('./pages/SymbolDetail'))
 const SystemIntelligence = lazy(() => import('./pages/SystemIntelligence'))
+const About             = lazy(() => import('./pages/About'))
 
 function PageFallback() {
   return (
@@ -53,6 +54,7 @@ export default function App() {
           */}
           <Route path="/symbol/:ticker" element={<SymbolDetail />} />
           <Route path="/system-intelligence" element={<SystemIntelligence />} />
+          <Route path="/about" element={<About />} />
           {/* Catch-all: any unknown/removed route (e.g. old /ibkr) redirects
               home instead of rendering a blank page. */}
           <Route path="*" element={<Navigate to="/" replace />} />
