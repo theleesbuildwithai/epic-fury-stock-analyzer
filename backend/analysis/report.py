@@ -186,6 +186,25 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     # 7. Hold duration recommendation
     hold_duration = calculate_hold_duration(closes, rsi, trend, forecast)
 
+    # 7b. Cross-source price verification — second opinion on the one number
+    # every verdict depends on. Fail-safe: infrastructure down = UNVERIFIED
+    # (proceed, labeled); only a measured >10% mismatch withholds the verdict.
+    try:
+        from analysis.price_verify import verify_price
+        _live_px = info.get("current_price") or (closes[-1] if closes else None)
+        price_verification = verify_price(ticker, _live_px)
+    except Exception:
+        price_verification = {"status": "UNVERIFIED", "deviation_pct": None,
+                              "reference_price": None, "source": "cnbc"}
+
+    # 7c. Earnings proximity — pure local SQLite read (populated by the
+    # analyze-extras endpoint); zero network on the analyze path.
+    try:
+        from predictions.earnings_cache import get_days_until_earnings
+        earnings_days = get_days_until_earnings(ticker)
+    except Exception:
+        earnings_days = None
+
     # 8. Autonomous decision — the single "what to do" verdict combining
     # technicals, forecast edge, news, geopolitics and fundamentals.
     # Pure arithmetic over data already in hand; fail-safe to None.
@@ -198,6 +217,8 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
             news_sentiment=news_sentiment,
             geo=geo_risk,
             tariff=tariff_risk,
+            earnings_days=earnings_days,
+            price_check=price_verification,
         )
     except Exception:
         decision = None
@@ -227,6 +248,7 @@ def generate_full_report(ticker: str, period: str = "2y") -> dict:
     return {
         "info": info,
         "_data_drift": data_drift_info,
+        "price_verification": price_verification,
         "signal": signal,
         "decision": decision,
         "geo_risk": {

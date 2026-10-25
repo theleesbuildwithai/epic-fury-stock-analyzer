@@ -226,12 +226,13 @@ def _score_fundamental(info):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_decision(info=None, signal=None, forecast=None, news_sentiment=None,
-                  geo=None, tariff=None, timing=None):
+                  geo=None, tariff=None, timing=None, earnings_days=None,
+                  price_check=None):
     """Combine every scanner into one autonomous verdict.
 
     All inputs optional; missing inputs score neutral (50). Returns a dict:
       action, conviction, stance, score, components{}, drivers[], risks[],
-      instruction, ok
+      instruction, ok, earnings_blackout, earnings_days
     """
     # FAIL CLOSED — no usable price means no verdict.
     px = _num((info or {}).get("current_price"))
@@ -246,6 +247,32 @@ def make_decision(info=None, signal=None, forecast=None, news_sentiment=None,
             "drivers": [],
             "risks": ["Price data unavailable or failed integrity checks"],
             "instruction": _ACTION_INSTRUCTIONS["UNRATED"],
+            "earnings_blackout": False,
+            "earnings_days": None,
+        }
+
+    # FAIL CLOSED — two independent sources disagree on the price itself.
+    # Only an actual measured MISMATCH withholds; UNVERIFIED never does.
+    pc = _dict(price_check)
+    pc_status = _label(pc, "status", "")
+    if pc_status == "MISMATCH":
+        dev = _num(pc.get("deviation_pct"))
+        ref = _num(pc.get("reference_price"))
+        detail = ""
+        if dev is not None and ref is not None:
+            detail = f" (live ${px:,.2f} vs reference ${ref:,.2f}, {dev:.1f}% apart)"
+        return {
+            "ok": False,
+            "action": "UNRATED",
+            "stance": "NEUTRAL",
+            "conviction": 0,
+            "score": None,
+            "components": {},
+            "drivers": [],
+            "risks": [f"Cross-source price mismatch{detail} — verdict withheld until sources agree"],
+            "instruction": _ACTION_INSTRUCTIONS["UNRATED"],
+            "earnings_blackout": False,
+            "earnings_days": None,
         }
 
     sector = (info or {}).get("sector")
@@ -297,6 +324,15 @@ def make_decision(info=None, signal=None, forecast=None, news_sentiment=None,
         action = "BUY"
         drivers.append("Entry timing engine confirms BUY NOW")
 
+    # Earnings blackout — a known binary event inside 7 days gates new entries.
+    earnings_blackout = False
+    ed = _num(earnings_days)
+    ed = int(ed) if ed is not None and ed >= 0 else None
+    if ed is not None and ed <= 7 and action in ("BUY", "ACCUMULATE"):
+        action = "HOLD"
+        earnings_blackout = True
+        risks.append(f"Earnings in {ed}d — binary event; new entries withheld until the print clears")
+
     stance = ("BULLISH" if composite >= _ACCUMULATE
               else "BEARISH" if composite < _HOLD_FLOOR
               else "NEUTRAL")
@@ -313,6 +349,14 @@ def make_decision(info=None, signal=None, forecast=None, news_sentiment=None,
     if spread >= 45:
         conviction = _clamp(round(conviction * 0.65), 5, 97)
         risks.append(f"Evidence split — component scores span {spread:.0f} points; conviction reduced")
+    # Cross-source tolerance band — sources differ but not enough to withhold.
+    if pc_status == "TOLERANCE":
+        dev = _num(pc.get("deviation_pct"))
+        conviction = _clamp(round(conviction * 0.8), 5, 97)
+        risks.append(
+            "Price sources differ by "
+            + (f"{dev:.1f}%" if dev is not None else "3-10%")
+            + " — verdict stands, conviction reduced")
 
     return {
         "ok": True,
@@ -330,6 +374,8 @@ def make_decision(info=None, signal=None, forecast=None, news_sentiment=None,
         "drivers": drivers[:6],
         "risks": risks[:6],
         "instruction": _ACTION_INSTRUCTIONS[action],
+        "earnings_blackout": earnings_blackout,
+        "earnings_days": ed,
     }
 
 

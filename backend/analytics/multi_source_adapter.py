@@ -1533,12 +1533,22 @@ def multi_source_quote_batch(symbols: list) -> dict:
     syms_upper = [s.upper() for s in symbols]
     out = {}
 
+    def _health(source, ok):
+        """Passive telemetry for /api/system-health. Never breaks a quote."""
+        try:
+            from analytics.source_health import record
+            record(source, ok=ok)
+        except Exception:
+            pass
+
     # 1. Yahoo Finance direct (v7 batch → threaded v8 fallback)
     try:
         yh_data = yahoo_direct_quote_batch(syms_upper)
         out.update(yh_data)
+        _health("yahoo_direct", bool(yh_data))
     except Exception as e:
         logger.debug(f"multi_source_quote_batch yahoo_direct failed: {e}")
+        _health("yahoo_direct", False)
 
     # 2. CNBC for any still-missing — approved source, reaches from AWS where
     #    finviz/stockanalysis are IP-blocked, so it's the effective prod backup
@@ -1556,8 +1566,10 @@ def multi_source_quote_batch(symbols: list) -> dict:
                 if px_v > 0:
                     out[sym] = {"price": round(px_v, 2),
                                 "change_pct": float(val.get("change_pct") or 0.0)}
+            _health("cnbc", bool(cn_data))
         except Exception as e:
             logger.debug(f"multi_source_quote_batch cnbc failed: {e}")
+            _health("cnbc", False)
 
     # 3. stockanalysis.com for any still-missing
     still_missing = [s for s in syms_upper if s not in out]
@@ -1565,8 +1577,10 @@ def multi_source_quote_batch(symbols: list) -> dict:
         try:
             sa_data = stockanalysis_quote_batch(still_missing)
             out.update(sa_data)
+            _health("stockanalysis", bool(sa_data))
         except Exception as e:
             logger.debug(f"multi_source_quote_batch stockanalysis failed: {e}")
+            _health("stockanalysis", False)
 
     # 4. finviz.com for any still-missing
     still_missing = [s for s in syms_upper if s not in out]
@@ -1574,8 +1588,10 @@ def multi_source_quote_batch(symbols: list) -> dict:
         try:
             fv_data = finviz_quote_batch(still_missing)
             out.update(fv_data)
+            _health("finviz", bool(fv_data))
         except Exception as e:
             logger.debug(f"multi_source_quote_batch finviz failed: {e}")
+            _health("finviz", False)
 
     # 5. Twelve Data batch (one call, key-gated)
     still_missing = [s for s in syms_upper if s not in out]
@@ -1583,8 +1599,10 @@ def multi_source_quote_batch(symbols: list) -> dict:
         try:
             td_data = twelvedata_quote_batch(still_missing)
             out.update(td_data)
+            _health("twelvedata", bool(td_data))
         except Exception as e:
             logger.debug(f"multi_source_quote_batch twelvedata failed: {e}")
+            _health("twelvedata", False)
 
     # 6. Polygon batch snapshot (one call, key-gated, delayed data)
     still_missing = [s for s in syms_upper if s not in out]
@@ -1592,8 +1610,10 @@ def multi_source_quote_batch(symbols: list) -> dict:
         try:
             pg_data = polygon_quote_batch(still_missing)
             out.update(pg_data)
+            _health("polygon", bool(pg_data))
         except Exception as e:
             logger.debug(f"multi_source_quote_batch polygon failed: {e}")
+            _health("polygon", False)
 
     # 7. FMP individual quotes (key-gated, 250/day)
     still_missing = [s for s in syms_upper if s not in out]

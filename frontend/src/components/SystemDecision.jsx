@@ -120,6 +120,14 @@ export default function SystemDecision({ decision, geoRisk }) {
               ? <ComponentBar key={key} label={label} value={components[key]} />
               : null
           ))}
+          {decision.earnings_blackout && (
+            <div className="mt-2 text-[10px] font-bold px-2 py-1 rounded border inline-block bg-rose-500/15 border-rose-500/40 text-rose-300">
+              EARNINGS BLACKOUT
+              {Number.isFinite(Number(decision.earnings_days)) && (
+                <span className="text-neutral-400 font-medium"> · report in {decision.earnings_days}d</span>
+              )}
+            </div>
+          )}
           {(geoLevel === 'CRITICAL' || geoLevel === 'ELEVATED') && (
             <div className={`mt-2 text-[10px] font-bold px-2 py-1 rounded border inline-block ${
               geoLevel === 'CRITICAL'

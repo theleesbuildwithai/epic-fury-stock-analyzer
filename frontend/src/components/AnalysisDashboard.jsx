@@ -6,6 +6,7 @@ import RiskScore from './RiskScore'
 import KeyStats from './KeyStats'
 import PriceForecast from './PriceForecast'
 import SystemDecision from './SystemDecision'
+import DataFreshness from './DataFreshness'
 
 // ─── Quant HF Signal Card (inline) ───────────────────────────────────────────
 function QuantHFSignalCard({ sig }) {
@@ -147,6 +148,9 @@ export default function AnalysisDashboard({ data, quantSignal }) {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+      {/* Data freshness / integrity labels — renders nothing when all fresh */}
+      <DataFreshness data={data} />
+
       {/* System Decision — the autonomous verdict combining every scanner */}
       <SystemDecision decision={data.decision} geoRisk={data.geo_risk} />
 

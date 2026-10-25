@@ -5271,6 +5271,15 @@ def analyze_extras(request: Request, ticker: str, price: float = None):
         _out = dict(_payload or {})
         _ed = (_out.get("earnings") or {}).get("days_until")
         _out["timing"] = _extras_timing(clean_ticker, price=price, earnings_days=_ed)
+        # Persist next_date so the analyze path's earnings hard-gate can read
+        # days-until with ZERO network. Fail-safe: never breaks the response.
+        try:
+            _nd = (_out.get("earnings") or {}).get("next_date")
+            if _nd:
+                from predictions.earnings_cache import save_next_earnings
+                save_next_earnings(clean_ticker, _nd)
+        except Exception:
+            pass
         return _out
 
     # Layer 1: in-memory (reuse the analyze cache dict; 24h TTL).
@@ -5408,6 +5417,41 @@ def analyze_extras(request: Request, ticker: str, price: float = None):
             pass
 
     return _finish(result)
+
+
+@app.get("/api/system-health")
+def system_health(request: Request):
+    """Data-source health snapshot — passive telemetry, zero extra network.
+
+    Reports what real requests observed via analytics.source_health plus
+    verdict-ledger counts. Always returns HTTP 200; worst case empty sources.
+    """
+    try:
+        check_rate_limit(request.client.host)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    out = {"ok": True, "sources": {}, "observed_since_utc": None,
+           "uptime_seconds": None, "verdict_ledger": None}
+    try:
+        from analytics.source_health import snapshot
+        snap = snapshot()
+        out["sources"] = snap.get("sources", {})
+        out["observed_since_utc"] = snap.get("observed_since_utc")
+        out["uptime_seconds"] = snap.get("uptime_seconds")
+    except Exception:
+        pass
+    try:
+        from predictions.verdict_ledger import accuracy_summary
+        summ = accuracy_summary() or {}
+        out["verdict_ledger"] = {
+            "total_verdicts": summ.get("total_verdicts"),
+            "scored_30d": summ.get("scored_30d"),
+        }
+    except Exception:
+        pass
+    return out
 
 
 @app.get("/api/quote/{ticker}")
