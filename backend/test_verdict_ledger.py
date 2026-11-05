@@ -15,6 +15,7 @@ os.environ["DB_PATH"] = os.path.join(_tmp, "test_ledger.db")
 
 from predictions.verdict_ledger import (
     record_verdict, score_pending, accuracy_summary, HORIZONS,
+    pending_matured_tickers,
 )
 
 PASS = 0
@@ -112,6 +113,51 @@ s2 = accuracy_summary()
 acc = s2["by_action"].get("ACCUMULATE") or {}
 check("3l 7d filled, 30d open", acc.get("avg_return_7d_pct") == 5.0 and acc.get("scored_30d") == 0,
       f"got {acc}")
+
+print("\n[4] overall hit rates (7d + 30d)")
+ov = s2.get("overall") or {}
+# Scored so far: TEST1 BUY +5% @7d (hit), TEST2 AVOID -4% @7d (hit),
+# TEST3 ACCUMULATE +5% @7d (hit); 30d: TEST1 hit, TEST2 hit.
+check("4a scored_7d counted", s2.get("scored_7d") == 3, f"got {s2.get('scored_7d')}")
+check("4b overall 7d hit rate 100", ov.get("hit_rate_7d_pct") == 100.0, f"got {ov}")
+check("4c 7d hits/misses 3/0", ov.get("hits_7d") == 3 and ov.get("misses_7d") == 0, f"got {ov}")
+check("4d overall 30d hit rate 100", ov.get("hit_rate_30d_pct") == 100.0, f"got {ov}")
+check("4e per-action 7d hit fields present",
+      (s2["by_action"].get("BUY") or {}).get("hit_rate_7d_pct") == 100.0
+      and (s2["by_action"].get("BUY") or {}).get("hit_sample_7d") == 1,
+      f"got {s2['by_action'].get('BUY')}")
+# A miss: BUY that fell at 7d.
+d_miss = (datetime.utcnow() - timedelta(days=9)).strftime("%Y-%m-%d")
+record_verdict("TEST4", mk_decision("BUY", score=70.0), mk_forecast(60.0),
+               price=20.0, date=d_miss)
+chart4 = [{"date": (datetime.utcnow() - timedelta(days=9) + timedelta(days=i)).strftime("%Y-%m-%d"),
+           "close": 20.0 - (1.0 if i >= 7 else 0.0)} for i in range(0, 10)]
+check("4f miss scored", score_pending("TEST4", chart4) == 1)
+s3 = accuracy_summary()
+ov3 = s3.get("overall") or {}
+check("4g overall 7d hit rate 75 after miss", ov3.get("hit_rate_7d_pct") == 75.0, f"got {ov3}")
+check("4h 7d hits/misses 3/1", ov3.get("hits_7d") == 3 and ov3.get("misses_7d") == 1, f"got {ov3}")
+
+print("\n[5] pending_matured_tickers")
+# TEST3/TEST4 still lack 30d outcomes but are <30d old -> NOT matured-pending.
+# TEST1/TEST2 fully scored -> not pending. HOLD5 matured and unscored -> pending.
+p0 = pending_matured_tickers()
+check("5a young/scored tickers excluded", "TEST3" not in p0 and "TEST1" not in p0, f"got {p0}")
+d_old = (datetime.utcnow() - timedelta(days=12)).strftime("%Y-%m-%d")
+record_verdict("HOLD5", mk_decision("HOLD", score=50.0), mk_forecast(50.0),
+               price=30.0, date=d_old)
+p1 = pending_matured_tickers()
+check("5b matured unscored ticker listed", "HOLD5" in p1, f"got {p1}")
+chart5 = [{"date": (datetime.utcnow() - timedelta(days=12) + timedelta(days=i)).strftime("%Y-%m-%d"),
+           "close": 30.0} for i in range(0, 13)]
+check("5c scoring clears 7d", score_pending("HOLD5", chart5) == 1)
+p2 = pending_matured_tickers()
+check("5d cleared from pending once 7d scored (30d not yet matured)",
+      "HOLD5" not in p2, f"got {p2}")
+check("5e as_of far future re-flags for 30d",
+      "HOLD5" in pending_matured_tickers(
+          (datetime.utcnow() + timedelta(days=60)).strftime("%Y-%m-%d")))
+check("5f garbage as_of safe", pending_matured_tickers("junk") == [])
 
 print(f"\n{'=' * 60}\nRESULT: {PASS} passed, {FAIL} failed\n{'=' * 60}")
 sys.exit(1 if FAIL else 0)

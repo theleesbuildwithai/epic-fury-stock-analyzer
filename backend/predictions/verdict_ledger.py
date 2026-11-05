@@ -181,6 +181,39 @@ def score_pending(ticker, chart_data):
     return updated
 
 
+def pending_matured_tickers(as_of=None):
+    """Distinct tickers holding verdicts whose scoring horizon has already
+    passed but whose outcome is still NULL. These will never self-score
+    unless the ticker is re-analyzed — the active sweep uses this list.
+    """
+    day = as_of or datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        base = datetime.strptime(day, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return []
+    cut7 = (base - timedelta(days=HORIZONS[0])).strftime("%Y-%m-%d")
+    cut30 = (base - timedelta(days=HORIZONS[1])).strftime("%Y-%m-%d")
+    conn = None
+    try:
+        conn = _conn()
+        rows = conn.execute(
+            """SELECT DISTINCT ticker FROM verdict_ledger
+               WHERE (outcome_7 IS NULL AND date <= ?)
+                  OR (outcome_30 IS NULL AND date <= ?)
+               ORDER BY ticker""",
+            (cut7, cut30),
+        ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 def accuracy_summary():
     """Aggregate the scored ledger into measured accuracy.
 
@@ -192,11 +225,15 @@ def accuracy_summary():
     out = {
         "ok": True,
         "total_verdicts": 0,
+        "scored_7d": 0,
         "scored_30d": 0,
+        "overall": {},
         "by_action": {},
         "calibration": [],
-        "note": ("Hit rate = 30-day outcome agreed with the verdict's direction. "
-                 "Small samples mean wide error bars — counts are shown for a reason."),
+        "note": ("Hit rate = outcome agreed with the verdict's direction at that "
+                 "horizon (bullish verdicts need a positive return, bearish need "
+                 "negative; HOLD has no hit). Small samples mean wide error bars — "
+                 "counts are shown for a reason."),
     }
     try:
         conn = _conn()
@@ -221,11 +258,21 @@ def accuracy_summary():
     ]
     for action, prob30, o7, o30 in rows:
         a = by.setdefault(action, {"n": 0, "scored": 0, "sum7": 0.0, "n7": 0,
-                                   "sum30": 0.0, "hits": 0, "hit_eligible": 0})
+                                   "sum30": 0.0, "hits": 0, "hit_eligible": 0,
+                                   "hits7": 0, "hit_eligible7": 0})
         a["n"] += 1
         if o7 is not None:
             a["sum7"] += o7
             a["n7"] += 1
+            out["scored_7d"] += 1
+            if action in ("BUY", "ACCUMULATE"):
+                a["hit_eligible7"] += 1
+                if o7 > 0:
+                    a["hits7"] += 1
+            elif action in ("REDUCE", "AVOID"):
+                a["hit_eligible7"] += 1
+                if o7 < 0:
+                    a["hits7"] += 1
         if o30 is None:
             continue
         a["scored"] += 1
@@ -248,16 +295,34 @@ def accuracy_summary():
                         b["up"] += 1
                     break
 
+    tot_hits7 = tot_elig7 = tot_hits30 = tot_elig30 = 0
     for action, a in by.items():
+        tot_hits7 += a["hits7"]
+        tot_elig7 += a["hit_eligible7"]
+        tot_hits30 += a["hits"]
+        tot_elig30 += a["hit_eligible"]
         out["by_action"][action] = {
             "verdicts": a["n"],
             "scored_30d": a["scored"],
             "avg_return_7d_pct": round(a["sum7"] / a["n7"], 2) if a["n7"] else None,
             "avg_return_30d_pct": round(a["sum30"] / a["scored"], 2) if a["scored"] else None,
+            "hit_rate_7d_pct": (round(a["hits7"] / a["hit_eligible7"] * 100.0, 1)
+                                if a["hit_eligible7"] else None),
+            "hit_sample_7d": a["hit_eligible7"],
             "hit_rate_pct": (round(a["hits"] / a["hit_eligible"] * 100.0, 1)
                              if a["hit_eligible"] else None),
             "hit_sample": a["hit_eligible"],
         }
+    out["overall"] = {
+        "hit_rate_7d_pct": (round(tot_hits7 / tot_elig7 * 100.0, 1)
+                            if tot_elig7 else None),
+        "hits_7d": tot_hits7,
+        "misses_7d": tot_elig7 - tot_hits7,
+        "hit_rate_30d_pct": (round(tot_hits30 / tot_elig30 * 100.0, 1)
+                             if tot_elig30 else None),
+        "hits_30d": tot_hits30,
+        "misses_30d": tot_elig30 - tot_hits30,
+    }
     out["calibration"] = [
         {"stated_prob_up_30d": b["band"], "n": b["n"],
          "realized_up_rate_pct": round(b["up"] / b["n"] * 100.0, 1) if b["n"] else None}

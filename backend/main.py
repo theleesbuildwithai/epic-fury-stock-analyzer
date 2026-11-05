@@ -5756,15 +5756,91 @@ def earnings_calendar(request: Request):
     }
 
 
+def _sweep_verdict_ledger(max_fetch: int = 5) -> int:
+    """ACTIVE SCORING SWEEP — matured verdicts must not wait for an organic
+    re-analyze of the same ticker (the original design's blind spot: a
+    verdict only scored if someone happened to analyze that ticker again
+    7+ days later; otherwise it sat pending forever).
+
+    Pass 1 (zero network): score each pending ticker from the newest cached
+    analyze payload in trading_state — its chart_data already contains the
+    "future" of older verdicts.
+    Pass 2 (tightly capped): for tickers STILL unscored, fetch fresh history
+    for at most max_fetch of them per call — protects the Yahoo budget.
+    Backs up the DB to S3 only when rows actually changed. Never raises.
+    """
+    import json as _json_sw
+    from predictions.verdict_ledger import pending_matured_tickers, score_pending
+    from predictions.models import get_db as _sw_db
+
+    tickers = pending_matured_tickers()
+    if not tickers:
+        return 0
+    updated = 0
+    # Pass 1: locally cached history — zero upstream requests.
+    for t in tickers[:40]:
+        chart = None
+        try:
+            conn = _sw_db()
+            row = conn.execute(
+                "SELECT value FROM trading_state WHERE key LIKE ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (f"analyze:{t}:%",),
+            ).fetchone()
+            conn.close()
+            if row:
+                payload = _json_sw.loads(row["value"])
+                if isinstance(payload, dict):
+                    chart = payload.get("chart_data")
+        except Exception:
+            pass
+        if chart:
+            try:
+                updated += score_pending(t, chart)
+            except Exception:
+                pass
+    # Pass 2: capped network fallback for tickers still unscored.
+    fetched = 0
+    try:
+        for t in pending_matured_tickers():
+            if fetched >= max_fetch:
+                break
+            fetched += 1
+            try:
+                from analysis.market_data import get_historical_data
+                hist = get_historical_data(t, "3mo")
+                if hist:
+                    updated += score_pending(t, hist)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if updated:
+        try:
+            from predictions.db_persistence import backup_db_to_s3
+            backup_db_to_s3()
+        except Exception:
+            pass
+    return updated
+
+
 @app.get("/api/decision-accuracy")
 def decision_accuracy(request: Request):
     """Measured accuracy of the System Decision engine: hit rate by action and
-    forecast-probability calibration, scored from the verdict ledger. Read-only
-    over SQLite — zero upstream requests."""
+    forecast-probability calibration, scored from the verdict ledger. Runs the
+    active scoring sweep first so matured verdicts are always settled."""
     check_rate_limit(request.client.host)
     try:
+        swept = _sweep_verdict_ledger()
+    except Exception as _swe:
+        swept = 0
+        logger.debug(f"ledger sweep non-fatal: {_swe}")
+    try:
         from predictions.verdict_ledger import accuracy_summary
-        return accuracy_summary()
+        out = accuracy_summary()
+        if isinstance(out, dict):
+            out["swept_this_call"] = swept
+        return out
     except Exception as e:
         logger.debug(f"decision-accuracy failed (non-fatal): {e}")
         return {"ok": False, "error": "accuracy summary unavailable"}
